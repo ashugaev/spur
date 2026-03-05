@@ -12,7 +12,7 @@
  * Example file contents:
  *   project=integrator
  *   worktree=/Users/foo/.agent-orchestrator/a3b4c5d6e7f8-integrator/worktrees/int-1
- *   branch=feat/INT-1234
+ *   branch=INT-1234
  *   status=working
  *   tmuxName=a3b4c5d6e7f8-int-1
  *   pr=https://github.com/org/repo/pull/42

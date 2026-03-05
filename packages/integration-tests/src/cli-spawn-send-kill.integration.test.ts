@@ -117,7 +117,7 @@ describe.skipIf(!tmuxOk)("CLI metadata integration (integration)", () => {
     const metaFile = join(sessionDir, sessionName);
     const metadata = [
       `worktree=${tmpDir}`,
-      `branch=feat/INT-123`,
+      `branch=INT-123`,
       `status=working`,
       `issue=INT-123`,
       `pr=https://github.com/org/repo/pull/42`,
@@ -127,7 +127,7 @@ describe.skipIf(!tmuxOk)("CLI metadata integration (integration)", () => {
     expect(existsSync(metaFile)).toBe(true);
 
     const content = readFileSync(metaFile, "utf-8");
-    expect(content).toContain("branch=feat/INT-123");
+    expect(content).toContain("branch=INT-123");
     expect(content).toContain("status=working");
     expect(content).toContain("issue=INT-123");
     expect(content).toContain("pr=https://github.com/org/repo/pull/42");

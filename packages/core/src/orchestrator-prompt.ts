@@ -86,7 +86,7 @@ ao open ${projectId}
 
 When you spawn a session:
 1. A git worktree is created from \`${project.defaultBranch}\`
-2. A feature branch is created (e.g., \`feat/INT-1234\`)
+2. A feature branch is created (e.g., \`INT-1234\`)
 3. A tmux session is started (e.g., \`${project.sessionPrefix}-1\`)
 4. The agent is launched with context about the issue
 5. Metadata is written to the project-specific sessions directory

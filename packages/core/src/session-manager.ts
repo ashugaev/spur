@@ -347,7 +347,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Issue fetch failed - determine why
         if (isIssueNotFoundError(err)) {
           // Ad-hoc issue string — proceed without tracker context.
-          // Branch will be generated as feat/{issueId} (line 329-331)
+          // Branch will be generated as {issueId} (line 329-331)
         } else {
           // Other error (auth, network, etc) - fail fast
           throw new Error(`Failed to fetch issue ${spawnConfig.issueId}: ${err}`, { cause: err });
@@ -407,7 +407,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             .replace(/[^a-z0-9]+/g, "-")
             .slice(0, 60)
             .replace(/^-+|-+$/g, "");
-      branch = `feat/${slug || sessionId}`;
+      branch = slug || sessionId;
     } else {
       branch = `session/${sessionId}`;
     }

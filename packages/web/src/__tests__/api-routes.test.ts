@@ -42,7 +42,7 @@ const testSessions: Session[] = [
       title: "feat: health check",
       owner: "acme",
       repo: "my-app",
-      branch: "feat/health-check",
+      branch: "health-check",
       baseBranch: "main",
       isDraft: false,
     },
@@ -54,7 +54,7 @@ const testSessions: Session[] = [
     activity: "exited",
     projectId: "my-app",
     issueId: "INT-1270",
-    branch: "feat/INT-1270-table",
+    branch: "INT-1270-table",
   }),
 ];
 

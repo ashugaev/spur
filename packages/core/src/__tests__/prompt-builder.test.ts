@@ -60,7 +60,7 @@ describe("buildPrompt", () => {
       issueId: "INT-1343",
     });
     expect(result).toContain("Work on issue: INT-1343");
-    expect(result).toContain("feat/INT-1343");
+    expect(result).toContain("INT-1343");
   });
 
   it("includes issue context when provided", () => {

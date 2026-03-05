@@ -35,7 +35,7 @@ export function makeSession(overrides: Partial<Session> = {}): Session {
     projectId: "my-project",
     status: "working" as SessionStatus,
     activity: "active" as ActivityState,
-    branch: "feat/test",
+    branch: "test",
     issueId: null,
     pr: null,
     workspacePath: "/tmp/workspace",

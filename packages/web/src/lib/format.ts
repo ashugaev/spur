@@ -7,7 +7,7 @@ import type { DashboardSession } from "./types.js";
 
 /**
  * Humanize a git branch name into a readable title.
- * e.g., "feat/infer-project-id" → "Infer Project ID"
+ * e.g., "infer-project-id"      → "Infer Project ID"
  *       "fix/broken-auth-flow"  → "Broken Auth Flow"
  *       "session/ao-52"         → "ao-52"
  */

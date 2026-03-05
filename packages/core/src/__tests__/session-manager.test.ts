@@ -65,7 +65,7 @@ beforeEach(() => {
     name: "mock-ws",
     create: vi.fn().mockResolvedValue({
       path: "/tmp/mock-ws/app-1",
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       sessionId: "app-1",
       projectId: "my-app",
     }),
@@ -157,7 +157,7 @@ describe("spawn", () => {
 
     const session = await sm.spawn({ projectId: "my-app", issueId: "INT-100" });
 
-    expect(session.branch).toBe("feat/INT-100");
+    expect(session.branch).toBe("INT-100");
     expect(session.issueId).toBe("INT-100");
   });
 
@@ -166,7 +166,7 @@ describe("spawn", () => {
 
     const session = await sm.spawn({ projectId: "my-app", issueId: "fix login bug" });
 
-    expect(session.branch).toBe("feat/fix-login-bug");
+    expect(session.branch).toBe("fix-login-bug");
   });
 
   it("preserves casing for branch-safe issue IDs without tracker", async () => {
@@ -174,7 +174,7 @@ describe("spawn", () => {
 
     const session = await sm.spawn({ projectId: "my-app", issueId: "INT-9999" });
 
-    expect(session.branch).toBe("feat/INT-9999");
+    expect(session.branch).toBe("INT-9999");
   });
 
   it("sanitizes issueId with special characters", async () => {
@@ -185,7 +185,7 @@ describe("spawn", () => {
       issueId: "Fix: user can't login (SSO)",
     });
 
-    expect(session.branch).toBe("feat/fix-user-can-t-login-sso");
+    expect(session.branch).toBe("fix-user-can-t-login-sso");
   });
 
   it("truncates long slugs to 60 characters", async () => {
@@ -196,7 +196,7 @@ describe("spawn", () => {
       issueId: "this is a very long issue description that should be truncated to sixty characters maximum",
     });
 
-    expect(session.branch!.replace("feat/", "").length).toBeLessThanOrEqual(60);
+    expect(session.branch!.replace("", "").length).toBeLessThanOrEqual(60);
   });
 
   it("does not leave trailing dash after truncation", async () => {
@@ -208,7 +208,7 @@ describe("spawn", () => {
       issueId: "ab ".repeat(30), // "ab ab ab ..." → "ab-ab-ab-..." truncated at 60
     });
 
-    const slug = session.branch!.replace("feat/", "");
+    const slug = session.branch!.replace("", "");
     expect(slug).not.toMatch(/-$/);
     expect(slug).not.toMatch(/^-/);
   });
@@ -219,7 +219,7 @@ describe("spawn", () => {
     const session = await sm.spawn({ projectId: "my-app", issueId: "!!!" });
 
     // Slug is empty after sanitization, falls back to sessionId
-    expect(session.branch).toMatch(/^feat\/app-\d+$/);
+    expect(session.branch).toMatch(/^app-\d+$/);
   });
 
   it("sanitizes issueId containing '..' (invalid in git branch names)", async () => {
@@ -228,7 +228,7 @@ describe("spawn", () => {
     const session = await sm.spawn({ projectId: "my-app", issueId: "foo..bar" });
 
     // '..' is invalid in git refs, so it should be slugified
-    expect(session.branch).toBe("feat/foo-bar");
+    expect(session.branch).toBe("foo-bar");
   });
 
   it("uses tracker.branchName when tracker is available", async () => {
@@ -399,7 +399,7 @@ describe("spawn", () => {
       }),
       isCompleted: vi.fn().mockResolvedValue(false),
       issueUrl: vi.fn().mockReturnValue("https://linear.app/test/issue/INT-100"),
-      branchName: vi.fn().mockReturnValue("feat/INT-100"),
+      branchName: vi.fn().mockReturnValue("INT-100"),
       generatePrompt: vi.fn().mockResolvedValue("Work on INT-100"),
     };
 
@@ -431,7 +431,7 @@ describe("spawn", () => {
       getIssue: vi.fn().mockRejectedValue(new Error("Issue INT-9999 not found")),
       isCompleted: vi.fn().mockResolvedValue(false),
       issueUrl: vi.fn().mockReturnValue(""),
-      branchName: vi.fn().mockReturnValue("feat/INT-9999"),
+      branchName: vi.fn().mockReturnValue("INT-9999"),
       generatePrompt: vi.fn().mockResolvedValue(""),
     };
 
@@ -455,7 +455,7 @@ describe("spawn", () => {
     const session = await sm.spawn({ projectId: "my-app", issueId: "INT-9999" });
 
     expect(session.issueId).toBe("INT-9999");
-    expect(session.branch).toBe("feat/INT-9999");
+    expect(session.branch).toBe("INT-9999");
     // tracker.branchName and generatePrompt should NOT be called when issue wasn't resolved
     expect(mockTracker.branchName).not.toHaveBeenCalled();
     expect(mockTracker.generatePrompt).not.toHaveBeenCalled();
@@ -493,7 +493,7 @@ describe("spawn", () => {
     const session = await sm.spawn({ projectId: "my-app", issueId: "fix login bug" });
 
     expect(session.issueId).toBe("fix login bug");
-    expect(session.branch).toBe("feat/fix-login-bug");
+    expect(session.branch).toBe("fix-login-bug");
     expect(mockTracker.branchName).not.toHaveBeenCalled();
     expect(mockWorkspace.create).toHaveBeenCalled();
   });
@@ -504,7 +504,7 @@ describe("spawn", () => {
       getIssue: vi.fn().mockRejectedValue(new Error("Unauthorized")),
       isCompleted: vi.fn().mockResolvedValue(false),
       issueUrl: vi.fn().mockReturnValue(""),
-      branchName: vi.fn().mockReturnValue("feat/INT-100"),
+      branchName: vi.fn().mockReturnValue("INT-100"),
       generatePrompt: vi.fn().mockResolvedValue(""),
     };
 
@@ -674,13 +674,13 @@ describe("list", () => {
   it("lists sessions from metadata", async () => {
     writeMetadata(sessionsDir, "app-1", {
       worktree: "/tmp/w1",
-      branch: "feat/a",
+      branch: "a",
       status: "working",
       project: "my-app",
     });
     writeMetadata(sessionsDir, "app-2", {
       worktree: "/tmp/w2",
-      branch: "feat/b",
+      branch: "b",
       status: "pr_open",
       project: "my-app",
     });
@@ -1332,7 +1332,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "killed",
       project: "my-app",
       issue: "TEST-1",
@@ -1348,7 +1348,7 @@ describe("restore", () => {
     expect(restored.status).toBe("spawning");
     expect(restored.activity).toBe("active");
     expect(restored.workspacePath).toBe(wsPath);
-    expect(restored.branch).toBe("feat/TEST-1");
+    expect(restored.branch).toBe("TEST-1");
     expect(restored.runtimeHandle).toEqual(makeHandle("rt-1"));
     expect(restored.restoredAt).toBeInstanceOf(Date);
 
@@ -1388,7 +1388,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "killed",
       project: "my-app",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
@@ -1411,7 +1411,7 @@ describe("restore", () => {
       exists: vi.fn().mockResolvedValue(false),
       restore: vi.fn().mockResolvedValue({
         path: wsPath,
-        branch: "feat/TEST-1",
+        branch: "TEST-1",
         sessionId: "app-1",
         projectId: "my-app",
       }),
@@ -1429,7 +1429,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "terminated",
       project: "my-app",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
@@ -1488,7 +1488,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "killed",
       project: "my-app",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
@@ -1505,7 +1505,7 @@ describe("restore", () => {
     // Create metadata, then delete it (which archives it)
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "killed",
       project: "my-app",
       issue: "TEST-1",
@@ -1526,7 +1526,7 @@ describe("restore", () => {
 
     expect(restored.id).toBe("app-1");
     expect(restored.status).toBe("spawning");
-    expect(restored.branch).toBe("feat/TEST-1");
+    expect(restored.branch).toBe("TEST-1");
     expect(restored.workspacePath).toBe(wsPath);
 
     // Verify active metadata was recreated
@@ -1555,7 +1555,7 @@ describe("restore", () => {
       join(archiveDir, "app-1_2025-06-15T12-00-00-000Z"),
       "worktree=" +
         wsPath +
-        "\nbranch=feat/latest\nstatus=killed\nproject=my-app\n" +
+        "\nbranch=latest\nstatus=killed\nproject=my-app\n" +
         "runtimeHandle=" +
         JSON.stringify(makeHandle("rt-old")) +
         "\n",
@@ -1564,7 +1564,7 @@ describe("restore", () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
     const restored = await sm.restore("app-1");
 
-    expect(restored.branch).toBe("feat/latest");
+    expect(restored.branch).toBe("latest");
   });
 
   it("throws for nonexistent session (not in active or archive)", async () => {
@@ -1593,7 +1593,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "errored",
       project: "my-app",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
@@ -1629,7 +1629,7 @@ describe("restore", () => {
 
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       status: "killed",
       project: "my-app",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
@@ -1651,7 +1651,7 @@ describe("restore", () => {
     const originalCreatedAt = "2024-06-15T10:00:00.000Z";
     writeMetadata(sessionsDir, "app-1", {
       worktree: wsPath,
-      branch: "feat/TEST-42",
+      branch: "TEST-42",
       status: "killed",
       project: "my-app",
       issue: "TEST-42",
@@ -1669,7 +1669,7 @@ describe("restore", () => {
     expect(meta!["issue"]).toBe("TEST-42");
     expect(meta!["pr"]).toBe("https://github.com/org/my-app/pull/99");
     expect(meta!["summary"]).toBe("Implementing feature X");
-    expect(meta!["branch"]).toBe("feat/TEST-42");
+    expect(meta!["branch"]).toBe("TEST-42");
   });
 });
 

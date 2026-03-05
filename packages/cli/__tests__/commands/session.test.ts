@@ -224,7 +224,7 @@ describe("session ls", () => {
   });
 
   it("lists sessions with metadata", async () => {
-    writeFileSync(join(sessionsDir, "app-1"), "branch=feat/INT-100\nstatus=working\n");
+    writeFileSync(join(sessionsDir, "app-1"), "branch=INT-100\nstatus=working\n");
 
     mockTmux.mockImplementation(async (...args: string[]) => {
       if (args[0] === "list-sessions") return "app-1";
@@ -239,7 +239,7 @@ describe("session ls", () => {
 
     const output = consoleSpy.mock.calls.map((c) => String(c[0])).join("\n");
     expect(output).toContain("app-1");
-    expect(output).toContain("feat/INT-100");
+    expect(output).toContain("INT-100");
     expect(output).toContain("[working]");
   });
 
@@ -289,7 +289,7 @@ describe("session kill", () => {
   it("kills session and reports success", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/fix\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=fix\nstatus=working\n",
     );
 
     mockSessionManager.kill.mockResolvedValue(undefined);
@@ -316,7 +316,7 @@ describe("session cleanup", () => {
   it("kills sessions with merged PRs", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\nstatus=merged\npr=https://github.com/org/repo/pull/42\n",
+      "branch=fix\nstatus=merged\npr=https://github.com/org/repo/pull/42\n",
     );
 
     mockSessionManager.cleanup.mockResolvedValue({
@@ -335,7 +335,7 @@ describe("session cleanup", () => {
   it("does not kill sessions with open PRs", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\nstatus=pr_open\npr=https://github.com/org/repo/pull/42\n",
+      "branch=fix\nstatus=pr_open\npr=https://github.com/org/repo/pull/42\n",
     );
 
     mockSessionManager.cleanup.mockResolvedValue({
@@ -353,7 +353,7 @@ describe("session cleanup", () => {
   it("dry run shows what would be cleaned without doing it", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\nstatus=merged\npr=https://github.com/org/repo/pull/42\n",
+      "branch=fix\nstatus=merged\npr=https://github.com/org/repo/pull/42\n",
     );
 
     // Dry-run now delegates to sm.cleanup({ dryRun: true })
@@ -378,11 +378,11 @@ describe("session cleanup", () => {
   it("reports errors from cleanup", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/a\npr=https://github.com/org/repo/pull/10\n",
+      "branch=a\npr=https://github.com/org/repo/pull/10\n",
     );
     writeFileSync(
       join(sessionsDir, "app-2"),
-      "branch=feat/b\npr=https://github.com/org/repo/pull/20\n",
+      "branch=b\npr=https://github.com/org/repo/pull/20\n",
     );
 
     mockSessionManager.cleanup.mockResolvedValue({
