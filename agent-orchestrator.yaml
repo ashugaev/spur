@@ -1,5 +1,6 @@
 # Agent Orchestrator — self-hosting config (dog-fooding)
 
+port: 5050
 dataDir: ~/.ao-sessions
 worktreeDir: ~/.worktrees/ao
 
@@ -21,8 +22,23 @@ projects:
     tracker:
       plugin: linear
       teamId: "2a6e9b1b-19cd-4e30-b5bd-7b34dc491c7e"
-    symlinks: [.claude]
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents]
     postCreate:
       - "pnpm install"
+    agentConfig:
+      permissions: skip
+
+  int:
+    name: Intelas Web
+    repo: intelas/intelas-web
+    path: ~/projects/intelas-web-2
+    defaultBranch: dev
+    sessionPrefix: intelas
+    scm:
+      plugin: github
+    tracker:
+      plugin: jira
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
+    agentRulesFile: dev/.ao-agent-rules.md
     agentConfig:
       permissions: skip
