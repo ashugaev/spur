@@ -157,6 +157,28 @@ vi.mock("@/lib/services", () => ({
   getSCM: vi.fn(() => mockSCM),
 }));
 
+vi.mock("@/lib/jira-sprint-tasks", () => ({
+  buildJiraSprintTasksSnapshot: vi.fn(async () => ({
+    updatedAt: "2026-03-06T14:00:00.000Z",
+    projectId: null,
+    listeners: [],
+    tasks: [],
+  })),
+  startJiraSprintTask: vi.fn(async () => ({
+    kind: "spawned",
+    issueKey: "MYAPP-101",
+    projectId: "my-app",
+    listenerId: "jira-my-app",
+    session: makeSession({
+      id: "my-app-101",
+      projectId: "my-app",
+      issueId: "MYAPP-101",
+      status: "spawning",
+      activity: "active",
+    }),
+  })),
+}));
+
 // ── Import routes after mocking ───────────────────────────────────────
 
 import { GET as sessionsGET } from "@/app/api/sessions/route";
@@ -167,12 +189,18 @@ import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
 import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
 import { GET as eventsGET } from "@/app/api/events/route";
 import { GET as integrationsStatusGET } from "@/app/api/integrations/status/route";
+import { GET as jiraSprintTasksGET, POST as jiraSprintTasksPOST } from "@/app/api/jira/sprint-tasks/route";
+import { POST as jiraSprintTasksStartPOST } from "@/app/api/jira/sprint-tasks/start/route";
+import { POST as jiraSprintTaskByKeyStartPOST } from "@/app/api/jira/sprint-tasks/[issueKey]/start/route";
+import { buildJiraSprintTasksSnapshot, startJiraSprintTask } from "@/lib/jira-sprint-tasks";
 
 const originalIntegrationsSnapshotPath = process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
 const originalHealthSnapshotPath = process.env.AO_HEALTH_SNAPSHOT_PATH;
 const originalIntegrationsStatusPath = process.env.AO_INTEGRATIONS_STATUS_PATH;
 const originalConfigPath = process.env.AO_CONFIG_PATH;
 const originalProjectId = process.env.AO_PROJECT_ID;
+const mockBuildJiraSprintTasksSnapshot = buildJiraSprintTasksSnapshot as ReturnType<typeof vi.fn>;
+const mockStartJiraSprintTask = startJiraSprintTask as ReturnType<typeof vi.fn>;
 
 function makeRequest(url: string, init?: RequestInit): NextRequest {
   return new NextRequest(
@@ -214,6 +242,25 @@ beforeEach(() => {
   (mockSessionManager.get as ReturnType<typeof vi.fn>).mockImplementation(
     async (id: string) => testSessions.find((s) => s.id === id) ?? null,
   );
+  mockBuildJiraSprintTasksSnapshot.mockResolvedValue({
+    updatedAt: "2026-03-06T14:00:00.000Z",
+    projectId: null,
+    listeners: [],
+    tasks: [],
+  });
+  mockStartJiraSprintTask.mockResolvedValue({
+    kind: "spawned",
+    issueKey: "MYAPP-101",
+    projectId: "my-app",
+    listenerId: "jira-my-app",
+    session: makeSession({
+      id: "my-app-101",
+      projectId: "my-app",
+      issueId: "MYAPP-101",
+      status: "spawning",
+      activity: "active",
+    }),
+  });
 });
 
 describe("API Routes", () => {
@@ -301,6 +348,38 @@ describe("API Routes", () => {
       expect(res.status).toBe(201);
       const data = await res.json();
       expect(data.session.issueId).toBeNull();
+    });
+
+    it("returns 500 when session creation fails", async () => {
+      (mockSessionManager.spawn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("Failed to create Jira task session"),
+      );
+
+      const req = makeRequest("/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "my-app", issueId: "INT-999" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await spawnPOST(req);
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.error).toMatch(/Failed to create Jira task session/);
+    });
+
+    it("returns generic 500 when non-Error is thrown during spawn", async () => {
+      (mockSessionManager.spawn as ReturnType<typeof vi.fn>).mockRejectedValueOnce("unexpected");
+
+      const req = makeRequest("/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "my-app", issueId: "INT-999" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await spawnPOST(req);
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.error).toBe("Failed to spawn session");
     });
   });
 
@@ -543,6 +622,7 @@ describe("API Routes", () => {
       delete process.env.AO_PROJECT_ID;
       delete process.env.AO_HEALTH_SNAPSHOT_PATH;
       delete process.env.AO_INTEGRATIONS_STATUS_PATH;
+      process.env.AO_CONFIG_PATH = join(tmp, "agent-orchestrator.yaml");
       process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = join(tmp, "missing-integrations.json");
 
       try {
@@ -699,6 +779,324 @@ describe("API Routes", () => {
         }
         rmSync(tmp, { recursive: true, force: true });
       }
+    });
+  });
+
+  // ── GET /api/jira/sprint-tasks ────────────────────────────────────
+
+  describe("GET /api/jira/sprint-tasks", () => {
+    it("returns jira sprint tasks snapshot", async () => {
+      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
+        updatedAt: "2026-03-06T14:10:00.000Z",
+        projectId: "my-app",
+        listeners: [
+          {
+            listenerId: "jira-my-app",
+            projectId: "my-app",
+            projectName: "My App",
+            jql: 'project = "MYAPP"',
+            backlogStatus: "Backlog",
+            effectiveJql: '(project = "MYAPP") AND status = "Backlog"',
+          },
+        ],
+        tasks: [
+          {
+            issueKey: "MYAPP-101",
+            issueUrl: "https://acme.atlassian.net/browse/MYAPP-101",
+            summary: "Add endpoint",
+            status: "Backlog",
+            statusCategory: "new",
+            listenerIds: ["jira-my-app"],
+            relatedActiveSessions: [],
+            spawnAvailable: true,
+          },
+        ],
+      });
+
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      const data = await res.json();
+      expect(data.projectId).toBe("my-app");
+      expect(data.listeners).toHaveLength(1);
+      expect(data.tasks).toHaveLength(1);
+      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "my-app",
+        }),
+      );
+    });
+
+    it("maps related active sessions into task payloads", async () => {
+      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
+        updatedAt: "2026-03-06T14:12:00.000Z",
+        projectId: "my-app",
+        listeners: [
+          {
+            listenerId: "jira-my-app",
+            projectId: "my-app",
+            projectName: "My App",
+            jql: 'project = "MYAPP"',
+            backlogStatus: "Backlog",
+            effectiveJql: '(project = "MYAPP") AND status = "Backlog"',
+          },
+        ],
+        tasks: [
+          {
+            issueKey: "MYAPP-202",
+            issueUrl: "https://acme.atlassian.net/browse/MYAPP-202",
+            summary: "Wire sprint session mapping",
+            status: "Backlog",
+            statusCategory: "new",
+            listenerIds: ["jira-my-app"],
+            relatedActiveSessions: [
+              {
+                id: "my-app-15",
+                projectId: "my-app",
+                status: "working",
+                activity: "active",
+                branch: "MYAPP-202-session-linking",
+                lastActivityAt: "2026-03-06T14:11:30.000Z",
+              },
+            ],
+            spawnAvailable: false,
+          },
+        ],
+      });
+
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.tasks).toHaveLength(1);
+      expect(data.tasks[0].issueKey).toBe("MYAPP-202");
+      expect(data.tasks[0].relatedActiveSessions).toHaveLength(1);
+      expect(data.tasks[0].relatedActiveSessions[0]).toEqual(
+        expect.objectContaining({
+          id: "my-app-15",
+          projectId: "my-app",
+          status: "working",
+          activity: "active",
+          branch: "MYAPP-202-session-linking",
+        }),
+      );
+      expect(data.tasks[0].spawnAvailable).toBe(false);
+      expect(data.tasks[0].listenerIds).toEqual(["jira-my-app"]);
+    });
+
+    it("returns an empty snapshot when no sprint tasks are available", async () => {
+      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
+        updatedAt: "2026-03-06T14:15:00.000Z",
+        projectId: "my-app",
+        listeners: [],
+        tasks: [],
+      });
+
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.listeners).toEqual([]);
+      expect(data.tasks).toEqual([]);
+      expect(data.projectId).toBe("my-app");
+    });
+
+    it("trims projectId query before building snapshot", async () => {
+      const res = await jiraSprintTasksGET(
+        makeRequest("/api/jira/sprint-tasks?projectId=%20my-app%20"),
+      );
+      expect(res.status).toBe(200);
+      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          sessionManager: mockSessionManager,
+          projectId: "my-app",
+        }),
+      );
+    });
+
+    it("treats whitespace-only projectId as undefined", async () => {
+      delete process.env.AO_PROJECT_ID;
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=%20%20%20"));
+      expect(res.status).toBe(200);
+      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: undefined,
+        }),
+      );
+    });
+
+    it("falls back to AO_PROJECT_ID when projectId query is omitted", async () => {
+      process.env.AO_PROJECT_ID = "my-app";
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
+      expect(res.status).toBe(200);
+      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({
+          projectId: "my-app",
+        }),
+      );
+    });
+
+    it("returns 500 when snapshot generation fails", async () => {
+      mockBuildJiraSprintTasksSnapshot.mockRejectedValueOnce(new Error("jira CLI unavailable"));
+
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.error).toMatch(/jira CLI unavailable/);
+    });
+
+    it("returns generic 500 error when non-Error is thrown", async () => {
+      mockBuildJiraSprintTasksSnapshot.mockRejectedValueOnce("unexpected");
+
+      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
+      expect(res.status).toBe(500);
+      const data = await res.json();
+      expect(data.error).toBe("Failed to load Jira sprint tasks");
+    });
+  });
+
+  // ── POST /api/jira/sprint-tasks ───────────────────────────────────
+
+  describe("POST /api/jira/sprint-tasks", () => {
+    it("starts a task and returns created session", async () => {
+      const req = makeRequest("/api/jira/sprint-tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          issueKey: "MYAPP-200",
+          projectId: "my-app",
+          listenerId: "jira-my-app",
+        }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksPOST(req);
+      expect(res.status).toBe(201);
+      const data = await res.json();
+      expect(data.started).toBe(true);
+      expect(data.duplicate).toBe(false);
+      expect(data.issueKey).toBe("MYAPP-101");
+      expect(data.session).toBeDefined();
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          issueKey: "MYAPP-200",
+          projectId: "my-app",
+          listenerId: "jira-my-app",
+        }),
+      );
+    });
+
+    it("returns 409 with duplicate=true when active session already exists", async () => {
+      mockStartJiraSprintTask.mockResolvedValueOnce({
+        kind: "already-active",
+        issueKey: "MYAPP-201",
+        projectId: "my-app",
+        listenerId: "jira-my-app",
+        session: makeSession({
+          id: "my-app-201",
+          projectId: "my-app",
+          issueId: "MYAPP-201",
+          status: "working",
+          activity: "active",
+        }),
+      });
+
+      const req = makeRequest("/api/jira/sprint-tasks", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-201", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksPOST(req);
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.started).toBe(false);
+      expect(data.duplicate).toBe(true);
+      expect(data.session.id).toBe("my-app-201");
+    });
+
+    it("returns 409 when start is already in progress", async () => {
+      mockStartJiraSprintTask.mockResolvedValueOnce({
+        kind: "start-in-progress",
+        issueKey: "MYAPP-202",
+        projectId: "my-app",
+        listenerId: "jira-my-app",
+      });
+
+      const req = makeRequest("/api/jira/sprint-tasks", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-202", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksPOST(req);
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.started).toBe(false);
+      expect(data.duplicate).toBe(false);
+      expect(data.error).toMatch(/already in progress/i);
+    });
+
+    it("returns 400 when issueKey is missing", async () => {
+      const req = makeRequest("/api/jira/sprint-tasks", {
+        method: "POST",
+        body: JSON.stringify({ projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksPOST(req);
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toMatch(/issueKey/i);
+    });
+
+    it("propagates structured task-start errors", async () => {
+      mockStartJiraSprintTask.mockRejectedValueOnce({
+        message: "Issue is outside listener scope",
+        status: 409,
+        code: "out_of_scope",
+        details: { issueKey: "MYAPP-203" },
+      });
+
+      const req = makeRequest("/api/jira/sprint-tasks", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-203", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksPOST(req);
+      expect(res.status).toBe(409);
+      const data = await res.json();
+      expect(data.code).toBe("out_of_scope");
+      expect(data.error).toMatch(/outside listener scope/i);
+      expect(data.details).toEqual(expect.objectContaining({ issueKey: "MYAPP-203" }));
+    });
+
+    it("supports legacy /start alias endpoint", async () => {
+      const req = makeRequest("/api/jira/sprint-tasks/start", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-204", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTasksStartPOST(req);
+      expect(res.status).toBe(201);
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({ issueKey: "MYAPP-204" }),
+      );
+    });
+
+    it("supports /:issueKey/start endpoint", async () => {
+      const req = makeRequest("/api/jira/sprint-tasks/MYAPP-205/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await jiraSprintTaskByKeyStartPOST(req, {
+        params: Promise.resolve({ issueKey: "MYAPP-205" }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({ issueKey: "MYAPP-205" }),
+      );
     });
   });
 

@@ -1,4 +1,9 @@
-import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
+import {
+  coerceOrchestratorSessionRoutingCandidates,
+  selectFallbackOrchestratorSessionId,
+  type OrchestratorConfig,
+  type SessionManager,
+} from "@composio/ao-core";
 import type { IntegrationHealthReporter, IntegrationIdentity } from "./integration-health.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -50,6 +55,7 @@ interface TelegramLongPollingConfig {
   chatId: string;
   intervalMs: number;
   defaultSessionId?: string;
+  preferredOrchestratorSessionId?: string;
 }
 
 interface LoggerLike {
@@ -134,8 +140,19 @@ function resolveLongPollingConfig(config: OrchestratorConfig): TelegramLongPolli
       "TELEGRAM_DEFAULT_SESSION_ID",
       "TG_DEFAULT_SESSION_ID",
     );
+  const preferredProjectId = env("AO_PROJECT_ID");
+  const preferredProject = preferredProjectId ? config.projects[preferredProjectId] : undefined;
+  const preferredOrchestratorSessionId = preferredProject
+    ? `${preferredProject.sessionPrefix}-orchestrator`
+    : undefined;
 
-  return { botToken, chatId, intervalMs, defaultSessionId };
+  return {
+    botToken,
+    chatId,
+    intervalMs,
+    defaultSessionId,
+    preferredOrchestratorSessionId,
+  };
 }
 
 async function isWebhookConfigured(botToken: string, fetchImpl: typeof fetch): Promise<boolean> {
@@ -164,12 +181,14 @@ async function resolveFallbackSessionId(
   cfg: TelegramLongPollingConfig,
   sessionManager: SessionManager,
 ): Promise<string | null> {
-  if (cfg.defaultSessionId) return cfg.defaultSessionId;
-
-  const sessions = await sessionManager.list();
-  const orchestrators = sessions.filter((s) => s.id.endsWith("-orchestrator") && s.status !== "killed");
-  if (orchestrators.length === 1) return orchestrators[0]?.id ?? null;
-  return null;
+  const listed = await sessionManager.list();
+  return selectFallbackOrchestratorSessionId(
+    coerceOrchestratorSessionRoutingCandidates(listed),
+    {
+      defaultSessionId: cfg.defaultSessionId,
+      preferredOrchestratorSessionId: cfg.preferredOrchestratorSessionId,
+    },
+  );
 }
 
 export async function maybeStartTelegramLongPolling(
@@ -247,12 +266,13 @@ export async function maybeStartTelegramLongPolling(
         if (!incomingChatId || incomingChatId !== cfg.chatId) continue;
 
         const replySessionId = extractSessionId(message);
-        if (fallbackSessionId === undefined) {
-          fallbackSessionId = await resolveFallbackSessionId(cfg, deps.sessionManager).catch(
-            () => null,
-          );
+        let sessionId: string | null = replySessionId;
+        if (!sessionId) {
+          if (fallbackSessionId === undefined) {
+            fallbackSessionId = await resolveFallbackSessionId(cfg, deps.sessionManager);
+          }
+          sessionId = fallbackSessionId ?? null;
         }
-        const sessionId = replySessionId ?? fallbackSessionId;
         if (!sessionId) continue;
 
         const rawText = typeof message.text === "string" ? message.text : "";

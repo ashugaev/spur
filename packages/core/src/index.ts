@@ -64,6 +64,16 @@ export type { OrchestratorPromptConfig } from "./orchestrator-prompt.js";
 // Shared utilities
 export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from "./utils.js";
 
+// Session routing utilities
+export {
+  coerceOrchestratorSessionRoutingCandidates,
+  selectFallbackOrchestratorSessionId,
+} from "./session-routing.js";
+export type {
+  OrchestratorSessionRoutingCandidate,
+  SelectFallbackOrchestratorSessionOptions,
+} from "./session-routing.js";
+
 // Path utilities — hash-based directory structure
 export {
   generateConfigHash,

@@ -1,6 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getServices } from "@/lib/services";
 import { stripControlChars } from "@/lib/validation";
+import {
+  coerceOrchestratorSessionRoutingCandidates,
+  selectFallbackOrchestratorSessionId,
+  type OrchestratorConfig,
+} from "@composio/ao-core";
 
 const SESSION_MARKER_REGEX = /\bAO_SESSION:([a-zA-Z0-9_-]+)\b/;
 const MAX_REPLY_LENGTH = 10_000;
@@ -80,17 +85,23 @@ function extractSessionIdFromReply(message: TelegramMessage | undefined): string
 
 async function resolveFallbackSessionId(
   inboundConfig: TelegramInboundConfig,
-  sessionManager: { list: () => Promise<Array<{ id: string; status: string }>> },
+  config: OrchestratorConfig,
+  sessionManager: { list: () => Promise<unknown> },
 ): Promise<string | null> {
-  if (inboundConfig.defaultSessionId) return inboundConfig.defaultSessionId;
+  const preferredProjectId = process.env["AO_PROJECT_ID"]?.trim();
+  const preferredProject = preferredProjectId ? config.projects[preferredProjectId] : undefined;
+  const preferredOrchestratorId = preferredProject
+    ? `${preferredProject.sessionPrefix}-orchestrator`
+    : null;
 
-  const sessions = await sessionManager.list();
-  const orchestrators = sessions.filter(
-    (s) => s.id.endsWith("-orchestrator") && s.status !== "killed",
+  const listed = await sessionManager.list();
+  return selectFallbackOrchestratorSessionId(
+    coerceOrchestratorSessionRoutingCandidates(listed),
+    {
+      defaultSessionId: inboundConfig.defaultSessionId,
+      preferredOrchestratorSessionId: preferredOrchestratorId,
+    },
   );
-
-  if (orchestrators.length === 1) return orchestrators[0]?.id ?? null;
-  return null;
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
@@ -126,10 +137,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   const incomingChatId =
     typeof message.chat?.id === "number" ? String(message.chat.id) : undefined;
 
-  if (
-    incomingChatId &&
-    inboundConfig.allowedChatId !== incomingChatId
-  ) {
+  if (!incomingChatId) {
+    return NextResponse.json({ ok: false, error: "Message chat id is missing" }, { status: 400 });
+  }
+
+  if (inboundConfig.allowedChatId !== incomingChatId) {
     return NextResponse.json({ ok: false, error: "Chat is not allowed" }, { status: 403 });
   }
 
@@ -148,7 +160,19 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   const replySessionId = extractSessionIdFromReply(message);
-  const targetSessionId = replySessionId ?? (await resolveFallbackSessionId(inboundConfig, sessionManager));
+  let targetSessionId = replySessionId;
+  if (!targetSessionId) {
+    try {
+      targetSessionId = await resolveFallbackSessionId(inboundConfig, config, sessionManager);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { ok: false, error: `Failed to resolve Telegram fallback session: ${msg}` },
+        { status: 503 },
+      );
+    }
+  }
+
   if (!targetSessionId) {
     return NextResponse.json({
       ok: true,

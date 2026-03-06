@@ -3,13 +3,26 @@ import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
 import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
 import { maybeStartTelegramLongPolling } from "../../src/lib/telegram-polling.js";
 
+function makeProject(sessionPrefix: string) {
+  return {
+    name: `${sessionPrefix} project`,
+    repo: `acme/${sessionPrefix}`,
+    path: `/tmp/${sessionPrefix}`,
+    defaultBranch: "main",
+    sessionPrefix,
+  };
+}
+
 function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig {
   return {
     configPath: "/tmp/ao-test/agent-orchestrator.yaml",
     port: 3000,
     readyThresholdMs: 300_000,
     defaults: { runtime: "tmux", agent: "claude-code", workspace: "worktree", notifiers: [] },
-    projects: {},
+    projects: {
+      app: makeProject("app"),
+      other: makeProject("other"),
+    },
     notifiers: {
       telegram: {
         plugin: "telegram",
@@ -57,6 +70,7 @@ describe("maybeStartTelegramLongPolling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    delete process.env["AO_PROJECT_ID"];
   });
 
   it("returns null when telegram notifier is not configured", async () => {
@@ -162,6 +176,67 @@ describe("maybeStartTelegramLongPolling", () => {
     );
   });
 
+  it("routes non-reply message to fallback orchestrator session", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
+    (sm.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: "my-app-orchestrator",
+        projectId: "my-app",
+        status: "working",
+        activity: "active",
+        branch: null,
+        issueId: null,
+        pr: null,
+        workspacePath: null,
+        runtimeHandle: null,
+        agentInfo: null,
+        createdAt: new Date("2026-03-06T00:00:00.000Z"),
+        lastActivityAt: new Date("2026-03-06T00:00:00.000Z"),
+        metadata: { role: "orchestrator" },
+      },
+    ]);
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 100,
+                message: {
+                  text: "run health check",
+                  chat: { id: 123456 },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).toHaveBeenCalledWith("my-app-orchestrator", "run health check");
+    controller?.stop();
+  });
+
   it("ignores replies from a different chat", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
@@ -234,6 +309,149 @@ describe("maybeStartTelegramLongPolling", () => {
     });
 
     await vi.runOnlyPendingTimersAsync();
+    expect(healthReporter.markDegraded).toHaveBeenCalled();
+    controller?.stop();
+  });
+
+  it("does not route ambiguous non-reply messages when multiple orchestrators are active", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    (sm.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: "app-orchestrator", status: "working", activity: "active", lastActivityAt: new Date() },
+      { id: "other-orchestrator", status: "working", activity: "ready", lastActivityAt: new Date() },
+    ]);
+    const healthReporter = makeHealthReporterMock();
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 202,
+                message: {
+                  text: "hello",
+                  chat: { id: 123456 },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).not.toHaveBeenCalled();
+    controller?.stop();
+  });
+
+  it("uses AO_PROJECT_ID as strict preferred fallback orchestrator", async () => {
+    process.env["AO_PROJECT_ID"] = "app";
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    (sm.list as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: "app-orchestrator", status: "working", activity: "ready", lastActivityAt: new Date() },
+      { id: "other-orchestrator", status: "working", activity: "active", lastActivityAt: new Date() },
+    ]);
+    const healthReporter = makeHealthReporterMock();
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 203,
+                message: {
+                  text: "deploy",
+                  chat: { id: 123456 },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).toHaveBeenCalledWith("app-orchestrator", "deploy");
+    controller?.stop();
+  });
+
+  it("marks degraded when fallback session lookup fails", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    (sm.list as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("list failed"));
+    const healthReporter = makeHealthReporterMock();
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 204,
+                message: {
+                  text: "hello",
+                  chat: { id: 123456 },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).not.toHaveBeenCalled();
     expect(healthReporter.markDegraded).toHaveBeenCalled();
     controller?.stop();
   });
