@@ -491,6 +491,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         environment: {
           ...environment,
           AO_SESSION: sessionId,
+          AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
           AO_DATA_DIR: sessionsDir, // Pass sessions directory (not root dataDir)
           AO_SESSION_NAME: sessionId, // User-facing session name
           ...(tmuxName && { AO_TMUX_NAME: tmuxName }), // Tmux session name if using new arch
@@ -653,6 +654,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       environment: {
         ...environment,
         AO_SESSION: sessionId,
+        AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
         AO_DATA_DIR: sessionsDir,
         AO_SESSION_NAME: sessionId,
         ...(tmuxName && { AO_TMUX_NAME: tmuxName }),
@@ -1113,6 +1115,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       environment: {
         ...environment,
         AO_SESSION: sessionId,
+        AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
         AO_DATA_DIR: sessionsDir,
         AO_SESSION_NAME: sessionId,
         ...(tmuxName && { AO_TMUX_NAME: tmuxName }),

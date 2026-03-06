@@ -15,8 +15,17 @@ import type { SessionManager } from "@composio/ao-core";
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitForPortAndOpen, mockSpawn } =
-  vi.hoisted(() => ({
+const {
+  mockExec,
+  mockExecSilent,
+  mockConfigRef,
+  mockSessionManager,
+  mockWaitForPortAndOpen,
+  mockSpawn,
+  mockLifecycleManager,
+  mockRegistry,
+  mockMaybeStartTelegramLongPolling,
+} = vi.hoisted(() => ({
     mockExec: vi.fn(),
     mockExecSilent: vi.fn(),
     mockConfigRef: { current: null as Record<string, unknown> | null },
@@ -31,6 +40,15 @@ const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitFor
     },
     mockWaitForPortAndOpen: vi.fn().mockResolvedValue(undefined),
     mockSpawn: vi.fn(),
+    mockLifecycleManager: { start: vi.fn(), stop: vi.fn() },
+    mockRegistry: {
+      register: vi.fn(),
+      get: vi.fn(() => null),
+      list: vi.fn(() => []),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    },
+    mockMaybeStartTelegramLongPolling: vi.fn().mockResolvedValue(null),
   }),
 );
 
@@ -63,11 +81,18 @@ vi.mock("@composio/ao-core", async (importOriginal) => {
       if (path) return actual.loadConfig(path);
       return mockConfigRef.current;
     },
+    createLifecycleManager: () => mockLifecycleManager,
   };
 });
 
 vi.mock("../../src/lib/create-session-manager.js", () => ({
   getSessionManager: async (): Promise<SessionManager> => mockSessionManager as SessionManager,
+  getPluginRegistry: async () => mockRegistry,
+}));
+
+vi.mock("../../src/lib/telegram-polling.js", () => ({
+  maybeStartTelegramLongPolling: (...args: unknown[]) =>
+    mockMaybeStartTelegramLongPolling(...args),
 }));
 
 vi.mock("../../src/lib/web-dir.js", () => ({
@@ -136,6 +161,12 @@ beforeEach(() => {
   mockSessionManager.kill.mockReset();
   mockExec.mockReset();
   mockExecSilent.mockReset();
+  mockLifecycleManager.start.mockReset();
+  mockLifecycleManager.stop.mockReset();
+  mockRegistry.get.mockReset();
+  mockRegistry.get.mockReturnValue(null);
+  mockMaybeStartTelegramLongPolling.mockReset();
+  mockMaybeStartTelegramLongPolling.mockResolvedValue(null);
   // Default: execSilent returns null (gh not available), so clone falls through to git SSH/HTTPS
   mockExecSilent.mockResolvedValue(null);
   mockWaitForPortAndOpen.mockReset();
@@ -524,6 +555,7 @@ describe("start command — browser open waits for port", () => {
     expect(port).toBe(3000);
     expect(url).toContain("/sessions/app-orchestrator");
     expect(signal).toBeInstanceOf(AbortSignal);
+    expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledTimes(1);
   });
 
   it("skips browser open with --no-dashboard", async () => {

@@ -20,7 +20,7 @@ defaults:
   runtime: tmux           # tmux | process | docker | kubernetes | ssh | e2b
   agent: claude-code      # claude-code | codex | aider | goose | custom
   workspace: worktree     # worktree | clone | copy
-  notifiers: [desktop]    # desktop | slack | discord | webhook | email
+  notifiers: [desktop]    # desktop | slack | telegram | discord | webhook | email
 
 # Projects — at minimum, specify repo and path
 projects:
@@ -71,13 +71,21 @@ projects:
 #     plugin: slack
 #     webhook: ${SLACK_WEBHOOK_URL}
 #     channel: "#agent-updates"
+#
+#   telegram:
+#     plugin: telegram
+#     # token/chat can come from env (AO_TELEGRAM_BOT_TOKEN, AO_TELEGRAM_CHAT_ID)
+#     # botToken: ${AO_TELEGRAM_BOT_TOKEN}
+#     # chatId: ${AO_TELEGRAM_CHAT_ID}
+#     # webhookSecret: ${AO_TELEGRAM_WEBHOOK_SECRET}
+#     # pollingIntervalMs: 30000   # used only when Telegram webhook is not configured
 
 # Notification routing by priority
 # notificationRouting:
-#   urgent: [desktop, slack]   # agent stuck, needs input, errored
-#   action: [desktop, slack]   # PR ready to merge
-#   warning: [slack]           # auto-fix failed
-#   info: [slack]              # summary, all done
+#   urgent: [desktop, telegram]   # agent stuck, needs input, errored
+#   action: [desktop, telegram]   # PR ready to merge
+#   warning: [telegram]           # auto-fix failed
+#   info: [telegram]              # summary, all done
 
 # Reactions — auto-responses to events (these are the defaults)
 # reactions:

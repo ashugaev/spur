@@ -17,6 +17,7 @@ import ora from "ora";
 import type { Command } from "commander";
 import {
   loadConfig,
+  createLifecycleManager,
   generateOrchestratorPrompt,
   isRepoUrl,
   parseRepoUrl,
@@ -29,7 +30,8 @@ import {
   type ParsedRepoUrl,
 } from "@composio/ao-core";
 import { exec, execSilent } from "../lib/shell.js";
-import { getSessionManager } from "../lib/create-session-manager.js";
+import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
+import { maybeStartTelegramLongPolling, type TelegramPollingController } from "../lib/telegram-polling.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
@@ -255,6 +257,9 @@ async function runStartup(
 
   const spinner = ora();
   let dashboardProcess: ChildProcess | null = null;
+  let lifecycleManager: ReturnType<typeof createLifecycleManager> | null = null;
+  let telegramPolling: TelegramPollingController | null = null;
+  let sharedSessionManager: Awaited<ReturnType<typeof getSessionManager>> | null = null;
   let exists = false;
 
   // Start dashboard (unless --no-dashboard)
@@ -294,12 +299,34 @@ async function runStartup(
     );
     spinner.succeed(`Dashboard starting on http://localhost:${port}`);
     console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
+
+    // Start lifecycle polling in the same process as `ao start` so reactions
+    // and notifiers (including Telegram) run continuously while dashboard is up.
+    const [sessionManager, registry] = await Promise.all([
+      getSessionManager(config),
+      getPluginRegistry(config),
+    ]);
+    sharedSessionManager = sessionManager;
+    lifecycleManager = createLifecycleManager({
+      config,
+      registry,
+      sessionManager,
+    });
+    lifecycleManager.start();
+
+    telegramPolling = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager,
+    });
+    if (telegramPolling) {
+      console.log(chalk.dim("  Telegram inbound: polling enabled (30s fallback, no webhook)"));
+    }
   }
 
   // Create orchestrator session (unless --no-orchestrator or already exists)
   let tmuxTarget = sessionId;
   if (opts?.orchestrator !== false) {
-    const sm = await getSessionManager(config);
+    const sm = sharedSessionManager ?? (await getSessionManager(config));
     const existing = await sm.get(sessionId);
     exists = existing !== null && existing.status !== "killed";
 
@@ -363,6 +390,8 @@ async function runStartup(
   if (dashboardProcess) {
     dashboardProcess.on("exit", (code) => {
       if (openAbort) openAbort.abort();
+      if (lifecycleManager) lifecycleManager.stop();
+      if (telegramPolling) telegramPolling.stop();
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }

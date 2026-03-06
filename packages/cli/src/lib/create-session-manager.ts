@@ -15,7 +15,7 @@ import {
   type PluginRegistry,
 } from "@composio/ao-core";
 
-let registryPromise: Promise<PluginRegistry> | null = null;
+const registryPromises = new Map<string, Promise<PluginRegistry>>();
 
 /**
  * Get or create the plugin registry.
@@ -23,17 +23,21 @@ let registryPromise: Promise<PluginRegistry> | null = null;
  * await the same initialization rather than racing.
  */
 async function getRegistry(config: OrchestratorConfig): Promise<PluginRegistry> {
-  if (!registryPromise) {
-    registryPromise = (async () => {
+  const cacheKey = config.configPath;
+  const existing = registryPromises.get(cacheKey);
+  if (existing) return existing;
+
+  const created = (async () => {
       const registry = createPluginRegistry();
       // Pass CLI's import context so pnpm strict resolution can find plugin packages.
       // Core can't resolve @composio/ao-plugin-* from its own module context because
       // they aren't in core's dependencies. The CLI has them as workspace deps.
       await registry.loadFromConfig(config, (pkg: string) => import(pkg));
       return registry;
-    })();
-  }
-  return registryPromise;
+  })();
+
+  registryPromises.set(cacheKey, created);
+  return created;
 }
 
 /**
@@ -45,3 +49,7 @@ export async function getSessionManager(config: OrchestratorConfig): Promise<Ses
   return createSessionManager({ config, registry });
 }
 
+/** Get the plugin registry used by the SessionManager factory. */
+export async function getPluginRegistry(config: OrchestratorConfig): Promise<PluginRegistry> {
+  return getRegistry(config);
+}

@@ -37,6 +37,8 @@ interface EnvironmentInfo {
   ghAuthed: boolean;
   hasLinearKey: boolean;
   hasSlackWebhook: boolean;
+  hasTelegramBotToken: boolean;
+  hasTelegramChatId: boolean;
 }
 
 async function detectDefaultBranch(
@@ -126,6 +128,17 @@ async function detectEnvironment(workingDir: string): Promise<EnvironmentInfo> {
   // Check for API keys in environment
   const hasLinearKey = !!process.env["LINEAR_API_KEY"];
   const hasSlackWebhook = !!process.env["SLACK_WEBHOOK_URL"];
+  const hasTelegramBotToken = !!(
+    process.env["AO_TELEGRAM_BOT_TOKEN"] ||
+    process.env["TELEGRAM_BOT_TOKEN"] ||
+    process.env["TG_BOT_TOKEN"] ||
+    process.env["TG_TOKEN"]
+  );
+  const hasTelegramChatId = !!(
+    process.env["AO_TELEGRAM_CHAT_ID"] ||
+    process.env["TELEGRAM_CHAT_ID"] ||
+    process.env["TG_CHAT_ID"]
+  );
 
   return {
     isGitRepo,
@@ -138,6 +151,8 @@ async function detectEnvironment(workingDir: string): Promise<EnvironmentInfo> {
     ghAuthed,
     hasLinearKey,
     hasSlackWebhook,
+    hasTelegramBotToken,
+    hasTelegramChatId,
   };
 }
 
@@ -219,6 +234,10 @@ export function registerInit(program: Command): void {
         console.log(chalk.green("  ✓ SLACK_WEBHOOK_URL detected"));
       }
 
+      if (env.hasTelegramBotToken && env.hasTelegramChatId) {
+        console.log(chalk.green("  ✓ Telegram token + chat id detected"));
+      }
+
       console.log();
 
       const rl = createInterface({
@@ -264,8 +283,8 @@ export function registerInit(program: Command): void {
         const workspace = await prompt(rl, "Workspace (worktree, clone)", "worktree");
         const notifiersStr = await prompt(
           rl,
-          "Notifiers (comma-separated: desktop, slack)",
-          "desktop",
+          "Notifiers (comma-separated: desktop, slack, telegram)",
+          env.hasTelegramBotToken && env.hasTelegramChatId ? "desktop,telegram" : "desktop",
         );
         const notifiers = notifiersStr.split(",").map((s) => s.trim());
 
@@ -469,7 +488,8 @@ async function handleAutoMode(outputPath: string, smart: boolean): Promise<void>
       runtime: "tmux",
       agent: "claude-code",
       workspace: "worktree",
-      notifiers: ["desktop"],
+      notifiers:
+        env.hasTelegramBotToken && env.hasTelegramChatId ? ["desktop", "telegram"] : ["desktop"],
     },
     projects: {
       [projectId]: {
@@ -482,6 +502,14 @@ async function handleAutoMode(outputPath: string, smart: boolean): Promise<void>
       },
     },
   };
+
+  if (env.hasTelegramBotToken && env.hasTelegramChatId) {
+    config.notifiers = {
+      telegram: {
+        plugin: "telegram",
+      },
+    };
+  }
 
   // Write config
   const yamlContent = yamlStringify(config, { indent: 2 });

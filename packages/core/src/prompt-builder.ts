@@ -23,6 +23,7 @@ export const BASE_AGENT_PROMPT = `You are an AI coding agent managed by the Agen
 
 ## Session Lifecycle
 - You are running inside a managed session. Focus on the assigned task.
+- Your session id is available in $AO_SESSION_ID. A ready-to-use Telegram marker is in $AO_SESSION_MARKER.
 - When you finish your work, create a DRAFT PR and push it. The orchestrator will handle CI monitoring and review routing.
 - If CI fails, the orchestrator will send you the failures — fix them and push again.
 - If reviewers request changes, the orchestrator will forward their comments — address each one, push fixes, and reply to the comments.

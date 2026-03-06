@@ -8,7 +8,17 @@ defaults:
   runtime: tmux
   agent: claude-code
   workspace: worktree
-  notifiers: [desktop]
+  notifiers: [desktop, telegram]
+
+notifiers:
+  telegram:
+    plugin: telegram
+
+notificationRouting:
+  urgent: [desktop, telegram]
+  action: [desktop, telegram]
+  warning: [telegram]
+  info: [telegram]
 
 projects:
   ao:
