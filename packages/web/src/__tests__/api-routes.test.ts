@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   SessionNotRestorableError,
   type Session,
@@ -163,6 +166,13 @@ import { POST as killPOST } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
 import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
 import { GET as eventsGET } from "@/app/api/events/route";
+import { GET as integrationsStatusGET } from "@/app/api/integrations/status/route";
+
+const originalIntegrationsSnapshotPath = process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
+const originalHealthSnapshotPath = process.env.AO_HEALTH_SNAPSHOT_PATH;
+const originalIntegrationsStatusPath = process.env.AO_INTEGRATIONS_STATUS_PATH;
+const originalConfigPath = process.env.AO_CONFIG_PATH;
+const originalProjectId = process.env.AO_PROJECT_ID;
 
 function makeRequest(url: string, init?: RequestInit): NextRequest {
   return new NextRequest(
@@ -173,6 +183,32 @@ function makeRequest(url: string, init?: RequestInit): NextRequest {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  if (originalIntegrationsSnapshotPath === undefined) {
+    delete process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
+  } else {
+    process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = originalIntegrationsSnapshotPath;
+  }
+  if (originalHealthSnapshotPath === undefined) {
+    delete process.env.AO_HEALTH_SNAPSHOT_PATH;
+  } else {
+    process.env.AO_HEALTH_SNAPSHOT_PATH = originalHealthSnapshotPath;
+  }
+  if (originalIntegrationsStatusPath === undefined) {
+    delete process.env.AO_INTEGRATIONS_STATUS_PATH;
+  } else {
+    process.env.AO_INTEGRATIONS_STATUS_PATH = originalIntegrationsStatusPath;
+  }
+  if (originalConfigPath === undefined) {
+    delete process.env.AO_CONFIG_PATH;
+  } else {
+    process.env.AO_CONFIG_PATH = originalConfigPath;
+  }
+  if (originalProjectId === undefined) {
+    delete process.env.AO_PROJECT_ID;
+  } else {
+    process.env.AO_PROJECT_ID = originalProjectId;
+  }
+
   // Re-set default return values
   (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValue(testSessions);
   (mockSessionManager.get as ReturnType<typeof vi.fn>).mockImplementation(
@@ -430,6 +466,239 @@ describe("API Routes", () => {
       expect(res.status).toBe(409);
       const data = await res.json();
       expect(data.error).toMatch(/merged/);
+    });
+  });
+
+  // ── GET /api/integrations/status ───────────────────────────────────
+
+  describe("GET /api/integrations/status", () => {
+    it("returns integration listener snapshot from file", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-"));
+      const snapshotPath = join(tmp, "snapshot.json");
+      writeFileSync(
+        snapshotPath,
+        JSON.stringify({
+          version: 1,
+          projectId: "my-app",
+          updatedAt: "2026-03-06T11:22:33.000Z",
+          entries: [
+            {
+              id: "telegram-polling",
+              service: "telegram",
+              kind: "polling",
+              active: true,
+              connected: true,
+              ok: true,
+              state: "healthy",
+              message: "Polling active",
+            },
+            {
+              id: "jira-comment-polling",
+              service: "jira",
+              kind: "polling",
+              active: true,
+              connected: true,
+              ok: false,
+              state: "degraded",
+              message: "Auth needs refresh",
+            },
+            {
+              id: "listener:jira-broai",
+              service: "jira",
+              kind: "listener",
+              active: true,
+              connected: true,
+              ok: true,
+              state: "healthy",
+              message: "Listener running",
+            },
+          ],
+        }),
+        "utf-8",
+      );
+
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("snapshot");
+        expect(data.updatedAt).toBe("2026-03-06T11:22:33.000Z");
+        expect(data.integrations.telegramInboundPolling.active).toBe(true);
+        expect(data.integrations.telegramInboundPolling.connected).toBe(true);
+        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
+        expect(data.integrations.jiraCommentPolling.ok).toBe(false);
+        expect(data.integrations.jiraCommentPolling.message).toMatch(/Auth needs refresh/);
+        expect(data.integrations.jiraTriggerListeners.state).toBe("healthy");
+        expect(data.integrations.jiraTriggerListeners.ok).toBe(true);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("returns inactive/unknown fallback when snapshot is missing", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-missing-"));
+      delete process.env.AO_CONFIG_PATH;
+      delete process.env.AO_PROJECT_ID;
+      delete process.env.AO_HEALTH_SNAPSHOT_PATH;
+      delete process.env.AO_INTEGRATIONS_STATUS_PATH;
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = join(tmp, "missing-integrations.json");
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("fallback");
+        expect(data.integrations.telegramInboundPolling.active).toBe(false);
+        expect(data.integrations.jiraCommentPolling.active).toBe(false);
+        expect(data.integrations.jiraTriggerListeners.active).toBe(false);
+        expect(data.integrations.telegramInboundPolling.state).toBe("unknown");
+        expect(data.integrations.jiraCommentPolling.state).toBe("unknown");
+        expect(data.integrations.jiraTriggerListeners.state).toBe("unknown");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("normalizes legacy integration payload shape to canonical contract", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-legacy-"));
+      const snapshotPath = join(tmp, "snapshot.json");
+      writeFileSync(
+        snapshotPath,
+        JSON.stringify({
+          updatedAt: "2026-03-06T12:00:00.000Z",
+          integrations: {
+            telegramInboundPolling: { state: "starting" },
+            jiraCommentPolling: { state: "degraded", detail: "Rate limit reached" },
+            jiraTriggerListeners: true,
+          },
+        }),
+        "utf-8",
+      );
+
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("snapshot");
+        expect(data.integrations.telegramInboundPolling.state).toBe("starting");
+        expect(data.integrations.telegramInboundPolling.active).toBe(true);
+        expect(data.integrations.telegramInboundPolling.connected).toBe(false);
+        expect(data.integrations.telegramInboundPolling.ok).toBe(false);
+        expect(data.integrations.jiraCommentPolling.state).toBe("degraded");
+        expect(data.integrations.jiraCommentPolling.message).toMatch(/Rate limit reached/);
+        expect(data.integrations.jiraTriggerListeners.state).toBe("healthy");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("returns fallback when snapshot JSON is invalid", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-invalid-"));
+      const snapshotPath = join(tmp, "snapshot.json");
+      writeFileSync(snapshotPath, "{ this is not valid json", "utf-8");
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("fallback");
+        expect(data.snapshotPath).toBe(snapshotPath);
+        expect(data.integrations.telegramInboundPolling.message).toMatch(/invalid JSON/);
+        expect(data.integrations.telegramInboundPolling.state).toBe("unknown");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("falls back from missing explicit env snapshot to config-dir default snapshot path", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-default-fallback-"));
+      const configPath = join(tmp, "agent-orchestrator.yaml");
+      const fallbackSnapshotPath = join(tmp, ".ao-integrations-health.json");
+
+      writeFileSync(
+        fallbackSnapshotPath,
+        JSON.stringify({
+          version: 1,
+          projectId: "default-fallback",
+          updatedAt: "2026-03-06T13:00:00.000Z",
+          entries: [
+            {
+              id: "telegram-polling",
+              service: "telegram",
+              kind: "polling",
+              active: true,
+              connected: true,
+              ok: true,
+              state: "healthy",
+              message: "Polling active",
+            },
+          ],
+        }),
+        "utf-8",
+      );
+
+      process.env.AO_CONFIG_PATH = configPath;
+      delete process.env.AO_PROJECT_ID;
+      delete process.env.AO_HEALTH_SNAPSHOT_PATH;
+      delete process.env.AO_INTEGRATIONS_STATUS_PATH;
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = join(tmp, "missing-snapshot.json");
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("snapshot");
+        expect(data.snapshotPath).toBe(fallbackSnapshotPath);
+        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("resolves relative snapshot env path from AO_CONFIG_PATH directory", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-relative-"));
+      const configPath = join(tmp, "agent-orchestrator.yaml");
+      const relativeSnapshotPath = join(".ao", "integration-health.json");
+      const absoluteSnapshotPath = join(tmp, relativeSnapshotPath);
+      const originalConfigPath = process.env.AO_CONFIG_PATH;
+
+      mkdirSync(join(tmp, ".ao"), { recursive: true });
+      writeFileSync(
+        absoluteSnapshotPath,
+        JSON.stringify({
+          updatedAt: "2026-03-06T12:22:00.000Z",
+          integrations: {
+            telegramInboundPolling: { active: true, connected: true, ok: true, state: "healthy" },
+            jiraCommentPolling: { active: false, connected: false, ok: false, state: "inactive" },
+            jiraTriggerListeners: { active: false, connected: false, ok: false, state: "inactive" },
+          },
+        }),
+        "utf-8",
+      );
+
+      process.env.AO_CONFIG_PATH = configPath;
+      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = relativeSnapshotPath;
+
+      try {
+        const res = await integrationsStatusGET();
+        expect(res.status).toBe(200);
+        const data = await res.json();
+        expect(data.source).toBe("snapshot");
+        expect(data.snapshotPath).toBe(absoluteSnapshotPath);
+        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
+      } finally {
+        if (originalConfigPath === undefined) {
+          delete process.env.AO_CONFIG_PATH;
+        } else {
+          process.env.AO_CONFIG_PATH = originalConfigPath;
+        }
+        rmSync(tmp, { recursive: true, force: true });
+      }
     });
   });
 

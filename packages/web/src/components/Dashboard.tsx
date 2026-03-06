@@ -1,13 +1,17 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   type DashboardSession,
   type DashboardStats,
   type DashboardPR,
   type AttentionLevel,
+  type IntegrationStatusEntry,
+  type IntegrationsStatusSnapshot,
   getAttentionLevel,
   isPRRateLimited,
+  INTEGRATION_STATUS_KEYS,
+  INTEGRATION_STATUS_LABELS,
 } from "@/lib/types";
 import { CI_STATUS } from "@composio/ao-core/types";
 import { AttentionZone } from "./AttentionZone";
@@ -17,6 +21,7 @@ import { useSessionEvents } from "@/hooks/useSessionEvents";
 
 interface DashboardProps {
   initialSessions: DashboardSession[];
+  initialIntegrationsStatus: IntegrationsStatusSnapshot;
   stats: DashboardStats;
   orchestratorId?: string | null;
   projectName?: string;
@@ -24,8 +29,15 @@ interface DashboardProps {
 
 const KANBAN_LEVELS = ["working", "pending", "review", "respond", "merge"] as const;
 
-export function Dashboard({ initialSessions, stats, orchestratorId, projectName }: DashboardProps) {
+export function Dashboard({
+  initialSessions,
+  initialIntegrationsStatus,
+  stats,
+  orchestratorId,
+  projectName,
+}: DashboardProps) {
   const sessions = useSessionEvents(initialSessions);
+  const [integrationsStatus, setIntegrationsStatus] = useState(initialIntegrationsStatus);
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
   const grouped = useMemo(() => {
     const zones: Record<AttentionLevel, DashboardSession[]> = {
@@ -94,6 +106,33 @@ export function Dashboard({ initialSessions, stats, orchestratorId, projectName 
     [sessions],
   );
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const refresh = async () => {
+      try {
+        const response = await fetch("/api/integrations/status", { cache: "no-store" });
+        if (!response.ok) return;
+        const next = (await response.json()) as IntegrationsStatusSnapshot;
+        if (!cancelled) {
+          setIntegrationsStatus(next);
+        }
+      } catch {
+        // Keep the last known status
+      }
+    };
+
+    void refresh();
+    const timer = setInterval(() => {
+      void refresh();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, []);
+
   return (
     <div className="px-8 py-7">
       <DynamicFavicon sessions={sessions} projectName={projectName} />
@@ -141,6 +180,8 @@ export function Dashboard({ initialSessions, stats, orchestratorId, projectName 
           </button>
         </div>
       )}
+
+      <IntegrationStatusPanel status={integrationsStatus} />
 
       {/* Kanban columns for active zones */}
       {hasKanbanSessions && (
@@ -219,6 +260,205 @@ export function Dashboard({ initialSessions, stats, orchestratorId, projectName 
       )}
     </div>
   );
+}
+
+function IntegrationStatusPanel({ status }: { status: IntegrationsStatusSnapshot }) {
+  const updatedLabel =
+    status.updatedAt && status.source === "snapshot"
+      ? `updated ${formatStatusTimestamp(status.updatedAt)}`
+      : "snapshot unavailable";
+  const entries = INTEGRATION_STATUS_KEYS.map((key) => ({
+    key,
+    label: INTEGRATION_STATUS_LABELS[key],
+    entry: status.integrations[key],
+  }));
+  const summary = entries.reduce(
+    (counts, item) => {
+      counts[integrationTone(item.entry)] += 1;
+      return counts;
+    },
+    { healthy: 0, attention: 0, inactive: 0, error: 0 } as Record<IntegrationTone, number>,
+  );
+  const attentionCount = summary.attention + summary.error;
+
+  return (
+    <section className="mb-7 rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 md:p-5">
+      <div className="mb-4 border-b border-[var(--color-border-subtle)] pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-[10px] font-bold uppercase tracking-[0.10em] text-[var(--color-text-secondary)]">
+              Integrations
+            </h2>
+            <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+              Listener runtime and connection health.
+            </p>
+          </div>
+          <span className="text-[11px] text-[var(--color-text-secondary)]">
+            {updatedLabel}
+            {" · "}
+            {status.source}
+          </span>
+        </div>
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          <SummaryPill label="ok" value={summary.healthy} tone="healthy" />
+          <SummaryPill
+            label="attention"
+            value={attentionCount}
+            tone={attentionCount > 0 ? "attention" : "inactive"}
+          />
+          <SummaryPill label="inactive" value={summary.inactive} tone="inactive" />
+        </div>
+        <p className="sr-only">
+          {summary.healthy} integrations healthy, {attentionCount} need attention, {summary.inactive} inactive.
+        </p>
+      </div>
+      <div className="grid gap-2.5 sm:grid-cols-2 md:grid-cols-3">
+        {entries.map(({ key, label, entry }) => {
+          const tone = integrationTone(entry);
+          return (
+            <article
+              key={key}
+              className={integrationCardClass(tone)}
+              aria-label={`${label}: ${formatStateLabel(entry.state)}`}
+            >
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className={integrationDotClass(tone)} aria-hidden="true" />
+                  <h3 className="text-[12px] font-medium text-[var(--color-text-primary)]">
+                    {label}
+                  </h3>
+                </div>
+                <span className={stateBadgeClass(entry)}>{formatStateLabel(entry.state)}</span>
+              </div>
+              <div className="grid gap-1.5">
+                <BooleanPill label="active" value={entry.active} />
+                <BooleanPill label="connected" value={entry.connected} />
+                <BooleanPill label="ok" value={entry.ok} />
+              </div>
+              {entry.message && (
+                <p className="mt-2.5 rounded-[5px] border border-[var(--color-border-subtle)] bg-[var(--color-bg-surface)] px-2 py-1.5 text-[11px] leading-[1.35] text-[var(--color-text-secondary)]">
+                  {entry.message}
+                </p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function BooleanPill({ label, value }: { label: string; value: boolean }) {
+  return (
+    <div
+      className={
+        value
+          ? "flex items-center justify-between rounded-[5px] border border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] px-2 py-1 text-[11px] text-[var(--color-status-ready)]"
+          : "flex items-center justify-between rounded-[5px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)]"
+      }
+    >
+      <span className="inline-flex items-center gap-1.5">
+        <span
+          className={
+            value
+              ? "h-1.5 w-1.5 rounded-full bg-[var(--color-status-ready)]"
+              : "h-1.5 w-1.5 rounded-full bg-[var(--color-border-strong)]"
+          }
+          aria-hidden="true"
+        />
+        <span className="text-[10px] uppercase tracking-[0.07em]">{label}</span>
+      </span>
+      <span className="text-[11px] font-semibold tracking-[0.02em]">
+        {value ? "Yes" : "No"}
+      </span>
+    </div>
+  );
+}
+
+type IntegrationTone = "healthy" | "attention" | "inactive" | "error";
+
+function integrationTone(entry: IntegrationStatusEntry): IntegrationTone {
+  if (entry.ok) return "healthy";
+  if (!entry.active) return "inactive";
+  if (entry.connected) return "attention";
+  return "error";
+}
+
+function integrationCardClass(tone: IntegrationTone): string {
+  const base =
+    "rounded-[7px] border bg-[linear-gradient(175deg,rgba(28,33,40,0.95)_0%,rgba(18,23,30,0.95)_100%)] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]";
+  if (tone === "healthy") return `${base} border-[rgba(63,185,80,0.35)]`;
+  if (tone === "attention") return `${base} border-[rgba(210,153,34,0.35)]`;
+  if (tone === "error") return `${base} border-[rgba(248,81,73,0.45)]`;
+  return `${base} border-[var(--color-border-subtle)]`;
+}
+
+function integrationDotClass(tone: IntegrationTone): string {
+  if (tone === "healthy") return "h-2 w-2 rounded-full bg-[var(--color-status-ready)]";
+  if (tone === "attention") return "h-2 w-2 rounded-full bg-[var(--color-status-attention)]";
+  if (tone === "error") return "h-2 w-2 rounded-full bg-[var(--color-status-error)]";
+  return "h-2 w-2 rounded-full bg-[var(--color-border-strong)]";
+}
+
+function toneBadgeClass(tone: IntegrationTone): string {
+  if (tone === "healthy") {
+    return "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.14)] text-[var(--color-status-ready)]";
+  }
+  if (tone === "attention") {
+    return "border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.14)] text-[var(--color-status-attention)]";
+  }
+  if (tone === "error") {
+    return "border-[rgba(248,81,73,0.45)] bg-[rgba(248,81,73,0.14)] text-[var(--color-status-error)]";
+  }
+  return "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)]";
+}
+
+function SummaryPill({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: IntegrationTone;
+}) {
+  return (
+    <span
+      className={[
+        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em]",
+        toneBadgeClass(tone),
+      ].join(" ")}
+    >
+      <span className="tabular-nums">{value}</span>
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function stateBadgeClass(entry: IntegrationStatusEntry): string {
+  return [
+    "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em]",
+    toneBadgeClass(integrationTone(entry)),
+  ].join(" ");
+}
+
+function formatStateLabel(value: string): string {
+  const normalized = value.replace(/[_-]+/g, " ").trim();
+  if (!normalized) {
+    return "Unknown";
+  }
+  return normalized
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function formatStatusTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return `${date.toISOString().slice(11, 19)}Z`;
 }
 
 function StatusLine({ stats }: { stats: DashboardStats }) {

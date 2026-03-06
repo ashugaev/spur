@@ -834,6 +834,9 @@ export interface OrchestratorConfig {
 
   /** Default reaction configs */
   reactions: Record<string, ReactionConfig>;
+
+  /** Background listeners (issue/event sources that auto-trigger actions) */
+  listeners?: Record<string, ListenerConfig>;
 }
 
 export interface DefaultPlugins {
@@ -912,6 +915,33 @@ export interface NotifierConfig {
   [key: string]: unknown;
 }
 
+export interface ListenerTriggerConfig {
+  /** Trigger type (v1: spawn session) */
+  type: "spawn-session" | string;
+  /** Optional agent override for spawned sessions */
+  agent?: string;
+  [key: string]: unknown;
+}
+
+export interface ListenerConfig {
+  /** Whether this listener is enabled (default: true) */
+  enabled?: boolean;
+  /** Source adapter name (e.g. "jira-backlog") */
+  source: string;
+  /** Project id this listener operates on */
+  projectId: string;
+  /** Poll interval in milliseconds */
+  intervalMs?: number;
+  /** Source-specific: backlog status name to enforce for jira-backlog (default: Backlog) */
+  backlogStatus?: string;
+  /** Source-specific: stale lock timeout in milliseconds for jira-backlog */
+  lockStaleMs?: number;
+  /** Trigger behavior configuration */
+  trigger?: ListenerTriggerConfig;
+  /** Source-specific fields (e.g. jql for jira-backlog) */
+  [key: string]: unknown;
+}
+
 export interface AgentSpecificConfig {
   permissions?: "skip" | "default";
   model?: string;
@@ -979,6 +1009,7 @@ export interface SessionMetadata {
   runtimeHandle?: string;
   restoredAt?: string;
   role?: string; // "orchestrator" for orchestrator sessions
+  terminationReason?: "manual" | "cleanup" | "system";
   dashboardPort?: number;
   terminalWsPort?: number;
   directTerminalWsPort?: number;
@@ -988,6 +1019,11 @@ export interface SessionMetadata {
 // SERVICE INTERFACES (core, not pluggable)
 // =============================================================================
 
+export interface KillSessionOptions {
+  /** Why the session is being terminated (affects archived terminal status) */
+  reason?: "manual" | "cleanup" | "system";
+}
+
 /** Session manager — CRUD for sessions */
 export interface SessionManager {
   spawn(config: SessionSpawnConfig): Promise<Session>;
@@ -995,7 +1031,7 @@ export interface SessionManager {
   restore(sessionId: SessionId): Promise<Session>;
   list(projectId?: string): Promise<Session[]>;
   get(sessionId: SessionId): Promise<Session | null>;
-  kill(sessionId: SessionId): Promise<void>;
+  kill(sessionId: SessionId, options?: KillSessionOptions): Promise<void>;
   cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
   send(sessionId: SessionId, message: string): Promise<void>;
 }

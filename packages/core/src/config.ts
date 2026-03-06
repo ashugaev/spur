@@ -51,6 +51,25 @@ const NotifierConfigSchema = z
   })
   .passthrough();
 
+const ListenerTriggerConfigSchema = z
+  .object({
+    type: z.string(),
+    agent: z.string().optional(),
+  })
+  .passthrough();
+
+const ListenerConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    source: z.string(),
+    projectId: z.string(),
+    intervalMs: z.number().positive().optional(),
+    backlogStatus: z.string().min(1).optional(),
+    lockStaleMs: z.number().positive().optional(),
+    trigger: ListenerTriggerConfigSchema.default({ type: "spawn-session" }),
+  })
+  .passthrough();
+
 const AgentSpecificConfigSchema = z
   .object({
     permissions: z.enum(["skip", "default"]).default("skip"),
@@ -103,6 +122,7 @@ const OrchestratorConfigSchema = z.object({
     info: ["composio"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
+  listeners: z.record(ListenerConfigSchema).default({}),
 });
 
 // =============================================================================

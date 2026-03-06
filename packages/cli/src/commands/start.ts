@@ -32,6 +32,12 @@ import {
 import { exec, execSilent } from "../lib/shell.js";
 import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
 import { maybeStartTelegramLongPolling, type TelegramPollingController } from "../lib/telegram-polling.js";
+import { maybeStartJiraCommentPolling, type JiraCommentPollingController } from "../lib/jira-comment-polling.js";
+import {
+  maybeStartConfiguredListeners,
+  type ListenerGroupController,
+} from "../lib/listeners/index.js";
+import { createIntegrationHealthReporter } from "../lib/integration-health.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
@@ -219,10 +225,19 @@ async function startDashboard(
   port: number,
   webDir: string,
   configPath: string | null,
+  projectId: string,
+  integrationHealthSnapshotPath: string,
   terminalPort?: number,
   directTerminalPort?: number,
 ): Promise<ChildProcess> {
-  const env = await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort);
+  const env =
+    (await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort)) ??
+    ({ ...process.env } as Record<string, string>);
+  env["AO_PROJECT_ID"] = projectId;
+  env["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"] = integrationHealthSnapshotPath;
+  // Compatibility aliases for older status readers.
+  env["AO_HEALTH_SNAPSHOT_PATH"] = integrationHealthSnapshotPath;
+  env["AO_INTEGRATIONS_STATUS_PATH"] = integrationHealthSnapshotPath;
 
   const child = spawn("pnpm", ["run", "dev"], {
     cwd: webDir,
@@ -252,6 +267,11 @@ async function runStartup(
 ): Promise<void> {
   const sessionId = `${project.sessionPrefix}-orchestrator`;
   let port = config.port ?? DEFAULT_PORT;
+  const integrationHealth = createIntegrationHealthReporter({
+    config,
+    projectId,
+    project,
+  });
 
   console.log(chalk.bold(`\nStarting orchestrator for ${chalk.cyan(project.name)}\n`));
 
@@ -259,6 +279,8 @@ async function runStartup(
   let dashboardProcess: ChildProcess | null = null;
   let lifecycleManager: ReturnType<typeof createLifecycleManager> | null = null;
   let telegramPolling: TelegramPollingController | null = null;
+  let jiraPolling: JiraCommentPollingController | null = null;
+  let configuredListeners: ListenerGroupController | null = null;
   let sharedSessionManager: Awaited<ReturnType<typeof getSessionManager>> | null = null;
   let exists = false;
 
@@ -294,6 +316,8 @@ async function runStartup(
       port,
       webDir,
       config.configPath,
+      projectId,
+      integrationHealth.snapshotPath,
       config.terminalPort,
       config.directTerminalPort,
     );
@@ -317,9 +341,33 @@ async function runStartup(
     telegramPolling = await maybeStartTelegramLongPolling({
       config,
       sessionManager,
+      healthReporter: integrationHealth,
     });
     if (telegramPolling) {
       console.log(chalk.dim("  Telegram inbound: polling enabled (30s fallback, no webhook)"));
+    }
+
+    jiraPolling = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager,
+      healthReporter: integrationHealth,
+    });
+    if (jiraPolling) {
+      console.log(chalk.dim("  Jira inbound: comment polling enabled (60s)"));
+    }
+
+    configuredListeners = await maybeStartConfiguredListeners({
+      config,
+      sessionManager,
+      projectId,
+      healthReporter: integrationHealth,
+    });
+    if (configuredListeners && configuredListeners.activeListeners.length > 0) {
+      console.log(
+        chalk.dim(
+          `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (enabled)`,
+        ),
+      );
     }
   }
 
@@ -392,6 +440,8 @@ async function runStartup(
       if (openAbort) openAbort.abort();
       if (lifecycleManager) lifecycleManager.stop();
       if (telegramPolling) telegramPolling.stop();
+      if (jiraPolling) jiraPolling.stop();
+      if (configuredListeners) configuredListeners.stop();
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }

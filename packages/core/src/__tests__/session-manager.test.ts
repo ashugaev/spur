@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createSessionManager } from "../session-manager.js";
-import { writeMetadata, readMetadata, readMetadataRaw, deleteMetadata } from "../metadata.js";
+import {
+  writeMetadata,
+  readMetadata,
+  readMetadataRaw,
+  readArchivedMetadataRaw,
+  deleteMetadata,
+} from "../metadata.js";
 import { getSessionsDir, getProjectBaseDir } from "../paths.js";
 import {
   SessionNotRestorableError,
@@ -608,6 +614,7 @@ describe("spawn", () => {
 
   it("does not destroy session when post-launch prompt delivery fails", async () => {
     vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const failingRuntime: Runtime = {
       ...mockRuntime,
       sendMessage: vi.fn().mockRejectedValue(new Error("tmux send failed")),
@@ -628,14 +635,18 @@ describe("spawn", () => {
 
     const sm = createSessionManager({ config, registry: registryWithFailingSend });
     const spawnPromise = sm.spawn({ projectId: "my-app", prompt: "Fix the bug" });
-    await vi.advanceTimersByTimeAsync(5_000);
+    // Initial delay (5s) + two retry delays (3s + 3s)
+    await vi.advanceTimersByTimeAsync(11_000);
     const session = await spawnPromise;
 
     // Session should still be returned successfully despite sendMessage failure
     expect(session.id).toBe("app-1");
     expect(session.status).toBe("spawning");
+    expect(failingRuntime.sendMessage).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalled();
     // Runtime should NOT have been destroyed
     expect(failingRuntime.destroy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
     vi.useRealTimers();
   });
 
@@ -1003,6 +1014,38 @@ describe("kill", () => {
     const sm = createSessionManager({ config, registry: registryWithFail });
     // Should not throw even though runtime.destroy fails
     await expect(sm.kill("app-1")).resolves.toBeUndefined();
+  });
+
+  it("archives manual kill as status=killed", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp/ws",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.kill("app-1", { reason: "manual" });
+
+    const archived = readArchivedMetadataRaw(sessionsDir, "app-1");
+    expect(archived?.["status"]).toBe("killed");
+    expect(archived?.["terminationReason"]).toBe("manual");
+  });
+
+  it("archives cleanup kill as status=cleanup", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp/ws",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.kill("app-1", { reason: "cleanup" });
+
+    const archived = readArchivedMetadataRaw(sessionsDir, "app-1");
+    expect(archived?.["status"]).toBe("cleanup");
+    expect(archived?.["terminationReason"]).toBe("cleanup");
   });
 });
 

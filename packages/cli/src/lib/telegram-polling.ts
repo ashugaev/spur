@@ -1,4 +1,5 @@
 import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
+import type { IntegrationHealthReporter, IntegrationIdentity } from "./integration-health.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const MAX_MESSAGE_LENGTH = 10_000;
@@ -60,7 +61,15 @@ interface StartTelegramLongPollingDeps {
   sessionManager: SessionManager;
   fetchImpl?: typeof fetch;
   logger?: LoggerLike;
+  healthReporter?: IntegrationHealthReporter;
 }
+
+const TELEGRAM_POLLING_HEALTH: IntegrationIdentity = {
+  id: "telegram-polling",
+  label: "Telegram Inbound Polling",
+  service: "telegram",
+  kind: "polling",
+};
 
 function env(...keys: string[]): string | undefined {
   for (const key of keys) {
@@ -167,18 +176,35 @@ export async function maybeStartTelegramLongPolling(
   deps: StartTelegramLongPollingDeps,
 ): Promise<TelegramPollingController | null> {
   const cfg = resolveLongPollingConfig(deps.config);
-  if (!cfg) return null;
+  const health = deps.healthReporter;
+  if (!cfg) {
+    health?.markInactive(
+      TELEGRAM_POLLING_HEALTH,
+      "Telegram polling inactive: notifier config, bot token, or chat id is missing",
+    );
+    return null;
+  }
 
   const fetchImpl = deps.fetchImpl ?? fetch;
   const logger = deps.logger ?? console;
+  health?.markStarting(TELEGRAM_POLLING_HEALTH, "Starting Telegram polling runtime");
 
   try {
     if (await isWebhookConfigured(cfg.botToken, fetchImpl)) {
+      health?.markInactive(
+        TELEGRAM_POLLING_HEALTH,
+        "Telegram polling inactive: webhook is configured",
+      );
       return null;
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.warn(`[telegram-polling] Could not verify webhook state (${msg}); using polling fallback`);
+    health?.markDegraded(
+      TELEGRAM_POLLING_HEALTH,
+      "Webhook state check failed; falling back to long polling",
+      err,
+    );
   }
 
   let offset: number | undefined;
@@ -240,9 +266,15 @@ export async function maybeStartTelegramLongPolling(
           logger.warn(`[telegram-polling] Failed to send message to session ${sessionId}: ${msg}`);
         }
       }
+
+      health?.markHealthy(
+        TELEGRAM_POLLING_HEALTH,
+        `Polling active; cycle completed (${updates.length} updates checked)`,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`[telegram-polling] Poll cycle failed: ${msg}`);
+      health?.markDegraded(TELEGRAM_POLLING_HEALTH, `Poll cycle failed: ${msg}`, err);
     } finally {
       inFlight = false;
     }
@@ -259,6 +291,7 @@ export async function maybeStartTelegramLongPolling(
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
+      health?.markInactive(TELEGRAM_POLLING_HEALTH, "Telegram polling stopped");
     },
   };
 }

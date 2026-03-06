@@ -25,6 +25,8 @@ const {
   mockLifecycleManager,
   mockRegistry,
   mockMaybeStartTelegramLongPolling,
+  mockMaybeStartJiraCommentPolling,
+  mockMaybeStartConfiguredListeners,
 } = vi.hoisted(() => ({
     mockExec: vi.fn(),
     mockExecSilent: vi.fn(),
@@ -49,6 +51,8 @@ const {
       loadFromConfig: vi.fn(),
     },
     mockMaybeStartTelegramLongPolling: vi.fn().mockResolvedValue(null),
+    mockMaybeStartJiraCommentPolling: vi.fn().mockResolvedValue(null),
+    mockMaybeStartConfiguredListeners: vi.fn().mockResolvedValue(null),
   }),
 );
 
@@ -93,6 +97,16 @@ vi.mock("../../src/lib/create-session-manager.js", () => ({
 vi.mock("../../src/lib/telegram-polling.js", () => ({
   maybeStartTelegramLongPolling: (...args: unknown[]) =>
     mockMaybeStartTelegramLongPolling(...args),
+}));
+
+vi.mock("../../src/lib/jira-comment-polling.js", () => ({
+  maybeStartJiraCommentPolling: (...args: unknown[]) =>
+    mockMaybeStartJiraCommentPolling(...args),
+}));
+
+vi.mock("../../src/lib/listeners/index.js", () => ({
+  maybeStartConfiguredListeners: (...args: unknown[]) =>
+    mockMaybeStartConfiguredListeners(...args),
 }));
 
 vi.mock("../../src/lib/web-dir.js", () => ({
@@ -167,6 +181,10 @@ beforeEach(() => {
   mockRegistry.get.mockReturnValue(null);
   mockMaybeStartTelegramLongPolling.mockReset();
   mockMaybeStartTelegramLongPolling.mockResolvedValue(null);
+  mockMaybeStartJiraCommentPolling.mockReset();
+  mockMaybeStartJiraCommentPolling.mockResolvedValue(null);
+  mockMaybeStartConfiguredListeners.mockReset();
+  mockMaybeStartConfiguredListeners.mockResolvedValue(null);
   // Default: execSilent returns null (gh not available), so clone falls through to git SSH/HTTPS
   mockExecSilent.mockResolvedValue(null);
   mockWaitForPortAndOpen.mockReset();
@@ -185,8 +203,13 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 function makeConfig(projects: Record<string, Record<string, unknown>>): Record<string, unknown> {
+  const configPath = join(tmpDir, "agent-orchestrator.yaml");
+  if (!existsSync(configPath)) {
+    writeFileSync(configPath, "projects: {}\n");
+  }
+
   return {
-    configPath: join(tmpDir, "agent-orchestrator.yaml"),
+    configPath,
     port: 3000,
     defaults: {
       runtime: "tmux",
@@ -556,6 +579,33 @@ describe("start command — browser open waits for port", () => {
     expect(url).toContain("/sessions/app-orchestrator");
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartJiraCommentPolling).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartConfiguredListeners).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledWith(
+      expect.objectContaining({
+        healthReporter: expect.objectContaining({
+          markStarting: expect.any(Function),
+          markHealthy: expect.any(Function),
+          markDegraded: expect.any(Function),
+          markInactive: expect.any(Function),
+        }),
+      }),
+    );
+
+    expect(mockSpawn).toHaveBeenCalled();
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: Record<string, string> }
+      | undefined;
+    expect(spawnOptions?.env?.["AO_PROJECT_ID"]).toBe("my-app");
+    expect(spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"]).toContain(
+      "integration-health.json",
+    );
+    expect(spawnOptions?.env?.["AO_HEALTH_SNAPSHOT_PATH"]).toBe(
+      spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"],
+    );
+    expect(spawnOptions?.env?.["AO_INTEGRATIONS_STATUS_PATH"]).toBe(
+      spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"],
+    );
   });
 
   it("skips browser open with --no-dashboard", async () => {
@@ -564,6 +614,9 @@ describe("start command — browser open waits for port", () => {
     await program.parseAsync(["node", "test", "start", "--no-dashboard", "--no-orchestrator"]);
 
     expect(mockWaitForPortAndOpen).not.toHaveBeenCalled();
+    expect(mockMaybeStartTelegramLongPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartJiraCommentPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartConfiguredListeners).not.toHaveBeenCalled();
   });
 });
 

@@ -127,6 +127,45 @@ export interface DashboardStats {
   needsReview: number;
 }
 
+export type IntegrationStatusKey =
+  | "telegramInboundPolling"
+  | "jiraCommentPolling"
+  | "jiraTriggerListeners";
+
+export type IntegrationStatusState =
+  | "inactive"
+  | "starting"
+  | "healthy"
+  | "degraded"
+  | "unknown";
+
+export interface IntegrationStatusEntry {
+  active: boolean;
+  connected: boolean;
+  ok: boolean;
+  state: IntegrationStatusState;
+  message: string | null;
+}
+
+export const INTEGRATION_STATUS_KEYS = [
+  "telegramInboundPolling",
+  "jiraCommentPolling",
+  "jiraTriggerListeners",
+] as const satisfies readonly IntegrationStatusKey[];
+
+export const INTEGRATION_STATUS_LABELS: Record<IntegrationStatusKey, string> = {
+  telegramInboundPolling: "Telegram inbound polling",
+  jiraCommentPolling: "Jira comment polling",
+  jiraTriggerListeners: "Jira trigger listeners",
+};
+
+export interface IntegrationsStatusSnapshot {
+  updatedAt: string | null;
+  source: "snapshot" | "fallback";
+  snapshotPath: string | null;
+  integrations: Record<IntegrationStatusKey, IntegrationStatusEntry>;
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";

@@ -20,6 +20,17 @@ notificationRouting:
   warning: [telegram]
   info: [telegram]
 
+listeners:
+  jira-broai:
+    enabled: true
+    source: jira-backlog
+    projectId: int
+    intervalMs: 60000
+    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+    backlogStatus: "Backlog"
+    trigger:
+      type: spawn-session
+
 projects:
   ao:
     name: Agent Orchestrator

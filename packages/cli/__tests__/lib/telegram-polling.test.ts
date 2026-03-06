@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
+import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
 import { maybeStartTelegramLongPolling } from "../../src/lib/telegram-polling.js";
 
 function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig {
@@ -35,6 +36,23 @@ function makeSessionManager(): SessionManager {
   };
 }
 
+function makeHealthReporterMock(): IntegrationHealthReporter {
+  return {
+    snapshotPath: "/tmp/ao-test/integration-health.json",
+    upsert: vi.fn(),
+    markStarting: vi.fn(),
+    markHealthy: vi.fn(),
+    markDegraded: vi.fn(),
+    markInactive: vi.fn(),
+    getSnapshot: vi.fn(() => ({
+      version: 1,
+      projectId: "test",
+      updatedAt: new Date(0).toISOString(),
+      entries: [],
+    })),
+  };
+}
+
 describe("maybeStartTelegramLongPolling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -45,20 +63,24 @@ describe("maybeStartTelegramLongPolling", () => {
     const config = makeConfig({ notifiers: {} });
     const sm = makeSessionManager();
     const fetchImpl = vi.fn();
+    const healthReporter = makeHealthReporterMock();
 
     const controller = await maybeStartTelegramLongPolling({
       config,
       sessionManager: sm,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
     });
 
     expect(controller).toBeNull();
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(healthReporter.markInactive).toHaveBeenCalledTimes(1);
   });
 
   it("returns null when webhook is configured", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce({
@@ -70,15 +92,19 @@ describe("maybeStartTelegramLongPolling", () => {
       config,
       sessionManager: sm,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
     });
 
     expect(controller).toBeNull();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(healthReporter.markStarting).toHaveBeenCalledTimes(1);
+    expect(healthReporter.markInactive).toHaveBeenCalledTimes(1);
   });
 
   it("polls every 30s and routes valid reply to sessionManager.send", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
 
     const fetchImpl = vi
       .fn()
@@ -115,6 +141,7 @@ describe("maybeStartTelegramLongPolling", () => {
       config,
       sessionManager: sm,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
     });
 
     expect(controller).not.toBeNull();
@@ -122,17 +149,23 @@ describe("maybeStartTelegramLongPolling", () => {
     // Immediate poll
     await vi.runOnlyPendingTimersAsync();
     expect(sm.send).toHaveBeenCalledWith("app-7", "Continue with fix");
+    expect(healthReporter.markHealthy).toHaveBeenCalled();
 
     // Next interval poll (30s)
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetchImpl).toHaveBeenCalled();
 
     controller?.stop();
+    expect(healthReporter.markInactive).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "telegram-polling" }),
+      expect.stringContaining("stopped"),
+    );
   });
 
   it("ignores replies from a different chat", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
 
     const fetchImpl = vi
       .fn()
@@ -166,11 +199,42 @@ describe("maybeStartTelegramLongPolling", () => {
       config,
       sessionManager: sm,
       fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
     });
 
     await vi.runOnlyPendingTimersAsync();
     expect(sm.send).not.toHaveBeenCalled();
+    expect(healthReporter.markHealthy).toHaveBeenCalled();
 
+    controller?.stop();
+  });
+
+  it("marks status degraded when poll cycle throws", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({}),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(healthReporter.markDegraded).toHaveBeenCalled();
     controller?.stop();
   });
 });

@@ -87,6 +87,20 @@ projects:
 #   warning: [telegram]           # auto-fix failed
 #   info: [telegram]              # summary, all done
 
+# Trigger listeners — poll external sources and auto-trigger current spawn flow.
+# listeners:
+#   jira-broai:
+#     enabled: true
+#     source: jira-backlog
+#     projectId: int
+#     intervalMs: 60000
+#     # Only backlog tickets assigned to you with BroAI label:
+#     jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+#     backlogStatus: "Backlog"   # enforced by listener; default is Backlog
+#     trigger:
+#       type: spawn-session
+#       # agent: codex            # optional agent override for auto-spawned sessions
+
 # Reactions — auto-responses to events (these are the defaults)
 # reactions:
 #   ci-failed:

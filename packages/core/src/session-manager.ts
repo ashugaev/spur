@@ -26,6 +26,7 @@ import {
   type OrchestratorSpawnConfig,
   type SessionStatus,
   type CleanupResult,
+  type KillSessionOptions,
   type OrchestratorConfig,
   type ProjectConfig,
   type Runtime,
@@ -103,6 +104,15 @@ const VALID_STATUSES: ReadonlySet<string> = new Set([
   "done",
   "terminated",
 ]);
+
+const POST_LAUNCH_PROMPT_INITIAL_DELAY_MS = 5_000;
+const POST_LAUNCH_PROMPT_RETRY_DELAY_MS = 3_000;
+const POST_LAUNCH_PROMPT_MAX_ATTEMPTS = 3;
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 /** Validate and normalize a status string. */
 function validateStatus(raw: string | undefined): SessionStatus {
@@ -574,13 +584,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // This is intentionally outside the try/catch above — a prompt delivery failure
     // should NOT destroy the session. The agent is running; user can retry with `ao send`.
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
-      try {
-        // Wait for agent to start and be ready for input
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
-      } catch {
-        // Non-fatal: agent is running but didn't receive the initial prompt.
-        // User can retry with `ao send`.
+      // Wait for agent to start and be ready for input.
+      await new Promise((resolve) => setTimeout(resolve, POST_LAUNCH_PROMPT_INITIAL_DELAY_MS));
+
+      for (let attempt = 1; attempt <= POST_LAUNCH_PROMPT_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+          break;
+        } catch (err) {
+          const msg = toErrorMessage(err);
+          if (attempt >= POST_LAUNCH_PROMPT_MAX_ATTEMPTS) {
+            // Non-fatal: agent is running but didn't receive the initial prompt.
+            // User can retry with `ao send`.
+            console.warn(
+              `[session:${sessionId}] Failed to deliver initial prompt after ${attempt} attempts: ${msg}. Retry manually with \`ao send ${sessionId} "<message>"\`.`,
+            );
+            break;
+          }
+          console.warn(
+            `[session:${sessionId}] Initial prompt delivery attempt ${attempt} failed: ${msg}. Retrying...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, POST_LAUNCH_PROMPT_RETRY_DELAY_MS));
+        }
       }
     }
 
@@ -779,7 +804,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return null;
   }
 
-  async function kill(sessionId: SessionId): Promise<void> {
+  async function kill(sessionId: SessionId, options?: KillSessionOptions): Promise<void> {
     // Find the session in any project's sessions directory
     let raw: Record<string, string> | null = null;
     let sessionsDir: string | null = null;
@@ -834,6 +859,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       }
     }
+
+    // Record terminal status before archiving so downstream automation can
+    // distinguish manual/system kills from cleanup terminations.
+    const reason = options?.reason ?? "manual";
+    const terminalStatus = reason === "cleanup" ? "cleanup" : "killed";
+    updateMetadata(sessionsDir, sessionId, {
+      status: terminalStatus,
+      terminationReason: reason,
+    });
 
     // Archive metadata
     deleteMetadata(sessionsDir, sessionId, true);
@@ -902,7 +936,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
         if (shouldKill) {
           if (!options?.dryRun) {
-            await kill(session.id);
+            await kill(session.id, { reason: "cleanup" });
           }
           result.killed.push(session.id);
         } else {
