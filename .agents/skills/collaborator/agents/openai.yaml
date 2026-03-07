@@ -1,0 +1,7 @@
+interface:
+  display_name: "Collaborator"
+  short_description: "Maintains state-file consistency across team loop"
+  default_prompt: "Use $collaborator to synchronize backlog/report/progress state files."
+
+policy:
+  allow_implicit_invocation: true

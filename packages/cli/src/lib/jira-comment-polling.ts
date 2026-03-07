@@ -1,4 +1,12 @@
-import type { OrchestratorConfig, SessionManager, Session } from "@composio/ao-core";
+import {
+  buildJiraInboundRouting,
+  createInboundContextStore,
+  formatInboundMessageForSession,
+  type InboundContextStore,
+  type OrchestratorConfig,
+  type Session,
+  type SessionManager,
+} from "@composio/ao-core";
 import type { IntegrationHealthReporter, IntegrationIdentity } from "./integration-health.js";
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
@@ -44,6 +52,7 @@ interface LoggerLike {
 interface StartJiraCommentPollingDeps {
   config: OrchestratorConfig;
   sessionManager: SessionManager;
+  inboundContextStore?: InboundContextStore;
   fetchImpl?: typeof fetch;
   logger?: LoggerLike;
   healthReporter?: IntegrationHealthReporter;
@@ -178,6 +187,7 @@ export async function maybeStartJiraCommentPolling(
 
   const fetchImpl = deps.fetchImpl ?? fetch;
   const logger = deps.logger ?? console;
+  const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
   const { baseUrl, email, apiToken } = cfg;
   health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting Jira comment polling runtime");
 
@@ -242,10 +252,24 @@ export async function maybeStartJiraCommentPolling(
   function findNewReplies(
     issueKey: string,
     comments: JiraComment[],
-  ): Array<{ sessionId: string; text: string }> {
+  ): Array<{
+    sessionId: string;
+    text: string;
+    issueKey: string;
+    commentId: string;
+    authorEmail?: string;
+    authorDisplayName?: string;
+  }> {
     const seen = seenCommentIds.get(issueKey);
     const nowSeen = new Set<string>();
-    const replies: Array<{ sessionId: string; text: string }> = [];
+    const replies: Array<{
+      sessionId: string;
+      text: string;
+      issueKey: string;
+      commentId: string;
+      authorEmail?: string;
+      authorDisplayName?: string;
+    }> = [];
 
     let activeSessionId: string | null = null;
 
@@ -265,7 +289,14 @@ export async function maybeStartJiraCommentPolling(
       if (activeSessionId && seen && !seen.has(id)) {
         const sanitized = text.trim();
         if (sanitized.length > 0 && sanitized.length <= MAX_COMMENT_LENGTH) {
-          replies.push({ sessionId: activeSessionId, text: sanitized });
+          replies.push({
+            sessionId: activeSessionId,
+            text: sanitized,
+            issueKey,
+            commentId: id,
+            authorEmail: toStringOrUndefined(comment.author.emailAddress),
+            authorDisplayName: toStringOrUndefined(comment.author.displayName),
+          });
         }
       }
     }
@@ -308,8 +339,41 @@ export async function maybeStartJiraCommentPolling(
           const replies = findNewReplies(issueKey, comments);
 
           for (const reply of replies) {
+            const jiraRouting = buildJiraInboundRouting({
+              issueKey: reply.issueKey,
+              commentId: reply.commentId,
+              authorEmail: reply.authorEmail,
+              authorDisplayName: reply.authorDisplayName,
+            });
+
+            let sourceReplyAvailable = false;
             try {
-              await deps.sessionManager.send(reply.sessionId, reply.text);
+              await inboundContextStore.enqueue({
+                sessionId: reply.sessionId,
+                source: "jira",
+                text: reply.text,
+                routing: jiraRouting,
+              });
+              sourceReplyAvailable = true;
+            } catch (err) {
+              cycleHadErrors = true;
+              const msg = err instanceof Error ? err.message : String(err);
+              logger.warn(
+                `[jira-polling] Failed to persist inbound source context for ${reply.sessionId}: ${msg}`,
+              );
+            }
+
+            try {
+              await deps.sessionManager.send(
+                reply.sessionId,
+                formatInboundMessageForSession({
+                  sessionId: reply.sessionId,
+                  source: "jira",
+                  text: reply.text,
+                  routing: jiraRouting,
+                  includeReplyCommand: sourceReplyAvailable,
+                }),
+              );
             } catch (err) {
               cycleHadErrors = true;
               const msg = err instanceof Error ? err.message : String(err);

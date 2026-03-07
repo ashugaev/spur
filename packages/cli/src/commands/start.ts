@@ -344,7 +344,9 @@ async function runStartup(
       healthReporter: integrationHealth,
     });
     if (telegramPolling) {
-      console.log(chalk.dim("  Telegram inbound: polling enabled (30s fallback, no webhook)"));
+      console.log(
+        chalk.dim("  Telegram inbound: polling enabled (2s fallback, 30s rate-limit backoff)"),
+      );
     }
 
     jiraPolling = await maybeStartJiraCommentPolling({

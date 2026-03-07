@@ -2,7 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getServices } from "@/lib/services";
 import { stripControlChars } from "@/lib/validation";
 import {
+  buildTelegramInboundRouting,
+  createInboundContextStore,
   coerceOrchestratorSessionRoutingCandidates,
+  formatInboundMessageForSession,
   selectFallbackOrchestratorSessionId,
   type OrchestratorConfig,
 } from "@composio/ao-core";
@@ -15,8 +18,16 @@ interface TelegramChat {
 }
 
 interface TelegramMessage {
+  message_id?: number;
   text?: string;
   chat?: TelegramChat;
+  from?: {
+    id?: number;
+    username?: string;
+    first_name?: string;
+    last_name?: string;
+  };
+  message_thread_id?: number;
   reply_to_message?: {
     text?: string;
   };
@@ -134,6 +145,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, ignored: "No message payload" });
   }
 
+  const messageId = typeof message.message_id === "number" ? message.message_id : null;
+  if (messageId === null) {
+    return NextResponse.json({ ok: false, error: "Message id is missing" }, { status: 400 });
+  }
+
   const incomingChatId =
     typeof message.chat?.id === "number" ? String(message.chat.id) : undefined;
 
@@ -180,9 +196,49 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     });
   }
 
+  const inboundStore = createInboundContextStore(config);
+  let inboundContextWarning: string | null = null;
+  let sourceReplyAvailable = false;
+  const telegramRouting = buildTelegramInboundRouting({
+    chatId: incomingChatId,
+    messageId,
+    messageThreadId: message.message_thread_id,
+    fromId: message.from?.id,
+    fromUsername: message.from?.username,
+    fromFirstName: message.from?.first_name,
+    fromLastName: message.from?.last_name,
+  });
+
   try {
-    await sessionManager.send(targetSessionId, sanitized);
-    return NextResponse.json({ ok: true, sessionId: targetSessionId });
+    await inboundStore.enqueue({
+      sessionId: targetSessionId,
+      source: "telegram",
+      text: sanitized,
+      routing: telegramRouting,
+    });
+    sourceReplyAvailable = true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Failed to persist inbound source context";
+    inboundContextWarning = msg;
+    console.warn(`[telegram-webhook] Failed to persist inbound source context: ${msg}`);
+  }
+
+  try {
+    await sessionManager.send(
+      targetSessionId,
+      formatInboundMessageForSession({
+        sessionId: targetSessionId,
+        source: "telegram",
+        text: sanitized,
+        routing: telegramRouting,
+        includeReplyCommand: sourceReplyAvailable,
+      }),
+    );
+    return NextResponse.json({
+      ok: true,
+      sessionId: targetSessionId,
+      warning: inboundContextWarning ?? undefined,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Failed to route Telegram reply";
     const status = msg.includes("not found") ? 404 : 500;

@@ -23,6 +23,20 @@ const mockSessionManager: SessionManager = {
   send: vi.fn(async () => {}),
 };
 
+const mockInboundContextStore = {
+  enqueue: vi.fn(async () => ({
+    id: "ctx-1",
+    sessionId: "app-7",
+    source: "telegram",
+    text: "hello",
+    receivedAt: new Date().toISOString(),
+    routing: { chatId: "123456", messageId: 100 },
+  })),
+  peekNext: vi.fn(),
+  ack: vi.fn(),
+  listPending: vi.fn(),
+};
+
 const mockConfig: OrchestratorConfig = {
   configPath: "/tmp/ao-test/agent-orchestrator.yaml",
   port: 3000,
@@ -51,6 +65,14 @@ vi.mock("@/lib/services", () => ({
   })),
 }));
 
+vi.mock("@composio/ao-core", async () => {
+  const actual = await vi.importActual("@composio/ao-core");
+  return {
+    ...actual,
+    createInboundContextStore: vi.fn(() => mockInboundContextStore),
+  };
+});
+
 import { POST as telegramWebhookPOST } from "@/app/api/integrations/telegram/route";
 
 function makeRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): NextRequest {
@@ -70,6 +92,14 @@ describe("POST /api/integrations/telegram", () => {
     (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "my-app-orchestrator", status: "working", activity: "active" },
     ]);
+    mockInboundContextStore.enqueue.mockResolvedValue({
+      id: "ctx-1",
+      sessionId: "app-7",
+      source: "telegram",
+      text: "hello",
+      receivedAt: new Date().toISOString(),
+      routing: { chatId: "123456", messageId: 100 },
+    });
 
     delete process.env["AO_TELEGRAM_CHAT_ID"];
     delete process.env["TELEGRAM_CHAT_ID"];
@@ -85,6 +115,7 @@ describe("POST /api/integrations/telegram", () => {
       {
         update_id: 1,
         message: {
+          message_id: 100,
           text: "Continue and fix the flaky test",
           chat: { id: 123456 },
           reply_to_message: {
@@ -98,6 +129,12 @@ describe("POST /api/integrations/telegram", () => {
     const res = await telegramWebhookPOST(req);
     expect(res.status).toBe(200);
     expect(mockSessionManager.send).toHaveBeenCalledWith("app-7", "Continue and fix the flaky test");
+    expect(mockInboundContextStore.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "app-7",
+        source: "telegram",
+      }),
+    );
   });
 
   it("returns 503 when inbound chat id is not configured", async () => {
@@ -109,6 +146,7 @@ describe("POST /api/integrations/telegram", () => {
       const req = makeRequest(
         {
           message: {
+            message_id: 101,
             text: "continue",
             chat: { id: 123456 },
             reply_to_message: { text: "AO_SESSION:app-7" },
@@ -132,6 +170,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 102,
           text: "continue",
           chat: { id: 123456 },
           reply_to_message: { text: "AO_SESSION:app-7" },
@@ -149,6 +188,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 103,
           text: "continue",
           chat: { id: 999999 },
           reply_to_message: { text: "AO_SESSION:app-7" },
@@ -166,6 +206,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 104,
           text: "continue",
           reply_to_message: { text: "AO_SESSION:app-7" },
         },
@@ -184,6 +225,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 105,
           text: "hello",
           chat: { id: 123456 },
         },
@@ -193,7 +235,20 @@ describe("POST /api/integrations/telegram", () => {
 
     const res = await telegramWebhookPOST(req);
     expect(res.status).toBe(200);
-    expect(mockSessionManager.send).toHaveBeenCalledWith("my-app-orchestrator", "hello");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining(
+        "[SOURCE:telegram] inbound message from connected integration.",
+      ),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining('ao source-reply my-app-orchestrator "<message>"'),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining("\n\nhello"),
+    );
   });
 
   it("ignores message when no reply marker and no fallback session", async () => {
@@ -202,6 +257,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 106,
           text: "hello",
           chat: { id: 123456 },
         },
@@ -225,6 +281,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 107,
           text: "hello",
           chat: { id: 123456 },
         },
@@ -249,6 +306,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 108,
           text: "hello",
           chat: { id: 123456 },
         },
@@ -258,7 +316,20 @@ describe("POST /api/integrations/telegram", () => {
 
     const res = await telegramWebhookPOST(req);
     expect(res.status).toBe(200);
-    expect(mockSessionManager.send).toHaveBeenCalledWith("my-app-orchestrator", "hello");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining(
+        "[SOURCE:telegram] inbound message from connected integration.",
+      ),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining('ao source-reply my-app-orchestrator "<message>"'),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining("\n\nhello"),
+    );
   });
 
   it("returns 503 when fallback session resolution fails", async () => {
@@ -269,6 +340,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 109,
           text: "hello",
           chat: { id: 123456 },
         },
@@ -285,6 +357,7 @@ describe("POST /api/integrations/telegram", () => {
     const req = makeRequest(
       {
         message: {
+          message_id: 110,
           text: "\u0000\u0001",
           chat: { id: 123456 },
           reply_to_message: { text: "AO_SESSION:app-7" },
@@ -296,5 +369,48 @@ describe("POST /api/integrations/telegram", () => {
     const res = await telegramWebhookPOST(req);
     expect(res.status).toBe(400);
     expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when message id is missing", async () => {
+    const req = makeRequest(
+      {
+        message: {
+          text: "continue",
+          chat: { id: 123456 },
+          reply_to_message: { text: "AO_SESSION:app-7" },
+        },
+      },
+      { "x-telegram-bot-api-secret-token": "secret-1" },
+    );
+
+    const res = await telegramWebhookPOST(req);
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/message id is missing/i);
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+
+  it("continues routing when inbound context persist fails", async () => {
+    mockInboundContextStore.enqueue.mockRejectedValueOnce(new Error("disk unavailable"));
+
+    const req = makeRequest(
+      {
+        message: {
+          message_id: 111,
+          text: "Continue and fix the flaky test",
+          chat: { id: 123456 },
+          reply_to_message: {
+            text: "[URGENT] session.needs_input\nAO_SESSION:app-7",
+          },
+        },
+      },
+      { "x-telegram-bot-api-secret-token": "secret-1" },
+    );
+
+    const res = await telegramWebhookPOST(req);
+    expect(res.status).toBe(200);
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-7", "Continue and fix the flaky test");
+    const body = await res.json();
+    expect(body.warning).toMatch(/disk unavailable/i);
   });
 });

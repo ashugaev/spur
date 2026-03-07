@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
+import type { InboundContextStore, OrchestratorConfig, SessionManager } from "@composio/ao-core";
 import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
 import { maybeStartJiraCommentPolling } from "../../src/lib/jira-comment-polling.js";
 
@@ -58,6 +58,22 @@ function makeHealthReporterMock(): IntegrationHealthReporter {
   };
 }
 
+function makeInboundContextStore(): InboundContextStore {
+  return {
+    enqueue: vi.fn(async () => ({
+      id: "env-1",
+      sessionId: "test-1",
+      source: "jira",
+      text: "hello",
+      receivedAt: new Date().toISOString(),
+      routing: { issueKey: "INT-100", commentId: "10002" },
+    })),
+    peekNext: vi.fn(),
+    ack: vi.fn(),
+    listPending: vi.fn(),
+  };
+}
+
 describe("maybeStartJiraCommentPolling", () => {
   const origEnv = { ...process.env };
 
@@ -81,6 +97,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       healthReporter,
     });
@@ -100,6 +117,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       healthReporter,
     });
@@ -128,6 +146,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter: makeHealthReporterMock(),
@@ -199,6 +218,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger,
       healthReporter,
@@ -263,6 +283,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter,
@@ -310,6 +331,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter: makeHealthReporterMock(),
@@ -369,6 +391,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter: makeHealthReporterMock(),
@@ -393,6 +416,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter: makeHealthReporterMock(),
@@ -419,6 +443,7 @@ describe("maybeStartJiraCommentPolling", () => {
     const controller = await maybeStartJiraCommentPolling({
       config,
       sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
       fetchImpl: fetchImpl as unknown as typeof fetch,
       logger: { warn: vi.fn() },
       healthReporter,

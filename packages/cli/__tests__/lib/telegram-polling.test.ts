@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { OrchestratorConfig, SessionManager } from "@composio/ao-core";
+import type { InboundContextStore, OrchestratorConfig, SessionManager } from "@composio/ao-core";
 import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
 import { maybeStartTelegramLongPolling } from "../../src/lib/telegram-polling.js";
 
@@ -66,6 +66,22 @@ function makeHealthReporterMock(): IntegrationHealthReporter {
   };
 }
 
+function makeInboundContextStore(sessionId = "app-orchestrator"): InboundContextStore {
+  return {
+    enqueue: vi.fn(async () => ({
+      id: "env-1",
+      sessionId,
+      source: "telegram",
+      text: "hello",
+      receivedAt: new Date().toISOString(),
+      routing: { chatId: "123456", messageId: 200 },
+    })),
+    peekNext: vi.fn(),
+    ack: vi.fn(),
+    listPending: vi.fn(),
+  };
+}
+
 describe("maybeStartTelegramLongPolling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -115,7 +131,7 @@ describe("maybeStartTelegramLongPolling", () => {
     expect(healthReporter.markInactive).toHaveBeenCalledTimes(1);
   });
 
-  it("polls every 30s and routes valid reply to sessionManager.send", async () => {
+  it("polls every 2s and routes valid reply to sessionManager.send", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
     const healthReporter = makeHealthReporterMock();
@@ -165,8 +181,8 @@ describe("maybeStartTelegramLongPolling", () => {
     expect(sm.send).toHaveBeenCalledWith("app-7", "Continue with fix");
     expect(healthReporter.markHealthy).toHaveBeenCalled();
 
-    // Next interval poll (30s)
-    await vi.advanceTimersByTimeAsync(30_000);
+    // Next interval poll (2s)
+    await vi.advanceTimersByTimeAsync(2_000);
     expect(fetchImpl).toHaveBeenCalled();
 
     controller?.stop();
@@ -180,6 +196,7 @@ describe("maybeStartTelegramLongPolling", () => {
     const config = makeConfig();
     const sm = makeSessionManager();
     const healthReporter = makeHealthReporterMock();
+    const inboundContextStore = makeInboundContextStore("my-app-orchestrator");
     (sm.list as ReturnType<typeof vi.fn>).mockResolvedValue([
       {
         id: "my-app-orchestrator",
@@ -213,6 +230,7 @@ describe("maybeStartTelegramLongPolling", () => {
               {
                 update_id: 100,
                 message: {
+                  message_id: 201,
                   text: "run health check",
                   chat: { id: 123456 },
                 },
@@ -228,12 +246,24 @@ describe("maybeStartTelegramLongPolling", () => {
     const controller = await maybeStartTelegramLongPolling({
       config,
       sessionManager: sm,
+      inboundContextStore,
       fetchImpl: fetchImpl as unknown as typeof fetch,
       healthReporter,
     });
 
     await vi.runOnlyPendingTimersAsync();
-    expect(sm.send).toHaveBeenCalledWith("my-app-orchestrator", "run health check");
+    expect(sm.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining("[SOURCE:telegram] inbound message from connected integration."),
+    );
+    expect(sm.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining('ao source-reply my-app-orchestrator "<message>"'),
+    );
+    expect(sm.send).toHaveBeenCalledWith(
+      "my-app-orchestrator",
+      expect.stringContaining("\n\nrun health check"),
+    );
     controller?.stop();
   });
 
@@ -313,6 +343,71 @@ describe("maybeStartTelegramLongPolling", () => {
     controller?.stop();
   });
 
+  it("backs off for 30s when Telegram API responds with rate limit", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
+
+    const getUpdatesCallTimes: number[] = [];
+    const fetchImpl = vi.fn(async (...args: unknown[]) => {
+      const url = String(args[0] ?? "");
+      if (url.includes("/getWebhookInfo")) {
+        return {
+          ok: true,
+          json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+        };
+      }
+
+      if (url.includes("/getUpdates")) {
+        getUpdatesCallTimes.push(Date.now());
+        if (getUpdatesCallTimes.length === 1) {
+          return {
+            ok: false,
+            status: 429,
+            json: () =>
+              Promise.resolve({
+                ok: false,
+                description: "Too Many Requests: retry later",
+                parameters: { retry_after: 1 },
+              }),
+          };
+        }
+
+        return {
+          ok: true,
+          json: () => Promise.resolve({ ok: true, result: [] }),
+        };
+      }
+
+      throw new Error(`Unexpected Telegram API URL: ${url}`);
+    });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+    }
+    expect(healthReporter.markDegraded).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "telegram-polling" }),
+      expect.stringContaining("backing off for 30s"),
+      expect.any(Error),
+    );
+    expect(getUpdatesCallTimes).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(28_000);
+    expect(getUpdatesCallTimes).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(getUpdatesCallTimes.length).toBeGreaterThan(1);
+
+    controller?.stop();
+  });
+
   it("does not route ambiguous non-reply messages when multiple orchestrators are active", async () => {
     const config = makeConfig();
     const sm = makeSessionManager();
@@ -337,6 +432,7 @@ describe("maybeStartTelegramLongPolling", () => {
               {
                 update_id: 202,
                 message: {
+                  message_id: 202,
                   text: "hello",
                   chat: { id: 123456 },
                 },
@@ -365,6 +461,7 @@ describe("maybeStartTelegramLongPolling", () => {
     process.env["AO_PROJECT_ID"] = "app";
     const config = makeConfig();
     const sm = makeSessionManager();
+    const inboundContextStore = makeInboundContextStore("app-orchestrator");
     (sm.list as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "app-orchestrator", status: "working", activity: "ready", lastActivityAt: new Date() },
       { id: "other-orchestrator", status: "working", activity: "active", lastActivityAt: new Date() },
@@ -386,6 +483,7 @@ describe("maybeStartTelegramLongPolling", () => {
               {
                 update_id: 203,
                 message: {
+                  message_id: 203,
                   text: "deploy",
                   chat: { id: 123456 },
                 },
@@ -401,12 +499,24 @@ describe("maybeStartTelegramLongPolling", () => {
     const controller = await maybeStartTelegramLongPolling({
       config,
       sessionManager: sm,
+      inboundContextStore,
       fetchImpl: fetchImpl as unknown as typeof fetch,
       healthReporter,
     });
 
     await vi.runOnlyPendingTimersAsync();
-    expect(sm.send).toHaveBeenCalledWith("app-orchestrator", "deploy");
+    expect(sm.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining("[SOURCE:telegram] inbound message from connected integration."),
+    );
+    expect(sm.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining('ao source-reply app-orchestrator "<message>"'),
+    );
+    expect(sm.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining("\n\ndeploy"),
+    );
     controller?.stop();
   });
 
@@ -431,6 +541,7 @@ describe("maybeStartTelegramLongPolling", () => {
               {
                 update_id: 204,
                 message: {
+                  message_id: 204,
                   text: "hello",
                   chat: { id: 123456 },
                 },
@@ -452,6 +563,128 @@ describe("maybeStartTelegramLongPolling", () => {
 
     await vi.runOnlyPendingTimersAsync();
     expect(sm.send).not.toHaveBeenCalled();
+    expect(healthReporter.markDegraded).toHaveBeenCalled();
+    controller?.stop();
+  });
+
+  it("persists inbound source context when message_id is present", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
+    const inboundContextStore = {
+      enqueue: vi.fn(async () => ({
+        id: "env-1",
+        sessionId: "app-7",
+        source: "telegram",
+        text: "Continue",
+        receivedAt: new Date().toISOString(),
+        routing: { chatId: "123456", messageId: 205 },
+      })),
+      peekNext: vi.fn(),
+      ack: vi.fn(),
+      listPending: vi.fn(),
+    };
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 205,
+                message: {
+                  message_id: 205,
+                  text: "Continue",
+                  chat: { id: 123456 },
+                  reply_to_message: { text: "AO_SESSION:app-7" },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(inboundContextStore.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "app-7",
+        source: "telegram",
+      }),
+    );
+    expect(sm.send).toHaveBeenCalledWith("app-7", "Continue");
+    controller?.stop();
+  });
+
+  it("keeps routing message to session when context persist fails", async () => {
+    const config = makeConfig();
+    const sm = makeSessionManager();
+    const healthReporter = makeHealthReporterMock();
+    const inboundContextStore = {
+      enqueue: vi.fn(async () => {
+        throw new Error("disk unavailable");
+      }),
+      peekNext: vi.fn(),
+      ack: vi.fn(),
+      listPending: vi.fn(),
+    };
+
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: { url: "" } }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            result: [
+              {
+                update_id: 206,
+                message: {
+                  message_id: 206,
+                  text: "Continue",
+                  chat: { id: 123456 },
+                  reply_to_message: { text: "AO_SESSION:app-7" },
+                },
+              },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ok: true, result: [] }),
+      });
+
+    const controller = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).toHaveBeenCalledWith("app-7", "Continue");
     expect(healthReporter.markDegraded).toHaveBeenCalled();
     controller?.stop();
   });

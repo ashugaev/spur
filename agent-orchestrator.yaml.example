@@ -64,6 +64,8 @@ projects:
     # reactions:
     #   approved-and-green:
     #     auto: true         # enable auto-merge for this project
+    #     action: auto-merge
+    #     mergeMethod: squash # optional: merge | squash | rebase
 
 # Notification channels
 # notifiers:
@@ -114,9 +116,16 @@ projects:
 #     action: send-to-agent
 #     escalateAfter: 30m
 #
+#   merge-conflicts:
+#     auto: true
+#     action: send-to-agent
+#     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+#     escalateAfter: 15m
+#
 #   approved-and-green:
 #     auto: false              # set to true for auto-merge
-#     action: notify
+#     action: notify           # use auto-merge to merge automatically
+#     mergeMethod: squash      # optional for auto-merge: merge | squash | rebase
 #     priority: action
 #
 #   agent-stuck:

@@ -1,12 +1,17 @@
 import {
+  buildTelegramInboundRouting,
+  createInboundContextStore,
   coerceOrchestratorSessionRoutingCandidates,
+  formatInboundMessageForSession,
   selectFallbackOrchestratorSessionId,
+  type InboundContextStore,
   type OrchestratorConfig,
   type SessionManager,
 } from "@composio/ao-core";
 import type { IntegrationHealthReporter, IntegrationIdentity } from "./integration-health.js";
 
-const DEFAULT_POLL_INTERVAL_MS = 30_000;
+const DEFAULT_POLL_INTERVAL_MS = 2_000;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 30_000;
 const MAX_MESSAGE_LENGTH = 10_000;
 const SESSION_MARKER_REGEX = /\bAO_SESSION:([a-zA-Z0-9_-]+)\b/;
 
@@ -15,6 +20,7 @@ interface TelegramNotifierConfig {
   botToken?: unknown;
   chatId?: unknown;
   pollingIntervalMs?: unknown;
+  rateLimitBackoffMs?: unknown;
   defaultSessionId?: unknown;
 }
 
@@ -32,10 +38,18 @@ interface TelegramUpdate {
 }
 
 interface TelegramMessage {
+  message_id?: unknown;
   text?: unknown;
   chat?: {
     id?: unknown;
   };
+  from?: {
+    id?: unknown;
+    username?: unknown;
+    first_name?: unknown;
+    last_name?: unknown;
+  };
+  message_thread_id?: unknown;
   reply_to_message?: {
     text?: unknown;
   };
@@ -46,6 +60,13 @@ interface TelegramUpdatesResponse {
   result?: TelegramUpdate[];
 }
 
+interface TelegramApiErrorResponse {
+  description?: unknown;
+  parameters?: {
+    retry_after?: unknown;
+  };
+}
+
 export interface TelegramPollingController {
   stop(): void;
 }
@@ -54,6 +75,7 @@ interface TelegramLongPollingConfig {
   botToken: string;
   chatId: string;
   intervalMs: number;
+  rateLimitBackoffMs: number;
   defaultSessionId?: string;
   preferredOrchestratorSessionId?: string;
 }
@@ -65,6 +87,7 @@ interface LoggerLike {
 interface StartTelegramLongPollingDeps {
   config: OrchestratorConfig;
   sessionManager: SessionManager;
+  inboundContextStore?: InboundContextStore;
   fetchImpl?: typeof fetch;
   logger?: LoggerLike;
   healthReporter?: IntegrationHealthReporter;
@@ -133,6 +156,13 @@ function resolveLongPollingConfig(config: OrchestratorConfig): TelegramLongPolli
     toPositiveNumber(env("AO_TELEGRAM_POLL_INTERVAL_MS", "TELEGRAM_POLL_INTERVAL_MS")) ??
     DEFAULT_POLL_INTERVAL_MS;
 
+  const rateLimitBackoffMs =
+    toPositiveNumber(notifier.rateLimitBackoffMs) ??
+    toPositiveNumber(
+      env("AO_TELEGRAM_RATELIMIT_BACKOFF_MS", "TELEGRAM_RATELIMIT_BACKOFF_MS"),
+    ) ??
+    DEFAULT_RATE_LIMIT_BACKOFF_MS;
+
   const defaultSessionId =
     toStringOrUndefined(notifier.defaultSessionId) ||
     env(
@@ -150,9 +180,20 @@ function resolveLongPollingConfig(config: OrchestratorConfig): TelegramLongPolli
     botToken,
     chatId,
     intervalMs,
+    rateLimitBackoffMs,
     defaultSessionId,
     preferredOrchestratorSessionId,
   };
+}
+
+class TelegramRateLimitError extends Error {
+  readonly backoffMs: number;
+
+  constructor(message: string, backoffMs: number) {
+    super(message);
+    this.name = "TelegramRateLimitError";
+    this.backoffMs = backoffMs;
+  }
 }
 
 async function isWebhookConfigured(botToken: string, fetchImpl: typeof fetch): Promise<boolean> {
@@ -195,6 +236,7 @@ export async function maybeStartTelegramLongPolling(
   deps: StartTelegramLongPollingDeps,
 ): Promise<TelegramPollingController | null> {
   const cfg = resolveLongPollingConfig(deps.config);
+  const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
   const health = deps.healthReporter;
   if (!cfg) {
     health?.markInactive(
@@ -229,9 +271,11 @@ export async function maybeStartTelegramLongPolling(
   let offset: number | undefined;
   let stopped = false;
   let inFlight = false;
+  let rateLimitedUntil = 0;
 
   const pollOnce = async () => {
     if (stopped || inFlight) return;
+    if (Date.now() < rateLimitedUntil) return;
     inFlight = true;
 
     try {
@@ -247,6 +291,23 @@ export async function maybeStartTelegramLongPolling(
       });
 
       if (!response.ok) {
+        if (response.status === 429) {
+          let retryAfterMs = 0;
+          let description = "Telegram API rate limited";
+          try {
+            const payload = (await response.json()) as TelegramApiErrorResponse;
+            const retryAfterSec = toPositiveNumber(payload.parameters?.retry_after);
+            if (retryAfterSec) retryAfterMs = retryAfterSec * 1000;
+            if (typeof payload.description === "string" && payload.description.trim().length > 0) {
+              description = payload.description.trim();
+            }
+          } catch {
+            // Ignore JSON parsing errors and fallback to configured backoff.
+          }
+          const backoffMs = Math.max(cfg.rateLimitBackoffMs, retryAfterMs);
+          throw new TelegramRateLimitError(description, backoffMs);
+        }
+
         throw new Error(`getUpdates failed (${response.status})`);
       }
 
@@ -279,8 +340,86 @@ export async function maybeStartTelegramLongPolling(
         const sanitized = sanitizeMessage(rawText);
         if (!sanitized || sanitized.length > MAX_MESSAGE_LENGTH) continue;
 
+        const routingForDisplay: Record<string, unknown> = {
+          chatId: incomingChatId,
+        };
+        const threadId = toPositiveNumber(message.message_thread_id);
+        if (threadId) {
+          routingForDisplay["threadId"] = threadId;
+        }
+        const fromUsername =
+          typeof message.from?.username === "string" ? message.from.username : undefined;
+        if (fromUsername) {
+          routingForDisplay["fromUsername"] = fromUsername;
+        }
+        const fromDisplayName = [
+          typeof message.from?.first_name === "string" ? message.from.first_name : undefined,
+          typeof message.from?.last_name === "string" ? message.from.last_name : undefined,
+        ]
+          .filter((part): part is string => Boolean(part && part.trim().length > 0))
+          .join(" ")
+          .trim();
+        if (fromDisplayName) {
+          routingForDisplay["fromDisplayName"] = fromDisplayName;
+        }
+
+        const messageId = toPositiveNumber(message.message_id);
+        let sourceReplyAvailable = false;
+        if (!messageId) {
+          const error = new Error("Incoming Telegram message has no message_id");
+          logger.warn("[telegram-polling] Skipping context persist: incoming message has no message_id");
+          health?.markDegraded(
+            TELEGRAM_POLLING_HEALTH,
+            "Poll cycle warning: incoming Telegram message had no message_id",
+            error,
+          );
+        } else {
+          routingForDisplay["messageId"] = messageId;
+          try {
+            await inboundContextStore.enqueue({
+              sessionId,
+              source: "telegram",
+              text: sanitized,
+              routing: buildTelegramInboundRouting({
+                chatId: incomingChatId,
+                messageId,
+                messageThreadId: toPositiveNumber(message.message_thread_id),
+                fromId: toPositiveNumber(message.from?.id),
+                fromUsername:
+                  typeof message.from?.username === "string" ? message.from.username : undefined,
+                fromFirstName:
+                  typeof message.from?.first_name === "string"
+                    ? message.from.first_name
+                    : undefined,
+                fromLastName:
+                  typeof message.from?.last_name === "string"
+                    ? message.from.last_name
+                    : undefined,
+              }),
+            });
+            sourceReplyAvailable = true;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`[telegram-polling] Failed to persist inbound source context: ${msg}`);
+            health?.markDegraded(
+              TELEGRAM_POLLING_HEALTH,
+              `Poll cycle warning: context persist failed (${msg})`,
+              err,
+            );
+          }
+        }
+
         try {
-          await deps.sessionManager.send(sessionId, sanitized);
+          await deps.sessionManager.send(
+            sessionId,
+            formatInboundMessageForSession({
+              sessionId,
+              source: "telegram",
+              text: sanitized,
+              routing: routingForDisplay,
+              includeReplyCommand: sourceReplyAvailable,
+            }),
+          );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.warn(`[telegram-polling] Failed to send message to session ${sessionId}: ${msg}`);
@@ -292,6 +431,15 @@ export async function maybeStartTelegramLongPolling(
         `Polling active; cycle completed (${updates.length} updates checked)`,
       );
     } catch (err) {
+      if (err instanceof TelegramRateLimitError) {
+        rateLimitedUntil = Date.now() + err.backoffMs;
+        const backoffSeconds = Math.ceil(err.backoffMs / 1000);
+        const message = `Poll cycle rate limited; backing off for ${backoffSeconds}s (${err.message})`;
+        logger.warn(`[telegram-polling] ${message}`);
+        health?.markDegraded(TELEGRAM_POLLING_HEALTH, message, err);
+        return;
+      }
+
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`[telegram-polling] Poll cycle failed: ${msg}`);
       health?.markDegraded(TELEGRAM_POLLING_HEALTH, `Poll cycle failed: ${msg}`, err);

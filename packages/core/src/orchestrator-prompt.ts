@@ -56,6 +56,9 @@ ao session ls -p ${projectId}
 # Send message to a session
 ao send ${project.sessionPrefix}-1 "Your message here"
 
+# Reply to latest inbound Telegram/source message routed to orchestrator
+ao source-reply ${project.sessionPrefix}-orchestrator "Acknowledged, starting now."
+
 # Kill a session
 ao session kill ${project.sessionPrefix}-1
 
@@ -76,6 +79,7 @@ ao open ${projectId}
 | \`ao session kill <session>\` | Kill a specific session |
 | \`ao session cleanup [-p project]\` | Kill completed/merged sessions |
 | \`ao send <session> <message>\` | Send a message to a running session |
+| \`ao source-reply <session> <message>\` | Reply to the next pending inbound source message (FIFO) |
 | \`ao dashboard\` | Start the web dashboard (http://localhost:${config.port ?? 3000}) |
 | \`ao open <project>\` | Open all project sessions in terminal tabs |`);
 
@@ -106,6 +110,13 @@ Send instructions to a running agent:
 \`\`\`bash
 ao send ${project.sessionPrefix}-1 "Please address the review comments on your PR"
 \`\`\`
+
+Reply back to the original inbound source message (for example Telegram webhook/polling):
+\`\`\`bash
+ao source-reply ${project.sessionPrefix}-orchestrator "On it. I queued this task."
+\`\`\`
+
+When an inbound message includes a header like \`[SOURCE:telegram]\` or \`[SOURCE:jira]\`, treat that as an integration-originated request. Reply to the human with \`ao source-reply ...\` (not \`ao send\`) so the response goes back to the same source/thread automatically.
 
 ### Cleanup
 
@@ -188,7 +199,7 @@ When an agent needs human judgment:
 
 2. **Check status before spawning** — Avoid creating duplicate sessions for issues already being worked on.
 
-3. **Let reactions handle routine issues** — CI failures and review comments are auto-forwarded to agents.
+3. **Let reactions handle routine issues** — CI failures, review comments, and merge conflicts are auto-forwarded to agents.
 
 4. **Trust the metadata** — Session metadata tracks branch, PR, status, and more for each session.
 

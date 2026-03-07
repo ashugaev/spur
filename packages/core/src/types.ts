@@ -768,6 +768,9 @@ export interface ReactionConfig {
   /** What to do: send message to agent, notify human, auto-merge */
   action: "send-to-agent" | "notify" | "auto-merge";
 
+  /** Merge strategy for auto-merge actions (default: squash) */
+  mergeMethod?: MergeMethod;
+
   /** Message to send (for send-to-agent) */
   message?: string;
 

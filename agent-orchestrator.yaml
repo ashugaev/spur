@@ -13,12 +13,35 @@ defaults:
 notifiers:
   telegram:
     plugin: telegram
+    pollingIntervalMs: 2000
+    defaultSessionId: ao-orchestrator
 
 notificationRouting:
   urgent: [desktop, telegram]
   action: [desktop, telegram]
-  warning: [telegram]
+  warning: [desktop, telegram]
   info: [telegram]
+
+reactions:
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    retries: 3
+    escalateAfter: 3
+  changes-requested:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 30m
+  merge-conflicts:
+    auto: true
+    action: send-to-agent
+    message: "Your PR has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+    escalateAfter: 15m
+  approved-and-green:
+    auto: true
+    action: auto-merge
+    mergeMethod: squash
+    priority: action
 
 listeners:
   jira-broai:

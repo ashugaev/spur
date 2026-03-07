@@ -39,7 +39,9 @@ export const BASE_AGENT_PROMPT = `You are an AI coding agent managed by the Agen
 - Write a clear PR title and description explaining what changed and why.
 - Link the issue in the PR description so it auto-closes when merged.
 - If the repo has CI checks, make sure they pass before requesting review.
-- Respond to every review comment, even if just to acknowledge it.`;
+- Respond to every review comment, even if just to acknowledge it.
+- At the very end of every PR description, add this attribution line (on its own line, after a blank line):
+  > Managed by [Agent Orchestrator](https://github.com/ComposioHQ/agent-orchestrator)`;
 
 // =============================================================================
 // TYPES

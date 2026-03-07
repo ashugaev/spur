@@ -10,6 +10,7 @@ import { registerReviewCheck } from "./commands/review-check.js";
 import { registerDashboard } from "./commands/dashboard.js";
 import { registerOpen } from "./commands/open.js";
 import { registerStart, registerStop } from "./commands/start.js";
+import { registerSourceReply } from "./commands/source-reply.js";
 
 const program = new Command();
 
@@ -26,6 +27,7 @@ registerSpawn(program);
 registerBatchSpawn(program);
 registerSession(program);
 registerSend(program);
+registerSourceReply(program);
 registerReviewCheck(program);
 registerDashboard(program);
 registerOpen(program);

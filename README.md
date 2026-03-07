@@ -8,7 +8,7 @@
 
 <div align="center">
 
-Spawn parallel AI coding agents, each in its own git worktree. Agents autonomously fix CI failures, address review comments, and open PRs — you supervise from one dashboard.
+Spawn parallel AI coding agents, each in its own git worktree. Agents autonomously fix CI failures, address review comments, resolve merge conflicts, and open PRs. When configured, approved green PRs can be merged automatically.
 
 [![GitHub stars](https://img.shields.io/github/stars/ComposioHQ/agent-orchestrator?style=flat-square)](https://github.com/ComposioHQ/agent-orchestrator/stargazers)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
@@ -19,7 +19,7 @@ Spawn parallel AI coding agents, each in its own git worktree. Agents autonomous
 
 ---
 
-Agent Orchestrator manages fleets of AI coding agents working in parallel on your codebase. Each agent gets its own git worktree, its own branch, and its own PR. When CI fails, the agent fixes it. When reviewers leave comments, the agent addresses them. You only get pulled in when human judgment is needed.
+Agent Orchestrator manages fleets of AI coding agents working in parallel on your codebase. Each agent gets its own git worktree, its own branch, and its own PR. When CI fails, the agent fixes it. When reviewers leave comments, the agent addresses them. If a PR hits merge conflicts, the orchestrator can auto-dispatch a conflict-resolution prompt to the agent. If a PR is approved and green, the orchestrator can auto-merge it.
 
 **Agent-agnostic** (Claude Code, Codex, Aider) · **Runtime-agnostic** (tmux, Docker) · **Tracker-agnostic** (GitHub, Linear)
 
@@ -81,7 +81,7 @@ ao spawn my-project 123
 2. **Runtime** starts a tmux session (or Docker container)
 3. **Agent** launches Claude Code (or Codex, or Aider) with issue context
 4. Agent works autonomously — reads code, writes tests, creates PR
-5. **Reactions** auto-handle CI failures and review comments
+5. **Reactions** continuously monitor CI/review/conflict state, auto-handle CI failures and review comments, auto-dispatch merge-conflict resolution prompts to agents, and can auto-merge approved+green PRs
 6. **Notifier** pings you only when judgment is needed
 
 ### Plugin Architecture
@@ -129,12 +129,18 @@ reactions:
     auto: true
     action: send-to-agent
     escalateAfter: 30m
+  merge-conflicts:
+    auto: true
+    action: send-to-agent
+    message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, and push."
+    escalateAfter: 15m
   approved-and-green:
-    auto: false       # flip to true for auto-merge
-    action: notify
+    auto: true
+    action: auto-merge
+    mergeMethod: squash   # optional: merge | squash | rebase (default: squash)
 ```
 
-CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. PR approved with green CI → you get a notification to merge.
+CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. Merge conflicts are continuously monitored; when conflicts appear, the orchestrator auto-sends conflict-resolution instructions to the agent (with retry/escalation policy). PR approved with green CI → orchestrator merges automatically when `approved-and-green` is set to `auto-merge` (or notifies if set to `notify`). If `mergeMethod` is omitted, `squash` is used.
 
 See [`agent-orchestrator.yaml.example`](agent-orchestrator.yaml.example) for the full reference.
 

@@ -74,6 +74,26 @@ export type {
   SelectFallbackOrchestratorSessionOptions,
 } from "./session-routing.js";
 
+// Inbound source context — persistent per-session source envelopes
+export {
+  createInboundContextStore,
+  buildTelegramInboundRouting,
+  buildJiraInboundRouting,
+  formatInboundMessageForSession,
+  isTelegramInboundEnvelope,
+  isJiraInboundEnvelope,
+  getInboundContextStatePath,
+} from "./inbound-context.js";
+export type {
+  InboundSource,
+  InboundEnvelope,
+  InboundContextStore,
+  EnqueueInboundEnvelopeInput,
+  TelegramInboundRouting,
+  JiraInboundRouting,
+  FormatInboundMessageForSessionInput,
+} from "./inbound-context.js";
+
 // Path utilities — hash-based directory structure
 export {
   generateConfigHash,
