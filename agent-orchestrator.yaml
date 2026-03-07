@@ -4,6 +4,9 @@ port: 5050
 dataDir: ~/.ao-sessions
 worktreeDir: ~/.worktrees/ao
 
+remote:
+  tailscaleHost: auto
+
 defaults:
   runtime: tmux
   agent: claude-code

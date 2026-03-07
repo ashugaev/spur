@@ -6,7 +6,9 @@ import { formatAge } from "../lib/format.js";
 import { getSessionManager } from "../lib/create-session-manager.js";
 
 export function registerSession(program: Command): void {
-  const session = program.command("session").description("Session management (ls, kill, cleanup)");
+  const session = program
+    .command("session")
+    .description("Session management (ls, kill, cleanup, restore)");
 
   session
     .command("ls")

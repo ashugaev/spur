@@ -15,6 +15,11 @@ port: 3000
 # terminalPort: 14800
 # directTerminalPort: 14801
 
+# Remote access (Tailscale)
+# When Tailscale is running, the dashboard is accessible via your Tailscale IP.
+# remote:
+#   tailscaleHost: auto  # auto-detect from `tailscale ip -4`, or set IP manually
+
 # Default plugins (these are the defaults — you can omit this section)
 defaults:
   runtime: tmux           # tmux | process | docker | kubernetes | ssh | e2b

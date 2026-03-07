@@ -28,7 +28,6 @@ interface DashboardProps {
 }
 
 type DashboardTab = "sessions" | "jira";
-
 interface JiraTaskSessionView {
   id: string;
   sessionUrl: string | null;

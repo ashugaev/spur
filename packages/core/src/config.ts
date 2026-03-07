@@ -78,6 +78,10 @@ const AgentSpecificConfigSchema = z
   })
   .passthrough();
 
+const RemoteConfigSchema = z.object({
+  tailscaleHost: z.string().optional(),
+});
+
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
   repo: z.string(),
@@ -124,6 +128,7 @@ const OrchestratorConfigSchema = z.object({
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
   listeners: z.record(ListenerConfigSchema).default({}),
+  remote: RemoteConfigSchema.optional(),
 });
 
 // =============================================================================
@@ -422,6 +427,13 @@ export function loadConfigWithPath(configPath?: string): {
 
 /** Validate a raw config object */
 export function validateConfig(raw: unknown): OrchestratorConfig {
+  // Warn about removed config keys (Zod silently strips unknown keys)
+  if (raw && typeof raw === "object" && "vibeTunnel" in raw) {
+    console.warn(
+      "[config] vibeTunnel has been removed. Use `remote: { tailscaleHost: auto }` instead.",
+    );
+  }
+
   const validated = OrchestratorConfigSchema.parse(raw);
 
   let config = validated as OrchestratorConfig;

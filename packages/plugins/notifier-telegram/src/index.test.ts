@@ -55,7 +55,7 @@ describe("notifier-telegram", () => {
     expect(payload.text).toContain("https://github.com/acme/repo/pull/42");
   });
 
-  it("formats actions as text entries", async () => {
+  it("sends URL actions as inline keyboard buttons", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve("ok") });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -69,8 +69,11 @@ describe("notifier-telegram", () => {
 
     const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(payload.text).toContain("Actions:");
-    expect(payload.text).toContain("Open PR");
     expect(payload.text).toContain("/api/sessions/app-7/kill");
+    expect(payload.text).not.toContain("https://github.com/acme/repo/pull/42");
+    expect(payload.reply_markup).toEqual({
+      inline_keyboard: [[{ text: "Open PR", url: "https://github.com/acme/repo/pull/42" }]],
+    });
   });
 
   it("uses env fallback for token/chat", async () => {

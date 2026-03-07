@@ -90,11 +90,17 @@ function formatEventWithActions(event: OrchestratorEvent, actions: NotifyAction[
   return `${base}\n\nActions:\n${actionLines.join("\n")}`;
 }
 
+interface InlineKeyboardButton {
+  text: string;
+  url: string;
+}
+
 async function sendMessage(
   botToken: string,
   chatId: string,
   text: string,
   threadId?: number,
+  inlineButtons?: InlineKeyboardButton[],
 ): Promise<void> {
   const endpoint = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload: Record<string, unknown> = {
@@ -105,6 +111,12 @@ async function sendMessage(
 
   if (threadId !== undefined) {
     payload.message_thread_id = threadId;
+  }
+
+  if (inlineButtons && inlineButtons.length > 0) {
+    payload.reply_markup = {
+      inline_keyboard: inlineButtons.map((btn) => [{ text: btn.text, url: btn.url }]),
+    };
   }
 
   const response = await fetch(endpoint, {
@@ -140,7 +152,16 @@ export function create(config?: Record<string, unknown>): Notifier {
 
     async notifyWithActions(event: OrchestratorEvent, actions: NotifyAction[]): Promise<void> {
       if (!botToken || !chatId) return;
-      await sendMessage(botToken, chatId, formatEventWithActions(event, actions), threadId);
+      const urlActions = actions.filter((a): a is NotifyAction & { url: string } => !!a.url);
+      const textActions = actions.filter((a) => !a.url);
+      const inlineButtons = urlActions.map((a) => ({ text: a.label, url: a.url }));
+      await sendMessage(
+        botToken,
+        chatId,
+        formatEventWithActions(event, textActions),
+        threadId,
+        inlineButtons,
+      );
     },
 
     async post(message: string, context?: NotifyContext): Promise<string | null> {

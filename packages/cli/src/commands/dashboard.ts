@@ -3,9 +3,10 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import chalk from "chalk";
 import type { Command } from "commander";
-import { loadConfig } from "@composio/ao-core";
+import { loadConfig, getDashboardUrl } from "@composio/ao-core";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen } from "../lib/web-dir.js";
 import { cleanNextCache, findRunningDashboardPid, findProcessWebDir, waitForPortFree } from "../lib/dashboard-rebuild.js";
+import { notifyRemoteReady } from "../lib/remote-notify.js";
 
 export function registerDashboard(program: Command): void {
   program
@@ -60,7 +61,16 @@ export function registerDashboard(program: Command): void {
 
       const webDir = localWebDir;
 
-      console.log(chalk.bold(`Starting dashboard on http://localhost:${port}\n`));
+      console.log(chalk.bold(`Starting dashboard on http://localhost:${port}`));
+
+      const remoteUrl = await getDashboardUrl(port, config.remote?.tailscaleHost);
+      if (remoteUrl) {
+        console.log(chalk.dim(`Remote: ${remoteUrl}`));
+      }
+      console.log();
+
+      // Notify Telegram with dashboard link (non-blocking)
+      void notifyRemoteReady(config, remoteUrl ?? `http://localhost:${port}`);
 
       const env = await buildDashboardEnv(
         port,
@@ -69,7 +79,9 @@ export function registerDashboard(program: Command): void {
         config.directTerminalPort,
       );
 
-      const child = spawn("npx", ["next", "dev", "-p", String(port)], {
+      // Start full web stack (Next.js + terminal servers) so session pages
+      // always have a reachable DirectTerminal WebSocket backend.
+      const child = spawn("pnpm", ["run", "dev"], {
         cwd: webDir,
         stdio: ["inherit", "inherit", "pipe"],
         env,

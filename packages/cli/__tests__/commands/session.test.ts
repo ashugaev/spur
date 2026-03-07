@@ -18,7 +18,15 @@ import {
   getProjectBaseDir,
 } from "@composio/ao-core";
 
-const { mockTmux, mockGit, mockGh, mockExec, mockConfigRef, mockSessionManager, sessionsDirRef } =
+const {
+  mockTmux,
+  mockGit,
+  mockGh,
+  mockExec,
+  mockConfigRef,
+  mockSessionManager,
+  sessionsDirRef,
+} =
   vi.hoisted(() => ({
     mockTmux: vi.fn(),
     mockGit: vi.fn(),
@@ -160,7 +168,6 @@ beforeEach(() => {
   vi.spyOn(process, "exit").mockImplementation((code) => {
     throw new Error(`process.exit(${code})`);
   });
-
   mockTmux.mockReset();
   mockGit.mockReset();
   mockGh.mockReset();
@@ -198,6 +205,7 @@ afterEach(() => {
   // Clean up tmpDir
   rmSync(tmpDir, { recursive: true, force: true });
 
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -418,3 +426,4 @@ describe("session cleanup", () => {
     expect(output).toContain("No sessions to clean up");
   });
 });
+

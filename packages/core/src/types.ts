@@ -742,7 +742,9 @@ export type EventType =
   | "reaction.triggered"
   | "reaction.escalated"
   // Summary
-  | "summary.all_complete";
+  | "summary.all_complete"
+  // System
+  | "system.dashboard_ready";
 
 /** An event emitted by the orchestrator */
 export interface OrchestratorEvent {
@@ -840,6 +842,9 @@ export interface OrchestratorConfig {
 
   /** Background listeners (issue/event sources that auto-trigger actions) */
   listeners?: Record<string, ListenerConfig>;
+
+  /** Remote access settings (Tailscale) */
+  remote?: RemoteConfig;
 }
 
 export interface DefaultPlugins {
@@ -943,6 +948,11 @@ export interface ListenerConfig {
   trigger?: ListenerTriggerConfig;
   /** Source-specific fields (e.g. jql for jira-backlog) */
   [key: string]: unknown;
+}
+
+export interface RemoteConfig {
+  /** Tailscale IP/hostname for remote access (auto-detected if omitted) */
+  tailscaleHost?: string;
 }
 
 export interface AgentSpecificConfig {
