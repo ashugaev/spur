@@ -129,6 +129,11 @@ reactions:
     auto: true
     action: send-to-agent
     escalateAfter: 30m
+  review-comments:
+    auto: true
+    action: send-to-agent
+    message: "There are unresolved review comments. Address each one, push fixes, and reply."
+    escalateAfter: 30m
   merge-conflicts:
     auto: true
     action: send-to-agent
@@ -140,7 +145,7 @@ reactions:
     mergeMethod: squash   # optional: merge | squash | rebase (default: squash)
 ```
 
-CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. Merge conflicts are continuously monitored; when conflicts appear, the orchestrator auto-sends conflict-resolution instructions to the agent (with retry/escalation policy). PR approved with green CI → orchestrator merges automatically when `approved-and-green` is set to `auto-merge` (or notifies if set to `notify`). If `mergeMethod` is omitted, `squash` is used.
+CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. Unresolved review comments can also be auto-forwarded to the agent even when review status does not flip to `changes_requested`. Merge conflicts are continuously monitored; when conflicts appear, the orchestrator auto-sends conflict-resolution instructions to the agent (with retry/escalation policy). PR approved with green CI → orchestrator merges automatically when `approved-and-green` is set to `auto-merge` (or notifies if set to `notify`). If `mergeMethod` is omitted, `squash` is used.
 
 See [`agent-orchestrator.yaml.example`](agent-orchestrator.yaml.example) for the full reference.
 

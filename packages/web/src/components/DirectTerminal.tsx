@@ -1,5 +1,11 @@
 "use client";
 
+declare global {
+  interface Window {
+    __aoClientId?: string;
+  }
+}
+
 import { useEffect, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { cn } from "@/lib/cn";
@@ -78,8 +84,9 @@ export function DirectTerminal({
     let cleanup: (() => void) | null = null;
     let inputDisposable: { dispose(): void } | null = null;
 
-    const PERMANENT_CLOSE_CODES = new Set([4001, 4004]); // auth failure, session not found
+    const PERMANENT_CLOSE_CODES = new Set([4001, 4004, 4005]); // auth failure, session not found, PTY exited
     const MAX_RECONNECT_DELAY = 15_000;
+    const MAX_RECONNECT_ATTEMPTS = 10;
 
     Promise.all([
       import("xterm").then((mod) => mod.Terminal),
@@ -185,8 +192,13 @@ export function DirectTerminal({
 
         // WebSocket URL — same origin, proxied through the unified server.
         // This ensures remote access (Tailscale, ngrok) works through a single port.
+        // clientId ensures multiple browser tabs/devices can view the same session
+        // without evicting each other's PTY connections.
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const wsUrl = `${protocol}//${window.location.host}/terminal/ws?session=${encodeURIComponent(sessionId)}`;
+        if (!window.__aoClientId) {
+          window.__aoClientId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        }
+        const wsUrl = `${protocol}//${window.location.host}/terminal/ws?session=${encodeURIComponent(sessionId)}&clientId=${window.__aoClientId}`;
 
         // ── Preserve selection while terminal receives output ────────
         // xterm.js clears the selection on every terminal.write(). We
@@ -327,6 +339,12 @@ export function DirectTerminal({
 
             // Transient failure — schedule reconnect with exponential backoff
             const attempt = reconnectAttemptRef.current;
+            if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+              permanentErrorRef.current = true;
+              setStatus("error");
+              setError("Max reconnect attempts reached");
+              return;
+            }
             const delay = Math.min(1000 * Math.pow(2, attempt), MAX_RECONNECT_DELAY);
             reconnectAttemptRef.current = attempt + 1;
 

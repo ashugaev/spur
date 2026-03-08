@@ -464,7 +464,25 @@ describe("scm-github plugin", () => {
       };
     }
 
-    it("returns only unresolved non-bot comments from GraphQL", async () => {
+    function makeIssueComments(
+      comments: Array<{
+        id: number;
+        author: string | null;
+        body: string;
+        createdAt: string;
+        url: string;
+      }>,
+    ) {
+      return comments.map((c) => ({
+        id: c.id,
+        user: c.author ? { login: c.author } : null,
+        body: c.body,
+        created_at: c.createdAt,
+        html_url: c.url,
+      }));
+    }
+
+    it("aggregates unresolved thread comments and top-level PR comments", async () => {
       mockGh(
         makeGraphQLThreads([
           {
@@ -477,25 +495,37 @@ describe("scm-github plugin", () => {
             url: "https://github.com/c/1",
             createdAt: "2025-01-01T00:00:00Z",
           },
+        ]),
+      );
+      mockGh(
+        makeIssueComments([
           {
-            isResolved: true,
-            id: "C2",
+            id: 99,
             author: "bob",
-            body: "Resolved one",
-            path: "src/bar.ts",
-            line: 20,
-            url: "https://github.com/c/2",
+            body: "Please also update docs",
             createdAt: "2025-01-02T00:00:00Z",
+            url: "https://github.com/pr/comments/99",
           },
         ]),
       );
 
       const comments = await scm.getPendingComments(pr);
-      expect(comments).toHaveLength(1);
-      expect(comments[0]).toMatchObject({ id: "C1", author: "alice", isResolved: false });
+      expect(comments).toHaveLength(2);
+      expect(comments[0]).toMatchObject({
+        id: "thread:C1",
+        author: "alice",
+        isResolved: false,
+        path: "src/foo.ts",
+        line: 10,
+      });
+      expect(comments[1]).toMatchObject({
+        id: "pr:99",
+        author: "bob",
+        isResolved: false,
+      });
     });
 
-    it("filters out bot comments", async () => {
+    it("filters out bot comments from both sources", async () => {
       mockGh(
         makeGraphQLThreads([
           {
@@ -518,26 +548,76 @@ describe("scm-github plugin", () => {
             url: "u",
             createdAt: "2025-01-01T00:00:00Z",
           },
+        ]),
+      );
+      mockGh(
+        makeIssueComments([
+          {
+            id: 1,
+            author: "github-actions[bot]",
+            body: "Automated note",
+            createdAt: "2025-01-01T00:00:00Z",
+            url: "u1",
+          },
+          {
+            id: 2,
+            author: "eve",
+            body: "Human PR comment",
+            createdAt: "2025-01-01T00:00:01Z",
+            url: "u2",
+          },
+        ]),
+      );
+
+      const comments = await scm.getPendingComments(pr);
+      expect(comments).toHaveLength(2);
+      expect(comments.map((c) => c.author)).toEqual(["alice", "eve"]);
+    });
+
+    it("keeps thread comments when issue-comment source fails", async () => {
+      mockGh(
+        makeGraphQLThreads([
           {
             isResolved: false,
-            id: "C3",
-            author: "codecov[bot]",
-            body: "Coverage",
+            id: "C1",
+            author: "alice",
+            body: "Fix this",
             path: "a.ts",
-            line: 3,
+            line: 1,
             url: "u",
             createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
+      mockGhError("issues endpoint failed");
+
+      const comments = await scm.getPendingComments(pr);
+      expect(comments).toHaveLength(1);
+      expect(comments[0].id).toBe("thread:C1");
+    });
+
+    it("keeps issue comments when thread source fails", async () => {
+      mockGhError("graphql failed");
+      mockGh(
+        makeIssueComments([
+          {
+            id: 77,
+            author: "alice",
+            body: "Need changelog entry",
+            createdAt: "2025-01-01T00:00:00Z",
+            url: "u",
           },
         ]),
       );
 
       const comments = await scm.getPendingComments(pr);
       expect(comments).toHaveLength(1);
-      expect(comments[0].author).toBe("alice");
+      expect(comments[0]).toMatchObject({ id: "pr:77", author: "alice" });
     });
 
-    it("returns empty on error", async () => {
+    it("returns empty when both sources fail", async () => {
       mockGhError("API rate limit");
+      mockGhError("issues endpoint rate limit");
       expect(await scm.getPendingComments(pr)).toEqual([]);
     });
 
@@ -556,9 +636,41 @@ describe("scm-github plugin", () => {
           },
         ]),
       );
+      mockGh(makeIssueComments([]));
       const comments = await scm.getPendingComments(pr);
       expect(comments[0].path).toBeUndefined();
       expect(comments[0].line).toBeUndefined();
+    });
+
+    it("returns deterministic order by createdAt then id", async () => {
+      mockGh(
+        makeGraphQLThreads([
+          {
+            isResolved: false,
+            id: "B",
+            author: "alice",
+            body: "B",
+            path: "a.ts",
+            line: 2,
+            url: "u2",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: false,
+            id: "A",
+            author: "alice",
+            body: "A",
+            path: "a.ts",
+            line: 1,
+            url: "u1",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
+      mockGh(makeIssueComments([]));
+
+      const comments = await scm.getPendingComments(pr);
+      expect(comments.map((c) => c.id)).toEqual(["thread:A", "thread:B"]);
     });
   });
 

@@ -17,6 +17,7 @@ import type {
   Notifier,
   ActivityState,
   PRInfo,
+  ReviewComment,
 } from "../types.js";
 
 let tmpDir: string;
@@ -57,6 +58,18 @@ function makePR(overrides: Partial<PRInfo> = {}): PRInfo {
     branch: "test",
     baseBranch: "main",
     isDraft: false,
+    ...overrides,
+  };
+}
+
+function makeReviewComment(overrides: Partial<ReviewComment> = {}): ReviewComment {
+  return {
+    id: "comment-1",
+    author: "alice",
+    body: "Please fix this",
+    isResolved: false,
+    createdAt: new Date("2025-01-01T00:00:00.000Z"),
+    url: "https://github.com/org/repo/pull/42#discussion_r1",
     ...overrides,
   };
 }
@@ -699,6 +712,356 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+
+  it("triggers review-comments reaction on unresolved comments without changes_requested", async () => {
+    config.reactions = {
+      "review-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review comments need fixes.",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("pending"),
+      getPendingComments: vi.fn().mockResolvedValue([makeReviewComment()]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Review required"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Review comments need fixes.");
+  });
+
+  it("does not spam review-comments reaction when unresolved comments are unchanged", async () => {
+    config.reactions = {
+      "review-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review comments need fixes.",
+      },
+    };
+
+    const pending = [makeReviewComment()];
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("pending"),
+      getPendingComments: vi.fn().mockResolvedValue(pending),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Review required"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Review comments need fixes.");
+  });
+
+  it("re-triggers review-comments reaction when unresolved comment set changes", async () => {
+    config.reactions = {
+      "review-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review comments need fixes.",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("pending"),
+      getPendingComments: vi
+        .fn()
+        .mockResolvedValueOnce([makeReviewComment({ id: "comment-1" })])
+        .mockResolvedValueOnce([
+          makeReviewComment({ id: "comment-1" }),
+          makeReviewComment({ id: "comment-2", body: "Another comment" }),
+        ]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Review required"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(2);
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(
+      1,
+      "app-1",
+      "Review comments need fixes.",
+    );
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(
+      2,
+      "app-1",
+      "Review comments need fixes.",
+    );
+  });
+
+  it("does not send duplicate prompt when changes-requested already sent in same cycle", async () => {
+    config.reactions = {
+      "changes-requested": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Fix requested changes.",
+      },
+      "review-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review comments need fixes.",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("changes_requested"),
+      getPendingComments: vi.fn().mockResolvedValue([makeReviewComment()]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Changes requested in review"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Fix requested changes.");
+    expect(mockSessionManager.send).not.toHaveBeenCalledWith(
+      "app-1",
+      "Review comments need fixes.",
+    );
+  });
+
+  it("falls back to review-comments when changes-requested send fails in same cycle", async () => {
+    config.reactions = {
+      "changes-requested": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Fix requested changes.",
+      },
+      "review-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Review comments need fixes.",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("changes_requested"),
+      getPendingComments: vi.fn().mockResolvedValue([makeReviewComment()]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Changes requested in review"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.send)
+      .mockRejectedValueOnce(new Error("transient send failure"))
+      .mockResolvedValue(undefined);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(2);
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(1, "app-1", "Fix requested changes.");
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(
+      2,
+      "app-1",
+      "Review comments need fixes.",
+    );
   });
 
   it("triggers auto-merge reaction by calling scm.mergePR for mergeable PR", async () => {
