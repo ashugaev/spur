@@ -32,7 +32,7 @@ function createCoreSession(overrides?: Partial<Session>): Session {
     projectId: "test",
     status: "working",
     activity: "active",
-    branch: "feat/test",
+    branch: "test",
     issueId: null,
     pr: null,
     workspacePath: "/test",
@@ -53,7 +53,7 @@ function createPRInfo(overrides?: Partial<PRInfo>): PRInfo {
     title: "Test PR",
     owner: "test",
     repo: "repo",
-    branch: "feat/test",
+    branch: "test",
     baseBranch: "main",
     isDraft: false,
     ...overrides,
@@ -121,7 +121,7 @@ describe("sessionToDashboard", () => {
     expect(dashboard.projectId).toBe("test");
     expect(dashboard.status).toBe("working");
     expect(dashboard.activity).toBe("active");
-    expect(dashboard.branch).toBe("feat/test");
+    expect(dashboard.branch).toBe("test");
     expect(dashboard.createdAt).toBe("2025-01-01T00:00:00.000Z");
     expect(dashboard.lastActivityAt).toBe("2025-01-01T01:00:00.000Z");
   });
@@ -395,7 +395,7 @@ describe("enrichSessionPR", () => {
       projectId: "test",
       status: "working",
       activity: "active",
-      branch: "feat/test",
+      branch: "test",
       issueId: null,
       issueUrl: null,
       issueLabel: null,
@@ -591,7 +591,7 @@ describe("enrichSessionIssueTitle", () => {
       isCompleted: vi.fn().mockResolvedValue(false),
       issueUrl: vi.fn().mockReturnValue("https://github.com/test/repo/issues/42"),
       issueLabel: vi.fn().mockReturnValue("#42"),
-      branchName: vi.fn().mockReturnValue("feat/issue-42"),
+      branchName: vi.fn().mockReturnValue("issue-42"),
       generatePrompt: vi.fn().mockResolvedValue("prompt"),
     };
   }
@@ -602,7 +602,7 @@ describe("enrichSessionIssueTitle", () => {
       projectId: "test",
       status: "working",
       activity: "active",
-      branch: "feat/test",
+      branch: "test",
       issueId: null,
       issueUrl: null,
       issueLabel: null,
@@ -733,7 +733,7 @@ describe("enrichSessionsMetadata", () => {
       isCompleted: vi.fn().mockResolvedValue(false),
       issueUrl: vi.fn().mockReturnValue(`${urlBase}-default`),
       issueLabel: vi.fn().mockReturnValue("#42"),
-      branchName: vi.fn().mockReturnValue("feat/issue-42"),
+      branchName: vi.fn().mockReturnValue("issue-42"),
       generatePrompt: vi.fn().mockResolvedValue("prompt"),
     };
   }
@@ -955,7 +955,7 @@ describe("computeStats", () => {
       projectId: "test",
       status: "working",
       activity: "active",
-      branch: "feat/test",
+      branch: "test",
       issueId: null,
       issueUrl: null,
       issueLabel: null,

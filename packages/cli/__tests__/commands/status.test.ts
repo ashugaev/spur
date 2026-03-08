@@ -262,11 +262,11 @@ describe("status command", () => {
     // Create metadata files
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt/app-1\nbranch=feat/INT-100\nstatus=working\nissue=INT-100\n",
+      "worktree=/tmp/wt/app-1\nbranch=INT-100\nstatus=working\nissue=INT-100\n",
     );
     writeFileSync(
       join(sessionsDir, "app-2"),
-      "worktree=/tmp/wt/app-2\nbranch=feat/INT-200\nstatus=pr_open\npr=https://github.com/org/repo/pull/42\n",
+      "worktree=/tmp/wt/app-2\nbranch=INT-200\nstatus=pr_open\npr=https://github.com/org/repo/pull/42\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -279,7 +279,7 @@ describe("status command", () => {
       return null;
     });
 
-    mockGit.mockResolvedValue("feat/INT-100"); // live branch
+    mockGit.mockResolvedValue("INT-100"); // live branch
 
     await program.parseAsync(["node", "test", "status"]);
 
@@ -366,7 +366,7 @@ describe("status command", () => {
   it("shows PR number, CI status, review decision, and threads", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/test\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=test\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -374,7 +374,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000) - 60);
       return null;
     });
-    mockGit.mockResolvedValue("feat/test");
+    mockGit.mockResolvedValue("test");
 
     mockDetectPR.mockResolvedValue({
       number: 42,
@@ -382,7 +382,7 @@ describe("status command", () => {
       title: "Test PR",
       owner: "org",
       repo: "repo",
-      branch: "feat/test",
+      branch: "test",
       baseBranch: "main",
       isDraft: false,
     });
@@ -419,7 +419,7 @@ describe("status command", () => {
   it("shows failing CI and changes_requested review", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/broken\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=broken\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -427,7 +427,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return null;
       return null;
     });
-    mockGit.mockResolvedValue("feat/broken");
+    mockGit.mockResolvedValue("broken");
 
     mockDetectPR.mockResolvedValue({
       number: 7,
@@ -435,7 +435,7 @@ describe("status command", () => {
       title: "Broken PR",
       owner: "org",
       repo: "repo",
-      branch: "feat/broken",
+      branch: "broken",
       baseBranch: "main",
       isDraft: false,
     });
@@ -454,7 +454,7 @@ describe("status command", () => {
   it("handles SCM errors gracefully", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/err\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=err\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -462,7 +462,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return null;
       return null;
     });
-    mockGit.mockResolvedValue("feat/err");
+    mockGit.mockResolvedValue("err");
 
     mockDetectPR.mockRejectedValue(new Error("gh failed"));
 
@@ -471,13 +471,13 @@ describe("status command", () => {
     // Should still show the session without crashing
     const output = consoleSpy.mock.calls.map((c) => c[0]).join("\n");
     expect(output).toContain("app-1");
-    expect(output).toContain("feat/err");
+    expect(output).toContain("err");
   });
 
   it("outputs JSON with enriched fields", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/json\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=json\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -485,7 +485,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/json");
+    mockGit.mockResolvedValue("json");
 
     mockDetectPR.mockResolvedValue({
       number: 10,
@@ -493,7 +493,7 @@ describe("status command", () => {
       title: "JSON PR",
       owner: "org",
       repo: "repo",
-      branch: "feat/json",
+      branch: "json",
       baseBranch: "main",
       isDraft: false,
     });
@@ -515,7 +515,7 @@ describe("status command", () => {
   it("falls back to PR number from metadata URL when SCM fails", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/pr-meta\nstatus=working\npr=https://github.com/org/repo/pull/99\n",
+      "worktree=/tmp/wt\nbranch=pr-meta\nstatus=working\npr=https://github.com/org/repo/pull/99\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -523,7 +523,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return null;
       return null;
     });
-    mockGit.mockResolvedValue("feat/pr-meta");
+    mockGit.mockResolvedValue("pr-meta");
 
     // SCM detectPR fails
     mockDetectPR.mockRejectedValue(new Error("gh failed"));
@@ -537,7 +537,7 @@ describe("status command", () => {
   it("shows null pendingThreads when getPendingComments fails", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/thr-err\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=thr-err\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -545,7 +545,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/thr-err");
+    mockGit.mockResolvedValue("thr-err");
 
     mockDetectPR.mockResolvedValue({
       number: 5,
@@ -553,7 +553,7 @@ describe("status command", () => {
       title: "Thread err PR",
       owner: "org",
       repo: "repo",
-      branch: "feat/thr-err",
+      branch: "thr-err",
       baseBranch: "main",
       isDraft: false,
     });
@@ -572,7 +572,7 @@ describe("status command", () => {
   it("uses session.activity from session manager for activity detection", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/act\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=act\nstatus=working\n",
     );
 
     // Override list to return sessions with activity set to "ready"
@@ -585,7 +585,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/act");
+    mockGit.mockResolvedValue("act");
 
     await program.parseAsync(["node", "test", "status", "--json"]);
 
@@ -597,7 +597,7 @@ describe("status command", () => {
   it("shows null activity when session has no activity set", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/thr\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=thr\nstatus=working\n",
     );
 
     // Default list mock returns activity: null
@@ -606,7 +606,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/thr");
+    mockGit.mockResolvedValue("thr");
 
     await program.parseAsync(["node", "test", "status", "--json"]);
 
@@ -618,7 +618,7 @@ describe("status command", () => {
   it("shows null activity when session activity is null", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/err\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=err\nstatus=working\n",
     );
 
     mockTmux.mockImplementation(async (...args: string[]) => {
@@ -626,7 +626,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/err");
+    mockGit.mockResolvedValue("err");
 
     // Session has activity: null (default from buildSessionsFromDir)
     await program.parseAsync(["node", "test", "status", "--json"]);
@@ -639,7 +639,7 @@ describe("status command", () => {
   it("shows null activity when session activity is explicitly null", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/null\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=null\nstatus=working\n",
     );
 
     mockSessionManager.list.mockImplementation(async () => {
@@ -651,7 +651,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return String(Math.floor(Date.now() / 1000));
       return null;
     });
-    mockGit.mockResolvedValue("feat/null");
+    mockGit.mockResolvedValue("null");
 
     await program.parseAsync(["node", "test", "status", "--json"]);
 
@@ -663,7 +663,7 @@ describe("status command", () => {
   it("shows exited activity from session manager", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "worktree=/tmp/wt\nbranch=feat/dead\nstatus=working\n",
+      "worktree=/tmp/wt\nbranch=dead\nstatus=working\n",
     );
 
     mockSessionManager.list.mockImplementation(async () => {
@@ -675,7 +675,7 @@ describe("status command", () => {
       if (args[0] === "display-message") return null;
       return null;
     });
-    mockGit.mockResolvedValue("feat/dead");
+    mockGit.mockResolvedValue("dead");
 
     await program.parseAsync(["node", "test", "status", "--json"]);
 

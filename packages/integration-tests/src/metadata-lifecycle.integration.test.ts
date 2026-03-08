@@ -40,7 +40,7 @@ describe("metadata lifecycle (real filesystem)", () => {
 
     const metadata: SessionMetadata = {
       worktree: "/tmp/wt/session-1",
-      branch: "feat/INT-100",
+      branch: "INT-100",
       status: "working",
       tmuxName: "abc123-session-1",
       issue: "INT-100",
@@ -100,7 +100,7 @@ describe("metadata lifecycle (real filesystem)", () => {
 
     writeMetadata(sessionsDir, "session-upd", {
       worktree: "/w",
-      branch: "feat/x",
+      branch: "x",
       status: "spawning",
       project: "proj",
     });
@@ -115,7 +115,7 @@ describe("metadata lifecycle (real filesystem)", () => {
     expect(result!.pr).toBe("https://github.com/org/repo/pull/99");
     // Original fields preserved
     expect(result!.worktree).toBe("/w");
-    expect(result!.branch).toBe("feat/x");
+    expect(result!.branch).toBe("x");
     expect(result!.project).toBe("proj");
   });
 

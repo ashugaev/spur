@@ -15,12 +15,19 @@ port: 3000
 # terminalPort: 14800
 # directTerminalPort: 14801
 
+# Remote access (Tailscale)
+# Short path for mobile HTTPS:
+#   tailscale serve --bg 3000
+# Then `ao dashboard` will print https://<your-node>.ts.net/
+# remote:
+#   tailscaleHost: auto  # prefer tailscale serve https URL, then MagicDNS/IP fallback
+
 # Default plugins (these are the defaults — you can omit this section)
 defaults:
   runtime: tmux           # tmux | process | docker | kubernetes | ssh | e2b
   agent: claude-code      # claude-code | codex | aider | goose | custom
   workspace: worktree     # worktree | clone | copy
-  notifiers: [desktop]    # desktop | slack | discord | webhook | email
+  notifiers: [desktop]    # desktop | slack | telegram | discord | webhook | email
 
 # Projects — at minimum, specify repo and path
 projects:
@@ -64,6 +71,8 @@ projects:
     # reactions:
     #   approved-and-green:
     #     auto: true         # enable auto-merge for this project
+    #     action: auto-merge
+    #     mergeMethod: squash # optional: merge | squash | rebase
 
 # Notification channels
 # notifiers:
@@ -71,13 +80,35 @@ projects:
 #     plugin: slack
 #     webhook: ${SLACK_WEBHOOK_URL}
 #     channel: "#agent-updates"
+#
+#   telegram:
+#     plugin: telegram
+#     # token/chat can come from env (AO_TELEGRAM_BOT_TOKEN, AO_TELEGRAM_CHAT_ID)
+#     # botToken: ${AO_TELEGRAM_BOT_TOKEN}
+#     # chatId: ${AO_TELEGRAM_CHAT_ID}
+#     # webhookSecret: ${AO_TELEGRAM_WEBHOOK_SECRET}
+#     # pollingIntervalMs: 30000   # used only when Telegram webhook is not configured
 
 # Notification routing by priority
 # notificationRouting:
-#   urgent: [desktop, slack]   # agent stuck, needs input, errored
-#   action: [desktop, slack]   # PR ready to merge
-#   warning: [slack]           # auto-fix failed
-#   info: [slack]              # summary, all done
+#   urgent: [desktop, telegram]   # agent stuck, needs input, errored
+#   action: [desktop, telegram]   # PR ready to merge
+#   warning: [telegram]           # auto-fix failed
+#   info: [telegram]              # summary, all done
+
+# Trigger listeners — poll external sources and auto-trigger current spawn flow.
+# listeners:
+#   jira-broai:
+#     enabled: true
+#     source: jira-backlog
+#     projectId: int
+#     intervalMs: 60000
+#     # Only backlog tickets assigned to you with BroAI label:
+#     jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+#     backlogStatus: "Backlog"   # enforced by listener; default is Backlog
+#     trigger:
+#       type: spawn-session
+#       # agent: codex            # optional agent override for auto-spawned sessions
 
 # Reactions — auto-responses to events (these are the defaults)
 # reactions:
@@ -92,9 +123,16 @@ projects:
 #     action: send-to-agent
 #     escalateAfter: 30m
 #
+#   merge-conflicts:
+#     auto: true
+#     action: send-to-agent
+#     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+#     escalateAfter: 15m
+#
 #   approved-and-green:
 #     auto: false              # set to true for auto-merge
-#     action: notify
+#     action: notify           # use auto-merge to merge automatically
+#     mergeMethod: squash      # optional for auto-merge: merge | squash | rebase
 #     priority: action
 #
 #   agent-stuck:

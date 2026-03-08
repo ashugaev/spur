@@ -69,13 +69,14 @@ spawning → working → pr_open → ci_failed/review_pending/approved → merge
 
 - `ci-failed` → send fix prompt to agent
 - `changes-requested` → send review comments to agent
-- `approved-and-green` → notify human (or auto-merge)
+- `merge-conflicts` → continuously monitor merge blockers and send rebase/conflict-resolution prompt to agent
+- `approved-and-green` → auto-merge via SCM plugin (or notify human)
 - `agent-stuck` → notify human
 
 **Polling loop:**
 
 1. For each session: check agent activity state (`Agent.getActivityState()`)
-2. If PR exists: check CI status (`SCM.getCISummary()`), review state (`SCM.getReviewDecision()`)
+2. If PR exists: check CI status (`SCM.getCISummary()`), review state (`SCM.getReviewDecision()`), and merge readiness (`SCM.getMergeability()`) for auto-merge + conflict detection
 3. Update session status based on state
 4. Trigger reactions if state changed
 5. Emit events
@@ -115,7 +116,7 @@ Loads and validates `agent-orchestrator.yaml`:
 - `projects` — per-project config (repo, path, branch, symlinks, reactions, agentRules)
 - `notifiers` — notification channel config (Slack webhooks, etc.)
 - `notificationRouting` — which notifiers get which priority events
-- `reactions` — auto-response config (ci-failed, changes-requested, approved-and-green, etc.)
+- `reactions` — auto-response config (ci-failed, changes-requested, merge-conflicts, approved-and-green, etc.)
 
 **Zod schemas** validate all config at load time.
 

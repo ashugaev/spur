@@ -57,3 +57,5 @@ packages/web/agent-orchestrator.yaml
 
 # Local agent orchestrator config (may contain secrets)
 agent-orchestrator.yaml
+
+.idea/

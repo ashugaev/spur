@@ -114,7 +114,7 @@ describe("config → metadata service integration (real filesystem)", () => {
     // 1. Write metadata
     writeMetadata(sessionsDir, "lifecycle-1", {
       worktree: join(tmpDir, "worktrees", "lifecycle-1"),
-      branch: "feat/TEST-100",
+      branch: "TEST-100",
       status: "spawning",
       project: "test-project",
       issue: "TEST-100",
@@ -124,7 +124,7 @@ describe("config → metadata service integration (real filesystem)", () => {
     // 2. Read it back
     const meta = readMetadata(sessionsDir, "lifecycle-1");
     expect(meta).not.toBeNull();
-    expect(meta!.branch).toBe("feat/TEST-100");
+    expect(meta!.branch).toBe("TEST-100");
     expect(meta!.status).toBe("spawning");
     expect(meta!.project).toBe("test-project");
     expect(meta!.issue).toBe("TEST-100");
@@ -143,7 +143,7 @@ describe("config → metadata service integration (real filesystem)", () => {
     // 4. List sessions
     writeMetadata(sessionsDir, "lifecycle-2", {
       worktree: join(tmpDir, "worktrees", "lifecycle-2"),
-      branch: "feat/TEST-200",
+      branch: "TEST-200",
       status: "idle",
       project: "test-project",
     });
@@ -188,7 +188,7 @@ describe("config → metadata service integration (real filesystem)", () => {
     // Write session to project A
     writeMetadata(dirA, "projA-session-1", {
       worktree: "/a/wt",
-      branch: "feat/A",
+      branch: "A",
       status: "working",
       project: "project-a",
     });
@@ -196,7 +196,7 @@ describe("config → metadata service integration (real filesystem)", () => {
     // Write session to project B
     writeMetadata(dirB, "projB-session-1", {
       worktree: "/b/wt",
-      branch: "feat/B",
+      branch: "B",
       status: "idle",
       project: "project-b",
     });

@@ -37,12 +37,14 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
   // Trackers
   { slot: "tracker", name: "github", pkg: "@composio/ao-plugin-tracker-github" },
   { slot: "tracker", name: "linear", pkg: "@composio/ao-plugin-tracker-linear" },
+  { slot: "tracker", name: "jira", pkg: "@composio/ao-plugin-tracker-jira" },
   // SCM
   { slot: "scm", name: "github", pkg: "@composio/ao-plugin-scm-github" },
   // Notifiers
   { slot: "notifier", name: "composio", pkg: "@composio/ao-plugin-notifier-composio" },
   { slot: "notifier", name: "desktop", pkg: "@composio/ao-plugin-notifier-desktop" },
   { slot: "notifier", name: "slack", pkg: "@composio/ao-plugin-notifier-slack" },
+  { slot: "notifier", name: "telegram", pkg: "@composio/ao-plugin-notifier-telegram" },
   { slot: "notifier", name: "webhook", pkg: "@composio/ao-plugin-notifier-webhook" },
   // Terminals
   { slot: "terminal", name: "iterm2", pkg: "@composio/ao-plugin-terminal-iterm2" },
@@ -51,11 +53,28 @@ const BUILTIN_PLUGINS: Array<{ slot: PluginSlot; name: string; pkg: string }> = 
 
 /** Extract plugin-specific config from orchestrator config */
 function extractPluginConfig(
-  _slot: PluginSlot,
-  _name: string,
-  _config: OrchestratorConfig,
+  slot: PluginSlot,
+  name: string,
+  config: OrchestratorConfig,
 ): Record<string, unknown> | undefined {
-  // Reserved for future plugin-specific config mapping
+  // Notifier configs live at top-level and should be injected into plugin.create().
+  // Keep this generic so new notifier plugins (telegram, teams, etc.) don't require core changes.
+  if (slot === "notifier") {
+    const exact = config.notifiers[name];
+    if (exact && typeof exact === "object") {
+      const { plugin: _plugin, ...rest } = exact;
+      return rest;
+    }
+
+    // Also support alias keys: notifiers.<alias>.plugin = "<name>"
+    for (const notifierConfig of Object.values(config.notifiers)) {
+      if (notifierConfig?.plugin === name) {
+        const { plugin: _plugin, ...rest } = notifierConfig;
+        return rest;
+      }
+    }
+  }
+
   return undefined;
 }
 

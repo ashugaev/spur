@@ -10,7 +10,8 @@
   "main": "dist/index.js",
   "files": [
     "dist",
-    "templates"
+    "templates",
+    "scripts"
   ],
   "repository": {
     "type": "git",
@@ -25,6 +26,7 @@
     "node": ">=20.0.0"
   },
   "scripts": {
+    "postinstall": "node scripts/postinstall.js || true",
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
@@ -40,6 +42,7 @@
     "@composio/ao-plugin-notifier-composio": "workspace:*",
     "@composio/ao-plugin-notifier-desktop": "workspace:*",
     "@composio/ao-plugin-notifier-slack": "workspace:*",
+    "@composio/ao-plugin-notifier-telegram": "workspace:*",
     "@composio/ao-plugin-notifier-webhook": "workspace:*",
     "@composio/ao-plugin-runtime-process": "workspace:*",
     "@composio/ao-plugin-runtime-tmux": "workspace:*",

@@ -3,9 +3,10 @@ import { resolve } from "node:path";
 import { existsSync } from "node:fs";
 import chalk from "chalk";
 import type { Command } from "commander";
-import { loadConfig } from "@composio/ao-core";
-import { findWebDir, buildDashboardEnv, waitForPortAndOpen } from "../lib/web-dir.js";
+import { loadConfig, getDashboardUrl } from "@composio/ao-core";
+import { findWebDir, buildDashboardEnv, waitForPortAndOpen, waitForPort } from "../lib/web-dir.js";
 import { cleanNextCache, findRunningDashboardPid, findProcessWebDir, waitForPortFree } from "../lib/dashboard-rebuild.js";
+import { notifyRemoteReady } from "../lib/remote-notify.js";
 
 export function registerDashboard(program: Command): void {
   program
@@ -59,8 +60,11 @@ export function registerDashboard(program: Command): void {
       }
 
       const webDir = localWebDir;
+      const localUrl = `http://localhost:${port}`;
+      const remoteUrlPromise = getDashboardUrl(port, config.remote?.tailscaleHost);
 
-      console.log(chalk.bold(`Starting dashboard on http://localhost:${port}\n`));
+      console.log(chalk.bold(`Starting dashboard on ${localUrl}`));
+      console.log();
 
       const env = await buildDashboardEnv(
         port,
@@ -69,7 +73,9 @@ export function registerDashboard(program: Command): void {
         config.directTerminalPort,
       );
 
-      const child = spawn("npx", ["next", "dev", "-p", String(port)], {
+      // Start full web stack (Next.js + terminal servers) so session pages
+      // always have a reachable DirectTerminal WebSocket backend.
+      const child = spawn("pnpm", ["run", "dev"], {
         cwd: webDir,
         stdio: ["inherit", "inherit", "pipe"],
         env,
@@ -94,15 +100,28 @@ export function registerDashboard(program: Command): void {
         process.exit(1);
       });
 
-      let openAbort: AbortController | undefined;
+      const startupAbort = new AbortController();
+
+      // Log remote URL as soon as it is available (non-blocking).
+      void remoteUrlPromise.then((remoteUrl) => {
+        if (startupAbort.signal.aborted || !remoteUrl) return;
+        console.log(chalk.dim(`Remote: ${remoteUrl}`));
+      });
+
+      // Notify Telegram only when the dashboard actually starts listening.
+      void (async () => {
+        const ready = await waitForPort(port, startupAbort.signal);
+        if (!ready || startupAbort.signal.aborted) return;
+        const remoteUrl = await remoteUrlPromise;
+        void notifyRemoteReady(config, remoteUrl ?? localUrl);
+      })();
 
       if (opts.open !== false) {
-        openAbort = new AbortController();
-        void waitForPortAndOpen(port, `http://localhost:${port}`, openAbort.signal);
+        void waitForPortAndOpen(port, localUrl, startupAbort.signal);
       }
 
       child.on("exit", (code) => {
-        if (openAbort) openAbort.abort();
+        startupAbort.abort();
 
         if (code !== 0 && code !== null && !opts.rebuild) {
           const stderr = stderrChunks.join("");

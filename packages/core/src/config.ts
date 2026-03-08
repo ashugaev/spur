@@ -25,6 +25,7 @@ import { generateSessionPrefix } from "./paths.js";
 const ReactionConfigSchema = z.object({
   auto: z.boolean().default(true),
   action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
+  mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
   message: z.string().optional(),
   priority: z.enum(["urgent", "action", "warning", "info"]).optional(),
   retries: z.number().optional(),
@@ -51,12 +52,35 @@ const NotifierConfigSchema = z
   })
   .passthrough();
 
+const ListenerTriggerConfigSchema = z
+  .object({
+    type: z.string(),
+    agent: z.string().optional(),
+  })
+  .passthrough();
+
+const ListenerConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    source: z.string(),
+    projectId: z.string(),
+    intervalMs: z.number().positive().optional(),
+    backlogStatus: z.string().min(1).optional(),
+    lockStaleMs: z.number().positive().optional(),
+    trigger: ListenerTriggerConfigSchema.default({ type: "spawn-session" }),
+  })
+  .passthrough();
+
 const AgentSpecificConfigSchema = z
   .object({
     permissions: z.enum(["skip", "default"]).default("skip"),
     model: z.string().optional(),
   })
   .passthrough();
+
+const RemoteConfigSchema = z.object({
+  tailscaleHost: z.string().optional(),
+});
 
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
@@ -103,6 +127,8 @@ const OrchestratorConfigSchema = z.object({
     info: ["composio"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
+  listeners: z.record(ListenerConfigSchema).default({}),
+  remote: RemoteConfigSchema.optional(),
 });
 
 // =============================================================================
@@ -244,6 +270,7 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     "approved-and-green": {
       auto: false,
       action: "notify",
+      mergeMethod: "squash",
       priority: "action",
       message: "PR is ready to merge",
     },
@@ -400,6 +427,13 @@ export function loadConfigWithPath(configPath?: string): {
 
 /** Validate a raw config object */
 export function validateConfig(raw: unknown): OrchestratorConfig {
+  // Warn about removed config keys (Zod silently strips unknown keys)
+  if (raw && typeof raw === "object" && "vibeTunnel" in raw) {
+    console.warn(
+      "[config] vibeTunnel has been removed. Use `remote: { tailscaleHost: auto }` instead.",
+    );
+  }
+
   const validated = OrchestratorConfigSchema.parse(raw);
 
   let config = validated as OrchestratorConfig;

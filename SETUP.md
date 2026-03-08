@@ -55,6 +55,12 @@ Comprehensive guide to installing, configuring, and troubleshooting Agent Orches
   - Create incoming webhook: https://api.slack.com/messaging/webhooks
   - Set environment variable: `export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."`
 
+- **Telegram Bot** - If using Telegram notifications + reply control
+  - Create bot token via BotFather
+  - Set environment variables:
+    - `export AO_TELEGRAM_BOT_TOKEN="123456:ABCDEF..."`
+    - `export AO_TELEGRAM_CHAT_ID="-1001234567890"`
+
 ## Installation
 
 ### Build from Source (Current Method)
@@ -197,7 +203,7 @@ Agent Orchestrator has 8 plugin slots. All are swappable:
 | **Workspace** | Workspace isolation  | `worktree`    | `clone`, `copy`                                 |
 | **Tracker**   | Issue tracking       | `github`      | `linear`, `jira`, custom                        |
 | **SCM**       | Source control       | `github`      | GitLab, Bitbucket (future)                      |
-| **Notifier**  | Notifications        | `desktop`     | `slack`, `discord`, `webhook`, `email`          |
+| **Notifier**  | Notifications        | `desktop`     | `slack`, `telegram`, `discord`, `webhook`, `email` |
 | **Terminal**  | Terminal integration | `iterm2`      | `web`, custom                                   |
 | **Lifecycle** | Session lifecycle    | (core)        | Non-pluggable                                   |
 
@@ -254,10 +260,10 @@ Route notifications by priority:
 
 ```yaml
 notificationRouting:
-  urgent: [desktop, slack] # Agent stuck, needs input, errored
-  action: [desktop, slack] # PR ready to merge
-  warning: [slack] # Auto-fix failed
-  info: [slack] # Summary, all done
+  urgent: [desktop, telegram] # Agent stuck, needs input, errored
+  action: [desktop, telegram] # PR ready to merge
+  warning: [telegram] # Auto-fix failed
+  info: [telegram] # Summary, all done
 ```
 
 ### Agent Rules
@@ -380,6 +386,49 @@ curl -X POST -H 'Content-type: application/json' \
   $SLACK_WEBHOOK_URL
 ```
 
+### Telegram
+
+**Setup:**
+
+1. Create a Telegram bot with BotFather and copy the token.
+2. Find your chat ID (private chat or group topic chat ID).
+3. Add environment variables:
+
+   ```bash
+   echo 'export AO_TELEGRAM_BOT_TOKEN="123456:ABCDEF..."' >> ~/.zshrc
+   echo 'export AO_TELEGRAM_CHAT_ID="-1001234567890"' >> ~/.zshrc
+   echo 'export AO_TELEGRAM_WEBHOOK_SECRET="your-random-secret"' >> ~/.zshrc
+   source ~/.zshrc
+   ```
+
+4. Configure in `agent-orchestrator.yaml`:
+   ```yaml
+   defaults:
+     notifiers: [desktop, telegram]
+
+   notifiers:
+     telegram:
+       plugin: telegram
+       # Optional: override env values
+       # botToken: ${AO_TELEGRAM_BOT_TOKEN}
+       # chatId: ${AO_TELEGRAM_CHAT_ID}
+       # webhookSecret: ${AO_TELEGRAM_WEBHOOK_SECRET}
+   ```
+
+5. Point Telegram webhook to your dashboard server:
+   ```bash
+   curl -X POST "https://api.telegram.org/bot$AO_TELEGRAM_BOT_TOKEN/setWebhook" \
+     -d "url=https://YOUR_HOST/api/integrations/telegram" \
+     -d "secret_token=$AO_TELEGRAM_WEBHOOK_SECRET"
+   ```
+
+**Reply flow:**
+
+- When a session enters `needs_input`, AO sends a Telegram message with `AO_SESSION:<id>`.
+- Reply to that message in Telegram.
+- AO routes your reply into that exact session (`sessionManager.send`), and the agent continues.
+- If Telegram webhook is not configured in Bot API, AO automatically falls back to polling `getUpdates` every 30 seconds while `ao start` is running.
+
 ### Custom Trackers
 
 To add a custom tracker (Jira, Asana, etc.), create a plugin:
@@ -389,6 +438,31 @@ To add a custom tracker (Jira, Asana, etc.), create a plugin:
 3. Register your plugin in the config
 
 See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
+
+### Jira Backlog Trigger Listener
+
+Use a background listener to auto-spawn sessions from Jira backlog without moving issue state on the board:
+
+```yaml
+listeners:
+  jira-broai:
+    enabled: true
+    source: jira-backlog
+    projectId: int
+    intervalMs: 60000
+    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+    backlogStatus: "Backlog"
+    trigger:
+      type: spawn-session
+```
+
+Behavior:
+
+- Runs while `ao start` is running.
+- Enforces backlog-only selection in code (`status = "Backlog"` by default).
+- Triggers the same spawn flow as `ao spawn <project> <issue>`.
+- Takes each issue once; retries only after that issue's previous session is `killed` (not `cleanup`/`done`/etc.).
+- Never calls tracker state transitions (does not move cards on the board).
 
 ## Troubleshooting
 

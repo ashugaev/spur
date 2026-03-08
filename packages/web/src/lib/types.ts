@@ -127,6 +127,103 @@ export interface DashboardStats {
   needsReview: number;
 }
 
+export type IntegrationStatusKey =
+  | "telegramInboundPolling"
+  | "jiraCommentPolling"
+  | "jiraTriggerListeners";
+
+export type IntegrationStatusState =
+  | "inactive"
+  | "starting"
+  | "healthy"
+  | "degraded"
+  | "unknown";
+
+export interface IntegrationStatusEntry {
+  active: boolean;
+  connected: boolean;
+  ok: boolean;
+  state: IntegrationStatusState;
+  message: string | null;
+}
+
+export const INTEGRATION_STATUS_KEYS = [
+  "telegramInboundPolling",
+  "jiraCommentPolling",
+  "jiraTriggerListeners",
+] as const satisfies readonly IntegrationStatusKey[];
+
+export const INTEGRATION_STATUS_LABELS: Record<IntegrationStatusKey, string> = {
+  telegramInboundPolling: "Telegram inbound polling",
+  jiraCommentPolling: "Jira comment polling",
+  jiraTriggerListeners: "Jira trigger listeners",
+};
+
+export interface IntegrationsStatusSnapshot {
+  updatedAt: string | null;
+  source: "snapshot" | "fallback";
+  snapshotPath: string | null;
+  integrations: Record<IntegrationStatusKey, IntegrationStatusEntry>;
+}
+
+export interface JiraSprintTaskSession {
+  id: string;
+  projectId: string;
+  status: SessionStatus;
+  activity: ActivityState | null;
+  branch: string | null;
+  lastActivityAt: string;
+}
+
+export interface JiraSprintTask {
+  /** Abstract source id for future multi-tracker support (e.g. jira, linear). */
+  source?: string;
+  /** Optional manager label used by UI routing/filters. */
+  taskManager?: string;
+  issueKey: string;
+  issueUrl: string | null;
+  summary: string | null;
+  status: string | null;
+  statusCategory: string | null;
+  listenerIds: string[];
+  projectIds: string[];
+  relatedActiveSessions: JiraSprintTaskSession[];
+  spawnAvailable: boolean;
+  /**
+   * Compatibility aliases consumed by dashboard variants.
+   * Keep these populated to avoid breaking older/manual start flows.
+   */
+  key: string;
+  title: string | null;
+  canStart: boolean;
+  startEndpoint: string;
+  listenerId: string | null;
+  projectId: string | null;
+  sessionId: string | null;
+  activeSessionId: string | null;
+  sessionUrl: string | null;
+}
+
+export interface JiraSprintTaskListener {
+  /** Source adapter id (currently jira-backlog). */
+  source?: string;
+  listenerId: string;
+  projectId: string;
+  projectName: string;
+  jql: string;
+  backlogStatus: string;
+  effectiveJql: string;
+  sprintJql: string;
+  triggerAgent: string | null;
+}
+
+export interface JiraSprintTasksSnapshot {
+  updatedAt: string;
+  projectId: string | null;
+  listeners: JiraSprintTaskListener[];
+  tasks: JiraSprintTask[];
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";

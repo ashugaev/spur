@@ -37,7 +37,7 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
 
 describe("humanizeBranch", () => {
   it("strips common prefixes and title-cases", () => {
-    expect(humanizeBranch("feat/infer-project-id")).toBe("Infer Project Id");
+    expect(humanizeBranch("infer-project-id")).toBe("Infer Project Id");
     expect(humanizeBranch("fix/broken-auth-flow")).toBe("Broken Auth Flow");
     expect(humanizeBranch("chore/update-deps")).toBe("Update Deps");
     expect(humanizeBranch("refactor/session-manager")).toBe("Session Manager");
@@ -61,7 +61,7 @@ describe("humanizeBranch", () => {
   });
 
   it("handles underscores", () => {
-    expect(humanizeBranch("feat/add_new_feature")).toBe("Add New Feature");
+    expect(humanizeBranch("add_new_feature")).toBe("Add New Feature");
   });
 
   it("handles branch with no prefix", () => {
@@ -91,14 +91,14 @@ describe("getSessionTitle", () => {
     const session = makeSession({
       summary: "Agent summary",
       issueTitle: "Issue title",
-      branch: "feat/branch",
+      branch: "branch",
       pr: {
         number: 1,
         url: "https://github.com/test/repo/pull/1",
         title: "feat: add auth",
         owner: "test",
         repo: "repo",
-        branch: "feat/branch",
+        branch: "branch",
         baseBranch: "main",
         isDraft: false,
         state: "open",
@@ -126,7 +126,7 @@ describe("getSessionTitle", () => {
       summary: "Implementing OAuth2 authentication with JWT tokens",
       summaryIsFallback: false,
       issueTitle: "Add user authentication",
-      branch: "feat/auth",
+      branch: "auth",
     });
     expect(getSessionTitle(session)).toBe(
       "Implementing OAuth2 authentication with JWT tokens",
@@ -138,7 +138,7 @@ describe("getSessionTitle", () => {
       summary: "You are working on GitHub issue #42: Add authentication to API...",
       summaryIsFallback: true,
       issueTitle: "Add authentication to API",
-      branch: "feat/issue-42",
+      branch: "issue-42",
     });
     expect(getSessionTitle(session)).toBe("Add authentication to API");
   });
@@ -148,7 +148,7 @@ describe("getSessionTitle", () => {
       summary: "You are working on GitHub issue #42: Add authentication to API...",
       summaryIsFallback: true,
       issueTitle: null,
-      branch: "feat/issue-42",
+      branch: "issue-42",
     });
     expect(getSessionTitle(session)).toBe(
       "You are working on GitHub issue #42: Add authentication to API...",
@@ -159,7 +159,7 @@ describe("getSessionTitle", () => {
     const session = makeSession({
       summary: null,
       issueTitle: "Add user authentication",
-      branch: "feat/auth",
+      branch: "auth",
     });
     expect(getSessionTitle(session)).toBe("Add user authentication");
   });
@@ -168,7 +168,7 @@ describe("getSessionTitle", () => {
     const session = makeSession({
       summary: null,
       issueTitle: null,
-      branch: "feat/infer-project-id",
+      branch: "infer-project-id",
     });
     expect(getSessionTitle(session)).toBe("Infer Project Id");
   });
@@ -187,7 +187,7 @@ describe("getSessionTitle", () => {
       summary: "You are working on Linear ticket INT-1327: Refactor session manager",
       summaryIsFallback: true,
       issueTitle: null,
-      branch: "feat/INT-1327",
+      branch: "INT-1327",
     });
     expect(getSessionTitle(session)).toBe(
       "You are working on Linear ticket INT-1327: Refactor session manager",

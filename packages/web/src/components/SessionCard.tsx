@@ -33,7 +33,13 @@ const borderColorByLevel: Record<AttentionLevel, string> = {
   done:    "border-l-[var(--color-border-default)]",
 };
 
-export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: SessionCardProps) {
+export function SessionCard({
+  session,
+  onSend,
+  onKill,
+  onMerge,
+  onRestore,
+}: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [sendingAction, setSendingAction] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,7 +90,7 @@ export function SessionCard({ session, onSend, onKill, onMerge, onRestore }: Ses
         setExpanded(!expanded);
       }}
     >
-      {/* Header row: dot + session ID + terminal link */}
+      {/* Header row: dot + session ID + quick actions */}
       <div className="flex items-center gap-2 px-4 pt-4 pb-2">
         <ActivityDot activity={session.activity} />
         <span className="font-[var(--font-mono)] text-[11px] tracking-wide text-[var(--color-text-muted)]">

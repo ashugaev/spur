@@ -1,0 +1,7 @@
+interface:
+  display_name: "Developer PR Merge"
+  short_description: "Implements approved-and-green auto-merge flow"
+  default_prompt: "Use $developer-pr-merge to implement and verify auto-merge behavior in lifecycle reactions."
+
+policy:
+  allow_implicit_invocation: true

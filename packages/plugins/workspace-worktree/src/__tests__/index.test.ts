@@ -76,7 +76,7 @@ function makeCreateConfig(overrides?: Partial<WorkspaceCreateConfig>): Workspace
     projectId: "myproject",
     project: makeProject(),
     sessionId: "session-1",
-    branch: "feat/TEST-1",
+    branch: "TEST-1",
     ...overrides,
   };
 }
@@ -159,7 +159,7 @@ describe("workspace.create()", () => {
         "worktree",
         "add",
         "-b",
-        "feat/TEST-1",
+        "TEST-1",
         "/mock-home/.worktrees/myproject/session-1",
         "origin/main",
       ],
@@ -209,11 +209,11 @@ describe("workspace.create()", () => {
     );
 
     // Fourth call: checkout
-    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["checkout", "feat/TEST-1"], {
+    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["checkout", "TEST-1"], {
       cwd: "/mock-home/.worktrees/myproject/session-1",
     });
 
-    expect(info.branch).toBe("feat/TEST-1");
+    expect(info.branch).toBe("TEST-1");
   });
 
   it("cleans up worktree on checkout failure", async () => {
@@ -226,7 +226,7 @@ describe("workspace.create()", () => {
     mockGitSuccess(""); // worktree remove (cleanup)
 
     await expect(ws.create(makeCreateConfig())).rejects.toThrow(
-      'Failed to checkout branch "feat/TEST-1" in worktree: checkout failed: conflict',
+      'Failed to checkout branch "TEST-1" in worktree: checkout failed: conflict',
     );
 
     // Verify cleanup was attempted
@@ -247,7 +247,7 @@ describe("workspace.create()", () => {
     mockGitError("worktree remove failed"); // cleanup also fails
 
     await expect(ws.create(makeCreateConfig())).rejects.toThrow(
-      'Failed to checkout branch "feat/TEST-1" in worktree',
+      'Failed to checkout branch "TEST-1" in worktree',
     );
   });
 
@@ -258,7 +258,7 @@ describe("workspace.create()", () => {
     mockGitError("fatal: invalid reference"); // worktree add fails with other error
 
     await expect(ws.create(makeCreateConfig())).rejects.toThrow(
-      'Failed to create worktree for branch "feat/TEST-1": fatal: invalid reference',
+      'Failed to create worktree for branch "TEST-1": fatal: invalid reference',
     );
   });
 
@@ -304,7 +304,7 @@ describe("workspace.create()", () => {
 
     expect(info).toEqual({
       path: "/mock-home/.worktrees/myproject/session-1",
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       sessionId: "session-1",
       projectId: "myproject",
     });
@@ -415,11 +415,11 @@ describe("workspace.list()", () => {
     const porcelainOutput = [
       "worktree /mock-home/.worktrees/myproject/session-1",
       "HEAD abc1234",
-      "branch refs/heads/feat/TEST-1",
+      "branch refs/heads/TEST-1",
       "",
       "worktree /mock-home/.worktrees/myproject/session-2",
       "HEAD def5678",
-      "branch refs/heads/feat/TEST-2",
+      "branch refs/heads/TEST-2",
       "",
       "worktree /repo/path",
       "HEAD 0000000",
@@ -433,13 +433,13 @@ describe("workspace.list()", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual({
       path: "/mock-home/.worktrees/myproject/session-1",
-      branch: "feat/TEST-1",
+      branch: "TEST-1",
       sessionId: "session-1",
       projectId: "myproject",
     });
     expect(result[1]).toEqual({
       path: "/mock-home/.worktrees/myproject/session-2",
-      branch: "feat/TEST-2",
+      branch: "TEST-2",
       sessionId: "session-2",
       projectId: "myproject",
     });
@@ -474,11 +474,11 @@ describe("workspace.list()", () => {
     const porcelainOutput = [
       "worktree /other/path/session-1",
       "HEAD abc1234",
-      "branch refs/heads/feat/other",
+      "branch refs/heads/other",
       "",
       "worktree /mock-home/.worktrees/myproject/session-1",
       "HEAD def5678",
-      "branch refs/heads/feat/TEST-1",
+      "branch refs/heads/TEST-1",
     ].join("\n");
 
     mockGitSuccess(porcelainOutput);
@@ -517,7 +517,7 @@ describe("workspace.list()", () => {
     const porcelainOutput = [
       "worktree /mock-home/.worktrees/myproject/session-2",
       "HEAD abc1234",
-      "branch refs/heads/feat/TEST-2",
+      "branch refs/heads/TEST-2",
     ].join("\n");
     mockGitSuccess(porcelainOutput);
 
@@ -546,7 +546,7 @@ describe("workspace.list()", () => {
     const porcelainOutput = [
       "worktree /mock-home/.worktrees/myproject/session-1",
       "HEAD abc1234",
-      "branch refs/heads/feat/TEST-1",
+      "branch refs/heads/TEST-1",
     ].join("\n");
 
     mockGitSuccess(porcelainOutput);
@@ -560,7 +560,7 @@ describe("workspace.list()", () => {
 describe("workspace.postCreate()", () => {
   const workspaceInfo: WorkspaceInfo = {
     path: "/mock-home/.worktrees/myproject/session-1",
-    branch: "feat/TEST-1",
+    branch: "TEST-1",
     sessionId: "session-1",
     projectId: "myproject",
   };

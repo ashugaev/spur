@@ -206,7 +206,7 @@ describe.skipIf(!canRun)("tracker-linear (integration)", () => {
 
   it("branchName returns conventional branch name", () => {
     const branch = tracker.branchName(issueIdentifier, project);
-    expect(branch).toBe(`feat/${issueIdentifier}`);
+    expect(branch).toBe(`${issueIdentifier}`);
   });
 
   it("generatePrompt includes issue details", async () => {

@@ -157,7 +157,7 @@ function generateSessionPrefix(projectId: string): string {
 ```
 project=integrator
 issue=INT-100
-branch=feat/INT-100
+branch=INT-100
 status=working
 tmuxName=a3b4c5d6e7f8-int-1
 worktree=/Users/alice/.agent-orchestrator/a3b4c5d6e7f8-integrator/worktrees/int-1

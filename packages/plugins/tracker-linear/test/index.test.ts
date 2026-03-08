@@ -320,8 +320,8 @@ describe("tracker-linear plugin", () => {
   // ---- branchName --------------------------------------------------------
 
   describe("branchName", () => {
-    it("generates feat/ prefix branch name", () => {
-      expect(tracker.branchName("INT-123", project)).toBe("feat/INT-123");
+    it("generates  prefix branch name", () => {
+      expect(tracker.branchName("INT-123", project)).toBe("INT-123");
     });
   });
 

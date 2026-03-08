@@ -183,11 +183,10 @@ export function DirectTerminal({
         // Fit terminal to container
         fit.fit();
 
-        // WebSocket URL (stable across reconnects)
+        // WebSocket URL — same origin, proxied through the unified server.
+        // This ensures remote access (Tailscale, ngrok) works through a single port.
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const hostname = window.location.hostname;
-        const port = process.env.NEXT_PUBLIC_DIRECT_TERMINAL_PORT ?? "14801";
-        const wsUrl = `${protocol}//${hostname}:${port}/ws?session=${encodeURIComponent(sessionId)}`;
+        const wsUrl = `${protocol}//${window.location.host}/terminal/ws?session=${encodeURIComponent(sessionId)}`;
 
         // ── Preserve selection while terminal receives output ────────
         // xterm.js clears the selection on every terminal.write(). We

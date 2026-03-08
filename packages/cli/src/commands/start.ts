@@ -1,5 +1,5 @@
 /**
- * `ao start` and `ao stop` commands — unified orchestrator startup.
+ * `ao start`, `ao stop`, and `ao restart` commands — unified orchestrator lifecycle.
  *
  * Supports two modes:
  *   1. `ao start [project]` — start from existing config
@@ -17,6 +17,7 @@ import ora from "ora";
 import type { Command } from "commander";
 import {
   loadConfig,
+  createLifecycleManager,
   generateOrchestratorPrompt,
   isRepoUrl,
   parseRepoUrl,
@@ -29,7 +30,14 @@ import {
   type ParsedRepoUrl,
 } from "@composio/ao-core";
 import { exec, execSilent } from "../lib/shell.js";
-import { getSessionManager } from "../lib/create-session-manager.js";
+import { getPluginRegistry, getSessionManager } from "../lib/create-session-manager.js";
+import { maybeStartTelegramLongPolling, type TelegramPollingController } from "../lib/telegram-polling.js";
+import { maybeStartJiraCommentPolling, type JiraCommentPollingController } from "../lib/jira-comment-polling.js";
+import {
+  maybeStartConfiguredListeners,
+  type ListenerGroupController,
+} from "../lib/listeners/index.js";
+import { createIntegrationHealthReporter } from "../lib/integration-health.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
@@ -217,10 +225,19 @@ async function startDashboard(
   port: number,
   webDir: string,
   configPath: string | null,
+  projectId: string,
+  integrationHealthSnapshotPath: string,
   terminalPort?: number,
   directTerminalPort?: number,
 ): Promise<ChildProcess> {
-  const env = await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort);
+  const env =
+    (await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort)) ??
+    ({ ...process.env } as Record<string, string>);
+  env["AO_PROJECT_ID"] = projectId;
+  env["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"] = integrationHealthSnapshotPath;
+  // Compatibility aliases for older status readers.
+  env["AO_HEALTH_SNAPSHOT_PATH"] = integrationHealthSnapshotPath;
+  env["AO_INTEGRATIONS_STATUS_PATH"] = integrationHealthSnapshotPath;
 
   const child = spawn("pnpm", ["run", "dev"], {
     cwd: webDir,
@@ -250,11 +267,21 @@ async function runStartup(
 ): Promise<void> {
   const sessionId = `${project.sessionPrefix}-orchestrator`;
   let port = config.port ?? DEFAULT_PORT;
+  const integrationHealth = createIntegrationHealthReporter({
+    config,
+    projectId,
+    project,
+  });
 
   console.log(chalk.bold(`\nStarting orchestrator for ${chalk.cyan(project.name)}\n`));
 
   const spinner = ora();
   let dashboardProcess: ChildProcess | null = null;
+  let lifecycleManager: ReturnType<typeof createLifecycleManager> | null = null;
+  let telegramPolling: TelegramPollingController | null = null;
+  let jiraPolling: JiraCommentPollingController | null = null;
+  let configuredListeners: ListenerGroupController | null = null;
+  let sharedSessionManager: Awaited<ReturnType<typeof getSessionManager>> | null = null;
   let exists = false;
 
   // Start dashboard (unless --no-dashboard)
@@ -289,17 +316,67 @@ async function runStartup(
       port,
       webDir,
       config.configPath,
+      projectId,
+      integrationHealth.snapshotPath,
       config.terminalPort,
       config.directTerminalPort,
     );
     spinner.succeed(`Dashboard starting on http://localhost:${port}`);
     console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
+
+    // Start lifecycle polling in the same process as `ao start` so reactions
+    // and notifiers (including Telegram) run continuously while dashboard is up.
+    const [sessionManager, registry] = await Promise.all([
+      getSessionManager(config),
+      getPluginRegistry(config),
+    ]);
+    sharedSessionManager = sessionManager;
+    lifecycleManager = createLifecycleManager({
+      config,
+      registry,
+      sessionManager,
+    });
+    lifecycleManager.start();
+
+    telegramPolling = await maybeStartTelegramLongPolling({
+      config,
+      sessionManager,
+      healthReporter: integrationHealth,
+    });
+    if (telegramPolling) {
+      console.log(
+        chalk.dim("  Telegram inbound: polling enabled (2s fallback, 30s rate-limit backoff)"),
+      );
+    }
+
+    jiraPolling = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager,
+      healthReporter: integrationHealth,
+    });
+    if (jiraPolling) {
+      console.log(chalk.dim("  Jira inbound: comment polling enabled (60s)"));
+    }
+
+    configuredListeners = await maybeStartConfiguredListeners({
+      config,
+      sessionManager,
+      projectId,
+      healthReporter: integrationHealth,
+    });
+    if (configuredListeners && configuredListeners.activeListeners.length > 0) {
+      console.log(
+        chalk.dim(
+          `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (enabled)`,
+        ),
+      );
+    }
   }
 
   // Create orchestrator session (unless --no-orchestrator or already exists)
   let tmuxTarget = sessionId;
   if (opts?.orchestrator !== false) {
-    const sm = await getSessionManager(config);
+    const sm = sharedSessionManager ?? (await getSessionManager(config));
     const existing = await sm.get(sessionId);
     exists = existing !== null && existing.status !== "killed";
 
@@ -363,6 +440,10 @@ async function runStartup(
   if (dashboardProcess) {
     dashboardProcess.on("exit", (code) => {
       if (openAbort) openAbort.abort();
+      if (lifecycleManager) lifecycleManager.stop();
+      if (telegramPolling) telegramPolling.stop();
+      if (jiraPolling) jiraPolling.stop();
+      if (configuredListeners) configuredListeners.stop();
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }
@@ -485,6 +566,52 @@ export function registerStop(program: Command): void {
         await stopDashboard(port);
 
         console.log(chalk.bold.green("\n✓ Orchestrator stopped\n"));
+      } catch (err) {
+        if (err instanceof Error) {
+          console.error(chalk.red("\nError:"), err.message);
+        } else {
+          console.error(chalk.red("\nError:"), String(err));
+        }
+        process.exit(1);
+      }
+    });
+}
+
+export function registerRestart(program: Command): void {
+  program
+    .command("restart <project>")
+    .description("Restart orchestrator agent and dashboard for a project")
+    .option("--rebuild", "Clean and rebuild dashboard before starting")
+    .action(async (projectArg: string, opts?: { rebuild?: boolean }) => {
+      try {
+        const config = loadConfig();
+        const { projectId, project } = resolveProject(config, projectArg);
+        const sessionId = `${project.sessionPrefix}-orchestrator`;
+        const port = config.port ?? 3000;
+
+        console.log(chalk.bold(`\nRestarting orchestrator for ${chalk.cyan(project.name)}\n`));
+
+        // Stop existing orchestrator session (if any)
+        const sm = await getSessionManager(config);
+        const existing = await sm.get(sessionId);
+
+        if (existing) {
+          const spinner = ora("Stopping orchestrator session").start();
+          await sm.kill(sessionId);
+          spinner.succeed("Orchestrator session stopped");
+        } else {
+          console.log(chalk.yellow(`Orchestrator session "${sessionId}" is not running`));
+        }
+
+        // Stop dashboard process on configured port before re-starting.
+        await stopDashboard(port);
+
+        // Start everything again using the same startup flow as `ao start`.
+        await runStartup(config, projectId, project, {
+          dashboard: true,
+          orchestrator: true,
+          rebuild: opts?.rebuild,
+        });
       } catch (err) {
         if (err instanceof Error) {
           console.error(chalk.red("\nError:"), err.message);

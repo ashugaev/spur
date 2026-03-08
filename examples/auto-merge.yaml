@@ -1,5 +1,5 @@
-# Aggressive automation with auto-merge
-# Automatically merges approved PRs with passing CI
+# Aggressive automation with auto-merge + conflict auto-resolution
+# Automatically merges approved PRs with passing CI and sends conflict fixes back to agents
 
 dataDir: ~/.agent-orchestrator
 worktreeDir: ~/.worktrees
@@ -13,7 +13,7 @@ projects:
     # Enable auto-merge for this project
     reactions:
       approved-and-green:
-        auto: true # Automatically merge when PR is approved and CI passes
+        auto: true # Actually executes SCM merge when PR is approved and CI passes
         action: auto-merge
 
 # Global reactions
@@ -29,6 +29,13 @@ reactions:
     auto: true
     action: send-to-agent
     escalateAfter: 1h # Notify human if not resolved in 1 hour
+
+  # Auto-resolve merge conflicts by dispatching instructions back to the agent
+  merge-conflicts:
+    auto: true
+    action: send-to-agent
+    message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+    escalateAfter: 15m # Escalate if conflicts are not resolved quickly
 
   # Notify when agent is stuck
   agent-stuck:

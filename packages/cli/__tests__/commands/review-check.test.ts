@@ -174,7 +174,7 @@ describe("review-check command", () => {
   it("reports no pending reviews when none exist", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     // All threads resolved, no changes requested
@@ -194,7 +194,7 @@ describe("review-check command", () => {
   it("finds sessions with pending review comments", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     mockGh.mockResolvedValue(
@@ -214,7 +214,7 @@ describe("review-check command", () => {
   });
 
   it("skips sessions without PR metadata", async () => {
-    writeFileSync(join(sessionsDir, "app-1"), "branch=feat/fix\nstatus=working\n");
+    writeFileSync(join(sessionsDir, "app-1"), "branch=fix\nstatus=working\n");
 
     await program.parseAsync(["node", "test", "review-check"]);
 
@@ -227,7 +227,7 @@ describe("review-check command", () => {
   it("skips sessions with non-matching prefix", async () => {
     writeFileSync(
       join(sessionsDir, "other-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     await program.parseAsync(["node", "test", "review-check"]);
@@ -246,7 +246,7 @@ describe("review-check command", () => {
   it("sends fix prompt when not in dry-run mode", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     mockGh.mockResolvedValue(
@@ -277,7 +277,7 @@ describe("review-check command", () => {
   it("handles gh returning null (API failure)", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     mockGh.mockResolvedValue(null);
@@ -291,7 +291,7 @@ describe("review-check command", () => {
   it("handles malformed GraphQL response gracefully", async () => {
     writeFileSync(
       join(sessionsDir, "app-1"),
-      "branch=feat/fix\npr=https://github.com/org/my-app/pull/10\n",
+      "branch=fix\npr=https://github.com/org/my-app/pull/10\n",
     );
 
     mockGh.mockResolvedValue("not valid json {{{");

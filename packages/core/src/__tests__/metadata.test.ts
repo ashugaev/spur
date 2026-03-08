@@ -28,14 +28,14 @@ describe("writeMetadata + readMetadata", () => {
   it("writes and reads basic metadata", () => {
     writeMetadata(dataDir, "app-1", {
       worktree: "/tmp/worktree",
-      branch: "feat/test",
+      branch: "test",
       status: "working",
     });
 
     const meta = readMetadata(dataDir, "app-1");
     expect(meta).not.toBeNull();
     expect(meta!.worktree).toBe("/tmp/worktree");
-    expect(meta!.branch).toBe("feat/test");
+    expect(meta!.branch).toBe("test");
     expect(meta!.status).toBe("working");
   });
 
@@ -70,14 +70,14 @@ describe("writeMetadata + readMetadata", () => {
   it("produces key=value format matching bash scripts", () => {
     writeMetadata(dataDir, "app-3", {
       worktree: "/tmp/w",
-      branch: "feat/INT-123",
+      branch: "INT-123",
       status: "working",
       issue: "https://linear.app/team/issue/INT-123",
     });
 
     const content = readFileSync(join(dataDir, "app-3"), "utf-8");
     expect(content).toContain("worktree=/tmp/w\n");
-    expect(content).toContain("branch=feat/INT-123\n");
+    expect(content).toContain("branch=INT-123\n");
     expect(content).toContain("status=working\n");
     expect(content).toContain("issue=https://linear.app/team/issue/INT-123\n");
   });
@@ -305,7 +305,7 @@ describe("readArchivedMetadataRaw", () => {
   it("integrates with deleteMetadata archive", () => {
     writeMetadata(dataDir, "app-1", {
       worktree: "/tmp/w",
-      branch: "feat/test",
+      branch: "test",
       status: "killed",
       issue: "TEST-1",
     });
@@ -318,7 +318,7 @@ describe("readArchivedMetadataRaw", () => {
     // Archived metadata should be readable
     const archived = readArchivedMetadataRaw(dataDir, "app-1");
     expect(archived).not.toBeNull();
-    expect(archived!["branch"]).toBe("feat/test");
+    expect(archived!["branch"]).toBe("test");
     expect(archived!["issue"]).toBe("TEST-1");
   });
 });

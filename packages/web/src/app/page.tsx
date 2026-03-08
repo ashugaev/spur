@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Dashboard } from "@/components/Dashboard";
-import type { DashboardSession } from "@/lib/types";
+import type { DashboardSession, IntegrationsStatusSnapshot } from "@/lib/types";
 import { getServices, getSCM } from "@/lib/services";
 import {
   sessionToDashboard,
@@ -11,6 +11,7 @@ import {
 } from "@/lib/serialize";
 import { prCache, prCacheKey } from "@/lib/cache";
 import { getProjectName } from "@/lib/project-name";
+import { readIntegrationsStatusSnapshot, fallbackIntegrationsStatus } from "@/lib/integration-status";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,15 @@ export async function generateMetadata(): Promise<Metadata> {
 export default async function Home() {
   let sessions: DashboardSession[] = [];
   let orchestratorId: string | null = null;
+  let initialIntegrationsStatus: IntegrationsStatusSnapshot = fallbackIntegrationsStatus();
   const projectName = getProjectName();
+
+  try {
+    initialIntegrationsStatus = readIntegrationsStatusSnapshot();
+  } catch {
+    // Keep fallback status if snapshot cannot be read
+  }
+
   try {
     const { config, registry, sessionManager } = await getServices();
     const allSessions = await sessionManager.list();
@@ -101,6 +110,12 @@ export default async function Home() {
   }
 
   return (
-    <Dashboard initialSessions={sessions} stats={computeStats(sessions)} orchestratorId={orchestratorId} projectName={projectName} />
+    <Dashboard
+      initialSessions={sessions}
+      initialIntegrationsStatus={initialIntegrationsStatus}
+      stats={computeStats(sessions)}
+      orchestratorId={orchestratorId}
+      projectName={projectName}
+    />
   );
 }

@@ -98,7 +98,7 @@ describe("create()", () => {
     const info = await workspace.create({
       projectId: "myproject",
       sessionId: "session-1",
-      branch: "feat/test",
+      branch: "test",
       project: makeProject(),
     });
 
@@ -116,7 +116,7 @@ describe("create()", () => {
     const info = await workspace.create({
       projectId: "myproject",
       sessionId: "session-2",
-      branch: "feat/custom",
+      branch: "custom",
       project: makeProject(),
     });
 
@@ -142,7 +142,7 @@ describe("workspace.create()", () => {
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/branch",
+      branch: "branch",
       project: makeProject(),
     });
 
@@ -166,7 +166,7 @@ describe("workspace.create()", () => {
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/branch",
+      branch: "branch",
       project: makeProject(),
     });
 
@@ -189,7 +189,7 @@ describe("workspace.create()", () => {
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/branch",
+      branch: "branch",
       project: makeProject({ defaultBranch: "develop" }),
     });
 
@@ -211,13 +211,13 @@ describe("workspace.create()", () => {
     mockGitSuccess("https://github.com/test/repo.git");
     (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
     mockGitSuccess("");
-    // git checkout -b feat/new-branch
+    // git checkout -b new-branch
     mockGitSuccess("");
 
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/new-branch",
+      branch: "new-branch",
       project: makeProject(),
     });
 
@@ -225,7 +225,7 @@ describe("workspace.create()", () => {
     expect(mockExecFileAsync).toHaveBeenNthCalledWith(
       3,
       "git",
-      ["checkout", "-b", "feat/new-branch"],
+      ["checkout", "-b", "new-branch"],
       { cwd: "/mock-home/.ao-clones/proj/sess" },
     );
   });
@@ -237,23 +237,23 @@ describe("workspace.create()", () => {
     (fs.existsSync as ReturnType<typeof vi.fn>).mockReturnValue(false);
     mockGitSuccess("");
     // git checkout -b fails (branch exists)
-    mockGitError("fatal: A branch named 'feat/existing' already exists");
+    mockGitError("fatal: A branch named 'existing' already exists");
     // git checkout (plain) succeeds
     mockGitSuccess("");
 
     const info = await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/existing",
+      branch: "existing",
       project: makeProject(),
     });
 
     // Fourth call: plain checkout
-    expect(mockExecFileAsync).toHaveBeenNthCalledWith(4, "git", ["checkout", "feat/existing"], {
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(4, "git", ["checkout", "existing"], {
       cwd: "/mock-home/.ao-clones/proj/sess",
     });
 
-    expect(info.branch).toBe("feat/existing");
+    expect(info.branch).toBe("existing");
   });
 
   it("cleans up partial clone on clone failure", async () => {
@@ -272,7 +272,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "proj",
         sessionId: "sess",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow('Failed to clone repo for session "sess"');
@@ -323,7 +323,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "proj",
         sessionId: "sess",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow(
@@ -338,7 +338,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "bad/project",
         sessionId: "sess",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow('Invalid projectId "bad/project"');
@@ -351,7 +351,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "bad.project",
         sessionId: "sess",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow('Invalid projectId "bad.project"');
@@ -364,7 +364,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "proj",
         sessionId: "bad session!",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow('Invalid sessionId "bad session!"');
@@ -377,7 +377,7 @@ describe("workspace.create()", () => {
       workspace.create({
         projectId: "proj",
         sessionId: "../escape",
-        branch: "feat/branch",
+        branch: "branch",
         project: makeProject(),
       }),
     ).rejects.toThrow('Invalid sessionId "../escape"');
@@ -394,13 +394,13 @@ describe("workspace.create()", () => {
     const info = await workspace.create({
       projectId: "my-project",
       sessionId: "session-42",
-      branch: "feat/awesome",
+      branch: "awesome",
       project: makeProject(),
     });
 
     expect(info).toEqual({
       path: "/mock-home/.ao-clones/my-project/session-42",
-      branch: "feat/awesome",
+      branch: "awesome",
       sessionId: "session-42",
       projectId: "my-project",
     });
@@ -417,7 +417,7 @@ describe("workspace.create()", () => {
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/branch",
+      branch: "branch",
       project: makeProject(),
     });
 
@@ -435,7 +435,7 @@ describe("workspace.create()", () => {
     await workspace.create({
       projectId: "proj",
       sessionId: "sess",
-      branch: "feat/branch",
+      branch: "branch",
       project: makeProject({ path: "~/my-repos/project" }),
     });
 
@@ -497,21 +497,21 @@ describe("workspace.list()", () => {
     ]);
 
     // git branch --show-current for each directory
-    mockGitSuccess("feat/feature-a");
-    mockGitSuccess("feat/feature-b");
+    mockGitSuccess("feature-a");
+    mockGitSuccess("feature-b");
 
     const result = await workspace.list("myproject");
 
     expect(result).toEqual([
       {
         path: "/mock-home/.ao-clones/myproject/session-1",
-        branch: "feat/feature-a",
+        branch: "feature-a",
         sessionId: "session-1",
         projectId: "myproject",
       },
       {
         path: "/mock-home/.ao-clones/myproject/session-2",
-        branch: "feat/feature-b",
+        branch: "feature-b",
         sessionId: "session-2",
         projectId: "myproject",
       },
@@ -558,7 +558,7 @@ describe("workspace.list()", () => {
     ]);
 
     // First directory succeeds
-    mockGitSuccess("feat/working");
+    mockGitSuccess("working");
     // Second directory fails (not a valid git repo)
     mockGitError("fatal: not a git repository");
 
@@ -596,7 +596,7 @@ describe("workspace.postCreate()", () => {
 
     const info = {
       path: "/mock-home/.ao-clones/proj/sess",
-      branch: "feat/branch",
+      branch: "branch",
       sessionId: "sess",
       projectId: "proj",
     };
@@ -627,7 +627,7 @@ describe("workspace.postCreate()", () => {
 
     const info = {
       path: "/mock-home/.ao-clones/proj/sess",
-      branch: "feat/branch",
+      branch: "branch",
       sessionId: "sess",
       projectId: "proj",
     };
@@ -644,7 +644,7 @@ describe("workspace.postCreate()", () => {
 
     const info = {
       path: "/mock-home/.ao-clones/proj/sess",
-      branch: "feat/branch",
+      branch: "branch",
       sessionId: "sess",
       projectId: "proj",
     };

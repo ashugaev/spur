@@ -116,7 +116,7 @@ describe.skipIf(!tmuxOk)("CLI-Core integration (hash-based architecture)", () =>
     const metadataPath = join(sessionsDir, sessionName);
     const metadata = [
       `worktree=${tmpDir}`,
-      `branch=feat/test`,
+      `branch=test`,
       `status=spawning`,
       `project=test-project`,
       `issue=TEST-123`,
@@ -143,7 +143,7 @@ describe.skipIf(!tmuxOk)("CLI-Core integration (hash-based architecture)", () =>
     const metadataPath = join(sessionsDir, sessionName);
     const metadata = [
       `worktree=${tmpDir}`,
-      `branch=feat/test`,
+      `branch=test`,
       `status=working`,
       `project=test-project`,
       `issue=TEST-123`,
@@ -193,7 +193,7 @@ describe.skipIf(!tmuxOk)("CLI-Core integration (hash-based architecture)", () =>
     const session = sessions.find((s) => s.id === sessionName);
     expect(session).toBeDefined();
     expect(session?.projectId).toBe("test-project");
-    expect(session?.branch).toBe("feat/test");
+    expect(session?.branch).toBe("test");
     expect(session?.issueId).toBe("TEST-123");
     expect(session?.status).toBe("working");
   });
@@ -255,7 +255,7 @@ describe.skipIf(!tmuxOk)("CLI-Core integration (hash-based architecture)", () =>
     const sessionAName = `${sessionPrefix}-a-1`;
     writeFileSync(
       join(sessionsDirA, sessionAName),
-      `worktree=${tmpDir}/a\nbranch=feat/A-100\nstatus=working\nproject=project-a\nissue=A-100\n`,
+      `worktree=${tmpDir}/a\nbranch=A-100\nstatus=working\nproject=project-a\nissue=A-100\n`,
     );
 
     // Write metadata for project B
@@ -264,7 +264,7 @@ describe.skipIf(!tmuxOk)("CLI-Core integration (hash-based architecture)", () =>
     const sessionBName = `${sessionPrefix}-b-1`;
     writeFileSync(
       join(sessionsDirB, sessionBName),
-      `worktree=${tmpDir}/b\nbranch=feat/B-100\nstatus=working\nproject=project-b\nissue=B-100\n`,
+      `worktree=${tmpDir}/b\nbranch=B-100\nstatus=working\nproject=project-b\nissue=B-100\n`,
     );
 
     const registry = createPluginRegistry();

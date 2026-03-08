@@ -199,9 +199,9 @@ describe("SessionCard", () => {
   });
 
   it("renders branch name", () => {
-    const session = makeSession({ branch: "feat/cool-thing" });
+    const session = makeSession({ branch: "cool-thing" });
     render(<SessionCard session={session} />);
-    expect(screen.getByText("feat/cool-thing")).toBeInTheDocument();
+    expect(screen.getByText("cool-thing")).toBeInTheDocument();
   });
 
   it("renders terminal link", () => {

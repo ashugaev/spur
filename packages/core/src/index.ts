@@ -25,10 +25,12 @@ export { createPluginRegistry } from "./plugin-registry.js";
 export {
   readMetadata,
   readMetadataRaw,
+  readArchivedMetadataRaw,
   writeMetadata,
   updateMetadata,
   deleteMetadata,
   listMetadata,
+  reserveSessionId,
 } from "./metadata.js";
 
 // tmux — command wrappers
@@ -59,8 +61,41 @@ export type { PromptBuildConfig } from "./prompt-builder.js";
 export { generateOrchestratorPrompt } from "./orchestrator-prompt.js";
 export type { OrchestratorPromptConfig } from "./orchestrator-prompt.js";
 
+// Tailscale — remote access utilities
+export { getTailscaleIp, getTailscaleDnsName, getTailscaleServeUrl, getLocalHostname, getDashboardUrl } from "./tailscale.js";
+
 // Shared utilities
 export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from "./utils.js";
+
+// Session routing utilities
+export {
+  coerceOrchestratorSessionRoutingCandidates,
+  selectFallbackOrchestratorSessionId,
+} from "./session-routing.js";
+export type {
+  OrchestratorSessionRoutingCandidate,
+  SelectFallbackOrchestratorSessionOptions,
+} from "./session-routing.js";
+
+// Inbound source context — persistent per-session source envelopes
+export {
+  createInboundContextStore,
+  buildTelegramInboundRouting,
+  buildJiraInboundRouting,
+  formatInboundMessageForSession,
+  isTelegramInboundEnvelope,
+  isJiraInboundEnvelope,
+  getInboundContextStatePath,
+} from "./inbound-context.js";
+export type {
+  InboundSource,
+  InboundEnvelope,
+  InboundContextStore,
+  EnqueueInboundEnvelopeInput,
+  TelegramInboundRouting,
+  JiraInboundRouting,
+  FormatInboundMessageForSessionInput,
+} from "./inbound-context.js";
 
 // Path utilities — hash-based directory structure
 export {

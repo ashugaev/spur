@@ -15,8 +15,19 @@ import type { SessionManager } from "@composio/ao-core";
 // Hoisted mocks
 // ---------------------------------------------------------------------------
 
-const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitForPortAndOpen, mockSpawn } =
-  vi.hoisted(() => ({
+const {
+  mockExec,
+  mockExecSilent,
+  mockConfigRef,
+  mockSessionManager,
+  mockWaitForPortAndOpen,
+  mockSpawn,
+  mockLifecycleManager,
+  mockRegistry,
+  mockMaybeStartTelegramLongPolling,
+  mockMaybeStartJiraCommentPolling,
+  mockMaybeStartConfiguredListeners,
+} = vi.hoisted(() => ({
     mockExec: vi.fn(),
     mockExecSilent: vi.fn(),
     mockConfigRef: { current: null as Record<string, unknown> | null },
@@ -31,6 +42,17 @@ const { mockExec, mockExecSilent, mockConfigRef, mockSessionManager, mockWaitFor
     },
     mockWaitForPortAndOpen: vi.fn().mockResolvedValue(undefined),
     mockSpawn: vi.fn(),
+    mockLifecycleManager: { start: vi.fn(), stop: vi.fn() },
+    mockRegistry: {
+      register: vi.fn(),
+      get: vi.fn(() => null),
+      list: vi.fn(() => []),
+      loadBuiltins: vi.fn(),
+      loadFromConfig: vi.fn(),
+    },
+    mockMaybeStartTelegramLongPolling: vi.fn().mockResolvedValue(null),
+    mockMaybeStartJiraCommentPolling: vi.fn().mockResolvedValue(null),
+    mockMaybeStartConfiguredListeners: vi.fn().mockResolvedValue(null),
   }),
 );
 
@@ -63,11 +85,28 @@ vi.mock("@composio/ao-core", async (importOriginal) => {
       if (path) return actual.loadConfig(path);
       return mockConfigRef.current;
     },
+    createLifecycleManager: () => mockLifecycleManager,
   };
 });
 
 vi.mock("../../src/lib/create-session-manager.js", () => ({
   getSessionManager: async (): Promise<SessionManager> => mockSessionManager as SessionManager,
+  getPluginRegistry: async () => mockRegistry,
+}));
+
+vi.mock("../../src/lib/telegram-polling.js", () => ({
+  maybeStartTelegramLongPolling: (...args: unknown[]) =>
+    mockMaybeStartTelegramLongPolling(...args),
+}));
+
+vi.mock("../../src/lib/jira-comment-polling.js", () => ({
+  maybeStartJiraCommentPolling: (...args: unknown[]) =>
+    mockMaybeStartJiraCommentPolling(...args),
+}));
+
+vi.mock("../../src/lib/listeners/index.js", () => ({
+  maybeStartConfiguredListeners: (...args: unknown[]) =>
+    mockMaybeStartConfiguredListeners(...args),
 }));
 
 vi.mock("../../src/lib/web-dir.js", () => ({
@@ -107,7 +146,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 import { Command } from "commander";
-import { registerStart, registerStop } from "../../src/commands/start.js";
+import { registerStart, registerStop, registerRestart } from "../../src/commands/start.js";
 
 let tmpDir: string;
 let program: Command;
@@ -120,6 +159,7 @@ beforeEach(() => {
   program.exitOverride();
   registerStart(program);
   registerStop(program);
+  registerRestart(program);
 
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -136,6 +176,16 @@ beforeEach(() => {
   mockSessionManager.kill.mockReset();
   mockExec.mockReset();
   mockExecSilent.mockReset();
+  mockLifecycleManager.start.mockReset();
+  mockLifecycleManager.stop.mockReset();
+  mockRegistry.get.mockReset();
+  mockRegistry.get.mockReturnValue(null);
+  mockMaybeStartTelegramLongPolling.mockReset();
+  mockMaybeStartTelegramLongPolling.mockResolvedValue(null);
+  mockMaybeStartJiraCommentPolling.mockReset();
+  mockMaybeStartJiraCommentPolling.mockResolvedValue(null);
+  mockMaybeStartConfiguredListeners.mockReset();
+  mockMaybeStartConfiguredListeners.mockResolvedValue(null);
   // Default: execSilent returns null (gh not available), so clone falls through to git SSH/HTTPS
   mockExecSilent.mockResolvedValue(null);
   mockWaitForPortAndOpen.mockReset();
@@ -154,8 +204,13 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 function makeConfig(projects: Record<string, Record<string, unknown>>): Record<string, unknown> {
+  const configPath = join(tmpDir, "agent-orchestrator.yaml");
+  if (!existsSync(configPath)) {
+    writeFileSync(configPath, "projects: {}\n");
+  }
+
   return {
-    configPath: join(tmpDir, "agent-orchestrator.yaml"),
+    configPath,
     port: 3000,
     defaults: {
       runtime: "tmux",
@@ -524,6 +579,34 @@ describe("start command — browser open waits for port", () => {
     expect(port).toBe(3000);
     expect(url).toContain("/sessions/app-orchestrator");
     expect(signal).toBeInstanceOf(AbortSignal);
+    expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartJiraCommentPolling).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartConfiguredListeners).toHaveBeenCalledTimes(1);
+    expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledWith(
+      expect.objectContaining({
+        healthReporter: expect.objectContaining({
+          markStarting: expect.any(Function),
+          markHealthy: expect.any(Function),
+          markDegraded: expect.any(Function),
+          markInactive: expect.any(Function),
+        }),
+      }),
+    );
+
+    expect(mockSpawn).toHaveBeenCalled();
+    const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
+      | { env?: Record<string, string> }
+      | undefined;
+    expect(spawnOptions?.env?.["AO_PROJECT_ID"]).toBe("my-app");
+    expect(spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"]).toContain(
+      "integration-health.json",
+    );
+    expect(spawnOptions?.env?.["AO_HEALTH_SNAPSHOT_PATH"]).toBe(
+      spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"],
+    );
+    expect(spawnOptions?.env?.["AO_INTEGRATIONS_STATUS_PATH"]).toBe(
+      spawnOptions?.env?.["AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH"],
+    );
   });
 
   it("skips browser open with --no-dashboard", async () => {
@@ -532,6 +615,9 @@ describe("start command — browser open waits for port", () => {
     await program.parseAsync(["node", "test", "start", "--no-dashboard", "--no-orchestrator"]);
 
     expect(mockWaitForPortAndOpen).not.toHaveBeenCalled();
+    expect(mockMaybeStartTelegramLongPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartJiraCommentPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartConfiguredListeners).not.toHaveBeenCalled();
   });
 });
 
@@ -563,5 +649,54 @@ describe("stop command", () => {
     expect(mockSessionManager.kill).not.toHaveBeenCalled();
     const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
     expect(output).toContain("is not running");
+  });
+});
+
+describe("restart command", () => {
+  it("stops then starts orchestrator and dashboard for the given project", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject({ sessionPrefix: "app" }) });
+    const { findWebDir } = await import("../../src/lib/web-dir.js");
+    vi.mocked(findWebDir).mockReturnValue(tmpDir);
+    writeFileSync(join(tmpDir, "package.json"), "{}");
+    mockSessionManager.get
+      .mockResolvedValueOnce({ id: "app-orchestrator", status: "running" }) // restart stop phase
+      .mockResolvedValueOnce(null); // runStartup spawn phase
+    mockSessionManager.kill.mockResolvedValue(undefined);
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "app-orchestrator",
+      runtimeHandle: { id: "tmux-app-orchestrator" },
+    });
+    mockExec.mockResolvedValue({ stdout: "12345", stderr: "" });
+
+    await program.parseAsync(["node", "test", "restart", "my-app"]);
+
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-orchestrator");
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("Restarting orchestrator for");
+    expect(output).toContain("Startup complete");
+  });
+
+  it("restarts even when orchestrator session is not running", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject({ sessionPrefix: "app" }) });
+    const { findWebDir } = await import("../../src/lib/web-dir.js");
+    vi.mocked(findWebDir).mockReturnValue(tmpDir);
+    writeFileSync(join(tmpDir, "package.json"), "{}");
+    mockSessionManager.get
+      .mockResolvedValueOnce(null) // restart stop phase
+      .mockResolvedValueOnce(null); // runStartup spawn phase
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "app-orchestrator",
+      runtimeHandle: { id: "tmux-app-orchestrator" },
+    });
+    mockExec.mockRejectedValue(new Error("no process"));
+
+    await program.parseAsync(["node", "test", "restart", "my-app"]);
+
+    expect(mockSessionManager.kill).not.toHaveBeenCalled();
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("is not running");
+    expect(output).toContain("Startup complete");
   });
 });

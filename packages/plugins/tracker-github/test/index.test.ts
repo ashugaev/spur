@@ -164,12 +164,12 @@ describe("tracker-github plugin", () => {
   // ---- branchName --------------------------------------------------------
 
   describe("branchName", () => {
-    it("generates feat/issue-N format", () => {
-      expect(tracker.branchName("42", project)).toBe("feat/issue-42");
+    it("generates issue-N format", () => {
+      expect(tracker.branchName("42", project)).toBe("issue-42");
     });
 
     it("strips # prefix", () => {
-      expect(tracker.branchName("#42", project)).toBe("feat/issue-42");
+      expect(tracker.branchName("#42", project)).toBe("issue-42");
     });
   });
 

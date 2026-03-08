@@ -174,7 +174,7 @@ export function create(config?: Record<string, unknown>): Workspace {
           if (line.startsWith("worktree ")) {
             path = line.slice("worktree ".length);
           } else if (line.startsWith("branch ")) {
-            // branch refs/heads/feat/INT-1234 → feat/INT-1234
+            // branch refs/heads/INT-1234 → INT-1234
             branch = line.slice("branch ".length).replace("refs/heads/", "");
           }
         }

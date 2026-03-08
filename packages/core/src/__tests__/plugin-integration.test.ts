@@ -78,7 +78,7 @@ const pr: PRInfo = {
   title: "feat: add feature",
   owner: "acme",
   repo: "app",
-  branch: "feat/issue-99",
+  branch: "issue-99",
   baseBranch: "main",
   isDraft: false,
 };
@@ -89,7 +89,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     projectId: "my-app",
     status: "working",
     activity: "active",
-    branch: "feat/issue-99",
+    branch: "issue-99",
     issueId: null,
     pr: null,
     workspacePath: "/tmp/test-app",
@@ -150,7 +150,7 @@ beforeEach(() => {
     name: "mock-ws",
     create: vi.fn().mockResolvedValue({
       path: "/tmp/mock-ws/app-1",
-      branch: "feat/issue-99",
+      branch: "issue-99",
       sessionId: "app-1",
       projectId: "my-app",
     }),
@@ -275,12 +275,12 @@ describe("plugin integration", () => {
         issueId: "99",
       });
 
-      // tracker-github.branchName("99", project) → "feat/issue-99"
-      expect(session.branch).toBe("feat/issue-99");
+      // tracker-github.branchName("99", project) → "issue-99"
+      expect(session.branch).toBe("issue-99");
 
       // Workspace should have been called with the tracker-derived branch
       expect(mockWorkspace.create).toHaveBeenCalledWith(
-        expect.objectContaining({ branch: "feat/issue-99" }),
+        expect.objectContaining({ branch: "issue-99" }),
       );
     });
 
@@ -300,8 +300,8 @@ describe("plugin integration", () => {
         issueId: "99",
       });
 
-      // Without tracker, falls back to "feat/<issueId>"
-      expect(session.branch).toBe("feat/99");
+      // Without tracker, falls back to "<issueId>"
+      expect(session.branch).toBe("99");
     });
 
     it("cleanup() never kills orchestrator sessions even when issue is closed", async () => {
@@ -322,7 +322,7 @@ describe("plugin integration", () => {
       // Also seed a regular session with the same closed issue — it SHOULD be killed
       writeMetadata(sessionsDir, "app-1", {
         worktree: "/tmp/mock-ws/app-1",
-        branch: "feat/issue-99",
+        branch: "issue-99",
         status: "working",
         issue: "99",
         project: "my-app",
@@ -347,7 +347,7 @@ describe("plugin integration", () => {
       // Seed a session with an issueId but no PR
       writeMetadata(sessionsDir, "app-1", {
         worktree: "/tmp/mock-ws/app-1",
-        branch: "feat/issue-99",
+        branch: "issue-99",
         status: "working",
         issue: "99",
         project: "my-app",
@@ -374,7 +374,7 @@ describe("plugin integration", () => {
 
       writeMetadata(sessionsDir, "app-1", {
         worktree: "/tmp/mock-ws/app-1",
-        branch: "feat/issue-99",
+        branch: "issue-99",
         status: "working",
         issue: "99",
         project: "my-app",
@@ -401,7 +401,7 @@ describe("plugin integration", () => {
       // and owner/repo stay empty — scm-github receives exactly that.
       writeMetadata(sessionsDir, "app-1", {
         worktree: "/tmp/mock-ws/app-1",
-        branch: "feat/issue-99",
+        branch: "issue-99",
         status: "working",
         pr: pr.url,
         project: "my-app",
@@ -428,7 +428,7 @@ describe("plugin integration", () => {
 
       writeMetadata(sessionsDir, "app-1", {
         worktree: "/tmp/mock-ws/app-1",
-        branch: "feat/issue-99",
+        branch: "issue-99",
         status: "working",
         pr: pr.url,
         project: "my-app",
@@ -459,7 +459,7 @@ describe("plugin integration", () => {
 
       writeMetadata(sessionsDir, session.id, {
         worktree: session.workspacePath ?? "/tmp/test-app",
-        branch: session.branch ?? "feat/issue-99",
+        branch: session.branch ?? "issue-99",
         status: session.status,
         project: session.projectId,
         ...(session.pr ? { pr: JSON.stringify(session.pr) } : {}),
@@ -492,7 +492,18 @@ describe("plugin integration", () => {
       // gh calls for determineStatus:
       // 1. getPRState → open
       mockGh({ state: "OPEN" });
-      // 2. getCISummary → failing (pr checks returns array of checks with correct field names)
+      // 2. getMergeability: getPRState → open
+      mockGh({ state: "OPEN" });
+      // 3. getMergeability: pr view mergeability payload
+      mockGh({
+        mergeable: "MERGEABLE",
+        reviewDecision: "REVIEW_REQUIRED",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+      });
+      // 4. getMergeability: getCISummary → failing checks
+      mockGh([{ name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" }]);
+      // 5. direct getCISummary in lifecycle check → failing checks
       mockGh([{ name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" }]);
 
       await lm.check("app-1");
@@ -548,9 +559,20 @@ describe("plugin integration", () => {
 
       // 1. getPRState → open
       mockGh({ state: "OPEN" });
-      // 2. getCISummary → passing (using correct field names: state and link)
+      // 2. getMergeability: getPRState → open
+      mockGh({ state: "OPEN" });
+      // 3. getMergeability: pr view mergeability payload
+      mockGh({
+        mergeable: "MERGEABLE",
+        reviewDecision: "REVIEW_REQUIRED",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+      });
+      // 4. getMergeability: getCISummary → passing checks
       mockGh([{ name: "lint", state: "SUCCESS", link: "", startedAt: "", completedAt: "" }]);
-      // 3. getReviewDecision (gh pr view with reviewDecision)
+      // 5. direct getCISummary in lifecycle check → passing checks
+      mockGh([{ name: "lint", state: "SUCCESS", link: "", startedAt: "", completedAt: "" }]);
+      // 6. getReviewDecision (gh pr view with reviewDecision)
       mockGh({ reviewDecision: "CHANGES_REQUESTED" });
 
       await lm.check("app-1");

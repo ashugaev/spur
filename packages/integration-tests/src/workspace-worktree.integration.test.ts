@@ -70,11 +70,11 @@ describe("workspace-worktree (integration)", () => {
       projectId: "inttest",
       sessionId: "session-1",
       project,
-      branch: "feat/test-branch",
+      branch: "test-branch",
     });
 
     expect(createdInfo.path).toContain("session-1");
-    expect(createdInfo.branch).toBe("feat/test-branch");
+    expect(createdInfo.branch).toBe("test-branch");
     expect(createdInfo.sessionId).toBe("session-1");
     expect(createdInfo.projectId).toBe("inttest");
     expect(existsSync(createdInfo.path)).toBe(true);
@@ -82,7 +82,7 @@ describe("workspace-worktree (integration)", () => {
 
   it("worktree is on the correct branch", async () => {
     const branch = await git(createdInfo.path, "branch", "--show-current");
-    expect(branch).toBe("feat/test-branch");
+    expect(branch).toBe("test-branch");
   });
 
   it("worktree has the files from main", async () => {
@@ -94,7 +94,7 @@ describe("workspace-worktree (integration)", () => {
     expect(list.length).toBeGreaterThanOrEqual(1);
     const found = list.find((w: { sessionId: string }) => w.sessionId === "session-1");
     expect(found).toBeDefined();
-    expect(found!.branch).toBe("feat/test-branch");
+    expect(found!.branch).toBe("test-branch");
   });
 
   it("rejects invalid projectId", async () => {
@@ -103,7 +103,7 @@ describe("workspace-worktree (integration)", () => {
         projectId: "../escape",
         sessionId: "ok",
         project,
-        branch: "feat/x",
+        branch: "x",
       }),
     ).rejects.toThrow("Invalid projectId");
   });
@@ -114,7 +114,7 @@ describe("workspace-worktree (integration)", () => {
         projectId: "inttest",
         sessionId: "bad/id",
         project,
-        branch: "feat/x",
+        branch: "x",
       }),
     ).rejects.toThrow("Invalid sessionId");
   });

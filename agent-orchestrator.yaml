@@ -1,13 +1,61 @@
 # Agent Orchestrator — self-hosting config (dog-fooding)
 
+port: 5050
 dataDir: ~/.ao-sessions
 worktreeDir: ~/.worktrees/ao
+
+remote:
+  tailscaleHost: auto
 
 defaults:
   runtime: tmux
   agent: claude-code
   workspace: worktree
-  notifiers: [desktop]
+  notifiers: [desktop, telegram]
+
+notifiers:
+  telegram:
+    plugin: telegram
+    pollingIntervalMs: 2000
+    defaultSessionId: ao-orchestrator
+
+notificationRouting:
+  urgent: [desktop, telegram]
+  action: [desktop, telegram]
+  warning: [desktop, telegram]
+  info: [telegram]
+
+reactions:
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    retries: 3
+    escalateAfter: 3
+  changes-requested:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 30m
+  merge-conflicts:
+    auto: true
+    action: send-to-agent
+    message: "Your PR has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+    escalateAfter: 15m
+  approved-and-green:
+    auto: true
+    action: auto-merge
+    mergeMethod: squash
+    priority: action
+
+listeners:
+  jira-broai:
+    enabled: true
+    source: jira-backlog
+    projectId: int
+    intervalMs: 60000
+    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+    backlogStatus: "Backlog"
+    trigger:
+      type: spawn-session
 
 projects:
   ao:
@@ -21,8 +69,23 @@ projects:
     tracker:
       plugin: linear
       teamId: "2a6e9b1b-19cd-4e30-b5bd-7b34dc491c7e"
-    symlinks: [.claude]
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents]
     postCreate:
       - "pnpm install"
+    agentConfig:
+      permissions: skip
+
+  int:
+    name: Intelas Web
+    repo: intelas/intelas-web
+    path: ~/projects/intelas-web-2
+    defaultBranch: dev
+    sessionPrefix: intelas
+    scm:
+      plugin: github
+    tracker:
+      plugin: jira
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
+    agentRulesFile: dev/.ao-agent-rules.md
     agentConfig:
       permissions: skip

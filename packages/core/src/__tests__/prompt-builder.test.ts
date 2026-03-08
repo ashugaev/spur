@@ -60,7 +60,7 @@ describe("buildPrompt", () => {
       issueId: "INT-1343",
     });
     expect(result).toContain("Work on issue: INT-1343");
-    expect(result).toContain("feat/INT-1343");
+    expect(result).toContain("INT-1343");
   });
 
   it("includes issue context when provided", () => {
@@ -212,5 +212,7 @@ describe("BASE_AGENT_PROMPT", () => {
     expect(BASE_AGENT_PROMPT).toContain("Session Lifecycle");
     expect(BASE_AGENT_PROMPT).toContain("Git Workflow");
     expect(BASE_AGENT_PROMPT).toContain("PR Best Practices");
+    expect(BASE_AGENT_PROMPT).toContain("$AO_SESSION_ID");
+    expect(BASE_AGENT_PROMPT).toContain("$AO_SESSION_MARKER");
   });
 });

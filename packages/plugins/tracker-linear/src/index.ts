@@ -336,8 +336,8 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
     },
 
     branchName(identifier: string, _project: ProjectConfig): string {
-      // Linear convention: feat/INT-1330
-      return `feat/${identifier}`;
+      // Linear convention: INT-1330
+      return identifier;
     },
 
     async generatePrompt(identifier: string, project: ProjectConfig): Promise<string> {

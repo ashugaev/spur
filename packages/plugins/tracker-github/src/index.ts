@@ -120,7 +120,7 @@ function createGitHubTracker(): Tracker {
 
     branchName(identifier: string, _project: ProjectConfig): string {
       const num = identifier.replace(/^#/, "");
-      return `feat/issue-${num}`;
+      return `issue-${num}`;
     },
 
     async generatePrompt(identifier: string, project: ProjectConfig): Promise<string> {

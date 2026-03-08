@@ -32,6 +32,7 @@ import {
   type Session,
   type EventPriority,
   type ProjectConfig as _ProjectConfig,
+  type MergeReadiness,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
@@ -168,20 +169,50 @@ interface ReactionTracker {
   firstTriggered: Date;
 }
 
+interface DeterminedSessionStatus {
+  status: SessionStatus;
+  hasMergeConflictBlockers: boolean;
+}
+
+function hasMergeConflictBlockers(blockers: string[]): boolean {
+  return blockers.some((blocker) => {
+    const normalized = blocker.toLowerCase();
+    return normalized.includes("merge conflicts") || normalized.includes("behind base branch");
+  });
+}
+
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
   const { config, registry, sessionManager } = deps;
 
   const states = new Map<SessionId, SessionStatus>();
+  const mergeConflictStates = new Map<SessionId, boolean>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
   let allCompleteEmitted = false; // guard against repeated all_complete
 
-  /** Determine current status for a session by polling plugins. */
-  async function determineStatus(session: Session): Promise<SessionStatus> {
+  function resolveReactionConfig(session: Session, reactionKey: string): ReactionConfig | null {
     const project = config.projects[session.projectId];
-    if (!project) return session.status;
+    const globalReaction = config.reactions[reactionKey];
+    const projectReaction = project?.reactions?.[reactionKey];
+    const reactionConfig = projectReaction ? { ...globalReaction, ...projectReaction } : globalReaction;
+    if (!reactionConfig || !reactionConfig.action) return null;
+    return reactionConfig as ReactionConfig;
+  }
+
+  /** Determine current status for a session by polling plugins. */
+  async function determineStatus(session: Session): Promise<DeterminedSessionStatus> {
+    const result = (
+      status: SessionStatus,
+      hasConflicts: boolean = false,
+    ): DeterminedSessionStatus => ({
+      status,
+      hasMergeConflictBlockers: hasConflicts,
+    });
+
+    const project = config.projects[session.projectId];
+    if (!project) return result(session.status);
 
     const agentName = session.metadata["agent"] ?? project.agent ?? config.defaults.agent;
     const agent = registry.get<Agent>("agent", agentName);
@@ -192,7 +223,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
       if (runtime) {
         const alive = await runtime.isAlive(session.runtimeHandle).catch(() => true);
-        if (!alive) return "killed";
+        if (!alive) return result("killed");
       }
     }
 
@@ -202,8 +233,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Try JSONL-based activity detection first (reads agent's session files directly)
         const activityState = await agent.getActivityState(session, config.readyThresholdMs);
         if (activityState) {
-          if (activityState.state === "waiting_input") return "needs_input";
-          if (activityState.state === "exited") return "killed";
+          if (activityState.state === "waiting_input") return result("needs_input");
+          if (activityState.state === "exited") return result("killed");
           // active/ready/idle/blocked — proceed to PR checks below
         } else {
           // getActivityState returned null — fall back to terminal output parsing
@@ -216,10 +247,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             : "";
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
-            if (activity === "waiting_input") return "needs_input";
+            if (activity === "waiting_input") return result("needs_input");
 
             const processAlive = await agent.isProcessRunning(session.runtimeHandle);
-            if (!processAlive) return "killed";
+            if (!processAlive) return result("killed");
           }
         }
       } catch {
@@ -229,7 +260,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           session.status === SESSION_STATUS.STUCK ||
           session.status === SESSION_STATUS.NEEDS_INPUT
         ) {
-          return session.status;
+          return result(session.status);
         }
       }
     }
@@ -257,25 +288,41 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     if (session.pr && scm) {
       try {
         const prState = await scm.getPRState(session.pr);
-        if (prState === PR_STATE.MERGED) return "merged";
-        if (prState === PR_STATE.CLOSED) return "killed";
+        if (prState === PR_STATE.MERGED) return result("merged");
+        if (prState === PR_STATE.CLOSED) return result("killed");
+
+        // Monitor merge conflicts continuously, similar to CI/review polling.
+        // Reuse the same mergeability payload for approved-path status decisions
+        // to avoid duplicate API calls in a single poll cycle.
+        let mergeReadiness: MergeReadiness | null = null;
+        try {
+          const readiness = await scm.getMergeability(session.pr);
+          if (readiness && Array.isArray(readiness.blockers)) {
+            mergeReadiness = readiness;
+          }
+        } catch {
+          // Keep lifecycle status checks running even if mergeability probe fails.
+        }
+        const hasConflictBlockers = !!(
+          mergeReadiness && hasMergeConflictBlockers(mergeReadiness.blockers)
+        );
 
         // Check CI
         const ciStatus = await scm.getCISummary(session.pr);
-        if (ciStatus === CI_STATUS.FAILING) return "ci_failed";
+        if (ciStatus === CI_STATUS.FAILING) return result("ci_failed", hasConflictBlockers);
 
         // Check reviews
         const reviewDecision = await scm.getReviewDecision(session.pr);
-        if (reviewDecision === "changes_requested") return "changes_requested";
-        if (reviewDecision === "approved") {
-          // Check merge readiness
-          const mergeReady = await scm.getMergeability(session.pr);
-          if (mergeReady.mergeable) return "mergeable";
-          return "approved";
+        if (reviewDecision === "changes_requested") {
+          return result("changes_requested", hasConflictBlockers);
         }
-        if (reviewDecision === "pending") return "review_pending";
+        if (reviewDecision === "approved") {
+          if (mergeReadiness?.mergeable) return result("mergeable", hasConflictBlockers);
+          return result("approved", hasConflictBlockers);
+        }
+        if (reviewDecision === "pending") return result("review_pending", hasConflictBlockers);
 
-        return "pr_open";
+        return result("pr_open", hasConflictBlockers);
       } catch {
         // SCM check failed — keep current status
       }
@@ -287,9 +334,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       session.status === SESSION_STATUS.STUCK ||
       session.status === SESSION_STATUS.NEEDS_INPUT
     ) {
-      return "working";
+      return result("working");
     }
-    return session.status;
+    return result(session.status);
   }
 
   /** Execute a reaction for a session. */
@@ -393,21 +440,162 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       }
 
       case "auto-merge": {
-        // Auto-merge is handled by the SCM plugin
-        // For now, just notify
-        const event = createEvent("reaction.triggered", {
-          sessionId,
-          projectId,
-          message: `Reaction '${reactionKey}' triggered auto-merge`,
-          data: { reactionKey },
-        });
-        await notifyHuman(event, "action");
-        return {
-          reactionType: reactionKey,
-          success: true,
-          action: "auto-merge",
-          escalated: false,
-        };
+        try {
+          const session = await sessionManager.get(sessionId);
+          if (!session) {
+            const reason = `Session '${sessionId}' not found`;
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge failed: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          const project = config.projects[session.projectId];
+          if (!project) {
+            const reason = `Project '${session.projectId}' not configured`;
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge failed: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          if (!session.pr) {
+            const reason = "No PR attached to session";
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge skipped: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+          if (!scm) {
+            const reason = "No SCM plugin configured for this project";
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge failed: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          const prState = await scm.getPRState(session.pr);
+          if (prState !== PR_STATE.OPEN) {
+            const reason = `PR is ${prState}, not open`;
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge skipped: ${reason}`,
+              data: { reactionKey, reason, prNumber: session.pr.number },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          const mergeability = await scm.getMergeability(session.pr);
+          if (!mergeability.mergeable) {
+            const reason =
+              mergeability.blockers.length > 0
+                ? `PR not mergeable: ${mergeability.blockers.join(", ")}`
+                : "PR not mergeable";
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' auto-merge skipped: ${reason}`,
+              data: {
+                reactionKey,
+                reason,
+                prNumber: session.pr.number,
+                blockers: mergeability.blockers,
+              },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "auto-merge",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          const mergeMethod = reactionConfig.mergeMethod ?? "squash";
+          await scm.mergePR(session.pr, mergeMethod);
+
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' auto-merged PR #${session.pr.number}`,
+            data: { reactionKey, prNumber: session.pr.number, mergeMethod },
+          });
+          await notifyHuman(event, "action");
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action: "auto-merge",
+            message: `Merged PR #${session.pr.number}`,
+            escalated: false,
+          };
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : "Auto-merge failed";
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' auto-merge failed: ${reason}`,
+            data: { reactionKey, reason },
+          });
+          await notifyHuman(event, "warning");
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "auto-merge",
+            message: reason,
+            escalated: false,
+          };
+        }
       }
     }
 
@@ -444,7 +632,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const tracked = states.get(session.id);
     const oldStatus =
       tracked ?? ((session.metadata?.["status"] as SessionStatus | undefined) || session.status);
-    const newStatus = await determineStatus(session);
+    const determined = await determineStatus(session);
+    const newStatus = determined.status;
+    const hadMergeConflicts = mergeConflictStates.get(session.id) ?? false;
+    const hasMergeConflicts = determined.hasMergeConflictBlockers;
 
     if (newStatus !== oldStatus) {
       // State transition detected
@@ -478,23 +669,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const reactionKey = eventToReactionKey(eventType);
 
         if (reactionKey) {
-          // Merge project-specific overrides with global defaults
-          const project = config.projects[session.projectId];
-          const globalReaction = config.reactions[reactionKey];
-          const projectReaction = project?.reactions?.[reactionKey];
-          const reactionConfig = projectReaction
-            ? { ...globalReaction, ...projectReaction }
-            : globalReaction;
-
-          if (reactionConfig && reactionConfig.action) {
+          const reactionConfig = resolveReactionConfig(session, reactionKey);
+          if (reactionConfig) {
             // auto: false skips automated agent actions but still allows notifications
             if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-              await executeReaction(
-                session.id,
-                session.projectId,
-                reactionKey,
-                reactionConfig as ReactionConfig,
-              );
+              await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
               // Reaction is handling this event — suppress immediate human notification.
               // "send-to-agent" retries + escalates on its own; "notify"/"auto-merge"
               // already call notifyHuman internally. Notifying here would bypass the
@@ -522,6 +701,38 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       // No transition but track current state
       states.set(session.id, newStatus);
     }
+
+    // Trigger merge-conflicts reaction once per conflict period, independent of status transitions.
+    if (hasMergeConflicts && !hadMergeConflicts) {
+      const eventType: EventType = "merge.conflicts";
+      let reactionHandledNotify = false;
+      const reactionKey = eventToReactionKey(eventType);
+
+      if (reactionKey) {
+        const reactionConfig = resolveReactionConfig(session, reactionKey);
+        if (reactionConfig) {
+          if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+            await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+            reactionHandledNotify = true;
+          }
+        }
+      }
+
+      if (!reactionHandledNotify) {
+        const event = createEvent(eventType, {
+          sessionId: session.id,
+          projectId: session.projectId,
+          message: `${session.id}: merge conflicts detected`,
+        });
+        await notifyHuman(event, inferPriority(eventType));
+      }
+    }
+
+    // Conflict condition cleared — allow merge-conflicts reaction retry on future reoccurrence.
+    if (!hasMergeConflicts && hadMergeConflicts) {
+      reactionTrackers.delete(`${session.id}:merge-conflicts`);
+    }
+    mergeConflictStates.set(session.id, hasMergeConflicts);
   }
 
   /** Run one polling cycle across all sessions. */
@@ -551,6 +762,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       for (const trackedId of states.keys()) {
         if (!currentSessionIds.has(trackedId)) {
           states.delete(trackedId);
+        }
+      }
+      for (const trackedId of mergeConflictStates.keys()) {
+        if (!currentSessionIds.has(trackedId)) {
+          mergeConflictStates.delete(trackedId);
         }
       }
       for (const trackerKey of reactionTrackers.keys()) {

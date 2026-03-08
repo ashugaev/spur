@@ -160,6 +160,31 @@ describe("loadBuiltins", () => {
     expect(registry.get("agent", "codex")).not.toBeNull();
     expect(registry.get("agent", "claude-code")).not.toBeNull();
   });
+
+  it("passes notifier config to plugin create()", async () => {
+    const registry = createPluginRegistry();
+    const fakeTelegram = makePlugin("notifier", "telegram");
+
+    const config = makeOrchestratorConfig({
+      notifiers: {
+        alerts: {
+          plugin: "telegram",
+          chatId: "-1001234567890",
+          botToken: "secret-token",
+        },
+      },
+    });
+
+    await registry.loadBuiltins(config, async (pkg: string) => {
+      if (pkg === "@composio/ao-plugin-notifier-telegram") return fakeTelegram;
+      throw new Error(`Not found: ${pkg}`);
+    });
+
+    expect(fakeTelegram.create).toHaveBeenCalledWith({
+      chatId: "-1001234567890",
+      botToken: "secret-token",
+    });
+  });
 });
 
 describe("extractPluginConfig (via register with config)", () => {

@@ -399,3 +399,4 @@ describe("Config Defaults", () => {
     expect(validated.projects.proj1.tracker).toEqual({ plugin: "github" });
   });
 });
+

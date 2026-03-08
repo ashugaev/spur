@@ -26,6 +26,7 @@ import {
   type OrchestratorSpawnConfig,
   type SessionStatus,
   type CleanupResult,
+  type KillSessionOptions,
   type OrchestratorConfig,
   type ProjectConfig,
   type Runtime,
@@ -103,6 +104,15 @@ const VALID_STATUSES: ReadonlySet<string> = new Set([
   "done",
   "terminated",
 ]);
+
+const POST_LAUNCH_PROMPT_INITIAL_DELAY_MS = 5_000;
+const POST_LAUNCH_PROMPT_RETRY_DELAY_MS = 3_000;
+const POST_LAUNCH_PROMPT_MAX_ATTEMPTS = 3;
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
 
 /** Validate and normalize a status string. */
 function validateStatus(raw: string | undefined): SessionStatus {
@@ -347,7 +357,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Issue fetch failed - determine why
         if (isIssueNotFoundError(err)) {
           // Ad-hoc issue string — proceed without tracker context.
-          // Branch will be generated as feat/{issueId} (line 329-331)
+          // Branch will be generated as {issueId} (line 329-331)
         } else {
           // Other error (auth, network, etc) - fail fast
           throw new Error(`Failed to fetch issue ${spawnConfig.issueId}: ${err}`, { cause: err });
@@ -407,7 +417,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
             .replace(/[^a-z0-9]+/g, "-")
             .slice(0, 60)
             .replace(/^-+|-+$/g, "");
-      branch = `feat/${slug || sessionId}`;
+      branch = slug || sessionId;
     } else {
       branch = `session/${sessionId}`;
     }
@@ -491,6 +501,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         environment: {
           ...environment,
           AO_SESSION: sessionId,
+          AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
           AO_DATA_DIR: sessionsDir, // Pass sessions directory (not root dataDir)
           AO_SESSION_NAME: sessionId, // User-facing session name
           ...(tmuxName && { AO_TMUX_NAME: tmuxName }), // Tmux session name if using new arch
@@ -573,13 +584,28 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     // This is intentionally outside the try/catch above — a prompt delivery failure
     // should NOT destroy the session. The agent is running; user can retry with `ao send`.
     if (plugins.agent.promptDelivery === "post-launch" && agentLaunchConfig.prompt) {
-      try {
-        // Wait for agent to start and be ready for input
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
-        await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
-      } catch {
-        // Non-fatal: agent is running but didn't receive the initial prompt.
-        // User can retry with `ao send`.
+      // Wait for agent to start and be ready for input.
+      await new Promise((resolve) => setTimeout(resolve, POST_LAUNCH_PROMPT_INITIAL_DELAY_MS));
+
+      for (let attempt = 1; attempt <= POST_LAUNCH_PROMPT_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          await plugins.runtime.sendMessage(handle, agentLaunchConfig.prompt);
+          break;
+        } catch (err) {
+          const msg = toErrorMessage(err);
+          if (attempt >= POST_LAUNCH_PROMPT_MAX_ATTEMPTS) {
+            // Non-fatal: agent is running but didn't receive the initial prompt.
+            // User can retry with `ao send`.
+            console.warn(
+              `[session:${sessionId}] Failed to deliver initial prompt after ${attempt} attempts: ${msg}. Retry manually with \`ao send ${sessionId} "<message>"\`.`,
+            );
+            break;
+          }
+          console.warn(
+            `[session:${sessionId}] Initial prompt delivery attempt ${attempt} failed: ${msg}. Retrying...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, POST_LAUNCH_PROMPT_RETRY_DELAY_MS));
+        }
       }
     }
 
@@ -653,6 +679,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       environment: {
         ...environment,
         AO_SESSION: sessionId,
+        AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
         AO_DATA_DIR: sessionsDir,
         AO_SESSION_NAME: sessionId,
         ...(tmuxName && { AO_TMUX_NAME: tmuxName }),
@@ -777,7 +804,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     return null;
   }
 
-  async function kill(sessionId: SessionId): Promise<void> {
+  async function kill(sessionId: SessionId, options?: KillSessionOptions): Promise<void> {
     // Find the session in any project's sessions directory
     let raw: Record<string, string> | null = null;
     let sessionsDir: string | null = null;
@@ -832,6 +859,15 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       }
     }
+
+    // Record terminal status before archiving so downstream automation can
+    // distinguish manual/system kills from cleanup terminations.
+    const reason = options?.reason ?? "manual";
+    const terminalStatus = reason === "cleanup" ? "cleanup" : "killed";
+    updateMetadata(sessionsDir, sessionId, {
+      status: terminalStatus,
+      terminationReason: reason,
+    });
 
     // Archive metadata
     deleteMetadata(sessionsDir, sessionId, true);
@@ -900,7 +936,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
         if (shouldKill) {
           if (!options?.dryRun) {
-            await kill(session.id);
+            await kill(session.id, { reason: "cleanup" });
           }
           result.killed.push(session.id);
         } else {
@@ -1113,6 +1149,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       environment: {
         ...environment,
         AO_SESSION: sessionId,
+        AO_SESSION_MARKER: `AO_SESSION:${sessionId}`,
         AO_DATA_DIR: sessionsDir,
         AO_SESSION_NAME: sessionId,
         ...(tmuxName && { AO_TMUX_NAME: tmuxName }),

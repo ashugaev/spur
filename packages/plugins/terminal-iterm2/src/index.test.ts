@@ -22,7 +22,7 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     projectId: "my-project",
     status: "working",
     activity: "active",
-    branch: "feat/test",
+    branch: "test",
     issueId: null,
     pr: null,
     workspacePath: "/tmp/workspace",
