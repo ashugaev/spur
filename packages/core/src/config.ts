@@ -52,6 +52,26 @@ const NotifierConfigSchema = z
   })
   .passthrough();
 
+const TranscriberConfigSchema = z
+  .object({
+    plugin: z.string().optional(),
+    enabled: z.boolean().optional(),
+    binaryPath: z.string().min(1).optional(),
+    modelPath: z.string().min(1).optional(),
+    ffmpegPath: z.string().min(1).optional(),
+    language: z.string().min(1).optional(),
+    timeoutMs: z.number().positive().optional(),
+    maxAudioBytes: z.number().positive().optional(),
+    maxDurationSec: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const ServicesConfigSchema = z
+  .object({
+    transcriber: TranscriberConfigSchema.optional(),
+  })
+  .passthrough();
+
 const ListenerTriggerConfigSchema = z
   .object({
     type: z.string(),
@@ -128,6 +148,7 @@ const OrchestratorConfigSchema = z.object({
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
   listeners: z.record(ListenerConfigSchema).default({}),
+  services: ServicesConfigSchema.optional(),
   remote: RemoteConfigSchema.optional(),
 });
 

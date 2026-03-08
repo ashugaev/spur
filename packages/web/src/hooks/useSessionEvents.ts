@@ -32,7 +32,10 @@ function reducer(state: DashboardSession[], action: Action): DashboardSession[] 
   }
 }
 
-export function useSessionEvents(initialSessions: DashboardSession[]): DashboardSession[] {
+export function useSessionEvents(
+  initialSessions: DashboardSession[],
+  projectId?: string,
+): DashboardSession[] {
   const [sessions, dispatch] = useReducer(reducer, initialSessions);
 
   // Reset state when server-rendered props change (e.g. full page refresh)
@@ -41,7 +44,10 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
   }, [initialSessions]);
 
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    const url = projectId
+      ? `/api/events?projectId=${encodeURIComponent(projectId)}`
+      : "/api/events";
+    const es = new EventSource(url);
 
     es.onmessage = (event: MessageEvent) => {
       try {
@@ -62,7 +68,7 @@ export function useSessionEvents(initialSessions: DashboardSession[]): Dashboard
     return () => {
       es.close();
     };
-  }, []);
+  }, [projectId]);
 
   return sessions;
 }

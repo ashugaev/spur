@@ -69,7 +69,7 @@ The package is not yet published to npm. Install by building from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/ComposioHQ/agent-orchestrator
+git clone https://github.com/ashugaev/ao
 cd agent-orchestrator
 
 # Install dependencies (requires pnpm)
@@ -426,6 +426,13 @@ curl -X POST -H 'Content-type: application/json' \
        # botToken: ${AO_TELEGRAM_BOT_TOKEN}
        # chatId: ${AO_TELEGRAM_CHAT_ID}
        # webhookSecret: ${AO_TELEGRAM_WEBHOOK_SECRET}
+
+   services:
+     transcriber:
+       binaryPath: /opt/whisper.cpp/build/bin/whisper-cli
+       modelPath: /opt/whisper.cpp/models/ggml-base.bin
+       # Optional advanced override:
+       # maxAudioBytes: 25000000
    ```
 
 5. Point Telegram webhook to your dashboard server:
@@ -438,9 +445,13 @@ curl -X POST -H 'Content-type: application/json' \
 **Reply flow:**
 
 - When a session enters `needs_input`, AO sends a Telegram message with `AO_SESSION:<id>`.
-- Reply to that message in Telegram.
+- Reply to that message in Telegram (text or voice).
 - AO routes your reply into that exact session (`sessionManager.send`), and the agent continues.
-- If Telegram webhook is not configured in Bot API, AO automatically falls back to polling `getUpdates` every 30 seconds while `ao start` is running.
+- Voice parsing is enabled by default when Telegram integration is enabled.
+- For local Whisper, only `services.transcriber.binaryPath` and `services.transcriber.modelPath` are essential; other transcriber values use built-in defaults.
+- Voice messages are transcribed locally via the shared transcriber service (`services.transcriber`) before routing.
+- If transcription fails, AO sends a system message into the target session with the failure reason and asks to resend as text.
+- If Telegram webhook is not configured in Bot API, AO automatically falls back to polling `getUpdates` every 2 seconds while `ao start` is running.
 
 ### Custom Trackers
 
@@ -907,4 +918,4 @@ Useful for:
 
 ---
 
-**Need help?** Open an issue at: https://github.com/ComposioHQ/agent-orchestrator/issues
+**Need help?** Open an issue at: https://github.com/ashugaev/ao/issues

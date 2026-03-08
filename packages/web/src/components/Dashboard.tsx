@@ -18,19 +18,25 @@ import { AttentionZone } from "./AttentionZone";
 import { PRTableRow } from "./PRStatus";
 import { DynamicFavicon } from "./DynamicFavicon";
 import { useSessionEvents } from "@/hooks/useSessionEvents";
+import { buildSessionPath, resolveSessionPath } from "@/lib/project-routes";
 
 interface DashboardProps {
   initialSessions: DashboardSession[];
   initialIntegrationsStatus: IntegrationsStatusSnapshot;
-  stats: DashboardStats;
-  orchestratorId?: string | null;
-  projectName?: string;
+  initialProjectId?: string;
+  projectFilters?: DashboardProjectFilterOption[];
+  orchestratorByProject?: Record<string, string>;
 }
 
 type DashboardTab = "sessions" | "jira";
+export interface DashboardProjectFilterOption {
+  id: string;
+  label: string;
+}
 interface JiraTaskSessionView {
   id: string;
   sessionUrl: string | null;
+  projectId: string | null;
   status: string | null;
   activity: string | null;
 }
@@ -56,19 +62,59 @@ const KANBAN_LEVELS = ["working", "pending", "review", "respond", "merge"] as co
 export function Dashboard({
   initialSessions,
   initialIntegrationsStatus,
-  stats,
-  orchestratorId,
-  projectName,
+  initialProjectId,
+  projectFilters = [],
+  orchestratorByProject = {},
 }: DashboardProps) {
   const sessions = useSessionEvents(initialSessions);
   const [integrationsStatus, setIntegrationsStatus] = useState(initialIntegrationsStatus);
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("sessions");
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
+    if (typeof initialProjectId === "string") {
+      const trimmed = initialProjectId.trim();
+      if (trimmed.length > 0) {
+        return trimmed;
+      }
+    }
+    return projectFilters[0]?.id ?? "";
+  });
   const [jiraTasks, setJiraTasks] = useState<JiraTaskView[]>([]);
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraLoadedOnce, setJiraLoadedOnce] = useState(false);
   const [jiraError, setJiraError] = useState<string | null>(null);
   const [startingJiraTaskKeys, setStartingJiraTaskKeys] = useState<Record<string, boolean>>({});
+
+  const filterOptions = useMemo(
+    () =>
+      [...projectFilters].sort((a, b) =>
+        a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+      ),
+    [projectFilters],
+  );
+  const projectFilterEnabled = filterOptions.length > 0;
+  const effectiveProjectId = selectedProjectId || filterOptions[0]?.id;
+  const selectedProjectOption = useMemo(
+    () => filterOptions.find((option) => option.id === effectiveProjectId),
+    [filterOptions, effectiveProjectId],
+  );
+  const displayProjectName = selectedProjectOption?.label;
+
+  const filteredSessions = useMemo(() => {
+    if (!effectiveProjectId) {
+      return sessions;
+    }
+    return sessions.filter((session) => session.projectId === effectiveProjectId);
+  }, [sessions, effectiveProjectId]);
+
+  const effectiveStats = useMemo(() => computeStatsForDashboard(filteredSessions), [filteredSessions]);
+  const effectiveOrchestratorId = useMemo(() => {
+    if (!effectiveProjectId) {
+      return null;
+    }
+    return orchestratorByProject[effectiveProjectId] ?? null;
+  }, [effectiveProjectId, orchestratorByProject]);
+
   const grouped = useMemo(() => {
     const zones: Record<AttentionLevel, DashboardSession[]> = {
       merge: [],
@@ -78,18 +124,18 @@ export function Dashboard({
       working: [],
       done: [],
     };
-    for (const session of sessions) {
+    for (const session of filteredSessions) {
       zones[getAttentionLevel(session)].push(session);
     }
     return zones;
-  }, [sessions]);
+  }, [filteredSessions]);
 
   const openPRs = useMemo(() => {
-    return sessions
+    return filteredSessions
       .filter((s): s is DashboardSession & { pr: DashboardPR } => s.pr?.state === "open")
       .map((s) => s.pr)
       .sort((a, b) => mergeScore(a) - mergeScore(b));
-  }, [sessions]);
+  }, [filteredSessions]);
 
   const handleSend = async (sessionId: string, message: string) => {
     const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/send`, {
@@ -134,12 +180,15 @@ export function Dashboard({
       setJiraLoading(true);
     }
     try {
-      const response = await fetch("/api/jira/sprint-tasks", { cache: "no-store" });
+      const endpoint = effectiveProjectId
+        ? `/api/jira/sprint-tasks?projectId=${encodeURIComponent(effectiveProjectId)}`
+        : "/api/jira/sprint-tasks";
+      const response = await fetch(endpoint, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(await readErrorMessage(response));
       }
       const payload = (await response.json()) as unknown;
-      setJiraTasks(parseJiraSprintTasks(payload));
+      setJiraTasks(parseJiraSprintTasks(payload, effectiveProjectId));
       setJiraError(null);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Unexpected error";
@@ -150,7 +199,7 @@ export function Dashboard({
         setJiraLoading(false);
       }
     }
-  }, []);
+  }, [effectiveProjectId]);
 
   const handleStartJiraTask = useCallback(
     async (task: JiraTaskView) => {
@@ -201,9 +250,28 @@ export function Dashboard({
   const hasKanbanSessions = KANBAN_LEVELS.some((l) => grouped[l].length > 0);
 
   const anyRateLimited = useMemo(
-    () => sessions.some((s) => s.pr && isPRRateLimited(s.pr)),
-    [sessions],
+    () => filteredSessions.some((s) => s.pr && isPRRateLimited(s.pr)),
+    [filteredSessions],
   );
+
+  useEffect(() => {
+    if (filterOptions.length === 0) {
+      if (selectedProjectId !== "") {
+        setSelectedProjectId("");
+      }
+      return;
+    }
+    if (!filterOptions.some((option) => option.id === selectedProjectId)) {
+      setSelectedProjectId(filterOptions[0].id);
+    }
+  }, [filterOptions, selectedProjectId]);
+
+  useEffect(() => {
+    setJiraTasks([]);
+    setJiraError(null);
+    setJiraLoadedOnce(false);
+    setStartingJiraTaskKeys({});
+  }, [effectiveProjectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -245,16 +313,16 @@ export function Dashboard({
 
   return (
     <div className="px-4 py-5 sm:px-8 sm:py-7">
-      <DynamicFavicon sessions={sessions} projectName={projectName} />
+      <DynamicFavicon sessions={filteredSessions} projectName={displayProjectName} />
       {/* Header */}
       <div className="mb-6 flex flex-col gap-3 border-b border-[var(--color-border-subtle)] pb-5 sm:mb-8 sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:pb-6">
         <div className="flex items-center justify-between gap-4 sm:justify-start sm:gap-6">
           <h1 className="text-[15px] font-semibold tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-[17px]">
-            Orchestrator
+            {displayProjectName ? `${displayProjectName} · Orchestrator` : "Orchestrator"}
           </h1>
-          {orchestratorId && (
+          {effectiveOrchestratorId && (
             <a
-              href={`/sessions/${encodeURIComponent(orchestratorId)}`}
+              href={buildSessionPath(effectiveOrchestratorId, effectiveProjectId)}
               className="orchestrator-btn flex items-center gap-2 rounded-[7px] px-3 py-1.5 text-[11px] font-semibold hover:no-underline sm:hidden sm:px-4 sm:py-2 sm:text-[12px]"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
@@ -272,10 +340,10 @@ export function Dashboard({
           )}
         </div>
         <div className="flex items-center justify-between gap-4">
-          <StatusLine stats={stats} />
-          {orchestratorId && (
+          <StatusLine stats={effectiveStats} />
+          {effectiveOrchestratorId && (
             <a
-              href={`/sessions/${encodeURIComponent(orchestratorId)}`}
+              href={buildSessionPath(effectiveOrchestratorId, effectiveProjectId)}
               className="orchestrator-btn hidden items-center gap-2 rounded-[7px] px-4 py-2 text-[12px] font-semibold hover:no-underline sm:flex"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
@@ -293,6 +361,29 @@ export function Dashboard({
           )}
         </div>
       </div>
+
+      {projectFilterEnabled && (
+        <div className="mb-5 flex items-center gap-2">
+          <label
+            htmlFor="project-filter"
+            className="text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--color-text-secondary)]"
+          >
+            Project
+          </label>
+          <select
+            id="project-filter"
+            value={selectedProjectId}
+            onChange={(event) => setSelectedProjectId(event.target.value)}
+            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1 text-[12px] text-[var(--color-text-primary)]"
+          >
+            {filterOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/* Rate limit notice */}
       {anyRateLimited && !rateLimitDismissed && (
@@ -371,6 +462,7 @@ export function Dashboard({
                     <AttentionZone
                       level={level}
                       sessions={grouped[level]}
+                      projectId={effectiveProjectId}
                       variant="column"
                       onSend={handleSend}
                       onKill={handleKill}
@@ -389,6 +481,7 @@ export function Dashboard({
               <AttentionZone
                 level="done"
                 sessions={grouped.done}
+                projectId={effectiveProjectId}
                 variant="grid"
                 onSend={handleSend}
                 onKill={handleKill}
@@ -445,6 +538,7 @@ export function Dashboard({
           loadedOnce={jiraLoadedOnce}
           error={jiraError}
           startingTaskKeys={startingJiraTaskKeys}
+          projectId={effectiveProjectId}
           onRefresh={() => void refreshJiraTasks(true)}
           onStartTask={(task) => void handleStartJiraTask(task)}
         />
@@ -459,6 +553,7 @@ interface JiraTasksPanelProps {
   loadedOnce: boolean;
   error: string | null;
   startingTaskKeys: Record<string, boolean>;
+  projectId?: string;
   onRefresh: () => void;
   onStartTask: (task: JiraTaskView) => void;
 }
@@ -469,6 +564,7 @@ function JiraTasksPanel({
   loadedOnce,
   error,
   startingTaskKeys,
+  projectId,
   onRefresh,
   onStartTask,
 }: JiraTasksPanelProps) {
@@ -653,9 +749,11 @@ function JiraTasksPanel({
                           {linkedSessions.slice(0, 2).map((session) => (
                             <a
                               key={session.id}
-                              href={
-                                session.sessionUrl ?? `/sessions/${encodeURIComponent(session.id)}`
-                              }
+                              href={resolveSessionPath({
+                                sessionId: session.id,
+                                projectId: session.projectId ?? task.projectId ?? projectId ?? undefined,
+                                sessionUrl: session.sessionUrl,
+                              })}
                               className="inline-flex items-center gap-1 rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:underline"
                             >
                               <span>{session.id}</span>
@@ -784,7 +882,7 @@ async function readErrorMessage(response: Response): Promise<string> {
   return payloadText || fallback;
 }
 
-function parseJiraSprintTasks(payload: unknown): JiraTaskView[] {
+function parseJiraSprintTasks(payload: unknown, fallbackProjectId?: string): JiraTaskView[] {
   const rawTasks = extractTaskArray(payload);
   const listenerProjectById = extractListenerProjectMap(payload);
   const parsed: JiraTaskView[] = [];
@@ -796,8 +894,8 @@ function parseJiraSprintTasks(payload: unknown): JiraTaskView[] {
     if (!issueKey) continue;
 
     const listenerIds = readStringArrayField(rawTask, ["listenerIds", "listeners"]);
-    const relatedActiveSessions = parseRelatedTaskSessions(rawTask);
-    const projectId = readProjectId(rawTask, listenerIds, listenerProjectById);
+    const projectId = readProjectId(rawTask, listenerIds, listenerProjectById, fallbackProjectId);
+    const relatedActiveSessions = parseRelatedTaskSessions(rawTask, projectId);
 
     parsed.push({
       source: readStringField(rawTask, ["source", "taskSource", "tracker"]),
@@ -829,6 +927,7 @@ function readProjectId(
   task: Record<string, unknown>,
   listenerIds: string[],
   listenerProjectById: Map<string, string>,
+  fallbackProjectId?: string,
 ): string | null {
   // Respect explicit null in payload (important for ambiguous multi-project issues).
   if ("projectId" in task) {
@@ -842,12 +941,15 @@ function readProjectId(
 
   // Legacy fallback: infer only when a single listener maps to one project.
   if (listenerIds.length !== 1) {
-    return null;
+    return fallbackProjectId ?? null;
   }
-  return listenerProjectById.get(listenerIds[0]) ?? null;
+  return listenerProjectById.get(listenerIds[0]) ?? fallbackProjectId ?? null;
 }
 
-function parseRelatedTaskSessions(task: Record<string, unknown>): JiraTaskSessionView[] {
+function parseRelatedTaskSessions(
+  task: Record<string, unknown>,
+  fallbackProjectId: string | null,
+): JiraTaskSessionView[] {
   const parsed: JiraTaskSessionView[] = [];
 
   const upsert = (session: JiraTaskSessionView) => {
@@ -868,9 +970,11 @@ function parseRelatedTaskSessions(task: Record<string, unknown>): JiraTaskSessio
 
       upsert({
         id: sessionId,
-        sessionUrl:
-          readStringField(rawSession, ["sessionUrl", "url", "link"]) ??
-          `/sessions/${encodeURIComponent(sessionId)}`,
+        sessionUrl: readStringField(rawSession, ["sessionUrl", "url", "link"]),
+        projectId:
+          readStringField(rawSession, ["projectId"]) ??
+          readNestedStringField(rawSession, "project", ["id", "projectId"]) ??
+          fallbackProjectId,
         status: readStringField(rawSession, ["status", "sessionStatus"]),
         activity: readStringField(rawSession, ["activity", "sessionActivity"]),
       });
@@ -885,8 +989,11 @@ function parseRelatedTaskSessions(task: Record<string, unknown>): JiraTaskSessio
       id: singleSessionId,
       sessionUrl:
         readStringField(task, ["sessionUrl", "sessionLink"]) ??
-        readNestedStringField(task, "session", ["url", "link"]) ??
-        `/sessions/${encodeURIComponent(singleSessionId)}`,
+        readNestedStringField(task, "session", ["url", "link"]),
+      projectId:
+        readStringField(task, ["sessionProjectId", "projectId"]) ??
+        readNestedStringField(task, "session", ["projectId"]) ??
+        fallbackProjectId,
       status: readStringField(task, ["sessionStatus"]),
       activity: readStringField(task, ["sessionActivity"]),
     });
@@ -1274,6 +1381,18 @@ function formatStatusTimestamp(value: string): string {
     return value;
   }
   return `${date.toISOString().slice(11, 19)}Z`;
+}
+
+function computeStatsForDashboard(sessions: DashboardSession[]): DashboardStats {
+  return {
+    totalSessions: sessions.length,
+    workingSessions: sessions.filter((session) => session.activity !== null && session.activity !== "exited")
+      .length,
+    openPRs: sessions.filter((session) => session.pr?.state === "open").length,
+    needsReview: sessions.filter(
+      (session) => session.pr && !session.pr.isDraft && session.pr.reviewDecision === "pending",
+    ).length,
+  };
 }
 
 function StatusLine({ stats }: { stats: DashboardStats }) {

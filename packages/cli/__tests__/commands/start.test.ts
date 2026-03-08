@@ -309,18 +309,19 @@ describe("start command — project resolution", () => {
     expect(errors).toContain("not found");
   });
 
-  it("errors when multiple projects and no arg", async () => {
+  it("starts all projects when multiple projects and no arg", async () => {
     mockConfigRef.current = makeConfig({
       frontend: makeProject({ name: "Frontend" }),
       backend: makeProject({ name: "Backend" }),
     });
 
-    await expect(
-      program.parseAsync(["node", "test", "start", "--no-dashboard", "--no-orchestrator"]),
-    ).rejects.toThrow("process.exit(1)");
+    await program.parseAsync(["node", "test", "start", "--no-dashboard", "--no-orchestrator"]);
 
-    const errors = vi.mocked(console.error).mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(errors).toContain("Multiple projects");
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("2 projects");
+    expect(output).toContain("Frontend");
+    expect(output).toContain("Backend");
+    expect(output).toContain("Startup complete");
   });
 
   it("errors when no projects configured", async () => {
@@ -621,6 +622,170 @@ describe("start command — browser open waits for port", () => {
   });
 });
 
+describe("start command — attach to existing runtime", () => {
+  it("reuses running start process and only creates requested orchestrator session", async () => {
+    const configPath = join(tmpDir, "agent-orchestrator.yaml");
+    const { isPortAvailable } = await import("../../src/lib/web-dir.js");
+    vi.mocked(isPortAvailable).mockResolvedValue(false);
+    mockConfigRef.current = makeConfig({
+      frontend: makeProject({ name: "Frontend", sessionPrefix: "fe" }),
+      backend: makeProject({ name: "Backend", sessionPrefix: "be" }),
+    });
+
+    writeFileSync(
+      join(tmpDir, ".ao-start-runtime.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          pid: process.pid,
+          port: 3000,
+          configPath,
+          startedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+
+    mockSessionManager.get.mockResolvedValue(null);
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "be-orchestrator",
+      runtimeHandle: { id: "tmux-be-orchestrator" },
+    });
+
+    await program.parseAsync(["node", "test", "start", "backend"]);
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockMaybeStartTelegramLongPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartJiraCommentPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartConfiguredListeners).not.toHaveBeenCalled();
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "backend" }),
+    );
+
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("Reusing running orchestrator runtime");
+    expect(output).toContain("Startup complete");
+  });
+
+  it("attaches using runtime-state port even when config port differs", async () => {
+    const configPath = join(tmpDir, "agent-orchestrator.yaml");
+    const { isPortAvailable } = await import("../../src/lib/web-dir.js");
+    vi.mocked(isPortAvailable).mockResolvedValue(false);
+    mockConfigRef.current = {
+      ...makeConfig({
+        backend: makeProject({ name: "Backend", sessionPrefix: "be" }),
+      }),
+      port: 5050,
+    };
+
+    writeFileSync(
+      join(tmpDir, ".ao-start-runtime.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          pid: process.pid,
+          port: 3000,
+          configPath,
+          startedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+
+    mockSessionManager.get.mockResolvedValue(null);
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "be-orchestrator",
+      runtimeHandle: { id: "tmux-be-orchestrator" },
+    });
+
+    await program.parseAsync(["node", "test", "start", "backend"]);
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("http://localhost:3000");
+    expect(output).toContain("Config port 5050 differs from running runtime port 3000");
+  });
+
+  it("attaches to existing runtime process when sessions are active even if dashboard probe reports free port", async () => {
+    const configPath = join(tmpDir, "agent-orchestrator.yaml");
+    const { isPortAvailable } = await import("../../src/lib/web-dir.js");
+    // Simulate an unreliable/early dashboard probe while runtime process is still active.
+    vi.mocked(isPortAvailable).mockResolvedValue(true);
+    mockConfigRef.current = makeConfig({
+      frontend: makeProject({ name: "Frontend", sessionPrefix: "fe" }),
+      backend: makeProject({ name: "Backend", sessionPrefix: "be" }),
+      mobile: makeProject({ name: "Mobile", sessionPrefix: "mobile" }),
+    });
+
+    writeFileSync(
+      join(tmpDir, ".ao-start-runtime.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          pid: process.pid,
+          port: 3000,
+          configPath,
+          startedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+
+    mockSessionManager.get.mockImplementation(async (sessionId: string) => {
+      if (sessionId === "fe-orchestrator" || sessionId === "be-orchestrator") {
+        return { id: sessionId, status: "running", runtimeHandle: { id: `tmux-${sessionId}` } };
+      }
+      return null;
+    });
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "mobile-orchestrator",
+      runtimeHandle: { id: "tmux-mobile-orchestrator" },
+    });
+
+    await program.parseAsync(["node", "test", "start", "mobile"]);
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockMaybeStartTelegramLongPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartJiraCommentPolling).not.toHaveBeenCalled();
+    expect(mockMaybeStartConfiguredListeners).not.toHaveBeenCalled();
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: "mobile" }),
+    );
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("attaching new project sessions");
+    expect(output).toContain("attached to existing runtime");
+  });
+});
+
+describe("start command — rollback on multi-project failure", () => {
+  it("kills already-created orchestrator sessions when later project setup fails", async () => {
+    mockConfigRef.current = makeConfig({
+      frontend: makeProject({ name: "Frontend", sessionPrefix: "fe" }),
+      backend: makeProject({ name: "Backend", sessionPrefix: "be" }),
+    });
+
+    mockSessionManager.get.mockResolvedValue(null);
+    mockSessionManager.spawnOrchestrator
+      .mockResolvedValueOnce({
+        id: "fe-orchestrator",
+        runtimeHandle: { id: "tmux-fe-orchestrator" },
+      })
+      .mockRejectedValueOnce(new Error("spawn failed"));
+
+    await expect(
+      program.parseAsync(["node", "test", "start", "--no-dashboard"]),
+    ).rejects.toThrow("process.exit(1)");
+
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(2);
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("fe-orchestrator");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // ao stop
 // ---------------------------------------------------------------------------
@@ -649,6 +814,35 @@ describe("stop command", () => {
     expect(mockSessionManager.kill).not.toHaveBeenCalled();
     const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
     expect(output).toContain("is not running");
+  });
+
+  it("uses runtime-state port when stopping dashboard", async () => {
+    const configPath = join(tmpDir, "agent-orchestrator.yaml");
+    mockConfigRef.current = {
+      ...makeConfig({ "my-app": makeProject() }),
+      port: 5050,
+    };
+    mockSessionManager.get.mockResolvedValue({ id: "app-orchestrator", status: "running" });
+    mockSessionManager.kill.mockResolvedValue(undefined);
+    writeFileSync(
+      join(tmpDir, ".ao-start-runtime.json"),
+      JSON.stringify(
+        {
+          version: 1,
+          pid: process.pid,
+          port: 3000,
+          configPath,
+          startedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+    );
+    mockExec.mockResolvedValue({ stdout: "12345", stderr: "" });
+
+    await program.parseAsync(["node", "test", "stop"]);
+
+    expect(mockExec).toHaveBeenCalledWith("lsof", ["-ti", ":3000"]);
   });
 });
 

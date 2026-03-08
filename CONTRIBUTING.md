@@ -75,7 +75,7 @@ We aim to review all PRs within 48 hours. If you haven't heard back, ping us in 
 
 ## Good First Issues
 
-Look for issues labeled [`good first issue`](https://github.com/ComposioHQ/agent-orchestrator/labels/good%20first%20issue) -- these are scoped, well-documented, and designed for new contributors.
+Look for issues labeled [`good first issue`](https://github.com/ashugaev/ao/labels/good%20first%20issue) -- these are scoped, well-documented, and designed for new contributors.
 
 ## Need Help?
 

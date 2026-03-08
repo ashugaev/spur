@@ -14,6 +14,7 @@ import type {
   JiraSprintTaskSession,
   JiraSprintTasksSnapshot,
 } from "./types";
+import { buildProjectSessionPath } from "./project-routes";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BACKLOG_STATUS = "Backlog";
@@ -367,7 +368,10 @@ function syncTaskComputedFields(task: JiraSprintTask): void {
   task.projectId = task.projectIds.length === 1 ? task.projectIds[0] : null;
   task.sessionId = sessionId;
   task.activeSessionId = sessionId;
-  task.sessionUrl = sessionId ? `/sessions/${encodeURIComponent(sessionId)}` : null;
+  task.sessionUrl =
+    sessionId && primarySession?.projectId
+      ? buildProjectSessionPath(primarySession.projectId, sessionId)
+      : null;
 }
 
 function getTaskStartLocks(): Set<string> {

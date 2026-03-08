@@ -128,6 +128,29 @@ function createDirectTransport(): GraphQLTransport {
 
 type ComposioTools = Composio["tools"];
 
+function isComposioModuleMissing(err: unknown): boolean {
+  const code =
+    typeof err === "object" && err !== null && "code" in err ? String(err.code) : undefined;
+  if (code === "MODULE_NOT_FOUND" || code === "ERR_MODULE_NOT_FOUND") {
+    return true;
+  }
+
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes("Cannot find module") ||
+    msg.includes("Cannot find package") ||
+    msg.includes("ERR_MODULE_NOT_FOUND") ||
+    (msg.includes("Could not resolve") && msg.includes("@composio/core")) ||
+    (msg.includes("Failed to resolve import") && msg.includes("@composio/core"))
+  );
+}
+
+async function loadComposio(): Promise<{ Composio: typeof Composio }> {
+  // Keep @composio/core runtime-only. Without webpackIgnore, webpack/Next can
+  // try to resolve this optional dependency at build time and hard-fail.
+  return import(/* webpackIgnore: true */ "@composio/core");
+}
+
 function createComposioTransport(apiKey: string, entityId: string): GraphQLTransport {
   // Lazy-load the Composio client — cached as a promise so the constructor
   // is called only once, even under concurrent requests.
@@ -137,16 +160,11 @@ function createComposioTransport(apiKey: string, entityId: string): GraphQLTrans
     if (!clientPromise) {
       clientPromise = (async () => {
         try {
-          const { Composio } = await import("@composio/core");
+          const { Composio } = await loadComposio();
           const client = new Composio({ apiKey });
           return client.tools;
         } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          if (
-            msg.includes("Cannot find module") ||
-            msg.includes("Cannot find package") ||
-            msg.includes("ERR_MODULE_NOT_FOUND")
-          ) {
+          if (isComposioModuleMissing(err)) {
             throw new Error(
               "Composio SDK (@composio/core) is not installed. " +
                 "Install it with: pnpm add @composio/core",

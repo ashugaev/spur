@@ -5,12 +5,12 @@ import { useParams } from "next/navigation";
 import { SessionDetail } from "@/components/SessionDetail";
 import { type DashboardSession, getAttentionLevel, type AttentionLevel } from "@/lib/types";
 import { activityIcon } from "@/lib/activity-icons";
+import { buildProjectPath, buildSessionPath, decodeRouteParam } from "@/lib/project-routes";
 
 function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max) + "..." : s;
 }
 
-/** Build a descriptive tab title from session data. */
 function buildSessionTitle(session: DashboardSession): string {
   const id = session.id;
   const emoji = session.activity ? (activityIcon[session.activity] ?? "") : "";
@@ -40,9 +40,10 @@ interface ZoneCounts {
   done: number;
 }
 
-export default function SessionPage() {
+export default function ProjectSessionPage() {
   const params = useParams();
-  const id = params.id as string;
+  const id = decodeRouteParam(params.id as string);
+  const projectId = decodeRouteParam(params.projectId as string);
   const isOrchestrator = id.endsWith("-orchestrator");
 
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -50,7 +51,6 @@ export default function SessionPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Update document title based on session data
   useEffect(() => {
     if (session) {
       document.title = buildSessionTitle(session);
@@ -59,10 +59,11 @@ export default function SessionPage() {
     }
   }, [session, id]);
 
-  // Fetch session data (memoized to avoid recreating on every render)
   const fetchSession = useCallback(async () => {
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`,
+      );
       if (res.status === 404) {
         setError("Session not found");
         setLoading(false);
@@ -70,6 +71,12 @@ export default function SessionPage() {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as DashboardSession;
+
+      if (data.projectId && data.projectId !== projectId) {
+        window.location.replace(buildSessionPath(data.id, data.projectId));
+        return;
+      }
+
       setSession(data);
       setError(null);
     } catch (err) {
@@ -78,36 +85,40 @@ export default function SessionPage() {
     } finally {
       setLoading(false);
     }
-  }, [id]);
+  }, [id, projectId]);
 
   const fetchZoneCounts = useCallback(async () => {
     if (!isOrchestrator) return;
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch(`/api/sessions?projectId=${encodeURIComponent(projectId)}`);
       if (!res.ok) return;
       const body = (await res.json()) as { sessions: DashboardSession[] };
       const sessions = body.sessions ?? [];
-      const counts: ZoneCounts = { merge: 0, respond: 0, review: 0, pending: 0, working: 0, done: 0 };
-      for (const s of sessions) {
-        if (!s.id.endsWith("-orchestrator")) {
-          counts[getAttentionLevel(s) as AttentionLevel]++;
+      const counts: ZoneCounts = {
+        merge: 0,
+        respond: 0,
+        review: 0,
+        pending: 0,
+        working: 0,
+        done: 0,
+      };
+      for (const activeSession of sessions) {
+        if (!activeSession.id.endsWith("-orchestrator")) {
+          counts[getAttentionLevel(activeSession) as AttentionLevel]++;
         }
       }
       setZoneCounts(counts);
     } catch {
       // non-critical — status strip just won't show
     }
-  }, [isOrchestrator]);
+  }, [isOrchestrator, projectId]);
 
-  // Initial fetch — session first, zone counts after (avoids blocking on slow /api/sessions)
   useEffect(() => {
     fetchSession();
-    // Delay zone counts so the heavy /api/sessions call doesn't contend with session load
     const t = setTimeout(fetchZoneCounts, 2000);
     return () => clearTimeout(t);
   }, [fetchSession, fetchZoneCounts]);
 
-  // Poll every 5s
   useEffect(() => {
     const interval = setInterval(() => {
       fetchSession();
@@ -119,7 +130,7 @@ export default function SessionPage() {
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-[var(--color-bg-base)]">
-        <div className="text-[13px] text-[var(--color-text-tertiary)]">Loading session…</div>
+        <div className="text-[13px] text-[var(--color-text-tertiary)]">Loading session...</div>
       </div>
     );
   }
@@ -128,8 +139,11 @@ export default function SessionPage() {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[var(--color-bg-base)]">
         <div className="text-[13px] text-[var(--color-status-error)]">{error ?? "Session not found"}</div>
-        <a href="/" className="text-[12px] text-[var(--color-accent)] hover:underline">
-          ← Back to dashboard
+        <a
+          href={buildProjectPath(projectId)}
+          className="text-[12px] text-[var(--color-accent)] hover:underline"
+        >
+          Back to project dashboard
         </a>
       </div>
     );
@@ -140,6 +154,7 @@ export default function SessionPage() {
       session={session}
       isOrchestrator={isOrchestrator}
       orchestratorZones={zoneCounts ?? undefined}
+      activeProjectId={projectId}
     />
   );
 }

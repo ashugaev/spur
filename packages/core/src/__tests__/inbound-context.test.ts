@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { OrchestratorConfig } from "../types.js";
 import {
+  buildTelegramInboundRouting,
   buildJiraInboundRouting,
   createInboundContextStore,
   formatInboundMessageForSession,
@@ -164,6 +165,24 @@ describe("createInboundContextStore", () => {
     expect(formatted).toContain('ao source-reply app-orchestrator "<message>"');
     expect(formatted).toContain("Routing: chat=123, thread=77, message=99");
     expect(formatted).toContain("\n\nplease start the task");
+  });
+
+  it("includes selected Telegram project metadata in formatted routing summary", () => {
+    const formatted = formatInboundMessageForSession({
+      sessionId: "app-orchestrator",
+      source: "telegram",
+      text: "route this inbound request",
+      routing: buildTelegramInboundRouting({
+        chatId: "123",
+        messageId: 99,
+        messageThreadId: 7,
+        projectId: "app",
+        fromFirstName: "Alex",
+        fromLastName: "Worker",
+      }),
+    });
+
+    expect(formatted).toContain("Routing: chat=123, thread=7, message=99, project=app, from=Alex Worker");
   });
 
   it("does not wrap inbound source messages for worker sessions", () => {

@@ -153,6 +153,7 @@ vi.mock("@/lib/services", () => ({
     config: mockConfig,
     registry: mockRegistry,
     sessionManager: mockSessionManager,
+    audioTranscriber: null,
   })),
   getSCM: vi.fn(() => mockSCM),
 }));
@@ -296,6 +297,21 @@ describe("API Routes", () => {
       expect(session).toHaveProperty("status");
       expect(session).toHaveProperty("activity");
       expect(session).toHaveProperty("createdAt");
+    });
+
+    it("passes projectId filter to session manager and echoes projectId", async () => {
+      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions?projectId=my-app"));
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      expect(data.projectId).toBe("my-app");
+      expect(mockSessionManager.list).toHaveBeenCalledWith("my-app");
+    });
+
+    it("returns 400 for unknown projectId filter", async () => {
+      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions?projectId=unknown"));
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.error).toMatch(/Unknown projectId/);
     });
   });
 
@@ -1104,13 +1120,13 @@ describe("API Routes", () => {
 
   describe("GET /api/events", () => {
     it("returns SSE content type", async () => {
-      const res = await eventsGET();
+      const res = await eventsGET(makeRequest("/api/events"));
       expect(res.headers.get("Content-Type")).toBe("text/event-stream");
       expect(res.headers.get("Cache-Control")).toBe("no-cache");
     });
 
     it("streams initial snapshot event", async () => {
-      const res = await eventsGET();
+      const res = await eventsGET(makeRequest("/api/events"));
       const reader = res.body!.getReader();
       const { value } = await reader.read();
       reader.cancel();
@@ -1123,6 +1139,12 @@ describe("API Routes", () => {
       expect(event.sessions.length).toBeGreaterThan(0);
       expect(event.sessions[0]).toHaveProperty("id");
       expect(event.sessions[0]).toHaveProperty("attentionLevel");
+    });
+
+    it("returns 400 for unknown projectId stream filter", async () => {
+      const res = await eventsGET(makeRequest("/api/events?projectId=unknown"));
+      expect(res.status).toBe(400);
+      expect(res.headers.get("Content-Type")).toContain("application/json");
     });
   });
 });
