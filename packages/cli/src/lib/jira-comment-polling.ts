@@ -4,6 +4,7 @@ import {
   formatInboundMessageForSession,
   type InboundContextStore,
   type OrchestratorConfig,
+  type ProjectConfig,
   type Session,
   type SessionManager,
 } from "@composio/ao-core";
@@ -49,11 +50,13 @@ interface LoggerLike {
   warn: (message: string) => void;
 }
 
+type FetchFn = typeof fetch;
+
 interface StartJiraCommentPollingDeps {
   config: OrchestratorConfig;
   sessionManager: SessionManager;
   inboundContextStore?: InboundContextStore;
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchFn;
   logger?: LoggerLike;
   healthReporter?: IntegrationHealthReporter;
 }
@@ -129,25 +132,26 @@ function commentBodyToText(body: unknown): string {
   return "";
 }
 
-function resolvePollingConfig(config: OrchestratorConfig): JiraPollingConfig | null {
-  // Find any project that uses tracker: jira — grab baseUrl from there
-  let baseUrl: string | undefined;
-  for (const project of Object.values(config.projects)) {
-    const tracker = project.tracker as Record<string, unknown> | undefined;
-    if (tracker?.plugin === "jira") {
-      baseUrl = toStringOrUndefined(tracker.baseUrl);
-      break;
-    }
-  }
-  baseUrl = baseUrl || env("JIRA_URL", "JIRA_HOST");
+function resolveProjectPollingConfig(
+  project: ProjectConfig,
+): JiraPollingConfig | null {
+  const tracker = project.tracker as Record<string, unknown> | undefined;
+  if (tracker?.plugin !== "jira") return null;
+
+  let baseUrl =
+    toStringOrUndefined(tracker.baseUrl) || env("JIRA_URL", "JIRA_HOST");
   if (!baseUrl) return null;
   baseUrl = normalizeBaseUrl(baseUrl);
 
-  const email = env("JIRA_EMAIL", "JIRA_USER");
-  const apiToken = env("JIRA_API_TOKEN", "JIRA_TOKEN");
+  const email =
+    toStringOrUndefined(tracker.email) || env("JIRA_EMAIL", "JIRA_USER");
+  const apiToken =
+    toStringOrUndefined(tracker.apiToken) ||
+    env("JIRA_API_TOKEN", "JIRA_TOKEN");
   if (!email || !apiToken) return null;
 
   const intervalMs =
+    toPositiveNumber(tracker.pollIntervalMs) ??
     toPositiveNumber(env("AO_JIRA_POLL_INTERVAL_MS", "JIRA_POLL_INTERVAL_MS")) ??
     DEFAULT_POLL_INTERVAL_MS;
 
@@ -158,6 +162,57 @@ function hasJiraTrackerProject(config: OrchestratorConfig): boolean {
   return Object.values(config.projects).some(
     (p) => (p.tracker as Record<string, unknown> | undefined)?.plugin === "jira",
   );
+}
+
+// ---------------------------------------------------------------------------
+// Standalone fetch helper
+// ---------------------------------------------------------------------------
+
+async function fetchComments(
+  issueKey: string,
+  cfg: JiraPollingConfig,
+  fetchImpl: FetchFn,
+): Promise<JiraComment[]> {
+  const collected: JiraComment[] = [];
+  let startAt = 0;
+  const maxResults = 100;
+  const maxPages = 50;
+
+  for (let page = 0; page < maxPages; page += 1) {
+    const url = `${cfg.baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
+    const response = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Basic ${btoa(`${cfg.email}:${cfg.apiToken}`)}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Jira API ${response.status}: ${await response.text()}`);
+    }
+
+    const payload = (await response.json()) as JiraCommentsResponse;
+    const pageComments = Array.isArray(payload.comments) ? payload.comments : [];
+    collected.push(...pageComments);
+
+    const total =
+      typeof payload.total === "number" && Number.isFinite(payload.total)
+        ? payload.total
+        : collected.length;
+    const returned =
+      typeof payload.maxResults === "number" && payload.maxResults > 0
+        ? payload.maxResults
+        : pageComments.length;
+
+    if (pageComments.length === 0 || collected.length >= total || returned <= 0) {
+      break;
+    }
+
+    startAt += returned;
+  }
+
+  return collected;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,11 +231,16 @@ export async function maybeStartJiraCommentPolling(
     return null;
   }
 
-  const cfg = resolvePollingConfig(deps.config);
-  if (!cfg) {
+  const projectConfigs = new Map<string, JiraPollingConfig>();
+  for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    const cfg = resolveProjectPollingConfig(project);
+    if (cfg) projectConfigs.set(projectId, cfg);
+  }
+
+  if (projectConfigs.size === 0) {
     health?.markInactive(
       JIRA_COMMENT_POLLING_HEALTH,
-      "Jira polling inactive: base URL, JIRA_EMAIL, or JIRA_API_TOKEN is missing",
+      "Jira polling inactive: base URL, email, or API token is missing for all Jira projects",
     );
     return null;
   }
@@ -188,57 +248,22 @@ export async function maybeStartJiraCommentPolling(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const logger = deps.logger ?? console;
   const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
-  const { baseUrl, email, apiToken } = cfg;
+
+  const intervalMs = Math.min(
+    ...[...projectConfigs.values()].map((c) => c.intervalMs),
+  );
+
   health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting Jira comment polling runtime");
 
-  // Track last seen comment ID per issue to avoid re-processing
+  // Track last seen comment ID per project:issue to avoid re-processing
   const seenCommentIds = new Map<string, Set<string>>();
+
+  // Track when each project was last polled so projects with longer intervals
+  // are not over-polled when the timer ticks at the minimum interval rate.
+  const lastPolledAt = new Map<string, number>();
 
   let stopped = false;
   let inFlight = false;
-
-  async function fetchComments(issueKey: string): Promise<JiraComment[]> {
-    const collected: JiraComment[] = [];
-    let startAt = 0;
-    const maxResults = 100;
-    const maxPages = 50;
-
-    for (let page = 0; page < maxPages; page += 1) {
-      const url = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
-      const response = await fetchImpl(url, {
-        method: "GET",
-        headers: {
-          Authorization: `Basic ${btoa(`${email}:${apiToken}`)}`,
-          Accept: "application/json",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`Jira API ${response.status}: ${await response.text()}`);
-      }
-
-      const payload = (await response.json()) as JiraCommentsResponse;
-      const pageComments = Array.isArray(payload.comments) ? payload.comments : [];
-      collected.push(...pageComments);
-
-      const total =
-        typeof payload.total === "number" && Number.isFinite(payload.total)
-          ? payload.total
-          : collected.length;
-      const returned =
-        typeof payload.maxResults === "number" && payload.maxResults > 0
-          ? payload.maxResults
-          : pageComments.length;
-
-      if (pageComments.length === 0 || collected.length >= total || returned <= 0) {
-        break;
-      }
-
-      startAt += returned;
-    }
-
-    return collected;
-  }
 
   /**
    * For a given issue's comments, find new human replies to AO_SESSION comments.
@@ -247,9 +272,10 @@ export async function maybeStartJiraCommentPolling(
    * 1. Walk comments in order
    * 2. Track the latest AO_SESSION:xxx marker seen so far
    * 3. Any NEW comment (not seen before, no AO_SESSION marker itself) after a
-   *    marker comment is a human reply → route to that session
+   *    marker comment is a human reply -> route to that session
    */
   function findNewReplies(
+    seenKey: string,
     issueKey: string,
     comments: JiraComment[],
   ): Array<{
@@ -260,7 +286,7 @@ export async function maybeStartJiraCommentPolling(
     authorEmail?: string;
     authorDisplayName?: string;
   }> {
-    const seen = seenCommentIds.get(issueKey);
+    const seen = seenCommentIds.get(seenKey);
     const nowSeen = new Set<string>();
     const replies: Array<{
       sessionId: string;
@@ -301,7 +327,7 @@ export async function maybeStartJiraCommentPolling(
       }
     }
 
-    seenCommentIds.set(issueKey, nowSeen);
+    seenCommentIds.set(seenKey, nowSeen);
     return replies;
   }
 
@@ -320,72 +346,95 @@ export async function maybeStartJiraCommentPolling(
           s.status !== "done",
       );
 
-      // Deduplicate by issueId (multiple sessions could share an issue)
-      const issueToSessions = new Map<string, string[]>();
+      // Group sessions by projectId
+      const projectSessions = new Map<string, Map<string, string[]>>();
       for (const session of activeSessions) {
         if (!session.issueId) continue;
-        const existing = issueToSessions.get(session.issueId);
+        const pid = session.projectId;
+        if (!projectSessions.has(pid)) {
+          projectSessions.set(pid, new Map<string, string[]>());
+        }
+        const issueMap = projectSessions.get(pid)!;
+        const existing = issueMap.get(session.issueId);
         if (existing) {
           existing.push(session.id);
         } else {
-          issueToSessions.set(session.issueId, [session.id]);
+          issueMap.set(session.issueId, [session.id]);
         }
       }
 
-      for (const [issueKey] of issueToSessions) {
-        cycleIssueCount += 1;
-        try {
-          const comments = await fetchComments(issueKey);
-          const replies = findNewReplies(issueKey, comments);
+      const now = Date.now();
 
-          for (const reply of replies) {
-            const jiraRouting = buildJiraInboundRouting({
-              issueKey: reply.issueKey,
-              commentId: reply.commentId,
-              authorEmail: reply.authorEmail,
-              authorDisplayName: reply.authorDisplayName,
-            });
+      for (const [projectId, issueToSessions] of projectSessions) {
+        const projectCfg = projectConfigs.get(projectId);
+        if (!projectCfg) {
+          logger.warn(
+            `[jira-polling] No valid Jira config for project "${projectId}", skipping its issues`,
+          );
+          continue;
+        }
 
-            let sourceReplyAvailable = false;
-            try {
-              await inboundContextStore.enqueue({
-                sessionId: reply.sessionId,
-                source: "jira",
-                text: reply.text,
-                routing: jiraRouting,
+        // Skip projects whose individual poll interval has not elapsed yet.
+        const lastPoll = lastPolledAt.get(projectId) ?? 0;
+        if (now - lastPoll < projectCfg.intervalMs) continue;
+        lastPolledAt.set(projectId, now);
+
+        for (const [issueKey] of issueToSessions) {
+          cycleIssueCount += 1;
+          const seenKey = `${projectId}:${issueKey}`;
+          try {
+            const comments = await fetchComments(issueKey, projectCfg, fetchImpl);
+            const replies = findNewReplies(seenKey, issueKey, comments);
+
+            for (const reply of replies) {
+              const jiraRouting = buildJiraInboundRouting({
+                issueKey: reply.issueKey,
+                commentId: reply.commentId,
+                authorEmail: reply.authorEmail,
+                authorDisplayName: reply.authorDisplayName,
               });
-              sourceReplyAvailable = true;
-            } catch (err) {
-              cycleHadErrors = true;
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.warn(
-                `[jira-polling] Failed to persist inbound source context for ${reply.sessionId}: ${msg}`,
-              );
-            }
 
-            try {
-              await deps.sessionManager.send(
-                reply.sessionId,
-                formatInboundMessageForSession({
+              let sourceReplyAvailable = false;
+              try {
+                await inboundContextStore.enqueue({
                   sessionId: reply.sessionId,
                   source: "jira",
                   text: reply.text,
                   routing: jiraRouting,
-                  includeReplyCommand: sourceReplyAvailable,
-                }),
-              );
-            } catch (err) {
-              cycleHadErrors = true;
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.warn(
-                `[jira-polling] Failed to send to session ${reply.sessionId}: ${msg}`,
-              );
+                });
+                sourceReplyAvailable = true;
+              } catch (err) {
+                cycleHadErrors = true;
+                const msg = err instanceof Error ? err.message : String(err);
+                logger.warn(
+                  `[jira-polling] Failed to persist inbound source context for ${reply.sessionId}: ${msg}`,
+                );
+              }
+
+              try {
+                await deps.sessionManager.send(
+                  reply.sessionId,
+                  formatInboundMessageForSession({
+                    sessionId: reply.sessionId,
+                    source: "jira",
+                    text: reply.text,
+                    routing: jiraRouting,
+                    includeReplyCommand: sourceReplyAvailable,
+                  }),
+                );
+              } catch (err) {
+                cycleHadErrors = true;
+                const msg = err instanceof Error ? err.message : String(err);
+                logger.warn(
+                  `[jira-polling] Failed to send to session ${reply.sessionId}: ${msg}`,
+                );
+              }
             }
+          } catch (err) {
+            cycleHadErrors = true;
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`[jira-polling] Failed to fetch comments for ${issueKey}: ${msg}`);
           }
-        } catch (err) {
-          cycleHadErrors = true;
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.warn(`[jira-polling] Failed to fetch comments for ${issueKey}: ${msg}`);
         }
       }
 
@@ -411,7 +460,7 @@ export async function maybeStartJiraCommentPolling(
 
   const timer = setInterval(() => {
     void pollOnce();
-  }, cfg.intervalMs);
+  }, intervalMs);
 
   // Initial poll
   void pollOnce();

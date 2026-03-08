@@ -27,10 +27,12 @@ function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig
 }
 
 function makeSessionManager(
-  sessions: Array<{ id: string; status: string; issueId: string | null }> = [],
+  sessions: Array<{ id: string; status: string; issueId: string | null; projectId?: string }> = [],
 ): SessionManager {
   return {
-    list: vi.fn(async () => sessions),
+    list: vi.fn(async () =>
+      sessions.map((s) => ({ ...s, projectId: s.projectId ?? "int" })),
+    ),
     get: vi.fn(),
     spawn: vi.fn(),
     kill: vi.fn(),
@@ -451,6 +453,295 @@ describe("maybeStartJiraCommentPolling", () => {
 
     await vi.runOnlyPendingTimersAsync();
     expect(healthReporter.markDegraded).toHaveBeenCalled();
+    controller?.stop();
+  });
+
+  it("falls back to JIRA_URL env var when tracker config has no baseUrl", async () => {
+    process.env["JIRA_URL"] = "https://env-based.atlassian.net";
+    process.env["JIRA_EMAIL"] = "env@test.com";
+    process.env["JIRA_API_TOKEN"] = "env-token";
+
+    const config = makeConfig({
+      projects: {
+        proj: {
+          name: "Proj",
+          repo: "org/proj",
+          path: "/tmp/proj",
+          defaultBranch: "main",
+          sessionPrefix: "proj",
+          tracker: { plugin: "jira" },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "proj-1", status: "working", issueId: "PROJ-1", projectId: "proj" },
+    ]);
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ comments: [] }),
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const [url, opts] = fetchImpl.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(url).toContain("https://env-based.atlassian.net/rest/api/3/issue/PROJ-1/comment");
+    expect(opts.headers.Authorization).toBe(`Basic ${btoa("env@test.com:env-token")}`);
+
+    controller?.stop();
+  });
+
+  // --- Per-project config tests ---
+
+  it("uses per-project auth from tracker config", async () => {
+    delete process.env["JIRA_EMAIL"];
+    delete process.env["JIRA_API_TOKEN"];
+
+    const config = makeConfig({
+      projects: {
+        proj: {
+          name: "Proj",
+          repo: "org/proj",
+          path: "/tmp/proj",
+          defaultBranch: "main",
+          sessionPrefix: "proj",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://proj.atlassian.net",
+            email: "proj@test.com",
+            apiToken: "proj-token",
+          },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "proj-1", status: "working", issueId: "PROJ-10", projectId: "proj" },
+    ]);
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ comments: [] }),
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const [url, opts] = fetchImpl.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(url).toContain("https://proj.atlassian.net/rest/api/3/issue/PROJ-10/comment");
+    expect(opts.headers.Authorization).toBe(`Basic ${btoa("proj@test.com:proj-token")}`);
+
+    controller?.stop();
+  });
+
+  it("polls multiple Jira instances with different credentials", async () => {
+    delete process.env["JIRA_EMAIL"];
+    delete process.env["JIRA_API_TOKEN"];
+
+    const config = makeConfig({
+      projects: {
+        "proj-a": {
+          name: "Proj A",
+          repo: "org/a",
+          path: "/tmp/a",
+          defaultBranch: "main",
+          sessionPrefix: "a",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://a.atlassian.net",
+            email: "a@test.com",
+            apiToken: "tok-a",
+          },
+        },
+        "proj-b": {
+          name: "Proj B",
+          repo: "org/b",
+          path: "/tmp/b",
+          defaultBranch: "main",
+          sessionPrefix: "b",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://b.atlassian.net",
+            email: "b@test.com",
+            apiToken: "tok-b",
+          },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "a-1", status: "working", issueId: "A-1", projectId: "proj-a" },
+      { id: "b-1", status: "working", issueId: "B-1", projectId: "proj-b" },
+    ]);
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ comments: [] }),
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    // Initial poll + interval tick may both fire; check at least 2 calls (one per project)
+    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const calls = fetchImpl.mock.calls as Array<[string, { headers: Record<string, string> }]>;
+    const urlA = calls.find(([u]) => u.includes("a.atlassian.net"));
+    const urlB = calls.find(([u]) => u.includes("b.atlassian.net"));
+
+    expect(urlA).toBeDefined();
+    expect(urlB).toBeDefined();
+    expect(urlA![1].headers.Authorization).toBe(`Basic ${btoa("a@test.com:tok-a")}`);
+    expect(urlB![1].headers.Authorization).toBe(`Basic ${btoa("b@test.com:tok-b")}`);
+
+    controller?.stop();
+  });
+
+  it("falls back to env vars when tracker config has no email/apiToken", async () => {
+    process.env["JIRA_EMAIL"] = "env@test.com";
+    process.env["JIRA_API_TOKEN"] = "env-token";
+
+    const config = makeConfig({
+      projects: {
+        proj: {
+          name: "Proj",
+          repo: "org/proj",
+          path: "/tmp/proj",
+          defaultBranch: "main",
+          sessionPrefix: "proj",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://test.atlassian.net",
+          },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "proj-1", status: "working", issueId: "PROJ-5", projectId: "proj" },
+    ]);
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ comments: [] }),
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(fetchImpl).toHaveBeenCalled();
+    const [url, opts] = fetchImpl.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(url).toContain("https://test.atlassian.net/rest/api/3/issue/PROJ-5/comment");
+    expect(opts.headers.Authorization).toBe(`Basic ${btoa("env@test.com:env-token")}`);
+
+    controller?.stop();
+  });
+
+  it("skips projects without valid Jira config", async () => {
+    delete process.env["JIRA_EMAIL"];
+    delete process.env["JIRA_API_TOKEN"];
+
+    const config = makeConfig({
+      projects: {
+        valid: {
+          name: "Valid",
+          repo: "org/valid",
+          path: "/tmp/valid",
+          defaultBranch: "main",
+          sessionPrefix: "v",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://valid.atlassian.net",
+            email: "valid@test.com",
+            apiToken: "valid-token",
+          },
+        },
+        invalid: {
+          name: "Invalid",
+          repo: "org/invalid",
+          path: "/tmp/invalid",
+          defaultBranch: "main",
+          sessionPrefix: "inv",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://invalid.atlassian.net",
+            // no email or apiToken, no env vars
+          },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "v-1", status: "working", issueId: "V-1", projectId: "valid" },
+      { id: "inv-1", status: "working", issueId: "INV-1", projectId: "invalid" },
+    ]);
+
+    const logger = { warn: vi.fn() };
+
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ comments: [] }),
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger,
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    // Only the valid project's issue should be polled (may fire more than once due to timer ticks)
+    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(1);
+    // All calls should be for the valid project, none for invalid
+    for (const call of fetchImpl.mock.calls) {
+      expect(call[0]).toContain("valid.atlassian.net");
+    }
+
+    // Warning logged for the invalid project
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("No valid Jira config for project \"invalid\""),
+    );
+
     controller?.stop();
   });
 });

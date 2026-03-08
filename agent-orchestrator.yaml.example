@@ -43,6 +43,14 @@ projects:
     #   plugin: linear
     #   teamId: "your-team-id"
 
+    # Jira tracker with per-project connection config:
+    # tracker:
+    #   plugin: jira
+    #   baseUrl: "https://myteam.atlassian.net"
+    #   email: "you@example.com"        # falls back to JIRA_EMAIL env var
+    #   apiToken: "your-api-token"       # falls back to JIRA_API_TOKEN env var
+    #   pollIntervalMs: 60000            # optional, defaults to 60000
+
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]
 

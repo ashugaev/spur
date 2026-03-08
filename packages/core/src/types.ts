@@ -939,6 +939,16 @@ export interface ProjectConfig {
 
 export interface TrackerConfig {
   plugin: string;
+  /** Jira instance base URL (e.g. "https://myteam.atlassian.net") */
+  baseUrl?: string;
+  /** Jira project key (e.g. "INT") */
+  projectKey?: string;
+  /** Jira user email for Basic auth */
+  email?: string;
+  /** Jira API token for Basic auth */
+  apiToken?: string;
+  /** Poll interval in milliseconds (overrides default 60 000) */
+  pollIntervalMs?: number;
   /** Plugin-specific config (e.g. teamId for Linear) */
   [key: string]: unknown;
 }
