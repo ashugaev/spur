@@ -680,7 +680,10 @@ describe("workspace.postCreate()", () => {
 
     await ws.postCreate!(workspaceInfo, project);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith("sh", ["-c", "pnpm install"], {
+    expect(mockExecFileAsync).toHaveBeenCalledWith("sh", [
+      "-c",
+      "pnpm install --config.confirmModulesPurge=false",
+    ], {
       cwd: "/mock-home/.worktrees/myproject/session-1",
     });
     expect(mockExecFileAsync).toHaveBeenCalledWith("sh", ["-c", "pnpm build"], {
@@ -717,7 +720,10 @@ describe("workspace.postCreate()", () => {
     await ws.postCreate!(workspaceInfo, project);
 
     expect(mockSymlinkSync).toHaveBeenCalledTimes(1);
-    expect(mockExecFileAsync).toHaveBeenCalledWith("sh", ["-c", "pnpm install"], {
+    expect(mockExecFileAsync).toHaveBeenCalledWith("sh", [
+      "-c",
+      "pnpm install --config.confirmModulesPurge=false",
+    ], {
       cwd: "/mock-home/.worktrees/myproject/session-1",
     });
   });

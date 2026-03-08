@@ -8,6 +8,7 @@ import { cn } from "@/lib/cn";
 import { CICheckList } from "./CIBadge";
 import { DirectTerminal } from "./DirectTerminal";
 import { ActivityDot } from "./ActivityDot";
+import { buildProjectPath } from "@/lib/project-routes";
 
 interface OrchestratorZones {
   merge: number;
@@ -22,6 +23,7 @@ interface SessionDetailProps {
   session: DashboardSession;
   isOrchestrator?: boolean;
   orchestratorZones?: OrchestratorZones;
+  activeProjectId?: string;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -181,7 +183,12 @@ function OrchestratorStatusStrip({
 
 // ── Main component ────────────────────────────────────────────────────
 
-export function SessionDetail({ session, isOrchestrator = false, orchestratorZones }: SessionDetailProps) {
+export function SessionDetail({
+  session,
+  isOrchestrator = false,
+  orchestratorZones,
+  activeProjectId,
+}: SessionDetailProps) {
   const searchParams = useSearchParams();
   const startFullscreen = searchParams.get("fullscreen") === "true";
   const pr = session.pr;
@@ -192,6 +199,7 @@ export function SessionDetail({ session, isOrchestrator = false, orchestratorZon
 
   const accentColor = "var(--color-accent)";
   const terminalVariant = isOrchestrator ? "orchestrator" : "agent";
+  const currentProjectId = activeProjectId ?? session.projectId;
 
   const terminalHeight = isOrchestrator
     ? "calc(100vh - 240px)"
@@ -203,13 +211,13 @@ export function SessionDetail({ session, isOrchestrator = false, orchestratorZon
       <nav className="nav-glass sticky top-0 z-10 border-b border-[var(--color-border-subtle)]">
         <div className="mx-auto flex max-w-[900px] items-center gap-2 px-8 py-2.5">
           <a
-            href="/"
+            href={buildProjectPath(currentProjectId)}
             className="flex items-center gap-1 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] hover:no-underline"
           >
             <svg className="h-3 w-3 opacity-60" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
               <path d="M15 18l-6-6 6-6" />
             </svg>
-            Orchestrator
+            Project Dashboard
           </a>
           <span className="text-[var(--color-border-strong)]">/</span>
           <span className="font-[var(--font-mono)] text-[11px] text-[var(--color-text-tertiary)]">

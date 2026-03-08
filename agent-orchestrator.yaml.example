@@ -89,6 +89,14 @@ projects:
 #     # webhookSecret: ${AO_TELEGRAM_WEBHOOK_SECRET}
 #     # pollingIntervalMs: 30000   # used only when Telegram webhook is not configured
 
+# Shared services (optional)
+# services:
+#   transcriber:
+#     binaryPath: /opt/whisper.cpp/build/bin/whisper-cli
+#     modelPath: /opt/whisper.cpp/models/ggml-base.bin
+#     # Optional advanced overrides (defaults are built-in):
+#     # maxAudioBytes: 25000000
+
 # Notification routing by priority
 # notificationRouting:
 #   urgent: [desktop, telegram]   # agent stuck, needs input, errored

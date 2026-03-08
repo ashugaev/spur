@@ -10,8 +10,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import chalk from "chalk";
 import ora from "ora";
 import type { Command } from "commander";
@@ -43,15 +43,179 @@ import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
 
 const DEFAULT_PORT = 3000;
+const START_RUNTIME_STATE_FILE = ".ao-start-runtime.json";
+const START_RUNTIME_STATE_VERSION = 1;
+
+interface StartRuntimeState {
+  version: number;
+  pid: number;
+  port: number;
+  configPath: string;
+  startedAt: string;
+}
 
 // =============================================================================
 // HELPERS
 // =============================================================================
 
 /**
- * Resolve project from config.
- * If projectArg is provided, use it. If only one project exists, use that.
- * Otherwise, error with helpful message.
+ * Path for start runtime state associated with a config file.
+ */
+function getStartRuntimeStatePath(configPath: string | null): string | null {
+  if (!configPath) return null;
+  return resolve(dirname(configPath), START_RUNTIME_STATE_FILE);
+}
+
+/**
+ * Check if a process is alive.
+ */
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read start runtime state from disk.
+ */
+function readStartRuntimeState(configPath: string | null): StartRuntimeState | null {
+  const statePath = getStartRuntimeStatePath(configPath);
+  if (!statePath || !existsSync(statePath)) return null;
+
+  try {
+    const raw = JSON.parse(readFileSync(statePath, "utf-8")) as Partial<StartRuntimeState>;
+    if (
+      raw.version !== START_RUNTIME_STATE_VERSION ||
+      typeof raw.pid !== "number" ||
+      typeof raw.port !== "number" ||
+      typeof raw.configPath !== "string" ||
+      typeof raw.startedAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      version: raw.version,
+      pid: raw.pid,
+      port: raw.port,
+      configPath: raw.configPath,
+      startedAt: raw.startedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persist start runtime state.
+ */
+function writeStartRuntimeState(configPath: string | null, port: number): void {
+  const statePath = getStartRuntimeStatePath(configPath);
+  if (!statePath || !configPath) return;
+
+  const state: StartRuntimeState = {
+    version: START_RUNTIME_STATE_VERSION,
+    pid: process.pid,
+    port,
+    configPath,
+    startedAt: new Date().toISOString(),
+  };
+  writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+}
+
+/**
+ * Remove runtime state if owned by the current process, or if marked stale.
+ */
+function clearStartRuntimeState(configPath: string | null, opts?: { staleOnly?: boolean }): void {
+  const statePath = getStartRuntimeStatePath(configPath);
+  if (!statePath || !existsSync(statePath)) return;
+
+  const safeUnlink = () => {
+    try {
+      unlinkSync(statePath);
+    } catch {
+      // Best effort cleanup
+    }
+  };
+
+  const state = readStartRuntimeState(configPath);
+  if (!state) {
+    safeUnlink();
+    return;
+  }
+
+  if (opts?.staleOnly) {
+    if (!isPidAlive(state.pid)) safeUnlink();
+    return;
+  }
+
+  if (state.pid === process.pid || !isPidAlive(state.pid)) {
+    safeUnlink();
+  }
+}
+
+/**
+ * Resolve current supervisor dashboard port.
+ * Prefers runtime state when a live supervisor exists.
+ */
+function resolveSupervisorPort(config: OrchestratorConfig): number {
+  const runtimeState = readStartRuntimeState(config.configPath);
+  if (
+    runtimeState &&
+    runtimeState.configPath === config.configPath &&
+    isPidAlive(runtimeState.pid) &&
+    Number.isInteger(runtimeState.port) &&
+    runtimeState.port > 0
+  ) {
+    return runtimeState.port;
+  }
+  return config.port ?? DEFAULT_PORT;
+}
+
+/**
+ * Check whether any configured orchestrator session is currently active.
+ * Used as an additional attach signal when a runtime state PID is live.
+ */
+async function hasActiveOrchestratorSessions(
+  config: OrchestratorConfig,
+  sessionManager: Awaited<ReturnType<typeof getSessionManager>>,
+): Promise<boolean> {
+  for (const project of Object.values(config.projects)) {
+    const sessionId = `${project.sessionPrefix}-orchestrator`;
+    const session = await sessionManager.get(sessionId);
+    if (session !== null && session.status !== "killed") {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Resolve target projects for `ao start`.
+ * If projectArg is omitted, start all configured projects.
+ */
+function resolveStartProjects(config: OrchestratorConfig, projectArg?: string): string[] {
+  const projectIds = Object.keys(config.projects);
+  if (projectIds.length === 0) {
+    throw new Error("No projects configured. Add a project to agent-orchestrator.yaml.");
+  }
+
+  if (!projectArg) return projectIds;
+
+  if (!config.projects[projectArg]) {
+    throw new Error(
+      `Project "${projectArg}" not found. Available projects:\n  ${projectIds.join(", ")}`,
+    );
+  }
+  return [projectArg];
+}
+
+/**
+ * Resolve a single project from config.
+ * Used by `stop`/`restart`, where a unique project target is required.
  */
 function resolveProject(
   config: OrchestratorConfig,
@@ -261,19 +425,45 @@ async function startDashboard(
  */
 async function runStartup(
   config: OrchestratorConfig,
-  projectId: string,
-  project: ProjectConfig,
-  opts?: { dashboard?: boolean; orchestrator?: boolean; rebuild?: boolean; autoPort?: boolean },
+  targetProjectIds: string[],
+  opts?: {
+    dashboard?: boolean;
+    orchestrator?: boolean;
+    rebuild?: boolean;
+    autoPort?: boolean;
+    forceFreshRuntime?: boolean;
+  },
 ): Promise<void> {
-  const sessionId = `${project.sessionPrefix}-orchestrator`;
+  if (targetProjectIds.length === 0) {
+    throw new Error("No target projects provided for startup");
+  }
+
+  const primaryProjectId = targetProjectIds[0];
+  const primaryProject = config.projects[primaryProjectId];
+  if (!primaryProject) {
+    throw new Error(`Project "${primaryProjectId}" not found`);
+  }
+
   let port = config.port ?? DEFAULT_PORT;
   const integrationHealth = createIntegrationHealthReporter({
     config,
-    projectId,
-    project,
+    projectId: primaryProjectId,
+    project: primaryProject,
   });
 
-  console.log(chalk.bold(`\nStarting orchestrator for ${chalk.cyan(project.name)}\n`));
+  if (targetProjectIds.length === 1) {
+    console.log(chalk.bold(`\nStarting orchestrator for ${chalk.cyan(primaryProject.name)}\n`));
+  } else {
+    const projectList = targetProjectIds
+      .map((id) => config.projects[id]?.name ?? id)
+      .join(", ");
+    console.log(
+      chalk.bold(
+        `\nStarting orchestrator for ${chalk.cyan(String(targetProjectIds.length))} projects\n`,
+      ),
+    );
+    console.log(chalk.dim(`  Projects: ${projectList}\n`));
+  }
 
   const spinner = ora();
   let dashboardProcess: ChildProcess | null = null;
@@ -282,132 +472,223 @@ async function runStartup(
   let jiraPolling: JiraCommentPollingController | null = null;
   let configuredListeners: ListenerGroupController | null = null;
   let sharedSessionManager: Awaited<ReturnType<typeof getSessionManager>> | null = null;
-  let exists = false;
+  let attachedToExistingRuntime = false;
+  let attachedRuntimeDashboardReachable = false;
 
   // Start dashboard (unless --no-dashboard)
   if (opts?.dashboard !== false) {
-    if (opts?.autoPort) {
-      // Port was auto-selected during config generation — if it's now busy
-      // (race condition), find another free port instead of erroring.
-      if (!(await isPortAvailable(port))) {
-        const newPort = await findFreePort(DEFAULT_PORT);
-        if (newPort === null) {
-          throw new Error(
-            `No free port found in range ${DEFAULT_PORT}–${DEFAULT_PORT + MAX_PORT_SCAN - 1}.`,
+    const runtimeState = readStartRuntimeState(config.configPath);
+    const attachCandidate =
+      opts?.forceFreshRuntime === true
+        ? null
+        : runtimeState !== null &&
+            runtimeState.configPath === config.configPath &&
+            isPidAlive(runtimeState.pid)
+          ? runtimeState
+          : null;
+
+    if (attachCandidate) {
+      const dashboardReachable = !(await isPortAvailable(attachCandidate.port));
+      let activeSessionsDetected = false;
+
+      if (!dashboardReachable) {
+        const sm = sharedSessionManager ?? (await getSessionManager(config));
+        sharedSessionManager = sm;
+        activeSessionsDetected = await hasActiveOrchestratorSessions(config, sm);
+      }
+
+      if (dashboardReachable || activeSessionsDetected) {
+        attachedToExistingRuntime = true;
+        attachedRuntimeDashboardReachable = dashboardReachable;
+        port = attachCandidate.port;
+        if (dashboardReachable) {
+          console.log(
+            chalk.dim(
+              `  Reusing running orchestrator runtime (PID ${attachCandidate.pid}) on http://localhost:${port}`,
+            ),
+          );
+        } else {
+          console.log(
+            chalk.dim(
+              `  Reusing running orchestrator runtime (PID ${attachCandidate.pid}) and attaching new project sessions`,
+            ),
           );
         }
-        port = newPort;
+      } else {
+        clearStartRuntimeState(config.configPath);
       }
+    }
+
+    if (!attachedToExistingRuntime) {
+      // If the config port differs from the reused runtime port we already set `port` above.
+      // New runtime startup still begins from config/default.
+      if (!attachCandidate) {
+        port = config.port ?? DEFAULT_PORT;
+      }
+
+      clearStartRuntimeState(config.configPath, { staleOnly: true });
+
+      if (opts?.forceFreshRuntime) {
+        clearStartRuntimeState(config.configPath);
+      }
+
+      if (opts?.autoPort) {
+        // Port was auto-selected during config generation — if it's now busy
+        // (race condition), find another free port instead of erroring.
+        if (!(await isPortAvailable(port))) {
+          const newPort = await findFreePort(DEFAULT_PORT);
+          if (newPort === null) {
+            throw new Error(
+              `No free port found in range ${DEFAULT_PORT}–${DEFAULT_PORT + MAX_PORT_SCAN - 1}.`,
+            );
+          }
+          port = newPort;
+        }
+      } else {
+        await preflight.checkPort(port);
+      }
+      const webDir = findWebDir();
+      if (!existsSync(resolve(webDir, "package.json"))) {
+        throw new Error("Could not find @composio/ao-web package. Run: pnpm install");
+      }
+      await preflight.checkBuilt(webDir);
+
+      if (opts?.rebuild) {
+        await cleanNextCache(webDir);
+      }
+
+      spinner.start("Starting dashboard");
+      dashboardProcess = await startDashboard(
+        port,
+        webDir,
+        config.configPath,
+        primaryProjectId,
+        integrationHealth.snapshotPath,
+        config.terminalPort,
+        config.directTerminalPort,
+      );
+      spinner.succeed(`Dashboard starting on http://localhost:${port}`);
+      console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
+
+      // Start lifecycle polling in the same process as `ao start` so reactions
+      // and notifiers (including Telegram) run continuously while dashboard is up.
+      const [sessionManager, registry] = await Promise.all([
+        getSessionManager(config),
+        getPluginRegistry(config),
+      ]);
+      sharedSessionManager = sessionManager;
+      lifecycleManager = createLifecycleManager({
+        config,
+        registry,
+        sessionManager,
+      });
+      lifecycleManager.start();
+
+      telegramPolling = await maybeStartTelegramLongPolling({
+        config,
+        sessionManager,
+        healthReporter: integrationHealth,
+      });
+      if (telegramPolling) {
+        console.log(
+          chalk.dim("  Telegram inbound: polling enabled (2s fallback, 30s rate-limit backoff)"),
+        );
+      }
+
+      jiraPolling = await maybeStartJiraCommentPolling({
+        config,
+        sessionManager,
+        healthReporter: integrationHealth,
+      });
+      if (jiraPolling) {
+        console.log(chalk.dim("  Jira inbound: comment polling enabled (60s)"));
+      }
+
+      configuredListeners = await maybeStartConfiguredListeners({
+        config,
+        sessionManager,
+        healthReporter: integrationHealth,
+      });
+      if (configuredListeners && configuredListeners.activeListeners.length > 0) {
+        console.log(
+          chalk.dim(
+            `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (enabled)`,
+          ),
+        );
+      }
+
+      writeStartRuntimeState(config.configPath, port);
     } else {
-      await preflight.checkPort(port);
-    }
-    const webDir = findWebDir();
-    if (!existsSync(resolve(webDir, "package.json"))) {
-      throw new Error("Could not find @composio/ao-web package. Run: pnpm install");
-    }
-    await preflight.checkBuilt(webDir);
-
-    if (opts?.rebuild) {
-      await cleanNextCache(webDir);
-    }
-
-    spinner.start("Starting dashboard");
-    dashboardProcess = await startDashboard(
-      port,
-      webDir,
-      config.configPath,
-      projectId,
-      integrationHealth.snapshotPath,
-      config.terminalPort,
-      config.directTerminalPort,
-    );
-    spinner.succeed(`Dashboard starting on http://localhost:${port}`);
-    console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
-
-    // Start lifecycle polling in the same process as `ao start` so reactions
-    // and notifiers (including Telegram) run continuously while dashboard is up.
-    const [sessionManager, registry] = await Promise.all([
-      getSessionManager(config),
-      getPluginRegistry(config),
-    ]);
-    sharedSessionManager = sessionManager;
-    lifecycleManager = createLifecycleManager({
-      config,
-      registry,
-      sessionManager,
-    });
-    lifecycleManager.start();
-
-    telegramPolling = await maybeStartTelegramLongPolling({
-      config,
-      sessionManager,
-      healthReporter: integrationHealth,
-    });
-    if (telegramPolling) {
-      console.log(
-        chalk.dim("  Telegram inbound: polling enabled (2s fallback, 30s rate-limit backoff)"),
-      );
-    }
-
-    jiraPolling = await maybeStartJiraCommentPolling({
-      config,
-      sessionManager,
-      healthReporter: integrationHealth,
-    });
-    if (jiraPolling) {
-      console.log(chalk.dim("  Jira inbound: comment polling enabled (60s)"));
-    }
-
-    configuredListeners = await maybeStartConfiguredListeners({
-      config,
-      sessionManager,
-      projectId,
-      healthReporter: integrationHealth,
-    });
-    if (configuredListeners && configuredListeners.activeListeners.length > 0) {
-      console.log(
-        chalk.dim(
-          `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (enabled)`,
-        ),
-      );
+      if (attachCandidate && attachCandidate.port !== (config.port ?? DEFAULT_PORT)) {
+        console.log(
+          chalk.dim(
+            `  Config port ${config.port ?? DEFAULT_PORT} differs from running runtime port ${attachCandidate.port}; using running port`,
+          ),
+        );
+      }
     }
   }
 
-  // Create orchestrator session (unless --no-orchestrator or already exists)
-  let tmuxTarget = sessionId;
+  const orchestratorResults: Array<{
+    projectId: string;
+    sessionId: string;
+    tmuxTarget: string;
+    exists: boolean;
+  }> = [];
+
+  // Create orchestrator sessions (unless --no-orchestrator)
   if (opts?.orchestrator !== false) {
     const sm = sharedSessionManager ?? (await getSessionManager(config));
-    const existing = await sm.get(sessionId);
-    exists = existing !== null && existing.status !== "killed";
+    const createdThisRun: string[] = [];
 
-    if (exists) {
-      if (existing?.runtimeHandle?.id) {
-        tmuxTarget = existing.runtimeHandle.id;
-      }
-      console.log(
-        chalk.yellow(
-          `Orchestrator session "${sessionId}" is already running (skipping creation)`,
-        ),
-      );
-    } else {
-      try {
-        spinner.start("Creating orchestrator session");
-        const systemPrompt = generateOrchestratorPrompt({ config, projectId, project });
-        const session = await sm.spawnOrchestrator({ projectId, systemPrompt });
-        if (session.runtimeHandle?.id) {
-          tmuxTarget = session.runtimeHandle.id;
+    for (const projectId of targetProjectIds) {
+      const project = config.projects[projectId];
+      if (!project) continue;
+
+      const sessionId = `${project.sessionPrefix}-orchestrator`;
+      let tmuxTarget = sessionId;
+      const existing = await sm.get(sessionId);
+      const exists = existing !== null && existing.status !== "killed";
+
+      if (exists) {
+        if (existing?.runtimeHandle?.id) {
+          tmuxTarget = existing.runtimeHandle.id;
         }
-        spinner.succeed("Orchestrator session created");
-      } catch (err) {
-        spinner.fail("Orchestrator setup failed");
-        if (dashboardProcess) {
-          dashboardProcess.kill();
-        }
-        throw new Error(
-          `Failed to setup orchestrator: ${err instanceof Error ? err.message : String(err)}`,
-          { cause: err },
+        console.log(
+          chalk.yellow(
+            `Orchestrator session "${sessionId}" is already running (skipping creation)`,
+          ),
         );
+      } else {
+        try {
+          spinner.start(`Creating orchestrator session (${project.name})`);
+          const systemPrompt = generateOrchestratorPrompt({ config, projectId, project });
+          const session = await sm.spawnOrchestrator({ projectId, systemPrompt });
+          if (session.runtimeHandle?.id) {
+            tmuxTarget = session.runtimeHandle.id;
+          }
+          createdThisRun.push(sessionId);
+          spinner.succeed(`Orchestrator session created (${project.name})`);
+        } catch (err) {
+          spinner.fail(`Orchestrator setup failed (${project.name})`);
+          for (const createdSessionId of createdThisRun.reverse()) {
+            try {
+              await sm.kill(createdSessionId);
+            } catch {
+              // Best effort rollback for partially-created sessions.
+            }
+          }
+          if (dashboardProcess) {
+            dashboardProcess.kill();
+          }
+          throw new Error(
+            `Failed to setup orchestrator for ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          );
+        }
       }
+
+      orchestratorResults.push({ projectId, sessionId, tmuxTarget, exists });
     }
   }
 
@@ -415,13 +696,32 @@ async function runStartup(
   console.log(chalk.bold.green("\n✓ Startup complete\n"));
 
   if (opts?.dashboard !== false) {
-    console.log(chalk.cyan("Dashboard:"), `http://localhost:${port}`);
+    if (attachedToExistingRuntime) {
+      if (attachedRuntimeDashboardReachable) {
+        console.log(chalk.cyan("Dashboard:"), `already running (http://localhost:${port})`);
+      } else {
+        console.log(
+          chalk.cyan("Dashboard:"),
+          `attached to existing runtime (http://localhost:${port}; may still be warming up)`,
+        );
+      }
+    } else {
+      console.log(chalk.cyan("Dashboard:"), `http://localhost:${port}`);
+    }
   }
 
-  if (opts?.orchestrator !== false && !exists) {
-    console.log(chalk.cyan("Orchestrator:"), `tmux attach -t ${tmuxTarget}`);
-  } else if (exists) {
-    console.log(chalk.cyan("Orchestrator:"), `already running (${sessionId})`);
+  if (opts?.orchestrator !== false) {
+    for (const result of orchestratorResults) {
+      const projectName = config.projects[result.projectId]?.name ?? result.projectId;
+      const label =
+        targetProjectIds.length > 1 ? `Orchestrator (${projectName}):` : "Orchestrator:";
+
+      if (result.exists) {
+        console.log(chalk.cyan(label), `already running (${result.sessionId})`);
+      } else {
+        console.log(chalk.cyan(label), `tmux attach -t ${result.tmuxTarget}`);
+      }
+    }
   }
 
   console.log(chalk.dim(`Config: ${config.configPath}\n`));
@@ -430,15 +730,18 @@ async function runStartup(
   // Polls the port instead of using a fixed delay — deterministic and works regardless of
   // how long Next.js takes to compile. AbortController cancels polling on early exit.
   let openAbort: AbortController | undefined;
-  if (opts?.dashboard !== false) {
+  if (opts?.dashboard !== false && !attachedToExistingRuntime) {
     openAbort = new AbortController();
-    const orchestratorUrl = `http://localhost:${port}/sessions/${sessionId}`;
+    const fallbackSessionId = `${primaryProject.sessionPrefix}-orchestrator`;
+    const preferredSessionId = orchestratorResults[0]?.sessionId ?? fallbackSessionId;
+    const orchestratorUrl = `http://localhost:${port}/sessions/${preferredSessionId}`;
     void waitForPortAndOpen(port, orchestratorUrl, openAbort.signal);
   }
 
   // Keep dashboard process alive if it was started
   if (dashboardProcess) {
     dashboardProcess.on("exit", (code) => {
+      clearStartRuntimeState(config.configPath);
       if (openAbort) openAbort.abort();
       if (lifecycleManager) lifecycleManager.stop();
       if (telegramPolling) telegramPolling.stop();
@@ -486,7 +789,7 @@ export function registerStart(program: Command): void {
   program
     .command("start [project]")
     .description(
-      "Start orchestrator agent and dashboard for a project (or pass a repo URL to onboard)",
+      "Start orchestrator agent and dashboard for one/all projects (or pass a repo URL to onboard)",
     )
     .option("--no-dashboard", "Skip starting the dashboard server")
     .option("--no-orchestrator", "Skip starting the orchestrator agent")
@@ -502,8 +805,7 @@ export function registerStart(program: Command): void {
       ) => {
         try {
           let config: OrchestratorConfig;
-          let projectId: string;
-          let project: ProjectConfig;
+          let targetProjectIds: string[] = [];
           let autoPort = false;
 
           // Detect URL argument — run onboarding flow
@@ -512,14 +814,15 @@ export function registerStart(program: Command): void {
             const result = await handleUrlStart(projectArg);
             config = result.config;
             autoPort = result.autoGenerated;
-            ({ projectId, project } = resolveProjectByRepo(config, result.parsed));
+            const resolved = resolveProjectByRepo(config, result.parsed);
+            targetProjectIds = [resolved.projectId];
           } else {
             // Normal flow — load existing config
             config = loadConfig();
-            ({ projectId, project } = resolveProject(config, projectArg));
+            targetProjectIds = resolveStartProjects(config, projectArg);
           }
 
-          await runStartup(config, projectId, project, { ...opts, autoPort });
+          await runStartup(config, targetProjectIds, { ...opts, autoPort });
         } catch (err) {
           if (err instanceof Error) {
             if (err.message.includes("No agent-orchestrator.yaml found")) {
@@ -546,7 +849,7 @@ export function registerStop(program: Command): void {
         const config = loadConfig();
         const { projectId: _projectId, project } = resolveProject(config, projectArg);
         const sessionId = `${project.sessionPrefix}-orchestrator`;
-        const port = config.port ?? 3000;
+        const port = resolveSupervisorPort(config);
 
         console.log(chalk.bold(`\nStopping orchestrator for ${chalk.cyan(project.name)}\n`));
 
@@ -587,7 +890,7 @@ export function registerRestart(program: Command): void {
         const config = loadConfig();
         const { projectId, project } = resolveProject(config, projectArg);
         const sessionId = `${project.sessionPrefix}-orchestrator`;
-        const port = config.port ?? 3000;
+        const port = resolveSupervisorPort(config);
 
         console.log(chalk.bold(`\nRestarting orchestrator for ${chalk.cyan(project.name)}\n`));
 
@@ -607,10 +910,11 @@ export function registerRestart(program: Command): void {
         await stopDashboard(port);
 
         // Start everything again using the same startup flow as `ao start`.
-        await runStartup(config, projectId, project, {
+        await runStartup(config, [projectId], {
           dashboard: true,
           orchestrator: true,
           rebuild: opts?.rebuild,
+          forceFreshRuntime: true,
         });
       } catch (err) {
         if (err instanceof Error) {

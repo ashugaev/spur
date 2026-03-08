@@ -11,10 +11,13 @@
  */
 
 import {
+  createAudioTranscriber,
   loadConfig,
   createPluginRegistry,
   createSessionManager,
+  type AudioTranscriber,
   type OrchestratorConfig,
+  type PluginModule,
   type PluginRegistry,
   type SessionManager,
   type SCM,
@@ -27,12 +30,12 @@ import pluginAgentClaudeCode from "@composio/ao-plugin-agent-claude-code";
 import pluginWorkspaceWorktree from "@composio/ao-plugin-workspace-worktree";
 import pluginScmGithub from "@composio/ao-plugin-scm-github";
 import pluginTrackerGithub from "@composio/ao-plugin-tracker-github";
-import pluginTrackerLinear from "@composio/ao-plugin-tracker-linear";
 
 export interface Services {
   config: OrchestratorConfig;
   registry: PluginRegistry;
   sessionManager: SessionManager;
+  audioTranscriber: AudioTranscriber | null;
 }
 
 // Cache in globalThis for Next.js HMR stability
@@ -57,6 +60,36 @@ export function getServices(): Promise<Services> {
   return globalForServices._aoServicesInit;
 }
 
+function isLinearOptionalDependencyError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("@composio/core") &&
+    (message.includes("Cannot find module") ||
+      message.includes("Cannot find package") ||
+      message.includes("Module not found") ||
+      message.includes("ERR_MODULE_NOT_FOUND"))
+  );
+}
+
+async function registerOptionalLinearTracker(registry: PluginRegistry): Promise<void> {
+  try {
+    const mod = (await import(
+      /* webpackIgnore: true */
+      "@composio/ao-plugin-tracker-linear"
+    )) as { default?: PluginModule };
+    const plugin = mod.default;
+    if (plugin?.manifest && typeof plugin.create === "function") {
+      registry.register(plugin);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const prefix = isLinearOptionalDependencyError(err)
+      ? "[services] Optional tracker plugin 'linear' disabled:"
+      : "[services] Failed to load tracker plugin 'linear':";
+    console.warn(`${prefix} ${message}`);
+  }
+}
+
 async function initServices(): Promise<Services> {
   const config = loadConfig();
   const registry = createPluginRegistry();
@@ -67,11 +100,18 @@ async function initServices(): Promise<Services> {
   registry.register(pluginWorkspaceWorktree);
   registry.register(pluginScmGithub);
   registry.register(pluginTrackerGithub);
-  registry.register(pluginTrackerLinear);
+  await registerOptionalLinearTracker(registry);
 
   const sessionManager = createSessionManager({ config, registry });
+  let audioTranscriber: AudioTranscriber | null = null;
+  try {
+    audioTranscriber = createAudioTranscriber(config);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[services] Audio transcriber disabled due to configuration error: ${message}`);
+  }
 
-  const services = { config, registry, sessionManager };
+  const services = { config, registry, sessionManager, audioTranscriber };
   globalForServices._aoServices = services;
   return services;
 }
@@ -81,4 +121,3 @@ export function getSCM(registry: PluginRegistry, project: ProjectConfig | undefi
   if (!project?.scm) return null;
   return registry.get<SCM>("scm", project.scm.plugin);
 }
-

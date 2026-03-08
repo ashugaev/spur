@@ -10,11 +10,17 @@ import {
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
+    const url = new URL(_request.url);
+    const requestedProjectIdRaw = url.searchParams.get("projectId");
+    const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
     const { config, registry, sessionManager } = await getServices();
 
     const coreSession = await sessionManager.get(id);
     if (!coreSession) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
+    if (requestedProjectId && coreSession.projectId !== requestedProjectId) {
+      return NextResponse.json({ error: "Session not found in requested project" }, { status: 404 });
     }
 
     const dashboardSession = sessionToDashboard(coreSession);

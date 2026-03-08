@@ -613,7 +613,10 @@ describe("workspace.postCreate()", () => {
 
     expect(mockExecFileAsync).toHaveBeenCalledTimes(2);
 
-    expect(mockExecFileAsync).toHaveBeenNthCalledWith(1, "sh", ["-c", "pnpm install"], {
+    expect(mockExecFileAsync).toHaveBeenNthCalledWith(1, "sh", [
+      "-c",
+      "pnpm install --config.confirmModulesPurge=false",
+    ], {
       cwd: "/mock-home/.ao-clones/proj/sess",
     });
 

@@ -678,6 +678,33 @@ export interface NotifyContext {
 }
 
 // =============================================================================
+// AUDIO TRANSCRIBER — Shared Service
+// =============================================================================
+
+export interface TranscribeLocalFileInput {
+  /** Absolute path to the source audio file. */
+  filePath: string;
+  /** Optional language override ("auto" uses whisper autodetection). */
+  language?: string;
+  /** Optional original message duration in seconds. */
+  durationSec?: number;
+  /** Optional original message size in bytes. */
+  fileSizeBytes?: number;
+}
+
+export interface TranscribeResult {
+  text: string;
+  language: string;
+  durationMs: number;
+  backend: string;
+}
+
+export interface AudioTranscriber {
+  readonly name: string;
+  transcribeLocalFile(input: TranscribeLocalFileInput): Promise<TranscribeResult>;
+}
+
+// =============================================================================
 // TERMINAL — Plugin Slot 7
 // =============================================================================
 
@@ -843,6 +870,9 @@ export interface OrchestratorConfig {
   /** Background listeners (issue/event sources that auto-trigger actions) */
   listeners?: Record<string, ListenerConfig>;
 
+  /** Shared services config (transcriber, etc). */
+  services?: ServicesConfig;
+
   /** Remote access settings (Tailscale) */
   remote?: RemoteConfig;
 }
@@ -920,6 +950,33 @@ export interface SCMConfig {
 
 export interface NotifierConfig {
   plugin: string;
+  [key: string]: unknown;
+}
+
+export interface WhisperCppTranscriberConfig {
+  /** Advanced/legacy override. v1 supports whisper-cpp only. */
+  plugin?: "whisper-cpp" | (string & {});
+  /** Advanced/legacy override. Set false to force-disable transcriber. */
+  enabled?: boolean;
+  /** Essential: path to whisper.cpp executable (whisper-cli / main). */
+  binaryPath?: string;
+  /** Essential: path to whisper model file (for example ggml-base.en.bin). */
+  modelPath?: string;
+  /** Optional advanced override; defaults to ffmpeg. */
+  ffmpegPath?: string;
+  /** Optional advanced override; default is auto-detect. */
+  language?: string;
+  /** Optional advanced override; default is 120000 ms. */
+  timeoutMs?: number;
+  /** Optional advanced override; default is 25000000 bytes. */
+  maxAudioBytes?: number;
+  /** Optional advanced override; default is 600 seconds. */
+  maxDurationSec?: number;
+  [key: string]: unknown;
+}
+
+export interface ServicesConfig {
+  transcriber?: WhisperCppTranscriberConfig;
   [key: string]: unknown;
 }
 

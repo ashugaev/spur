@@ -15,9 +15,11 @@ import { getSessionTitle } from "@/lib/format";
 import { PRStatus } from "./PRStatus";
 import { CICheckList } from "./CIBadge";
 import { ActivityDot } from "./ActivityDot";
+import { buildSessionPath } from "@/lib/project-routes";
 
 interface SessionCardProps {
   session: DashboardSession;
+  projectId?: string;
   onSend?: (sessionId: string, message: string) => void;
   onKill?: (sessionId: string) => void;
   onMerge?: (prNumber: number) => void;
@@ -35,6 +37,7 @@ const borderColorByLevel: Record<AttentionLevel, string> = {
 
 export function SessionCard({
   session,
+  projectId,
   onSend,
   onKill,
   onMerge,
@@ -64,6 +67,7 @@ export function SessionCard({
     TERMINAL_STATUSES.has(session.status) ||
     (session.activity !== null && TERMINAL_ACTIVITIES.has(session.activity));
   const isRestorable = isTerminal && session.status !== "merged";
+  const sessionLinkProjectId = projectId ?? session.projectId;
 
   const title = getSessionTitle(session);
 
@@ -107,7 +111,7 @@ export function SessionCard({
         )}
         {!isTerminal && (
           <a
-            href={`/sessions/${encodeURIComponent(session.id)}`}
+            href={buildSessionPath(session.id, sessionLinkProjectId)}
             onClick={(e) => e.stopPropagation()}
             className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-subtle)] px-2.5 py-0.5 text-[11px] text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] hover:no-underline"
           >
