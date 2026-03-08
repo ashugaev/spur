@@ -10,8 +10,10 @@ export async function notifyRemoteReady(
   dashboardUrl: string,
 ): Promise<void> {
   try {
-    const telegramConfig = config.notifiers?.["telegram"];
-    if (!telegramConfig || telegramConfig.plugin !== "telegram") return;
+    const telegramConfig = Object.values(config.notifiers ?? {}).find(
+      (entry) => entry?.plugin === "telegram",
+    );
+    if (!telegramConfig) return;
 
     const notifier = telegramPlugin.create(telegramConfig);
     await notifier.notifyWithActions?.(

@@ -244,34 +244,54 @@ export function Dashboard({
   }, [activeTab, jiraLoadedOnce, refreshJiraTasks]);
 
   return (
-    <div className="px-8 py-7">
+    <div className="px-4 py-5 sm:px-8 sm:py-7">
       <DynamicFavicon sessions={sessions} projectName={projectName} />
       {/* Header */}
-      <div className="mb-8 flex items-center justify-between border-b border-[var(--color-border-subtle)] pb-6">
-        <div className="flex items-center gap-6">
-          <h1 className="text-[17px] font-semibold tracking-[-0.02em] text-[var(--color-text-primary)]">
+      <div className="mb-6 flex flex-col gap-3 border-b border-[var(--color-border-subtle)] pb-5 sm:mb-8 sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:pb-6">
+        <div className="flex items-center justify-between gap-4 sm:justify-start sm:gap-6">
+          <h1 className="text-[15px] font-semibold tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-[17px]">
             Orchestrator
           </h1>
-          <StatusLine stats={stats} />
-        </div>
-        {orchestratorId && (
-          <a
-            href={`/sessions/${encodeURIComponent(orchestratorId)}`}
-            className="orchestrator-btn flex items-center gap-2 rounded-[7px] px-4 py-2 text-[12px] font-semibold hover:no-underline"
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
-            orchestrator
-            <svg
-              className="h-3 w-3 opacity-70"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+          {orchestratorId && (
+            <a
+              href={`/sessions/${encodeURIComponent(orchestratorId)}`}
+              className="orchestrator-btn flex items-center gap-2 rounded-[7px] px-3 py-1.5 text-[11px] font-semibold hover:no-underline sm:hidden sm:px-4 sm:py-2 sm:text-[12px]"
             >
-              <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
-            </svg>
-          </a>
-        )}
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
+              orchestrator
+              <svg
+                className="h-3 w-3 opacity-70"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+              </svg>
+            </a>
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <StatusLine stats={stats} />
+          {orchestratorId && (
+            <a
+              href={`/sessions/${encodeURIComponent(orchestratorId)}`}
+              className="orchestrator-btn hidden items-center gap-2 rounded-[7px] px-4 py-2 text-[12px] font-semibold hover:no-underline sm:flex"
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] opacity-80" />
+              orchestrator
+              <svg
+                className="h-3 w-3 opacity-70"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+              </svg>
+            </a>
+          )}
+        </div>
       </div>
 
       {/* Rate limit notice */}
@@ -1273,17 +1293,17 @@ function StatusLine({ stats }: { stats: DashboardStats }) {
   ];
 
   return (
-    <div className="flex items-baseline gap-0.5">
+    <div className="flex flex-wrap items-baseline gap-0.5">
       {parts.map((p, i) => (
         <span key={p.label} className="flex items-baseline">
-          {i > 0 && <span className="mx-3 text-[11px] text-[var(--color-border-strong)]">·</span>}
+          {i > 0 && <span className="mx-1.5 text-[11px] text-[var(--color-border-strong)] sm:mx-3">·</span>}
           <span
-            className="text-[20px] font-bold tabular-nums tracking-tight"
+            className="text-[16px] font-bold tabular-nums tracking-tight sm:text-[20px]"
             style={{ color: p.color ?? "var(--color-text-primary)" }}
           >
             {p.value}
           </span>
-          <span className="ml-1.5 text-[11px] text-[var(--color-text-muted)]">{p.label}</span>
+          <span className="ml-1 text-[10px] text-[var(--color-text-muted)] sm:ml-1.5 sm:text-[11px]">{p.label}</span>
         </span>
       ))}
     </div>

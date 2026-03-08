@@ -28,9 +28,10 @@ const BackendContext = createContext<BackendContextValue | null>(null);
 function deriveTerminalWsUrl(backendUrl: string): string {
   try {
     const url = new URL(backendUrl);
-    return `ws://${url.hostname}:14801`;
+    const wsProtocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${url.host}/terminal`;
   } catch {
-    return "ws://192.168.1.1:14801";
+    return "ws://192.168.1.1:3000/terminal";
   }
 }
 

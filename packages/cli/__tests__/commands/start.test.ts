@@ -146,7 +146,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 // ---------------------------------------------------------------------------
 
 import { Command } from "commander";
-import { registerStart, registerStop } from "../../src/commands/start.js";
+import { registerStart, registerStop, registerRestart } from "../../src/commands/start.js";
 
 let tmpDir: string;
 let program: Command;
@@ -159,6 +159,7 @@ beforeEach(() => {
   program.exitOverride();
   registerStart(program);
   registerStop(program);
+  registerRestart(program);
 
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -648,5 +649,54 @@ describe("stop command", () => {
     expect(mockSessionManager.kill).not.toHaveBeenCalled();
     const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
     expect(output).toContain("is not running");
+  });
+});
+
+describe("restart command", () => {
+  it("stops then starts orchestrator and dashboard for the given project", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject({ sessionPrefix: "app" }) });
+    const { findWebDir } = await import("../../src/lib/web-dir.js");
+    vi.mocked(findWebDir).mockReturnValue(tmpDir);
+    writeFileSync(join(tmpDir, "package.json"), "{}");
+    mockSessionManager.get
+      .mockResolvedValueOnce({ id: "app-orchestrator", status: "running" }) // restart stop phase
+      .mockResolvedValueOnce(null); // runStartup spawn phase
+    mockSessionManager.kill.mockResolvedValue(undefined);
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "app-orchestrator",
+      runtimeHandle: { id: "tmux-app-orchestrator" },
+    });
+    mockExec.mockResolvedValue({ stdout: "12345", stderr: "" });
+
+    await program.parseAsync(["node", "test", "restart", "my-app"]);
+
+    expect(mockSessionManager.kill).toHaveBeenCalledWith("app-orchestrator");
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("Restarting orchestrator for");
+    expect(output).toContain("Startup complete");
+  });
+
+  it("restarts even when orchestrator session is not running", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject({ sessionPrefix: "app" }) });
+    const { findWebDir } = await import("../../src/lib/web-dir.js");
+    vi.mocked(findWebDir).mockReturnValue(tmpDir);
+    writeFileSync(join(tmpDir, "package.json"), "{}");
+    mockSessionManager.get
+      .mockResolvedValueOnce(null) // restart stop phase
+      .mockResolvedValueOnce(null); // runStartup spawn phase
+    mockSessionManager.spawnOrchestrator.mockResolvedValue({
+      id: "app-orchestrator",
+      runtimeHandle: { id: "tmux-app-orchestrator" },
+    });
+    mockExec.mockRejectedValue(new Error("no process"));
+
+    await program.parseAsync(["node", "test", "restart", "my-app"]);
+
+    expect(mockSessionManager.kill).not.toHaveBeenCalled();
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledTimes(1);
+    const output = vi.mocked(console.log).mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("is not running");
+    expect(output).toContain("Startup complete");
   });
 });

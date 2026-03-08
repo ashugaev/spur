@@ -16,9 +16,11 @@ port: 3000
 # directTerminalPort: 14801
 
 # Remote access (Tailscale)
-# When Tailscale is running, the dashboard is accessible via your Tailscale IP.
+# Short path for mobile HTTPS:
+#   tailscale serve --bg 3000
+# Then `ao dashboard` will print https://<your-node>.ts.net/
 # remote:
-#   tailscaleHost: auto  # auto-detect from `tailscale ip -4`, or set IP manually
+#   tailscaleHost: auto  # prefer tailscale serve https URL, then MagicDNS/IP fallback
 
 # Default plugins (these are the defaults — you can omit this section)
 defaults:

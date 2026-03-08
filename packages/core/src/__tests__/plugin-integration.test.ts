@@ -492,7 +492,18 @@ describe("plugin integration", () => {
       // gh calls for determineStatus:
       // 1. getPRState → open
       mockGh({ state: "OPEN" });
-      // 2. getCISummary → failing (pr checks returns array of checks with correct field names)
+      // 2. getMergeability: getPRState → open
+      mockGh({ state: "OPEN" });
+      // 3. getMergeability: pr view mergeability payload
+      mockGh({
+        mergeable: "MERGEABLE",
+        reviewDecision: "REVIEW_REQUIRED",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+      });
+      // 4. getMergeability: getCISummary → failing checks
+      mockGh([{ name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" }]);
+      // 5. direct getCISummary in lifecycle check → failing checks
       mockGh([{ name: "lint", state: "FAILURE", link: "", startedAt: "", completedAt: "" }]);
 
       await lm.check("app-1");
@@ -548,9 +559,20 @@ describe("plugin integration", () => {
 
       // 1. getPRState → open
       mockGh({ state: "OPEN" });
-      // 2. getCISummary → passing (using correct field names: state and link)
+      // 2. getMergeability: getPRState → open
+      mockGh({ state: "OPEN" });
+      // 3. getMergeability: pr view mergeability payload
+      mockGh({
+        mergeable: "MERGEABLE",
+        reviewDecision: "REVIEW_REQUIRED",
+        mergeStateStatus: "CLEAN",
+        isDraft: false,
+      });
+      // 4. getMergeability: getCISummary → passing checks
       mockGh([{ name: "lint", state: "SUCCESS", link: "", startedAt: "", completedAt: "" }]);
-      // 3. getReviewDecision (gh pr view with reviewDecision)
+      // 5. direct getCISummary in lifecycle check → passing checks
+      mockGh([{ name: "lint", state: "SUCCESS", link: "", startedAt: "", completedAt: "" }]);
+      // 6. getReviewDecision (gh pr view with reviewDecision)
       mockGh({ reviewDecision: "CHANGES_REQUESTED" });
 
       await lm.check("app-1");

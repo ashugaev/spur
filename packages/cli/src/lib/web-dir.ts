@@ -63,22 +63,35 @@ export async function waitForPortAndOpen(
   signal: AbortSignal,
   timeoutMs = 30_000,
 ): Promise<void> {
+  const ready = await waitForPort(port, signal, timeoutMs);
+  if (!ready || signal.aborted) return;
+
+  // Windows: `start` is a cmd.exe builtin (no start.exe), so must run via shell.
+  // The empty "" arg is the window title required by `start` before the URL.
+  const [cmd, args]: [string, string[]] =
+    process.platform === "win32"
+      ? ["cmd.exe", ["/c", "start", "", url]]
+      : [process.platform === "linux" ? "xdg-open" : "open", [url]];
+  const browser = spawn(cmd, args, { stdio: "ignore" });
+  browser.on("error", () => {});
+}
+
+/**
+ * Poll until a port is accepting connections.
+ * Returns true when ready, false on timeout/abort.
+ */
+export async function waitForPort(
+  port: number,
+  signal: AbortSignal,
+  timeoutMs = 30_000,
+): Promise<boolean> {
   const start = Date.now();
   while (!signal.aborted && Date.now() - start < timeoutMs) {
     const free = await isPortAvailable(port);
-    if (!free) {
-      // Windows: `start` is a cmd.exe builtin (no start.exe), so must run via shell.
-      // The empty "" arg is the window title required by `start` before the URL.
-      const [cmd, args]: [string, string[]] =
-        process.platform === "win32"
-          ? ["cmd.exe", ["/c", "start", "", url]]
-          : [process.platform === "linux" ? "xdg-open" : "open", [url]];
-      const browser = spawn(cmd, args, { stdio: "ignore" });
-      browser.on("error", () => {});
-      return;
-    }
+    if (!free) return true;
     await new Promise((r) => setTimeout(r, 300));
   }
+  return false;
 }
 
 /**

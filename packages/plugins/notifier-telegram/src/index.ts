@@ -63,13 +63,17 @@ function getSessionMarker(sessionId: string): string {
 }
 
 function formatEventText(event: OrchestratorEvent): string {
-  const lines = [
-    `${PRIORITY_EMOJI[event.priority]} ${event.type}`,
-    event.message,
-    `Session: ${event.sessionId}`,
-    `Project: ${event.projectId}`,
-    getSessionMarker(event.sessionId),
-  ];
+  const lines = [`${PRIORITY_EMOJI[event.priority]} ${event.type}`, event.message];
+  const sessionId = event.sessionId.trim();
+  const projectId = event.projectId.trim();
+
+  if (sessionId) {
+    lines.push(`Session: ${sessionId}`);
+    lines.push(getSessionMarker(sessionId));
+  }
+  if (projectId) {
+    lines.push(`Project: ${projectId}`);
+  }
 
   const prUrl = typeof event.data.prUrl === "string" ? event.data.prUrl : undefined;
   if (prUrl) lines.push(`PR: ${prUrl}`);

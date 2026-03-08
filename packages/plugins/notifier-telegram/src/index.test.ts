@@ -76,6 +76,26 @@ describe("notifier-telegram", () => {
     });
   });
 
+  it("omits session marker when session id is empty", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: () => Promise.resolve("ok") });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const notifier = create({ botToken: "123:abc", chatId: "42" });
+    await notifier.notify(
+      makeEvent({
+        type: "system.dashboard_ready",
+        sessionId: "",
+        projectId: "",
+        message: "Dashboard is running",
+      }),
+    );
+
+    const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(payload.text).not.toContain("AO_SESSION:");
+    expect(payload.text).not.toContain("Session:");
+    expect(payload.text).not.toContain("Project:");
+  });
+
   it("uses env fallback for token/chat", async () => {
     process.env["TELEGRAM_BOT_TOKEN"] = "env-token";
     process.env["TELEGRAM_CHAT_ID"] = "-999";

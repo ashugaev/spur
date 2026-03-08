@@ -1,5 +1,5 @@
 /**
- * `ao start` and `ao stop` commands — unified orchestrator startup.
+ * `ao start`, `ao stop`, and `ao restart` commands — unified orchestrator lifecycle.
  *
  * Supports two modes:
  *   1. `ao start [project]` — start from existing config
@@ -566,6 +566,52 @@ export function registerStop(program: Command): void {
         await stopDashboard(port);
 
         console.log(chalk.bold.green("\n✓ Orchestrator stopped\n"));
+      } catch (err) {
+        if (err instanceof Error) {
+          console.error(chalk.red("\nError:"), err.message);
+        } else {
+          console.error(chalk.red("\nError:"), String(err));
+        }
+        process.exit(1);
+      }
+    });
+}
+
+export function registerRestart(program: Command): void {
+  program
+    .command("restart <project>")
+    .description("Restart orchestrator agent and dashboard for a project")
+    .option("--rebuild", "Clean and rebuild dashboard before starting")
+    .action(async (projectArg: string, opts?: { rebuild?: boolean }) => {
+      try {
+        const config = loadConfig();
+        const { projectId, project } = resolveProject(config, projectArg);
+        const sessionId = `${project.sessionPrefix}-orchestrator`;
+        const port = config.port ?? 3000;
+
+        console.log(chalk.bold(`\nRestarting orchestrator for ${chalk.cyan(project.name)}\n`));
+
+        // Stop existing orchestrator session (if any)
+        const sm = await getSessionManager(config);
+        const existing = await sm.get(sessionId);
+
+        if (existing) {
+          const spinner = ora("Stopping orchestrator session").start();
+          await sm.kill(sessionId);
+          spinner.succeed("Orchestrator session stopped");
+        } else {
+          console.log(chalk.yellow(`Orchestrator session "${sessionId}" is not running`));
+        }
+
+        // Stop dashboard process on configured port before re-starting.
+        await stopDashboard(port);
+
+        // Start everything again using the same startup flow as `ao start`.
+        await runStartup(config, projectId, project, {
+          dashboard: true,
+          orchestrator: true,
+          rebuild: opts?.rebuild,
+        });
       } catch (err) {
         if (err instanceof Error) {
           console.error(chalk.red("\nError:"), err.message);

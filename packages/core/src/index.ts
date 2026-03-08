@@ -62,7 +62,7 @@ export { generateOrchestratorPrompt } from "./orchestrator-prompt.js";
 export type { OrchestratorPromptConfig } from "./orchestrator-prompt.js";
 
 // Tailscale — remote access utilities
-export { getTailscaleIp, getDashboardUrl } from "./tailscale.js";
+export { getTailscaleIp, getTailscaleDnsName, getTailscaleServeUrl, getLocalHostname, getDashboardUrl } from "./tailscale.js";
 
 // Shared utilities
 export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from "./utils.js";

@@ -951,7 +951,7 @@ export interface ListenerConfig {
 }
 
 export interface RemoteConfig {
-  /** Tailscale IP/hostname for remote access (auto-detected if omitted) */
+  /** Tailscale host for remote access (prefers MagicDNS *.ts.net when auto-detected) */
   tailscaleHost?: string;
 }
 
