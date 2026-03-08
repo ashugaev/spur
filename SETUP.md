@@ -69,7 +69,7 @@ The package is not yet published to npm. Install by building from source:
 
 ```bash
 # Clone the repository
-git clone https://github.com/ComposioHQ/agent-orchestrator
+git clone https://github.com/ashugaev/ao
 cd agent-orchestrator
 
 # Install dependencies (requires pnpm)
@@ -907,4 +907,4 @@ Useful for:
 
 ---
 
-**Need help?** Open an issue at: https://github.com/ComposioHQ/agent-orchestrator/issues
+**Need help?** Open an issue at: https://github.com/ashugaev/ao/issues

@@ -1,14 +1,14 @@
 # Agent Orchestrator -- Product Strategy & Growth Plan
 
 **Date:** March 2026
-**Base repo:** ComposioHQ/agent-orchestrator (3,796 stars | 437 forks)
+**Base repo:** ashugaev/ao (3,796 stars | 437 forks)
 **This fork:** `my-updates` branch (+10,355 lines, 97 files changed vs main)
 
 ---
 
 ## Part 0: Fork Context -- What Makes This Version Different
 
-This is an **improved fork** of ComposioHQ/agent-orchestrator. The `my-updates` branch adds a critical layer that the upstream project lacks: **bidirectional human-agent communication through messaging platforms**.
+This is an **improved fork** of ashugaev/ao. The `my-updates` branch adds a critical layer that the upstream project lacks: **bidirectional human-agent communication through messaging platforms**.
 
 ### What This Fork Adds Over Upstream
 
@@ -42,7 +42,7 @@ Rationale from 10 expert reviews:
 1. New GitHub repo via `git init` (NOT GitHub Fork button) -- no "forked from" label
 2. New npm scope (e.g. `@agentorch/*` or chosen name)
 3. MIT LICENSE with dual copyright: original Composio + new project
-4. NOTICES file attributing ComposioHQ/agent-orchestrator as the base
+4. NOTICES file attributing ashugaev/ao as the base
 5. README Acknowledgments section: "Built on agent-orchestrator by Composio, Inc."
 6. Remove all Composio branding (banners, badges, social links)
 7. Fresh git history (single initial commit)

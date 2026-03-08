@@ -25,7 +25,7 @@ case "$PROJECT" in
         SESSION_PREFIX="splitly"
         ;;
     agent-orchestrator|ao)
-        REPO="ComposioHQ/agent-orchestrator"
+        REPO="ashugaev/ao"
         SESSIONS_DIR="$HOME/.ao-sessions"
         SESSION_PREFIX="ao"
         ;;

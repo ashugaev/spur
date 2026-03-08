@@ -48,7 +48,7 @@ Why this option (consensus from 10 experts):
 
 **How to stay legally and reputationally clean:**
 - MIT LICENSE with dual copyright (yours + "Portions copyright (c) 2025 Composio, Inc.")
-- NOTICES file attributing ComposioHQ/agent-orchestrator
+- NOTICES file attributing ashugaev/ao
 - README "Acknowledgments" section crediting Composio
 - Fresh `git init` (not GitHub Fork button) -- no "forked from" label
 - New npm scope, new GitHub org, new branding
