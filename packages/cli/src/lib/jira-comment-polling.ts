@@ -100,7 +100,7 @@ function normalizeBaseUrl(value: string): string {
 /** Simple recursive ADF (Atlassian Document Format) to plain text. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function adfToPlainText(node: any): string {
-  if (node == null) return "";
+  if (node === null || node === undefined) return "";
   if (typeof node === "string") return node;
   if (node.type === "text") return node.text ?? "";
 

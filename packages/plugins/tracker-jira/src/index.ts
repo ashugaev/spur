@@ -58,7 +58,7 @@ function mapState(statusCategoryKey: string): Issue["state"] {
 /** Simple recursive ADF (Atlassian Document Format) → plain text converter. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function adfToPlainText(node: any): string {
-  if (node == null) return "";
+  if (node === null || node === undefined) return "";
   if (typeof node === "string") return node;
 
   // Text node

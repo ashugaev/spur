@@ -54,6 +54,15 @@ describe("tracker-linear optional @composio/core dependency", () => {
     process.env["COMPOSIO_API_KEY"] = "composio_test_key";
     delete process.env["LINEAR_API_KEY"];
 
+    vi.doMock("@composio/core", () => {
+      function ComposioStub() {
+        const err = new Error("Cannot find module '@composio/core'");
+        (err as NodeJS.ErrnoException).code = "ERR_MODULE_NOT_FOUND";
+        throw err;
+      }
+      return { Composio: ComposioStub };
+    });
+
     const { create } = await import("../src/index.js");
     const tracker = create();
 

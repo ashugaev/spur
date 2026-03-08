@@ -143,6 +143,7 @@ function isJiraCommandMissingError(error: unknown): boolean {
 }
 
 function stripAnsi(value: string): string {
+  // eslint-disable-next-line no-control-regex
   return value.replace(/\u001b\[[0-9;]*m/g, "");
 }
 
@@ -322,6 +323,7 @@ async function restoreIssueStateEntry(
     if (previousEntry) {
       latestState.issues[issueKey] = previousEntry;
     } else {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete latestState.issues[issueKey];
     }
   });
@@ -553,7 +555,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
     if (stopped || inFlight) return;
     inFlight = true;
     let cycleHadErrors = false;
-    let cycleIssueCount = 0;
+    let cycleIssueCount: number;
 
     try {
       const [issueKeys, sessions] = await Promise.all([

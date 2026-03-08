@@ -374,7 +374,7 @@ function buildStatePath(
 ): string {
   const projectPath = resolveProjectPathForSession(config, sessionId);
   if (!projectPath) {
-    throw new Error(`Could not resolve project for session \"${sessionId}\"`);
+    throw new Error(`Could not resolve project for session "${sessionId}"`);
   }
 
   const baseDir = getProjectBaseDir(config.configPath, projectPath);
@@ -456,7 +456,7 @@ async function withFileLock<T>(lockPath: string, fn: () => Promise<T>): Promise<
       }
 
       if (attempt === LOCK_RETRY_ATTEMPTS - 1) {
-        throw new Error(`Timed out acquiring lock for ${lockPath}`);
+        throw new Error(`Timed out acquiring lock for ${lockPath}`, { cause: err });
       }
       await sleep(LOCK_RETRY_DELAY_MS);
     }

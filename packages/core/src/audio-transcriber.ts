@@ -181,7 +181,7 @@ async function runCommand(
     const stderr = typeof typed.stderr === "string" ? typed.stderr.trim() : "";
     const stdout = typeof typed.stdout === "string" ? typed.stdout.trim() : "";
     const details = normalizeCommandErrorDetails(stderr || stdout || typed.message || "unknown error");
-    throw new Error(`${label} command failed: ${details}`);
+    throw new Error(`${label} command failed: ${details}`, { cause: error });
   }
 }
 
