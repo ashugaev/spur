@@ -1,9 +1,16 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdir, unlink, rmdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import {
   buildTelegramInboundRouting,
+  createAudioTranscriber,
   createInboundContextStore,
   coerceOrchestratorSessionRoutingCandidates,
+  downloadTelegramVoiceFile,
   formatInboundMessageForSession,
   selectFallbackOrchestratorSessionId,
+  type AudioTranscriber,
   type InboundContextStore,
   type OrchestratorConfig,
   type SessionManager,
@@ -37,9 +44,17 @@ interface TelegramUpdate {
   edited_message?: TelegramMessage;
 }
 
+interface TelegramVoice {
+  file_id?: unknown;
+  file_unique_id?: unknown;
+  duration?: unknown;
+  file_size?: unknown;
+}
+
 interface TelegramMessage {
   message_id?: unknown;
   text?: unknown;
+  voice?: TelegramVoice;
   chat?: {
     id?: unknown;
   };
@@ -268,6 +283,8 @@ export async function maybeStartTelegramLongPolling(
     );
   }
 
+  const transcriber: AudioTranscriber | null = createAudioTranscriber(deps.config.services?.transcriber);
+
   let offset: number | undefined;
   let stopped = false;
   let inFlight = false;
@@ -336,9 +353,48 @@ export async function maybeStartTelegramLongPolling(
         }
         if (!sessionId) continue;
 
-        const rawText = typeof message.text === "string" ? message.text : "";
-        const sanitized = sanitizeMessage(rawText);
-        if (!sanitized || sanitized.length > MAX_MESSAGE_LENGTH) continue;
+        const hasText = typeof message.text === "string" && message.text.trim().length > 0;
+        const hasVoice = message.voice && typeof message.voice.file_id === "string";
+        let sanitized = "";
+        let voiceTranscriptionError: string | null = null;
+
+        if (hasText) {
+          sanitized = sanitizeMessage(message.text as string);
+        } else if (hasVoice) {
+          // Attempt voice transcription
+          if (!transcriber) {
+            voiceTranscriptionError = "Voice transcription failed: transcriber service is not configured (services.transcriber in config)";
+          } else {
+            try {
+              const tempDir = join(tmpdir(), `ao-tg-voice-${randomUUID()}`);
+              await mkdir(tempDir, { recursive: true });
+              const voiceFileId = String((message.voice as TelegramVoice).file_id);
+              const localPath = await downloadTelegramVoiceFile(cfg.botToken, voiceFileId, tempDir);
+              try {
+                const result = await transcriber.transcribeLocalFile({ filePath: localPath });
+                sanitized = result.text;
+              } finally {
+                try {
+                  await unlink(localPath);
+                  await rmdir(tempDir);
+                } catch {
+                  // Ignore cleanup errors
+                }
+              }
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : String(err);
+              voiceTranscriptionError = `Voice transcription failed: ${errMsg}`;
+              logger.warn(`[telegram-polling] ${voiceTranscriptionError}`);
+            }
+          }
+        }
+
+        // Use error as the routed text when transcription failed
+        const textToRoute = voiceTranscriptionError
+          ? `[SYSTEM] ${voiceTranscriptionError}`
+          : sanitized;
+
+        if (!textToRoute || textToRoute.length > MAX_MESSAGE_LENGTH) continue;
 
         const routingForDisplay: Record<string, unknown> = {
           chatId: incomingChatId,
@@ -379,7 +435,7 @@ export async function maybeStartTelegramLongPolling(
             await inboundContextStore.enqueue({
               sessionId,
               source: "telegram",
-              text: sanitized,
+              text: textToRoute,
               routing: buildTelegramInboundRouting({
                 chatId: incomingChatId,
                 messageId,
@@ -415,7 +471,7 @@ export async function maybeStartTelegramLongPolling(
             formatInboundMessageForSession({
               sessionId,
               source: "telegram",
-              text: sanitized,
+              text: textToRoute,
               routing: routingForDisplay,
               includeReplyCommand: sourceReplyAvailable,
             }),

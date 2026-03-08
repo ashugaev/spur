@@ -64,6 +64,14 @@ export type { OrchestratorPromptConfig } from "./orchestrator-prompt.js";
 // Tailscale — remote access utilities
 export { getTailscaleIp, getTailscaleDnsName, getTailscaleServeUrl, getLocalHostname, getDashboardUrl } from "./tailscale.js";
 
+// Audio transcription
+export {
+  createWhisperCppTranscriber,
+  createAudioTranscriber,
+  downloadFile,
+  downloadTelegramVoiceFile,
+} from "./audio-transcriber.js";
+
 // Shared utilities
 export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from "./utils.js";
 

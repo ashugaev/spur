@@ -1,10 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { getServices } from "@/lib/services";
 import { stripControlChars } from "@/lib/validation";
 import {
   buildTelegramInboundRouting,
+  createAudioTranscriber,
   createInboundContextStore,
   coerceOrchestratorSessionRoutingCandidates,
+  downloadTelegramVoiceFile,
   formatInboundMessageForSession,
   selectFallbackOrchestratorSessionId,
   type OrchestratorConfig,
@@ -17,9 +23,17 @@ interface TelegramChat {
   id: number;
 }
 
+interface TelegramVoice {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  file_size?: number;
+}
+
 interface TelegramMessage {
   message_id?: number;
   text?: string;
+  voice?: TelegramVoice;
   chat?: TelegramChat;
   from?: {
     id?: number;
@@ -51,6 +65,15 @@ function env(...keys: string[]): string | undefined {
     if (typeof value === "string" && value.trim().length > 0) return value.trim();
   }
   return undefined;
+}
+
+function resolveBotToken(rawNotifiers: Record<string, { [key: string]: unknown }>): string | undefined {
+  const notifierConfig = Object.values(rawNotifiers).find((entry) => entry?.plugin === "telegram");
+  const fromConfig =
+    typeof notifierConfig?.botToken === "string" && notifierConfig.botToken.trim().length > 0
+      ? notifierConfig.botToken.trim()
+      : undefined;
+  return fromConfig || env("AO_TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_TOKEN", "TG_BOT_TOKEN", "TG_TOKEN");
 }
 
 function resolveTelegramInboundConfig(rawNotifiers: Record<string, { [key: string]: unknown }>): TelegramInboundConfig {
@@ -161,10 +184,53 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: false, error: "Chat is not allowed" }, { status: 403 });
   }
 
-  const rawText = typeof message.text === "string" ? message.text : "";
-  const sanitized = stripControlChars(rawText).trim();
+  // Determine message text: text takes priority, then voice transcription
+  let sanitized = "";
+  let voiceTranscriptionError: string | null = null;
+  const hasText = typeof message.text === "string" && message.text.trim().length > 0;
+  const hasVoice = message.voice && typeof message.voice.file_id === "string";
 
-  if (sanitized.length === 0) {
+  if (hasText) {
+    const rawText = message.text as string;
+    sanitized = stripControlChars(rawText).trim();
+  } else if (hasVoice) {
+    // Attempt voice transcription
+    const notifiers = config.notifiers as Record<string, { [key: string]: unknown }>;
+    const botToken = resolveBotToken(notifiers);
+    const transcriber = createAudioTranscriber(config.services?.transcriber);
+
+    if (!botToken) {
+      voiceTranscriptionError = "Voice transcription failed: bot token not configured for file download";
+    } else if (!transcriber) {
+      voiceTranscriptionError = "Voice transcription failed: transcriber service is not configured (services.transcriber in config)";
+    } else {
+      try {
+        const tempDir = join(tmpdir(), `ao-tg-voice-${randomUUID()}`);
+        await mkdir(tempDir, { recursive: true });
+        const voiceFileId = (message.voice as TelegramVoice).file_id;
+        const localPath = await downloadTelegramVoiceFile(botToken, voiceFileId, tempDir);
+        try {
+          const result = await transcriber.transcribeLocalFile({ filePath: localPath });
+          sanitized = result.text;
+        } finally {
+          // Best-effort cleanup
+          try {
+            const { unlink, rmdir } = await import("node:fs/promises");
+            await unlink(localPath);
+            await rmdir(tempDir);
+          } catch {
+            // Ignore cleanup errors
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        voiceTranscriptionError = `Voice transcription failed: ${msg}`;
+      }
+    }
+  }
+
+  // If neither text nor successful voice transcription, check for voice error
+  if (sanitized.length === 0 && !voiceTranscriptionError) {
     return NextResponse.json({ ok: false, error: "Reply text is empty" }, { status: 400 });
   }
 
@@ -196,6 +262,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     });
   }
 
+  // Use error message as the text to route if voice transcription failed
+  const textToRoute = voiceTranscriptionError
+    ? `[SYSTEM] ${voiceTranscriptionError}`
+    : sanitized;
+
   const inboundStore = createInboundContextStore(config);
   let inboundContextWarning: string | null = null;
   let sourceReplyAvailable = false;
@@ -213,7 +284,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     await inboundStore.enqueue({
       sessionId: targetSessionId,
       source: "telegram",
-      text: sanitized,
+      text: textToRoute,
       routing: telegramRouting,
     });
     sourceReplyAvailable = true;
@@ -229,7 +300,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       formatInboundMessageForSession({
         sessionId: targetSessionId,
         source: "telegram",
-        text: sanitized,
+        text: textToRoute,
         routing: telegramRouting,
         includeReplyCommand: sourceReplyAvailable,
       }),
@@ -237,6 +308,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({
       ok: true,
       sessionId: targetSessionId,
+      voiceTranscribed: hasVoice && !voiceTranscriptionError ? true : undefined,
+      voiceError: voiceTranscriptionError ?? undefined,
       warning: inboundContextWarning ?? undefined,
     });
   } catch (err) {

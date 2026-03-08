@@ -96,6 +96,19 @@ projects:
 #   warning: [telegram]           # auto-fix failed
 #   info: [telegram]              # summary, all done
 
+# Services — optional service backends
+# services:
+#   transcriber:
+#     plugin: whisper-cpp
+#     binaryPath: /usr/local/bin/whisper-cli    # path to whisper binary
+#     modelPath: ~/models/ggml-base.en.bin      # path to GGML model file
+#     ffmpegPath: ffmpeg                         # default: ffmpeg
+#     language: auto                             # language code or "auto" (default: auto)
+#     timeoutMs: 120000                          # transcription timeout (default: 120000)
+#     maxAudioBytes: 25000000                    # max file size in bytes (default: 25MB)
+#     maxDurationSec: 600                        # max audio duration (default: 600s)
+#     enabled: true                              # toggle transcription (default: true)
+
 # Trigger listeners — poll external sources and auto-trigger current spawn flow.
 # listeners:
 #   jira-broai:

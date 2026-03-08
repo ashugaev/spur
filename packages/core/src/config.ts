@@ -78,6 +78,22 @@ const AgentSpecificConfigSchema = z
   })
   .passthrough();
 
+const TranscriberConfigSchema = z.object({
+  plugin: z.string().default("whisper-cpp"),
+  binaryPath: z.string(),
+  modelPath: z.string(),
+  ffmpegPath: z.string().default("ffmpeg"),
+  language: z.string().default("auto"),
+  timeoutMs: z.number().positive().default(120_000),
+  maxAudioBytes: z.number().positive().default(25_000_000),
+  maxDurationSec: z.number().positive().default(600),
+  enabled: z.boolean().default(true),
+});
+
+const ServicesConfigSchema = z.object({
+  transcriber: TranscriberConfigSchema.optional(),
+});
+
 const RemoteConfigSchema = z.object({
   tailscaleHost: z.string().optional(),
 });
@@ -128,6 +144,7 @@ const OrchestratorConfigSchema = z.object({
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
   listeners: z.record(ListenerConfigSchema).default({}),
+  services: ServicesConfigSchema.optional(),
   remote: RemoteConfigSchema.optional(),
 });
 

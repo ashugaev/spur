@@ -843,6 +843,9 @@ export interface OrchestratorConfig {
   /** Background listeners (issue/event sources that auto-trigger actions) */
   listeners?: Record<string, ListenerConfig>;
 
+  /** Services configuration (transcriber, etc.) */
+  services?: ServicesConfig;
+
   /** Remote access settings (Tailscale) */
   remote?: RemoteConfig;
 }
@@ -953,6 +956,11 @@ export interface ListenerConfig {
 export interface RemoteConfig {
   /** Tailscale host for remote access (prefers MagicDNS *.ts.net when auto-detected) */
   tailscaleHost?: string;
+}
+
+export interface ServicesConfig {
+  /** Audio transcription service configuration */
+  transcriber?: TranscriberConfig;
 }
 
 export interface AgentSpecificConfig {
@@ -1133,6 +1141,58 @@ export class SessionNotRestorableError extends Error {
     super(`Session ${sessionId} cannot be restored: ${reason}`);
     this.name = "SessionNotRestorableError";
   }
+}
+
+// =============================================================================
+// AUDIO TRANSCRIPTION
+// =============================================================================
+
+/** Request to transcribe an audio file */
+export interface TranscribeRequest {
+  /** Absolute path to the audio file on disk */
+  filePath: string;
+  /** Audio format hint (e.g. "ogg", "mp3", "wav"). Optional. */
+  format?: string;
+  /** Language hint for the transcriber (e.g. "en", "ru"). Optional. */
+  language?: string;
+}
+
+/** Result of a transcription */
+export interface TranscribeResult {
+  /** Transcribed text */
+  text: string;
+  /** How long the transcription took in milliseconds */
+  durationMs: number;
+  /** Detected or forced language (if available) */
+  language?: string;
+}
+
+/** Audio transcription service interface */
+export interface AudioTranscriber {
+  /** Transcribe a local audio file to text */
+  transcribeLocalFile(request: TranscribeRequest): Promise<TranscribeResult>;
+}
+
+/** Configuration for the whisper-cpp transcription provider */
+export interface TranscriberConfig {
+  /** Transcriber plugin name (currently only "whisper-cpp") */
+  plugin: string;
+  /** Path to the whisper binary (e.g. whisper-cli) */
+  binaryPath: string;
+  /** Path to the whisper GGML model file */
+  modelPath: string;
+  /** Path to ffmpeg binary (default: "ffmpeg") */
+  ffmpegPath?: string;
+  /** Language code or "auto" (default: "auto") */
+  language?: string;
+  /** Timeout for transcription in ms (default: 120000) */
+  timeoutMs?: number;
+  /** Max audio file size in bytes (default: 25000000) */
+  maxAudioBytes?: number;
+  /** Max audio duration in seconds (default: 600) */
+  maxDurationSec?: number;
+  /** Whether transcription is enabled (default: true) */
+  enabled?: boolean;
 }
 
 /** Thrown when a workspace is missing and cannot be recreated. */
