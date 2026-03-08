@@ -35,6 +35,10 @@ reactions:
     auto: true
     action: send-to-agent
     escalateAfter: 30m
+  review-comments:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 30m
   merge-conflicts:
     auto: true
     action: send-to-agent
@@ -60,16 +64,13 @@ listeners:
 projects:
   ao:
     name: Agent Orchestrator
-    repo: ComposioHQ/agent-orchestrator
-    path: ~/agent-orchestrator
+    repo: ashugaev/ao
+    path: ~/projects/agent-orchestrator
     defaultBranch: main
     sessionPrefix: ao
     scm:
       plugin: github
-    tracker:
-      plugin: linear
-      teamId: "2a6e9b1b-19cd-4e30-b5bd-7b34dc491c7e"
-    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents]
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents,  node_modules]
     postCreate:
       - "pnpm install"
     agentConfig:

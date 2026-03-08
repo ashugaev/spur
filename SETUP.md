@@ -232,6 +232,19 @@ reactions:
     escalateAfter: 30m # Notify human if not resolved in 30 minutes
 ```
 
+#### Review Comments Without Status Change
+
+```yaml
+reactions:
+  review-comments:
+    auto: true
+    action: send-to-agent
+    message: "There are unresolved review comments on your PR. Address each one, push fixes, and reply."
+    escalateAfter: 30m # Notify human if comments remain unresolved
+```
+
+This reaction handles unresolved review comments even when GitHub review decision is not `CHANGES_REQUESTED`.
+
 #### Approved and Green (Auto-merge)
 
 ```yaml
