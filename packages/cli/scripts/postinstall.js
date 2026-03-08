@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+/* global console */
+/* eslint no-console: "off" */
 
 // Subtle star nudge after npm install -- standard practice (Astro, Vite, Bun all do this)
 const msg = `

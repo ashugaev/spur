@@ -162,6 +162,7 @@ describe("jiraBacklogSource", () => {
     mockedPaths.sessionsDir = join(mockedPaths.baseDir, "sessions");
     mkdirSync(mockedPaths.sessionsDir, { recursive: true });
     for (const key of Object.keys(archivedStateBySession)) {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete archivedStateBySession[key];
     }
     vi.useFakeTimers();

@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getProjectBaseDir } from "@composio/ao-core";
-import type { OrchestratorConfig, ProjectConfig } from "@composio/ao-core";
+import { getProjectBaseDir, type OrchestratorConfig, type ProjectConfig } from "@composio/ao-core";
 
 export type IntegrationService = "telegram" | "jira";
 export type IntegrationKind = "polling" | "listener";
@@ -79,7 +78,7 @@ function toErrorMessage(error: unknown): string | undefined {
     return normalized.length > 0 ? normalized : undefined;
   }
 
-  if (error == null) return undefined;
+  if (error === null || error === undefined) return undefined;
 
   try {
     return JSON.stringify(error);

@@ -35,11 +35,11 @@ export function registerSourceReply(program: Command): void {
       const sessionManager = await getSessionManager(config);
       const session = await sessionManager.get(sessionId);
       if (!session) {
-        fail(`Session \"${sessionId}\" not found`);
+        fail(`Session "${sessionId}" not found`);
       }
 
       if (!isOrchestratorSession(session)) {
-        fail(`Session \"${sessionId}\" is not an orchestrator session`);
+        fail(`Session "${sessionId}" is not an orchestrator session`);
       }
 
       const inboundContextStore = createInboundContextStore(config);
@@ -54,13 +54,13 @@ export function registerSourceReply(program: Command): void {
 
       if (!envelope) {
         fail(
-          `No pending source context for \"${sessionId}\". Wait for a source message first, then retry.`,
+          `No pending source context for "${sessionId}". Wait for a source message first, then retry.`,
         );
       }
 
       const adapter = getSourceReplyAdapter(envelope.source);
       if (!adapter) {
-        fail(`No source-reply adapter registered for source \"${envelope.source}\"`);
+        fail(`No source-reply adapter registered for source "${envelope.source}"`);
       }
 
       try {
@@ -76,7 +76,7 @@ export function registerSourceReply(program: Command): void {
 
       const acknowledged = await inboundContextStore.ack(sessionId, envelope.id);
       if (!acknowledged) {
-        fail(`Reply sent but failed to acknowledge context envelope \"${envelope.id}\"`);
+        fail(`Reply sent but failed to acknowledge context envelope "${envelope.id}"`);
       }
 
       console.log(
