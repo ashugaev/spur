@@ -7,6 +7,7 @@ import { SessionCard } from "./SessionCard";
 interface AttentionZoneProps {
   level: AttentionLevel;
   sessions: DashboardSession[];
+  projectId?: string;
   variant?: "column" | "grid";
   onSend?: (sessionId: string, message: string) => void;
   onKill?: (sessionId: string) => void;
@@ -57,6 +58,7 @@ const zoneConfig: Record<
 export function AttentionZone({
   level,
   sessions,
+  projectId,
   variant = "grid",
   onSend,
   onKill,
@@ -108,6 +110,7 @@ export function AttentionZone({
               <SessionCard
                 key={session.id}
                 session={session}
+                projectId={projectId}
                 onSend={onSend}
                 onKill={onKill}
                 onMerge={onMerge}
@@ -161,6 +164,7 @@ export function AttentionZone({
             <SessionCard
               key={session.id}
               session={session}
+              projectId={projectId}
               onSend={onSend}
               onKill={onKill}
               onMerge={onMerge}

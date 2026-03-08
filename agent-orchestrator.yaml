@@ -19,6 +19,11 @@ notifiers:
     pollingIntervalMs: 2000
     defaultSessionId: ao-orchestrator
 
+services:
+  transcriber:
+    binaryPath: /opt/homebrew/bin/whisper-cli
+    modelPath: "/Users/alek/Library/Application Support/com.meetily.ai/models/ggml-large-v3-turbo.bin"
+
 notificationRouting:
   urgent: [desktop, telegram]
   action: [desktop, telegram]
@@ -50,16 +55,17 @@ reactions:
     mergeMethod: squash
     priority: action
 
-listeners:
-  jira-broai:
-    enabled: true
-    source: jira-backlog
-    projectId: int
-    intervalMs: 60000
-    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-    backlogStatus: "Backlog"
-    trigger:
-      type: spawn-session
+# TODO: Jira to project level
+#listeners:
+#  jira-broai:
+#    enabled: true
+#    source: jira-backlog
+#    projectId: int
+#    intervalMs: 60000
+#    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
+#    backlogStatus: "Backlog"
+#    trigger:
+#      type: spawn-session
 
 projects:
   ao:
@@ -70,7 +76,10 @@ projects:
     sessionPrefix: ao
     scm:
       plugin: github
+    tracker:
+      plugin: github
     symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents,  node_modules]
+    agentRulesFile: .ao-agent-rules.md
     postCreate:
       - "pnpm install"
     agentConfig:

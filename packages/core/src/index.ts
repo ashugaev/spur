@@ -97,6 +97,13 @@ export type {
   FormatInboundMessageForSessionInput,
 } from "./inbound-context.js";
 
+// Audio transcriber service
+export {
+  createAudioTranscriber,
+  transcribeAudioBytes,
+  downloadTelegramVoiceFileBytes,
+} from "./audio-transcriber.js";
+
 // Path utilities — hash-based directory structure
 export {
   generateConfigHash,

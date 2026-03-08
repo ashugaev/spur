@@ -10,7 +10,31 @@ export const dynamic = "force-dynamic";
  * Sends session state updates to connected clients.
  * Polls SessionManager.list() on an interval (no SSE push from core yet).
  */
-export async function GET(): Promise<Response> {
+export async function GET(request: Request): Promise<Response> {
+  const { searchParams } = new URL(request.url);
+  const requestedProjectIdRaw = searchParams.get("projectId");
+  const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
+
+  if (requestedProjectId) {
+    try {
+      const { config } = await getServices();
+      if (!config.projects[requestedProjectId]) {
+        return new Response(JSON.stringify({ error: `Unknown projectId: ${requestedProjectId}` }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Failed to resolve services for project-scoped stream" }),
+        {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+  }
+
   const encoder = new TextEncoder();
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let updates: ReturnType<typeof setInterval> | undefined;
@@ -21,7 +45,7 @@ export async function GET(): Promise<Response> {
       void (async () => {
         try {
           const { sessionManager } = await getServices();
-          const sessions = await sessionManager.list();
+          const sessions = await sessionManager.list(requestedProjectId);
           const dashboardSessions = sessions.map(sessionToDashboard);
 
           const initialEvent = {
@@ -59,7 +83,7 @@ export async function GET(): Promise<Response> {
           let dashboardSessions;
           try {
             const { sessionManager } = await getServices();
-            const sessions = await sessionManager.list();
+            const sessions = await sessionManager.list(requestedProjectId);
             dashboardSessions = sessions.map(sessionToDashboard);
           } catch {
             // Transient service error — skip this poll, retry on next interval

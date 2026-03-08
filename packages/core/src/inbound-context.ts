@@ -76,6 +76,11 @@ function buildTelegramRoutingSummary(routing: Record<string, unknown>): string |
     parts.push(`message=${Math.trunc(messageId)}`);
   }
 
+  const projectId = toNonEmptyString(routing["projectId"]);
+  if (projectId) {
+    parts.push(`project=${projectId}`);
+  }
+
   const fromDisplayName = toNonEmptyString(routing["fromDisplayName"]);
   const fromUsername = toNonEmptyString(routing["fromUsername"]);
   if (fromDisplayName) {
@@ -122,6 +127,7 @@ export interface TelegramInboundRouting {
   chatId: string;
   messageId: number;
   threadId?: number;
+  projectId?: string;
   fromId?: number;
   fromUsername?: string;
   fromDisplayName?: string;
@@ -494,6 +500,7 @@ export function buildTelegramInboundRouting(payload: {
   chatId: unknown;
   messageId: unknown;
   messageThreadId?: unknown;
+  projectId?: unknown;
   fromId?: unknown;
   fromUsername?: unknown;
   fromFirstName?: unknown;
@@ -517,6 +524,11 @@ export function buildTelegramInboundRouting(payload: {
   const threadId = toOptionalNumber(payload.messageThreadId);
   if (threadId !== undefined) {
     routing.threadId = Math.trunc(threadId);
+  }
+
+  const projectId = toNonEmptyString(payload.projectId);
+  if (projectId) {
+    routing.projectId = projectId;
   }
 
   const fromId = toOptionalNumber(payload.fromId);

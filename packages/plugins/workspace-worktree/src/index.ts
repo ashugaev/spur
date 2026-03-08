@@ -15,6 +15,7 @@ import type {
 const GIT_TIMEOUT = 30_000;
 
 const execFileAsync = promisify(execFile);
+const PNPM_INSTALL_COMMAND = /^pnpm\s+install(?:\s|$)/i;
 
 export const manifest = {
   name: "worktree",
@@ -44,6 +45,17 @@ function expandPath(p: string): string {
     return join(homedir(), p.slice(2));
   }
   return p;
+}
+
+function normalizePostCreateCommand(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return trimmed;
+  if (!PNPM_INSTALL_COMMAND.test(trimmed)) return trimmed;
+  if (/confirmModulesPurge/i.test(trimmed)) return trimmed;
+  return trimmed.replace(
+    /^pnpm\s+install\b/i,
+    "pnpm install --config.confirmModulesPurge=false",
+  );
 }
 
 export function create(config?: Record<string, unknown>): Workspace {
@@ -291,7 +303,9 @@ export function create(config?: Record<string, unknown>): Workspace {
       // NOTE: commands run with full shell privileges — they come from trusted YAML config
       if (project.postCreate) {
         for (const command of project.postCreate) {
-          await execFileAsync("sh", ["-c", command], { cwd: info.path });
+          await execFileAsync("sh", ["-c", normalizePostCreateCommand(command)], {
+            cwd: info.path,
+          });
         }
       }
     },

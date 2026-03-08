@@ -1,6 +1,6 @@
 # Rebranding Plan: Clean-Room Independent Repo
 
-**Decision:** Detach from ComposioHQ/agent-orchestrator fork. Create independent project.
+**Decision:** Detach from ashugaev/ao fork. Create independent project.
 **Status:** APPROVED
 **Referenced in:** STRATEGY.md (Part 0), STRATEGY-FINAL.md (Phase 0)
 
@@ -63,7 +63,7 @@ Find and replace across codebase:
 - `@composio/ao-cli` -> `@agentorch/cli`
 - `@composio/ao-web` -> `@agentorch/web`
 - `@composio/ao-plugin-*` -> `@agentorch/plugin-*`
-- `ComposioHQ/agent-orchestrator` -> `your-org/agentorch`
+- `ashugaev/ao` -> `your-org/agentorch`
 - All `repository.url` fields in package.json files
 
 ### 4. Handle attribution (REQUIRED by MIT)
@@ -76,7 +76,7 @@ This project includes code originally from:
 
   Agent Orchestrator
   Copyright (c) 2025 Composio, Inc.
-  https://github.com/ComposioHQ/agent-orchestrator
+  https://github.com/ashugaev/ao
   Licensed under the MIT License
 
 Portions of this codebase were derived from the above project.
@@ -91,7 +91,7 @@ MIT License
 Copyright (c) 2026 [Your Name]
 
 Portions copyright (c) 2025 Composio, Inc.
-Originally from: https://github.com/ComposioHQ/agent-orchestrator
+Originally from: https://github.com/ashugaev/ao
 
 [standard MIT text]
 ```
@@ -104,7 +104,7 @@ One line in the README, near the bottom:
 ```markdown
 ## Acknowledgments
 
-This project builds on [agent-orchestrator](https://github.com/ComposioHQ/agent-orchestrator)
+This project builds on [agent-orchestrator](https://github.com/ashugaev/ao)
 by Composio, Inc. (MIT licensed). We added bidirectional messaging,
 Telegram/Jira integration, and the inbound context system.
 ```

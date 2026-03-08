@@ -12,14 +12,24 @@ import {
 /** GET /api/sessions — List all sessions with full state
  * Query params:
  * - active=true: Only return non-exited sessions
+ * - projectId=<id>: Limit to a single project
  */
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const activeOnly = searchParams.get("active") === "true";
+    const requestedProjectIdRaw = searchParams.get("projectId");
+    const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
 
     const { config, registry, sessionManager } = await getServices();
-    const coreSessions = await sessionManager.list();
+    if (requestedProjectId && !config.projects[requestedProjectId]) {
+      return NextResponse.json(
+        { error: `Unknown projectId: ${requestedProjectId}` },
+        { status: 400 },
+      );
+    }
+
+    const coreSessions = await sessionManager.list(requestedProjectId);
 
     // Find orchestrator session ID (if running) and expose to clients
     const orchSession = coreSessions.find((s) => s.id.endsWith("-orchestrator"));
@@ -59,6 +69,7 @@ export async function GET(request: Request) {
       sessions: dashboardSessions,
       stats: computeStats(dashboardSessions),
       orchestratorId,
+      projectId: requestedProjectId ?? null,
     });
   } catch (err) {
     return NextResponse.json(
