@@ -68,11 +68,10 @@ function handleConnection(
     return;
   }
 
-  // Each WebSocket connection gets a unique key so multiple clients
-  // (e.g. desktop + mobile) can view the same tmux session simultaneously.
-  // tmux natively supports multiple attach-session viewers.
-  const clientId = url.searchParams.get("clientId");
-  const connectionKey = clientId ? `${sessionId}:${clientId}` : `${sessionId}:${Date.now()}`;
+  // Use sessionId as the map key. When the same session is requested again
+  // (e.g. browser refresh), the previous connection is replaced.
+  // tmux natively supports multiple attach-session viewers via separate PTYs.
+  const connectionKey = sessionId;
 
   // Replace an existing connection only if it has the same connectionKey
   // (same client reconnecting). Different clients get independent PTYs.
