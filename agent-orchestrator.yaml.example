@@ -65,7 +65,6 @@ projects:
 
     # Rules for the orchestrator agent (reserved for future use)
     # orchestratorRules: |
-    #   Never write or edit code yourself — always delegate to worker agents.
     #   Prefer to batch-spawn related issues together.
 
     # Per-project reaction overrides
