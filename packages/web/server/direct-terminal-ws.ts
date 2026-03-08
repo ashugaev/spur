@@ -68,13 +68,19 @@ function handleConnection(
     return;
   }
 
-  // Replace an existing WebSocket/PTy pair for the same user-facing session.
-  // This prevents orphaned PTYs when clients reconnect quickly.
-  const previous = activeSessions.get(sessionId);
+  // Each WebSocket connection gets a unique key so multiple clients
+  // (e.g. desktop + mobile) can view the same tmux session simultaneously.
+  // tmux natively supports multiple attach-session viewers.
+  const clientId = url.searchParams.get("clientId");
+  const connectionKey = clientId ? `${sessionId}:${clientId}` : `${sessionId}:${Date.now()}`;
+
+  // Replace an existing connection only if it has the same connectionKey
+  // (same client reconnecting). Different clients get independent PTYs.
+  const previous = activeSessions.get(connectionKey);
   if (previous) {
     previous.ws.close(1000, "Replaced by newer connection");
     previous.pty.kill();
-    activeSessions.delete(sessionId);
+    activeSessions.delete(connectionKey);
   }
 
   console.log(`[DirectTerminal] New connection for session: ${tmuxSessionId}`);
@@ -130,7 +136,7 @@ function handleConnection(
   }
 
   const session: TerminalSession = { sessionId, pty, ws };
-  activeSessions.set(sessionId, session);
+  activeSessions.set(connectionKey, session);
 
   // PTY -> WebSocket
   pty.onData((data) => {
@@ -142,13 +148,11 @@ function handleConnection(
   // PTY exit
   pty.onExit(({ exitCode }) => {
     console.log(`[DirectTerminal] PTY exited for ${sessionId} with code ${exitCode}`);
-    // Guard against stale exits: only delete if this pty is still the active one.
-    // A new connection may have already replaced this session entry.
-    if (activeSessions.get(sessionId)?.pty === pty) {
-      activeSessions.delete(sessionId);
+    if (activeSessions.get(connectionKey)?.pty === pty) {
+      activeSessions.delete(connectionKey);
     }
     if (ws.readyState === WebSocket.OPEN) {
-      ws.close(1000, "Terminal session ended");
+      ws.close(4005, "Terminal session ended");
     }
   });
 
@@ -176,9 +180,8 @@ function handleConnection(
   // WebSocket close
   ws.on("close", () => {
     console.log(`[DirectTerminal] WebSocket closed for ${sessionId}`);
-    // Guard against stale closes replacing a newer session's entry
-    if (activeSessions.get(sessionId)?.pty === pty) {
-      activeSessions.delete(sessionId);
+    if (activeSessions.get(connectionKey)?.pty === pty) {
+      activeSessions.delete(connectionKey);
     }
     pty.kill();
   });
@@ -186,9 +189,8 @@ function handleConnection(
   // WebSocket error
   ws.on("error", (err) => {
     console.error(`[DirectTerminal] WebSocket error for ${sessionId}:`, err.message);
-    // Guard against stale error handlers replacing a newer session's entry
-    if (activeSessions.get(sessionId)?.pty === pty) {
-      activeSessions.delete(sessionId);
+    if (activeSessions.get(connectionKey)?.pty === pty) {
+      activeSessions.delete(connectionKey);
     }
     pty.kill();
   });

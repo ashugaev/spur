@@ -255,6 +255,13 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
         "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.",
       escalateAfter: "30m",
     },
+    "review-comments": {
+      auto: true,
+      action: "send-to-agent",
+      message:
+        "There are unresolved review comments on your PR. Address each one, push fixes, and reply on GitHub.",
+      escalateAfter: "30m",
+    },
     "bugbot-comments": {
       auto: true,
       action: "send-to-agent",
@@ -298,8 +305,17 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     },
   };
 
-  // Merge defaults with user-specified reactions (user wins)
-  config.reactions = { ...defaults, ...config.reactions };
+  // Merge defaults with user-specified reactions field-by-field.
+  // This keeps default message/escalation values when users override only
+  // a subset of fields (e.g. action/auto) for built-in reaction keys.
+  const mergedReactions: Record<string, (typeof config.reactions)[string]> = { ...defaults };
+  for (const [reactionKey, reactionConfig] of Object.entries(config.reactions)) {
+    const defaultReaction = defaults[reactionKey];
+    mergedReactions[reactionKey] = defaultReaction
+      ? { ...defaultReaction, ...reactionConfig }
+      : reactionConfig;
+  }
+  config.reactions = mergedReactions;
 
   return config;
 }

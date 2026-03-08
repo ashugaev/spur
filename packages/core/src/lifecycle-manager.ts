@@ -33,6 +33,7 @@ import {
   type EventPriority,
   type ProjectConfig as _ProjectConfig,
   type MergeReadiness,
+  type ReviewComment,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
@@ -70,7 +71,12 @@ function inferPriority(type: EventType): EventPriority {
   ) {
     return "action";
   }
-  if (type.includes("fail") || type.includes("changes_requested") || type.includes("conflicts")) {
+  if (
+    type.includes("fail") ||
+    type.includes("changes_requested") ||
+    type.includes("comments_unresolved") ||
+    type.includes("conflicts")
+  ) {
     return "warning";
   }
   return "info";
@@ -138,6 +144,8 @@ function eventToReactionKey(eventType: EventType): string | null {
       return "ci-failed";
     case "review.changes_requested":
       return "changes-requested";
+    case "review.comments_unresolved":
+      return "review-comments";
     case "automated_review.found":
       return "bugbot-comments";
     case "merge.conflicts":
@@ -181,12 +189,30 @@ function hasMergeConflictBlockers(blockers: string[]): boolean {
   });
 }
 
+function pendingCommentsFingerprint(comments: ReviewComment[]): string {
+  if (comments.length === 0) return "";
+  return comments
+    .map((comment) =>
+      JSON.stringify([
+        comment.id,
+        comment.author,
+        comment.body,
+        comment.path ?? "",
+        comment.line ?? "",
+        comment.url,
+      ]),
+    )
+    .sort()
+    .join("|");
+}
+
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
   const { config, registry, sessionManager } = deps;
 
   const states = new Map<SessionId, SessionStatus>();
   const mergeConflictStates = new Map<SessionId, boolean>();
+  const reviewCommentFingerprints = new Map<SessionId, string>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
@@ -636,6 +662,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const newStatus = determined.status;
     const hadMergeConflicts = mergeConflictStates.get(session.id) ?? false;
     const hasMergeConflicts = determined.hasMergeConflictBlockers;
+    let changesRequestedHandledBySendToAgent = false;
 
     if (newStatus !== oldStatus) {
       // State transition detected
@@ -673,7 +700,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           if (reactionConfig) {
             // auto: false skips automated agent actions but still allows notifications
             if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-              await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+              const reactionResult = await executeReaction(
+                session.id,
+                session.projectId,
+                reactionKey,
+                reactionConfig,
+              );
+              if (
+                reactionKey === "changes-requested" &&
+                reactionResult.action === "send-to-agent" &&
+                reactionResult.success
+              ) {
+                changesRequestedHandledBySendToAgent = true;
+              }
               // Reaction is handling this event — suppress immediate human notification.
               // "send-to-agent" retries + escalates on its own; "notify"/"auto-merge"
               // already call notifyHuman internally. Notifying here would bypass the
@@ -700,6 +739,59 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     } else {
       // No transition but track current state
       states.set(session.id, newStatus);
+    }
+
+    // Trigger review-comments reaction when unresolved comments change, independent of status transitions.
+    const projectConfig = config.projects[session.projectId];
+    const scm = projectConfig?.scm ? registry.get<SCM>("scm", projectConfig.scm.plugin) : null;
+    if (session.pr && scm) {
+      try {
+        const pendingCommentsRaw = await scm.getPendingComments(session.pr);
+        const pendingComments = Array.isArray(pendingCommentsRaw) ? pendingCommentsRaw : [];
+        const fingerprint = pendingCommentsFingerprint(pendingComments);
+        const previousFingerprint = reviewCommentFingerprints.get(session.id) ?? "";
+        const hasPendingComments = pendingComments.length > 0;
+        const commentsChanged = fingerprint !== previousFingerprint;
+
+        if (commentsChanged) {
+          reviewCommentFingerprints.set(session.id, fingerprint);
+        }
+
+        if (!hasPendingComments) {
+          reactionTrackers.delete(`${session.id}:review-comments`);
+        }
+
+        if (hasPendingComments && commentsChanged && !changesRequestedHandledBySendToAgent) {
+          const eventType: EventType = "review.comments_unresolved";
+          let reactionHandledNotify = false;
+          const reactionKey = eventToReactionKey(eventType);
+
+          if (reactionKey) {
+            const reactionConfig = resolveReactionConfig(session, reactionKey);
+            if (reactionConfig) {
+              if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+                await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+                reactionHandledNotify = true;
+              }
+            }
+          }
+
+          if (!reactionHandledNotify) {
+            const event = createEvent(eventType, {
+              sessionId: session.id,
+              projectId: session.projectId,
+              message: `${session.id}: ${pendingComments.length} unresolved review comment(s)`,
+              data: { pendingComments: pendingComments.length },
+            });
+            await notifyHuman(event, inferPriority(eventType));
+          }
+        }
+      } catch {
+        // Keep lifecycle checks running if pending-comment polling fails.
+      }
+    } else {
+      reviewCommentFingerprints.delete(session.id);
+      reactionTrackers.delete(`${session.id}:review-comments`);
     }
 
     // Trigger merge-conflicts reaction once per conflict period, independent of status transitions.
@@ -767,6 +859,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       for (const trackedId of mergeConflictStates.keys()) {
         if (!currentSessionIds.has(trackedId)) {
           mergeConflictStates.delete(trackedId);
+        }
+      }
+      for (const trackedId of reviewCommentFingerprints.keys()) {
+        if (!currentSessionIds.has(trackedId)) {
+          reviewCommentFingerprints.delete(trackedId);
         }
       }
       for (const trackerKey of reactionTrackers.keys()) {

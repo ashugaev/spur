@@ -331,8 +331,10 @@ function createGitHubSCM(): SCM {
     },
 
     async getPendingComments(pr: PRInfo): Promise<ReviewComment[]> {
+      const pendingComments: ReviewComment[] = [];
+
+      // Source 1: unresolved review-thread comments.
       try {
-        // Use GraphQL with variables to get review threads with actual isResolved status
         const raw = await gh([
           "api",
           "graphql",
@@ -394,30 +396,74 @@ function createGitHubSCM(): SCM {
 
         const threads = data.data.repository.pullRequest.reviewThreads.nodes;
 
-        return threads
-          .filter((t) => {
-            if (t.isResolved) return false; // only pending (unresolved) threads
-            const c = t.comments.nodes[0];
-            if (!c) return false; // skip threads with no comments
-            const author = c.author?.login ?? "";
-            return !BOT_AUTHORS.has(author);
-          })
-          .map((t) => {
-            const c = t.comments.nodes[0];
-            return {
-              id: c.id,
-              author: c.author?.login ?? "unknown",
-              body: c.body,
-              path: c.path || undefined,
-              line: c.line ?? undefined,
-              isResolved: t.isResolved,
-              createdAt: parseDate(c.createdAt),
-              url: c.url,
-            };
-          });
+        pendingComments.push(
+          ...threads
+            .filter((t) => {
+              if (t.isResolved) return false;
+              const c = t.comments.nodes[0];
+              if (!c) return false;
+              const author = c.author?.login ?? "";
+              return !BOT_AUTHORS.has(author);
+            })
+            .map((t) => {
+              const c = t.comments.nodes[0];
+              return {
+                id: `thread:${c.id}`,
+                author: c.author?.login ?? "unknown",
+                body: c.body,
+                path: c.path || undefined,
+                line: c.line ?? undefined,
+                isResolved: false,
+                createdAt: parseDate(c.createdAt),
+                url: c.url,
+              };
+            }),
+        );
       } catch {
-        return [];
+        // Continue with other sources.
       }
+
+      // Source 2: top-level PR conversation comments (/issues/:number/comments).
+      try {
+        const raw = await gh([
+          "api",
+          "-F",
+          "per_page=100",
+          `repos/${repoFlag(pr)}/issues/${pr.number}/comments`,
+        ]);
+
+        const comments: Array<{
+          id: number;
+          user: { login: string } | null;
+          body: string;
+          created_at: string;
+          html_url: string;
+        }> = JSON.parse(raw);
+
+        pendingComments.push(
+          ...comments
+            .filter((c) => !BOT_AUTHORS.has(c.user?.login ?? ""))
+            .map((c) => ({
+              id: `pr:${String(c.id)}`,
+              author: c.user?.login ?? "unknown",
+              body: c.body,
+              isResolved: false,
+              createdAt: parseDate(c.created_at),
+              url: c.html_url,
+            })),
+        );
+      } catch {
+        // Continue with whatever we've already collected.
+      }
+
+      // Deterministic order for stable fingerprints in lifecycle logic.
+      pendingComments.sort((a, b) => {
+        const timeDelta = a.createdAt.getTime() - b.createdAt.getTime();
+        if (timeDelta !== 0) return timeDelta;
+        return a.id.localeCompare(b.id);
+      });
+
+      return pendingComments;
     },
 
     async getAutomatedComments(pr: PRInfo): Promise<AutomatedComment[]> {

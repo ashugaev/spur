@@ -112,6 +112,53 @@ projects:
     it("should throw error if config not found", () => {
       expect(() => loadConfig()).toThrow("No agent-orchestrator.yaml found");
     });
+
+    it("keeps default reaction message when built-in reaction override omits message", () => {
+      const configPath = join(testDir, "reaction-default-message.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+reactions:
+  review-comments:
+    auto: true
+    action: send-to-agent
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.reactions["review-comments"]?.message).toBe(
+        "There are unresolved review comments on your PR. Address each one, push fixes, and reply on GitHub.",
+      );
+      expect(config.reactions["review-comments"]?.escalateAfter).toBe("30m");
+    });
+
+    it("allows overriding default reaction message", () => {
+      const configPath = join(testDir, "reaction-message-override.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+reactions:
+  review-comments:
+    auto: true
+    action: send-to-agent
+    message: "Custom review-comment prompt"
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.reactions["review-comments"]?.message).toBe("Custom review-comment prompt");
+      expect(config.reactions["review-comments"]?.escalateAfter).toBe("30m");
+    });
   });
 
   describe("Config Discovery Priority", () => {
