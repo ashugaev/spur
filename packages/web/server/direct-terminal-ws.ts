@@ -68,6 +68,15 @@ function handleConnection(
     return;
   }
 
+  // Replace an existing WebSocket/PTy pair for the same user-facing session.
+  // This prevents orphaned PTYs when clients reconnect quickly.
+  const previous = activeSessions.get(sessionId);
+  if (previous) {
+    previous.ws.close(1000, "Replaced by newer connection");
+    previous.pty.kill();
+    activeSessions.delete(sessionId);
+  }
+
   console.log(`[DirectTerminal] New connection for session: ${tmuxSessionId}`);
 
   // Enable mouse mode for scrollback support
@@ -202,10 +211,12 @@ export function createDirectTerminalWss(tmuxPath?: string): DirectTerminalWss {
   });
 
   function shutdown() {
-    for (const [, session] of activeSessions) {
+    for (const [sessionId, session] of activeSessions) {
       session.pty.kill();
       session.ws.close(1001, "Server shutting down");
+      activeSessions.delete(sessionId);
     }
+    wss.close();
   }
 
   return { wss, activeSessions, shutdown };
@@ -245,10 +256,12 @@ export function createDirectTerminalServer(tmuxPath?: string): DirectTerminalSer
   });
 
   function shutdown() {
-    for (const [, session] of activeSessions) {
+    for (const [sessionId, session] of activeSessions) {
       session.pty.kill();
       session.ws.close(1001, "Server shutting down");
+      activeSessions.delete(sessionId);
     }
+    wss.close();
     server.close();
   }
 
