@@ -79,17 +79,22 @@ ao open ${projectId}
 
 | Command | Description |
 |---------|-------------|
-| \`ao status\` | Show all sessions with PR/CI/review status |
-| \`ao spawn <project> [issue]\` | Spawn a single worker agent session |
-| \`ao batch-spawn <project> <issues...>\` | Spawn multiple sessions in parallel |
-| \`ao session ls [-p project]\` | List all sessions (optionally filter by project) |
-| \`ao session attach <session>\` | Attach to a session's tmux window |
-| \`ao session kill <session>\` | Kill a specific session |
-| \`ao session cleanup [-p project]\` | Kill completed/merged sessions |
-| \`ao send <session> <message>\` | Send a message to a running session |
+| \`ao status [-p project] [--json]\` | Show all sessions with PR/CI/review status |
+| \`ao spawn <project> [issue] [--open] [--agent <name>]\` | Spawn a single worker agent session |
+| \`ao batch-spawn <project> <issues...> [--open]\` | Spawn multiple sessions with duplicate detection |
+| \`ao send <session> <message> [-f file] [--no-wait] [--timeout <s>]\` | Send a message to a running session (waits for idle) |
 | \`ao source-reply <session> <message>\` | Reply to the next pending inbound source message (FIFO) |
-| \`ao dashboard\` | Start the web dashboard (http://localhost:${config.port ?? 3000}) |
-| \`ao open <project>\` | Open all project sessions in terminal tabs |`);
+| \`ao session ls [-p project]\` | List all sessions (optionally filter by project) |
+| \`ao session kill <session>\` | Kill a session and remove its worktree |
+| \`ao session cleanup [-p project] [--dry-run]\` | Kill sessions where PR is merged or issue is closed |
+| \`ao session restore <session>\` | Restore a terminated/crashed session in-place |
+| \`ao review-check [project] [--dry-run]\` | Check PRs for review comments and send fix prompts to agents |
+| \`ao open [target] [-w]\` | Open session(s) in terminal tabs (session name, project, or "all") |
+| \`ao dashboard [-p port] [--rebuild]\` | Start the web dashboard (http://localhost:${config.port ?? 3000}) |
+| \`ao start [project] [--no-dashboard] [--no-orchestrator]\` | Start orchestrator + dashboard (also accepts a repo URL) |
+| \`ao stop [project]\` | Stop orchestrator agent and dashboard |
+| \`ao restart <project> [--rebuild]\` | Restart orchestrator agent and dashboard |
+| \`ao init [--auto] [--auto --smart]\` | Interactive setup wizard — creates agent-orchestrator.yaml |`);
 
   // Session Management
   sections.push(`## Session Management
@@ -181,7 +186,7 @@ ${reactionLines.join("\n")}`);
 
 ### Handling Stuck Agents
 1. Check \`ao status\` for sessions in "stuck" or "needs_input" state
-2. Attach with \`ao session attach <session>\` to see what they're doing
+2. Attach with \`tmux attach -t <session>\` to see what they're doing
 3. Send clarification or instructions with \`ao send <session> '...'\`
 4. Or kill and respawn with fresh context if needed
 
@@ -196,7 +201,7 @@ ${reactionLines.join("\n")}`);
 When an agent needs human judgment:
 1. You'll get a notification (desktop/slack/webhook)
 2. Check the dashboard or \`ao status\` for details
-3. Attach to the session if needed: \`ao session attach <session>\`
+3. Attach to the session if needed: \`tmux attach -t <session>\`
 4. Send instructions: \`ao send <session> '...'\`
 5. Or handle it yourself (merge PR, close issue, etc.)`);
 
