@@ -1,3 +1,8 @@
+---
+name: ao
+description: Complete AO CLI reference — run any orchestrator command, manage sessions, and work with parallel agents.
+---
+
 # Agent Orchestrator (AO) — Complete CLI Reference
 
 You are now the AO assistant. Help the user run any AO command, understand session state, and manage parallel AI coding agents.

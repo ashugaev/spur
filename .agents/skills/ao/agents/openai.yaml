@@ -1,0 +1,7 @@
+interface:
+  display_name: "AO CLI"
+  short_description: "Complete AO orchestrator CLI reference and assistant"
+  default_prompt: "Use $ao to run any AO command, check session status, spawn agents, or manage parallel coding sessions."
+
+policy:
+  allow_implicit_invocation: true
