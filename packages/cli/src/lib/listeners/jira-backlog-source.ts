@@ -559,7 +559,7 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
     if (stopped || inFlight) return;
     inFlight = true;
     let cycleHadErrors = false;
-    let cycleIssueCount = 0;
+    let cycleIssueCount: number;
 
     try {
       const [issueIdMap, sessions] = await Promise.all([
