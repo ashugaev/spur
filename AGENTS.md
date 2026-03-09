@@ -50,6 +50,15 @@ You are the manager/orchestrator for PR pipeline automation.
 6. Report
 - Return completed changes, evidence (tests/build), and residual risks.
 
+## Keeping Skills and Orchestrator Prompt in Sync
+
+When adding or changing CLI commands or features, update these files:
+
+1. **`packages/core/src/orchestrator-prompt.ts`** — the "Available Commands" table and workflows shown to the orchestrator agent at runtime
+2. **`.agents/skills/ao/SKILL.md`** — the `/ao` skill reference used by Codex and Claude Code (via symlink at `.claude/skills/ao.md`)
+
+This ensures both human-facing docs (`/ao` skill) and agent-facing context (orchestrator prompt) stay accurate.
+
 ## Hard Rules
 - No dependency on objective documents for normal execution.
 - Manager delegates; specialists implement.
