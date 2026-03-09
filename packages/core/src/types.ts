@@ -1015,6 +1015,10 @@ export interface ListenerTriggerConfig {
   type: "spawn-session" | string;
   /** Optional agent override for spawned sessions */
   agent?: string;
+  /** Prompt to send to the agent when spawning a session */
+  prompt?: string;
+  /** Branch to work on (default: project.defaultBranch) */
+  branch?: string;
   [key: string]: unknown;
 }
 

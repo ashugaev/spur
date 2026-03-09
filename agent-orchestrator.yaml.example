@@ -85,6 +85,20 @@ projects:
     #       limit: 100
     #     trigger:
     #       type: spawn-session
+    #
+    #   # Cron listener — spawn a session on a schedule
+    #   nightly-audit:
+    #     source: cron
+    #     intervalMs: 86400000   # every 24h
+    #     runOnStart: false       # run immediately on ao start (default: false)
+    #     trigger:
+    #       type: spawn-session
+    #       agent: claude-code    # optional: override default agent
+    #       prompt: |
+    #         Run a full security audit of the codebase. Check for hardcoded
+    #         secrets, SQL injection, XSS, OWASP top 10. Create a markdown
+    #         report at docs/security-audit.md and open a PR.
+    #       # branch: main        # optional: branch to work on (default: project.defaultBranch)
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]
