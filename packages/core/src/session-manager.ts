@@ -65,16 +65,29 @@ const execFileAsync = promisify(execFile);
 // PR URL Helpers
 // =============================================================================
 
-/** Pattern matching GitHub PR URLs: https://github.com/owner/repo/pull/123 */
-const GITHUB_PR_URL_PATTERN = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/;
-
-/** Parse a GitHub PR URL into owner, repo, and number. Returns null if not a PR URL. */
+/**
+ * Parse a GitHub PR URL into owner, repo, and number. Returns null if not a PR URL.
+ *
+ * Accepts common URL variants: canonical, with suffixes (/files, /commits, /checks),
+ * with query params, and with trailing slashes.
+ * Examples:
+ *   https://github.com/owner/repo/pull/123
+ *   https://github.com/owner/repo/pull/123/files
+ *   https://github.com/owner/repo/pull/123/commits?query=1
+ */
 export function parseGitHubPrUrl(
   url: string,
 ): { owner: string; repo: string; number: number } | null {
-  const match = url.match(GITHUB_PR_URL_PATTERN);
-  if (!match) return null;
-  return { owner: match[1], repo: match[2], number: parseInt(match[3], 10) };
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "github.com") return null;
+    // pathname: /owner/repo/pull/123[/optional-suffix]
+    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) return null;
+    return { owner: match[1], repo: match[2], number: parseInt(match[3], 10) };
+  } catch {
+    return null;
+  }
 }
 
 /** Run a `gh` CLI command and return trimmed stdout. */
@@ -94,7 +107,16 @@ interface FetchedPrMetadata {
   body: string;
   isDraft: boolean;
   state: string;
+  /** Whether the PR head is from a fork (different repo than base) */
+  isFork: boolean;
+  /** For fork PRs: "owner:branch" ref needed for git fetch */
+  headRefOid: string;
+  /** Fork head repo full name (e.g. "fork-owner/repo"), empty for same-repo PRs */
+  headRepoFullName: string;
 }
+
+/** PR states that are valid for spawning a continuation session. */
+const SPAWNABLE_PR_STATES = new Set(["OPEN"]);
 
 /** Fetch PR metadata via `gh pr view`. */
 async function fetchPrMetadata(
@@ -109,7 +131,7 @@ async function fetchPrMetadata(
     "--repo",
     `${owner}/${repo}`,
     "--json",
-    "headRefName,baseRefName,title,body,isDraft,state",
+    "headRefName,baseRefName,title,body,isDraft,state,headRefOid,headRepository,headRepositoryOwner,isCrossRepository",
   ]);
   const data: {
     headRefName: string;
@@ -118,7 +140,23 @@ async function fetchPrMetadata(
     body: string;
     isDraft: boolean;
     state: string;
+    headRefOid: string;
+    headRepository: { name: string } | null;
+    headRepositoryOwner: { login: string } | null;
+    isCrossRepository: boolean;
   } = JSON.parse(raw);
+
+  const state = data.state?.toUpperCase() ?? "";
+  if (!SPAWNABLE_PR_STATES.has(state)) {
+    throw new Error(`PR #${prNumber} is ${state.toLowerCase()}. Only open PRs can be continued.`);
+  }
+
+  const isFork = data.isCrossRepository ?? false;
+  const headRepoFullName =
+    isFork && data.headRepositoryOwner && data.headRepository
+      ? `${data.headRepositoryOwner.login}/${data.headRepository.name}`
+      : "";
+
   return {
     branch: data.headRefName,
     baseBranch: data.baseRefName,
@@ -126,12 +164,26 @@ async function fetchPrMetadata(
     body: data.body ?? "",
     isDraft: data.isDraft,
     state: data.state,
+    isFork,
+    headRefOid: data.headRefOid ?? "",
+    headRepoFullName,
   };
 }
 
+/** Result of fetching PR comments — distinguishes "no comments" from "fetch failed". */
+interface FetchedPrComments {
+  comments: string[];
+  fetchFailed: boolean;
+}
+
 /** Fetch review comments on a PR (unresolved thread comments + top-level comments). */
-async function fetchPrComments(owner: string, repo: string, prNumber: number): Promise<string[]> {
+async function fetchPrComments(
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<FetchedPrComments> {
   const comments: string[] = [];
+  let fetchFailed = false;
 
   // Unresolved review thread comments (GraphQL)
   try {
@@ -198,7 +250,7 @@ async function fetchPrComments(owner: string, repo: string, prNumber: number): P
       }
     }
   } catch {
-    // Continue without review thread comments
+    fetchFailed = true;
   }
 
   // Top-level PR conversation comments
@@ -222,10 +274,10 @@ async function fetchPrComments(owner: string, repo: string, prNumber: number): P
       comments.push(`- [${login}]: ${c.body}`);
     }
   } catch {
-    // Continue without conversation comments
+    fetchFailed = true;
   }
 
-  return comments;
+  return { comments, fetchFailed };
 }
 
 /** Fetch CI status summary for a PR. */
@@ -285,7 +337,7 @@ async function buildPrContext(
   prNumber: number,
   prMeta: FetchedPrMetadata,
 ): Promise<string> {
-  const [comments, ciStatus] = await Promise.all([
+  const [commentResult, ciStatus] = await Promise.all([
     fetchPrComments(owner, repo, prNumber),
     fetchPrCiStatus(owner, repo, prNumber),
   ]);
@@ -297,15 +349,26 @@ async function buildPrContext(
     `State: ${prMeta.state}${prMeta.isDraft ? " (draft)" : ""}`,
   ];
 
+  if (prMeta.isFork) {
+    lines.push(`Fork: ${prMeta.headRepoFullName}`);
+  }
+
   if (prMeta.body) {
     lines.push("", "### PR Description", "", prMeta.body);
   }
 
   lines.push("", "### CI Status", "", ciStatus);
 
-  if (comments.length > 0) {
+  if (commentResult.comments.length > 0) {
     lines.push("", "### Review Comments (unresolved)", "");
-    lines.push(...comments);
+    lines.push(...commentResult.comments);
+  } else if (commentResult.fetchFailed) {
+    lines.push(
+      "",
+      "### Review Comments",
+      "",
+      "⚠ Failed to fetch review comments — check the PR page manually for unresolved feedback.",
+    );
   } else {
     lines.push("", "### Review Comments", "", "No unresolved review comments.");
   }
@@ -705,6 +768,36 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       branch = `session/${sessionId}`;
     }
 
+    // For PR continuation, fetch the PR head ref before workspace creation
+    // so the worktree plugin can find the branch. For fork PRs we must fetch
+    // from the fork remote; for same-repo PRs we fetch via the PR ref.
+    if (prMetadata && prParsed) {
+      const repoPath = project.path;
+      try {
+        if (prMetadata.isFork && prMetadata.headRepoFullName) {
+          // Fork PR: fetch from the fork repo into a local branch
+          await execFileAsync(
+            "git",
+            [
+              "fetch",
+              `https://github.com/${prMetadata.headRepoFullName}.git`,
+              `${prMetadata.branch}:${prMetadata.branch}`,
+            ],
+            { cwd: repoPath, timeout: 30_000 },
+          );
+        } else {
+          // Same-repo PR: fetch the PR ref and create/update local branch
+          await execFileAsync(
+            "git",
+            ["fetch", "origin", `pull/${prParsed.number}/head:${prMetadata.branch}`],
+            { cwd: repoPath, timeout: 30_000 },
+          );
+        }
+      } catch {
+        // Branch may already exist locally — workspace plugin will handle it
+      }
+    }
+
     // Create workspace (if workspace plugin is available)
     let workspacePath = project.path;
     if (plugins.workspace) {
@@ -757,7 +850,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const composedPrompt = buildPrompt({
       project,
       projectId: spawnConfig.projectId,
-      issueId: spawnConfig.prUrl && prParsed ? `PR #${prParsed.number}` : spawnConfig.issueId,
+      // In PR mode, don't set issueId — it triggers issue-specific prompt text
+      // (branch-creation guidance) that conflicts with PR continuation semantics.
+      issueId: spawnConfig.prUrl ? undefined : spawnConfig.issueId,
       issueContext,
       prContext,
       userPrompt: spawnConfig.prompt,

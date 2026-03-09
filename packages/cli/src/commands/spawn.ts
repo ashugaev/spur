@@ -12,19 +12,24 @@ import { preflight } from "../lib/preflight.js";
  * Validates runtime and tracker prerequisites so failures surface immediately
  * rather than repeating per-session in a batch.
  */
-async function runSpawnPreflight(config: OrchestratorConfig, projectId: string): Promise<void> {
+async function runSpawnPreflight(
+  config: OrchestratorConfig,
+  projectId: string,
+  options?: { prUrl?: string },
+): Promise<void> {
   const project = config.projects[projectId];
   const runtime = project?.runtime ?? config.defaults.runtime;
   if (runtime === "tmux") {
     await preflight.checkTmux();
   }
-  if (project?.tracker?.plugin === "github") {
+  // PR mode always needs gh auth regardless of tracker plugin
+  if (project?.tracker?.plugin === "github" || options?.prUrl) {
     await preflight.checkGhAuth();
   }
 }
 
-/** Pattern matching GitHub PR URLs */
-const GITHUB_PR_URL_PATTERN = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+\/?$/;
+/** Pattern matching GitHub PR URLs (lenient — accepts /files, /commits suffixes and query params) */
+const GITHUB_PR_URL_PATTERN = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
 async function spawnSession(
   config: OrchestratorConfig,
@@ -111,7 +116,7 @@ export function registerSpawn(program: Command): void {
         }
 
         try {
-          await runSpawnPreflight(config, projectId);
+          await runSpawnPreflight(config, projectId, { prUrl });
           await spawnSession(config, projectId, effectiveIssueId, opts.open, opts.agent, prUrl);
         } catch (err) {
           console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
