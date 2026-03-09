@@ -208,23 +208,18 @@ Then use `browser_navigate` as normal. If Playwright was previously used in the 
 - Forgetting to clean up setInterval/setTimeout on disconnect/destroy
 - Using `on("exit")` instead of `once("exit")` for one-time handlers
 
+## Keeping Skills and Orchestrator Prompt in Sync
+
+When adding or changing CLI commands or features, update these files:
+
+1. **`packages/core/src/orchestrator-prompt.ts`** — the "Available Commands" table and workflows shown to the orchestrator agent at runtime
+2. **`.agents/skills/ao/SKILL.md`** — the `/ao` skill reference used by Codex and Claude Code (via symlink at `.claude/skills/ao.md`)
+
+This ensures both human-facing docs (`/ao` skill) and agent-facing context (orchestrator prompt) stay accurate.
+
 ## Config
 
 Config loaded from `agent-orchestrator.yaml` (see `agent-orchestrator.yaml.example`). Paths support `~` expansion. Validated with Zod at load time. Per-project overrides for plugins and reactions.
-
-## /ao Skill Maintenance
-
-The local `/ao` skill lives at `.claude/skills/ao/SKILL.md`. It documents all CLI commands, config options, plugin capabilities, and workflows.
-
-**When you change feature code, check if the skill needs updating:**
-- New CLI command or flag → add to the Commands section
-- New config option → add to the Configuration section
-- New plugin or plugin capability → update the Plugin Architecture section
-- Changed session lifecycle states → update the Session Lifecycle section
-- New API endpoint → update the Web API section
-- Changed reaction actions or events → update the Reactions section
-
-If the change affects user-facing behavior documented in the skill, update `.claude/skills/ao/SKILL.md` in the same PR/commit.
 
 ## Design Decisions
 
