@@ -208,6 +208,15 @@ Then use `browser_navigate` as normal. If Playwright was previously used in the 
 - Forgetting to clean up setInterval/setTimeout on disconnect/destroy
 - Using `on("exit")` instead of `once("exit")` for one-time handlers
 
+## Keeping Skills and Orchestrator Prompt in Sync
+
+When adding or changing CLI commands or features, update these files:
+
+1. **`packages/core/src/orchestrator-prompt.ts`** — the "Available Commands" table and workflows shown to the orchestrator agent at runtime
+2. **`.agents/skills/ao/SKILL.md`** — the `/ao` skill reference used by Codex and Claude Code (via symlink at `.claude/skills/ao.md`)
+
+This ensures both human-facing docs (`/ao` skill) and agent-facing context (orchestrator prompt) stay accurate.
+
 ## Config
 
 Config loaded from `agent-orchestrator.yaml` (see `agent-orchestrator.yaml.example`). Paths support `~` expansion. Validated with Zod at load time. Per-project overrides for plugins and reactions.
