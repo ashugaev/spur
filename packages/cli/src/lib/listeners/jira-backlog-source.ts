@@ -142,6 +142,14 @@ function isJiraCommandMissingError(error: unknown): boolean {
   return false;
 }
 
+function toStringOrUndefined(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  return undefined;
+}
+
 function stripAnsi(value: string): string {
   // eslint-disable-next-line no-control-regex
   return value.replace(/\u001b\[[0-9;]*m/g, "");
@@ -329,11 +337,15 @@ async function restoreIssueStateEntry(
   });
 }
 
-async function jiraCli(args: string[]): Promise<string> {
+async function jiraCli(
+  args: string[],
+  env?: Record<string, string | undefined>,
+): Promise<string> {
   try {
     const { stdout } = await execFileAsync("jira", args, {
       maxBuffer: 10 * 1024 * 1024,
       timeout: 30_000,
+      ...(env ? { env } : {}),
     });
     return stdout.trim();
   } catch (err) {
@@ -343,10 +355,13 @@ async function jiraCli(args: string[]): Promise<string> {
   }
 }
 
-async function listIssueKeysByJql(jql: string): Promise<string[]> {
+async function listIssueKeysByJql(
+  jql: string,
+  env?: Record<string, string | undefined>,
+): Promise<string[]> {
   let raw: string;
   try {
-    raw = await jiraCli(["issue", "list", "-q", jql, "--raw"]);
+    raw = await jiraCli(["issue", "list", "-q", jql, "--raw"], env);
   } catch (err) {
     if (isJiraNoResultsError(err)) {
       return [];
@@ -523,6 +538,28 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
     );
   }
 
+  // Build child env with per-project Jira credentials (fall back to env vars)
+  const tracker = project.tracker as Record<string, unknown> | undefined;
+  const jiraEmail =
+    toStringOrUndefined(tracker?.["email"]) ||
+    process.env["JIRA_EMAIL"] ||
+    process.env["JIRA_USER"];
+  const jiraToken =
+    toStringOrUndefined(tracker?.["apiToken"]) ||
+    process.env["JIRA_API_TOKEN"] ||
+    process.env["JIRA_TOKEN"];
+  const jiraUrl =
+    toStringOrUndefined(tracker?.["baseUrl"]) ||
+    process.env["JIRA_URL"] ||
+    process.env["JIRA_HOST"];
+
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    ...(jiraEmail ? { JIRA_EMAIL: jiraEmail, JIRA_USER: jiraEmail } : {}),
+    ...(jiraToken ? { JIRA_API_TOKEN: jiraToken, JIRA_TOKEN: jiraToken } : {}),
+    ...(jiraUrl ? { JIRA_URL: jiraUrl, JIRA_HOST: jiraUrl } : {}),
+  };
+
   const effectiveJql = buildEffectiveJql(jql, backlogStatus);
   const statePath = buildStatePath(config.configPath, project.path, listenerId);
   const issueLocksDir = buildIssueLocksDir(config.configPath, project.path);
@@ -559,7 +596,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
 
     try {
       const [issueKeys, sessions] = await Promise.all([
-        listIssueKeysByJql(effectiveJql),
+        listIssueKeysByJql(effectiveJql, childEnv),
         sessionManager.list(projectId),
       ]);
       cycleIssueCount = issueKeys.length;

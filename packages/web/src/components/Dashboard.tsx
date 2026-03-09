@@ -69,6 +69,7 @@ export function Dashboard({
   const sessions = useSessionEvents(initialSessions);
   const [integrationsStatus, setIntegrationsStatus] = useState(initialIntegrationsStatus);
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
+  const hasJira = integrationsStatus?.integrations?.jiraTriggerListeners?.state !== "inactive";
   const [activeTab, setActiveTab] = useState<DashboardTab>("sessions");
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
     if (typeof initialProjectId === "string") {
@@ -420,36 +421,38 @@ export function Dashboard({
         </div>
       )}
 
-      <div className="mb-6 flex items-center gap-1 rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-1">
-        <button
-          type="button"
-          onClick={() => setActiveTab("sessions")}
-          aria-pressed={activeTab === "sessions"}
-          className={[
-            "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
-            activeTab === "sessions"
-              ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
-              : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
-          ].join(" ")}
-        >
-          Sessions
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("jira")}
-          aria-pressed={activeTab === "jira"}
-          className={[
-            "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
-            activeTab === "jira"
-              ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
-              : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
-          ].join(" ")}
-        >
-          Jira Tasks
-        </button>
-      </div>
+      {hasJira && (
+        <div className="mb-6 flex items-center gap-1 rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-1">
+          <button
+            type="button"
+            onClick={() => setActiveTab("sessions")}
+            aria-pressed={activeTab === "sessions"}
+            className={[
+              "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
+              activeTab === "sessions"
+                ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
+                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
+            ].join(" ")}
+          >
+            Sessions
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("jira")}
+            aria-pressed={activeTab === "jira"}
+            className={[
+              "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
+              activeTab === "jira"
+                ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
+                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
+            ].join(" ")}
+          >
+            Jira Tasks
+          </button>
+        </div>
+      )}
 
-      {activeTab === "sessions" ? (
+      {activeTab === "sessions" || !hasJira ? (
         <>
           <IntegrationStatusPanel status={integrationsStatus} />
 
