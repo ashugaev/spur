@@ -51,6 +51,11 @@ id_ecdsa
 id_ed25519
 *.ppk
 
+# Local Claude Code config (per-worktree, not committed)
+.claude/settings.json
+.claude/metadata-updater.sh
+.claude/worktrees/
+
 # Development symlinks (created per-worktree, not committed)
 packages/web/agent-orchestrator.yaml
 
