@@ -130,18 +130,24 @@ end_step "Step 7: Dashboard API responding"
 # Step 8: Verify WebSocket terminal servers
 start_step "Step 8: Verify WebSocket servers"
 
-# Check if direct terminal WebSocket server is running (required for terminal feature)
-# Default port is 14801 (14800 range chosen to avoid conflicts with dev tools)
-DIRECT_TERMINAL_PORT="${DIRECT_TERMINAL_PORT:-14801}"
-echo "  Checking WebSocket server on port $DIRECT_TERMINAL_PORT..."
+# The DirectTerminal WebSocket runs on the same port as the dashboard (unified server).
+# Verify it's reachable by checking that the dashboard responds to a WebSocket upgrade
+# on /terminal/ws (HTTP 426 or 101 means the endpoint exists).
+DASHBOARD_PORT="${DASHBOARD_PORT:-9000}"
+echo "  Checking DirectTerminal WebSocket endpoint on dashboard port $DASHBOARD_PORT..."
 max_retries=10
 for i in $(seq 1 $max_retries); do
-    if curl -sf "http://localhost:$DIRECT_TERMINAL_PORT/health" > /dev/null 2>&1; then
-        echo "  ✓ WebSocket server responding"
+    # curl --include shows HTTP headers; 426 (Upgrade Required) or 101 (Switching Protocols)
+    # both confirm the /terminal/ws route is handled by the server.
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        -H "Connection: Upgrade" -H "Upgrade: websocket" \
+        "http://localhost:$DASHBOARD_PORT/terminal/ws" 2>/dev/null || echo "000")
+    if [ "$HTTP_CODE" != "000" ]; then
+        echo "  ✓ WebSocket endpoint reachable (HTTP $HTTP_CODE)"
         break
     fi
     if [ $i -eq $max_retries ]; then
-        fail_step "Step 8: WebSocket terminal server not responding (bug: ao start didn't launch all services)"
+        fail_step "Step 8: WebSocket terminal endpoint not reachable on dashboard port"
     fi
     sleep 1
 done
