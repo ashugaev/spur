@@ -750,7 +750,7 @@ describe("spawn with prUrl", () => {
     prChecks?: object;
     apiError?: boolean;
   }) {
-    const mock: typeof realExecFile = ((
+    const mock: ExecFileFn = ((
       cmd: string,
       args: string[],
       optsOrCb: unknown,
@@ -782,7 +782,7 @@ describe("spawn with prUrl", () => {
       } else {
         cb(null, { stdout: "", stderr: "" });
       }
-    }) as typeof realExecFile;
+    }) as ExecFileFn;
     return mock;
   }
 
