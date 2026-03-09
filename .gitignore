@@ -53,7 +53,7 @@ id_ed25519
 
 # Development symlinks (created per-worktree, not committed)
 .claude/*
-!.claude/commands/
+!.claude/skills/
 packages/web/agent-orchestrator.yaml
 
 # Local agent orchestrator config (may contain secrets)
