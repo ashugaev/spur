@@ -27,6 +27,7 @@ const ReactionConfigSchema = z.object({
   action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
   mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
   message: z.string().optional(),
+  kind: z.enum(["any", "tagged", "reply"]).optional(),
   priority: z.enum(["urgent", "action", "warning", "info"]).optional(),
   retries: z.number().optional(),
   escalateAfter: z.union([z.number(), z.string()]).optional(),
@@ -295,6 +296,13 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       action: "send-to-agent",
       message: "Your branch has merge conflicts. Rebase on the default branch and resolve them.",
       escalateAfter: "15m",
+    },
+    "tracker-comment": {
+      auto: true,
+      action: "send-to-agent",
+      kind: "reply",
+      message: "A new tracker comment arrived. Review it and update your implementation.",
+      escalateAfter: "30m",
     },
     "approved-and-green": {
       auto: false,

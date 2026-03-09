@@ -21,7 +21,13 @@ function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig
     },
     notifiers: {},
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
-    reactions: {},
+    reactions: {
+      "tracker-comment": {
+        auto: true,
+        action: "send-to-agent",
+        kind: "reply",
+      },
+    },
     ...overrides,
   };
 }
@@ -766,6 +772,163 @@ describe("maybeStartJiraCommentPolling", () => {
     // Advance 1 more second to hit 15s
     await vi.advanceTimersByTimeAsync(1_000);
     expect(fetchImpl).toHaveBeenCalled();
+
+    controller?.stop();
+  });
+
+  it("isolates seen-comment state by project when issue keys match", async () => {
+    const config = makeConfig({
+      projects: {
+        proj_a: {
+          name: "Project A",
+          repo: "org/repo-a",
+          path: "/tmp/repo-a",
+          defaultBranch: "main",
+          sessionPrefix: "a",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://project-a.atlassian.net",
+            email: "user-a@example.com",
+            apiToken: "token-a",
+          },
+        },
+        proj_b: {
+          name: "Project B",
+          repo: "org/repo-b",
+          path: "/tmp/repo-b",
+          defaultBranch: "main",
+          sessionPrefix: "b",
+          tracker: {
+            plugin: "jira",
+            baseUrl: "https://project-b.atlassian.net",
+            email: "user-b@example.com",
+            apiToken: "token-b",
+          },
+        },
+      },
+    });
+
+    const sm = makeSessionManager([
+      { id: "a-1", status: "working", issueId: "INT-100", projectId: "proj_a" },
+      { id: "b-1", status: "working", issueId: "INT-100", projectId: "proj_b" },
+    ]);
+
+    let aPoll = 0;
+    let bPoll = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("project-a.atlassian.net")) {
+        aPoll += 1;
+        if (aPoll === 1) {
+          return {
+            ok: true,
+            json: () =>
+              Promise.resolve({
+                comments: [{ id: "a-1", created: "2026-03-01", body: "AO_SESSION:a-1", author: {} }],
+              }),
+          };
+        }
+        return {
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              comments: [
+                { id: "a-1", created: "2026-03-01", body: "AO_SESSION:a-1", author: {} },
+                { id: "a-2", created: "2026-03-01", body: "please update", author: {} },
+              ],
+            }),
+        };
+      }
+
+      bPoll += 1;
+      return {
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            comments: [{ id: "b-1", created: "2026-03-01", body: "AO_SESSION:b-1", author: {} }],
+          }),
+      };
+    });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(aPoll).toBeGreaterThanOrEqual(1);
+    expect(bPoll).toBeGreaterThanOrEqual(1);
+    expect(sm.send).toHaveBeenCalledWith("a-1", "please update");
+    expect(sm.send).not.toHaveBeenCalledWith("b-1", "please update");
+
+    controller?.stop();
+  });
+
+  it("supports tracker-comment reaction with tagged kind and custom message", async () => {
+    const config = makeConfig({
+      reactions: {
+        "tracker-comment": {
+          auto: true,
+          action: "send-to-agent",
+          kind: "tagged",
+          message: "Please handle tracker feedback.",
+        },
+      },
+    });
+
+    const sm = makeSessionManager([{ id: "test-1", status: "working", issueId: "INT-100" }]);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            comments: [{ id: "10001", created: "2026-03-01", body: "AO_SESSION:test-1", author: {} }],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            comments: [
+              { id: "10001", created: "2026-03-01", body: "AO_SESSION:test-1", author: {} },
+              { id: "10002", created: "2026-03-01", body: "please update this flow", author: {} },
+            ],
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            comments: [
+              { id: "10001", created: "2026-03-01", body: "AO_SESSION:test-1", author: {} },
+              { id: "10002", created: "2026-03-01", body: "please update this flow", author: {} },
+              { id: "10003", created: "2026-03-01", body: "@ao please update this flow", author: {} },
+            ],
+          }),
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ comments: [] }),
+      });
+
+    const controller = await maybeStartJiraCommentPolling({
+      config,
+      sessionManager: sm,
+      inboundContextStore: makeInboundContextStore(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      logger: { warn: vi.fn() },
+      healthReporter: makeHealthReporterMock(),
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+    expect(sm.send).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sm.send).toHaveBeenCalledWith("test-1", "Please handle tracker feedback.");
 
     controller?.stop();
   });

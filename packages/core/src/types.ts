@@ -819,6 +819,14 @@ export interface ReactionConfig {
 
   /** Whether to include a summary in the notification */
   includeSummary?: boolean;
+
+  /**
+   * Optional reaction discriminator for tracker comment reactions.
+   * - any: every routed tracker comment
+   * - tagged: only comments explicitly tagging AO/agent/session
+   * - reply: comments detected as replies to AO marker messages
+   */
+  kind?: "any" | "tagged" | "reply";
 }
 
 export interface ReactionResult {

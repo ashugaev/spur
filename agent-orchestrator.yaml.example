@@ -93,6 +93,11 @@ projects:
     #     auto: true         # enable auto-merge for this project
     #     action: auto-merge
     #     mergeMethod: squash # optional: merge | squash | rebase
+    #   tracker-comment:
+    #     auto: true
+    #     action: send-to-agent
+    #     kind: reply         # any | tagged | reply
+    #     # message: "New tracker comment received. Check context and update implementation."
 
 # Notification channels
 # notifiers:
@@ -156,6 +161,12 @@ projects:
 #     action: send-to-agent
 #     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
 #     escalateAfter: 15m
+#
+#   tracker-comment:
+#     auto: true
+#     action: send-to-agent
+#     kind: reply            # any | tagged | reply
+#     # message: "A new tracker comment arrived. Review and address it."
 #
 #   approved-and-green:
 #     auto: false              # set to true for auto-merge
