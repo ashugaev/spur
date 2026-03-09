@@ -4,6 +4,7 @@ import {
   formatInboundMessageForSession,
   type InboundContextStore,
   type OrchestratorConfig,
+  type ProjectConfig,
   type Session,
   type SessionManager,
 } from "@composio/ao-core";
@@ -22,6 +23,7 @@ export interface JiraCommentPollingController {
 }
 
 interface JiraPollingConfig {
+  projectId: string;
   baseUrl: string;
   email: string;
   apiToken: string;
@@ -129,35 +131,40 @@ function commentBodyToText(body: unknown): string {
   return "";
 }
 
-function resolvePollingConfig(config: OrchestratorConfig): JiraPollingConfig | null {
-  // Find any project that uses tracker: jira — grab baseUrl from there
-  let baseUrl: string | undefined;
-  for (const project of Object.values(config.projects)) {
-    const tracker = project.tracker as Record<string, unknown> | undefined;
-    if (tracker?.plugin === "jira") {
-      baseUrl = toStringOrUndefined(tracker.baseUrl);
-      break;
-    }
-  }
-  baseUrl = baseUrl || env("JIRA_URL", "JIRA_HOST");
-  if (!baseUrl) return null;
-  baseUrl = normalizeBaseUrl(baseUrl);
+/**
+ * Resolve per-project Jira polling config from project tracker settings and env vars.
+ * Returns null if the project does not use the jira tracker or is missing required fields.
+ */
+function resolveProjectPollingConfig(
+  projectId: string,
+  project: ProjectConfig,
+): JiraPollingConfig | null {
+  const tracker = project.tracker;
+  if (!tracker || tracker.plugin !== "jira") return null;
 
-  const email = env("JIRA_EMAIL", "JIRA_USER");
-  const apiToken = env("JIRA_API_TOKEN", "JIRA_TOKEN");
-  if (!email || !apiToken) return null;
+  // baseUrl: config first, then env fallback
+  const rawBaseUrl =
+    toStringOrUndefined(tracker.baseUrl) ?? env("JIRA_URL", "JIRA_HOST");
+  if (!rawBaseUrl) return null;
+  const baseUrl = normalizeBaseUrl(rawBaseUrl);
 
+  // email: config first, then env fallback
+  const email =
+    toStringOrUndefined(tracker.email) ?? env("JIRA_EMAIL", "JIRA_USER");
+  if (!email) return null;
+
+  // apiToken: config first, then env fallback
+  const apiToken =
+    toStringOrUndefined(tracker.apiToken) ?? env("JIRA_API_TOKEN", "JIRA_TOKEN");
+  if (!apiToken) return null;
+
+  // pollIntervalMs: config first, then env fallback, then default
   const intervalMs =
-    toPositiveNumber(env("AO_JIRA_POLL_INTERVAL_MS", "JIRA_POLL_INTERVAL_MS")) ??
+    toPositiveNumber(tracker.pollIntervalMs) ??
+    toPositiveNumber(env("AO_JIRA_POLL_INTERVAL_MS")) ??
     DEFAULT_POLL_INTERVAL_MS;
 
-  return { baseUrl, email, apiToken, intervalMs };
-}
-
-function hasJiraTrackerProject(config: OrchestratorConfig): boolean {
-  return Object.values(config.projects).some(
-    (p) => (p.tracker as Record<string, unknown> | undefined)?.plugin === "jira",
-  );
+  return { projectId, baseUrl, email, apiToken, intervalMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +175,17 @@ export async function maybeStartJiraCommentPolling(
   deps: StartJiraCommentPollingDeps,
 ): Promise<JiraCommentPollingController | null> {
   const health = deps.healthReporter;
-  if (!hasJiraTrackerProject(deps.config)) {
+
+  // Build per-project config map
+  const projectConfigs = new Map<string, JiraPollingConfig>();
+  for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    const cfg = resolveProjectPollingConfig(projectId, project);
+    if (cfg) {
+      projectConfigs.set(projectId, cfg);
+    }
+  }
+
+  if (projectConfigs.size === 0) {
     health?.markInactive(
       JIRA_COMMENT_POLLING_HEALTH,
       "Jira polling inactive: no project configured with Jira tracker",
@@ -176,19 +193,10 @@ export async function maybeStartJiraCommentPolling(
     return null;
   }
 
-  const cfg = resolvePollingConfig(deps.config);
-  if (!cfg) {
-    health?.markInactive(
-      JIRA_COMMENT_POLLING_HEALTH,
-      "Jira polling inactive: base URL, JIRA_EMAIL, or JIRA_API_TOKEN is missing",
-    );
-    return null;
-  }
-
   const fetchImpl = deps.fetchImpl ?? fetch;
   const logger = deps.logger ?? console;
   const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
-  const { baseUrl, email, apiToken } = cfg;
+
   health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting Jira comment polling runtime");
 
   // Track last seen comment ID per issue to avoid re-processing
@@ -197,18 +205,18 @@ export async function maybeStartJiraCommentPolling(
   let stopped = false;
   let inFlight = false;
 
-  async function fetchComments(issueKey: string): Promise<JiraComment[]> {
+  async function fetchComments(issueKey: string, cfg: JiraPollingConfig): Promise<JiraComment[]> {
     const collected: JiraComment[] = [];
     let startAt = 0;
     const maxResults = 100;
     const maxPages = 50;
 
     for (let page = 0; page < maxPages; page += 1) {
-      const url = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
+      const url = `${cfg.baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
       const response = await fetchImpl(url, {
         method: "GET",
         headers: {
-          Authorization: `Basic ${btoa(`${email}:${apiToken}`)}`,
+          Authorization: `Basic ${btoa(`${cfg.email}:${cfg.apiToken}`)}`,
           Accept: "application/json",
         },
       });
@@ -320,22 +328,26 @@ export async function maybeStartJiraCommentPolling(
           s.status !== "done",
       );
 
-      // Deduplicate by issueId (multiple sessions could share an issue)
-      const issueToSessions = new Map<string, string[]>();
+      // Group active sessions by projectId, then by issueId
+      // Sessions whose project has no valid Jira config are skipped
+      const issueToInfo = new Map<string, { sessionIds: string[]; cfg: JiraPollingConfig }>();
       for (const session of activeSessions) {
         if (!session.issueId) continue;
-        const existing = issueToSessions.get(session.issueId);
+        const projectCfg = projectConfigs.get(session.projectId);
+        if (!projectCfg) continue; // project not configured with Jira
+
+        const existing = issueToInfo.get(session.issueId);
         if (existing) {
-          existing.push(session.id);
+          existing.sessionIds.push(session.id);
         } else {
-          issueToSessions.set(session.issueId, [session.id]);
+          issueToInfo.set(session.issueId, { sessionIds: [session.id], cfg: projectCfg });
         }
       }
 
-      for (const [issueKey] of issueToSessions) {
+      for (const [issueKey, { cfg }] of issueToInfo) {
         cycleIssueCount += 1;
         try {
-          const comments = await fetchComments(issueKey);
+          const comments = await fetchComments(issueKey, cfg);
           const replies = findNewReplies(issueKey, comments);
 
           for (const reply of replies) {
@@ -409,9 +421,12 @@ export async function maybeStartJiraCommentPolling(
     }
   }
 
+  // Use the minimum interval across all configured projects
+  const intervalMs = Math.min(...Array.from(projectConfigs.values()).map((c) => c.intervalMs));
+
   const timer = setInterval(() => {
     void pollOnce();
-  }, cfg.intervalMs);
+  }, intervalMs);
 
   // Initial poll
   void pollOnce();

@@ -941,6 +941,16 @@ export interface ProjectConfig {
 
 export interface TrackerConfig {
   plugin: string;
+  /** Jira: base URL (e.g. "https://myorg.atlassian.net"). Falls back to JIRA_URL / JIRA_HOST. */
+  baseUrl?: string;
+  /** Jira: project key (e.g. "INT"). Required for listIssues/createIssue. */
+  projectKey?: string;
+  /** Jira: Atlassian account email. Falls back to JIRA_EMAIL / JIRA_USER. */
+  email?: string;
+  /** Jira: Atlassian API token. Falls back to JIRA_API_TOKEN / JIRA_TOKEN. */
+  apiToken?: string;
+  /** Jira: comment poll interval ms (default: 60000). Falls back to AO_JIRA_POLL_INTERVAL_MS. */
+  pollIntervalMs?: number;
   /** Plugin-specific config (e.g. teamId for Linear) */
   [key: string]: unknown;
 }
