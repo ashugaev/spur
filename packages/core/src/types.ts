@@ -937,6 +937,12 @@ export interface ProjectConfig {
 
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
+
+  /**
+   * Per-project trigger listeners (alternative to top-level listeners).
+   * projectId is implicit — no need to set it here.
+   */
+  listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
 }
 
 export interface TrackerConfig {

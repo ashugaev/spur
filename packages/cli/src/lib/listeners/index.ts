@@ -60,7 +60,16 @@ export async function maybeStartConfiguredListeners(
 ): Promise<ListenerGroupController | null> {
   const logger = deps.logger ?? console;
   const health = deps.healthReporter;
-  const listeners = deps.config.listeners ?? {};
+
+  // Merge top-level listeners with per-project listeners (projectId is implicit for the latter).
+  const globalListeners = deps.config.listeners ?? {};
+  const projectListeners: Record<string, ListenerConfig> = {};
+  for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    for (const [listenerId, listener] of Object.entries(project.listeners ?? {})) {
+      projectListeners[listenerId] = { ...(listener as ListenerConfig), projectId };
+    }
+  }
+  const listeners = { ...globalListeners, ...projectListeners };
 
   const controllers: ListenerController[] = [];
   const activeListeners: string[] = [];

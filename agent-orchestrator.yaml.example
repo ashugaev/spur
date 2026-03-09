@@ -43,8 +43,7 @@ projects:
     #   plugin: linear
     #   teamId: "your-team-id"
 
-    # Jira tracker — per-project connection config (credentials + comment polling)
-    # JQL for auto-spawning tasks goes in the top-level `listeners` section (see below).
+    # Jira tracker — per-project connection config
     # tracker:
     #   plugin: jira
     #   baseUrl: "https://myorg.atlassian.net"   # falls back to JIRA_URL / JIRA_HOST env var
@@ -52,6 +51,17 @@ projects:
     #   email: "you@yourorg.com"                  # falls back to JIRA_EMAIL / JIRA_USER env var
     #   apiToken: "your-api-token"               # falls back to JIRA_API_TOKEN / JIRA_TOKEN env var (prefer env var over hardcoding)
     #   pollIntervalMs: 30000                    # comment poll interval (default: 60000); falls back to AO_JIRA_POLL_INTERVAL_MS
+
+    # Per-project trigger listeners — JQL and auto-spawn config lives here.
+    # (Equivalent to top-level `listeners` but scoped to this project; no projectId needed.)
+    # listeners:
+    #   jira-backlog:
+    #     source: jira-backlog
+    #     intervalMs: 60000
+    #     jql: 'assignee = "you@yourorg.com" AND labels = "ao" AND sprint in openSprints()'
+    #     backlogStatus: "Backlog"  # move to this status before spawning
+    #     trigger:
+    #       type: spawn-session
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]

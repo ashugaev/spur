@@ -123,6 +123,7 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
+  listeners: z.record(ListenerConfigSchema.omit({ projectId: true })).optional(),
 });
 
 const DefaultPluginsSchema = z.object({
