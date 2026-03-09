@@ -12,16 +12,24 @@ import { preflight } from "../lib/preflight.js";
  * Validates runtime and tracker prerequisites so failures surface immediately
  * rather than repeating per-session in a batch.
  */
-async function runSpawnPreflight(config: OrchestratorConfig, projectId: string): Promise<void> {
+async function runSpawnPreflight(
+  config: OrchestratorConfig,
+  projectId: string,
+  options?: { prUrl?: string },
+): Promise<void> {
   const project = config.projects[projectId];
   const runtime = project?.runtime ?? config.defaults.runtime;
   if (runtime === "tmux") {
     await preflight.checkTmux();
   }
-  if (project?.tracker?.plugin === "github") {
+  // PR mode always needs gh auth regardless of tracker plugin
+  if (project?.tracker?.plugin === "github" || options?.prUrl) {
     await preflight.checkGhAuth();
   }
 }
+
+/** Pattern matching GitHub PR URLs (lenient — accepts /files, /commits suffixes and query params) */
+const GITHUB_PR_URL_PATTERN = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+/;
 
 async function spawnSession(
   config: OrchestratorConfig,
@@ -29,17 +37,21 @@ async function spawnSession(
   issueId?: string,
   openTab?: boolean,
   agent?: string,
+  prUrl?: string,
 ): Promise<string> {
   const spinner = ora("Creating session").start();
 
   try {
     const sm = await getSessionManager(config);
-    spinner.text = "Spawning session via core";
+    spinner.text = prUrl
+      ? "Fetching PR metadata and spawning session"
+      : "Spawning session via core";
 
     const session = await sm.spawn({
       projectId,
-      issueId,
+      issueId: prUrl ? undefined : issueId,
       agent,
+      prUrl,
     });
 
     spinner.succeed(`Session ${chalk.green(session.id)} created`);
@@ -73,30 +85,45 @@ async function spawnSession(
 export function registerSpawn(program: Command): void {
   program
     .command("spawn")
-    .description("Spawn a single agent session")
+    .description("Spawn a single agent session (supports issue IDs and GitHub PR URLs)")
     .argument("<project>", "Project ID from config")
-    .argument("[issue]", "Issue identifier (e.g. INT-1234, #42) - must exist in tracker")
+    .argument("[issue]", "Issue identifier (e.g. INT-1234, #42) or GitHub PR URL")
     .option("--open", "Open session in terminal tab")
     .option("--agent <name>", "Override the agent plugin (e.g. codex, claude-code)")
-    .action(async (projectId: string, issueId: string | undefined, opts: { open?: boolean; agent?: string }) => {
-      const config = loadConfig();
-      if (!config.projects[projectId]) {
-        console.error(
-          chalk.red(
-            `Unknown project: ${projectId}\nAvailable: ${Object.keys(config.projects).join(", ")}`,
-          ),
-        );
-        process.exit(1);
-      }
+    .option("--pr <url>", "GitHub PR URL to continue working on")
+    .action(
+      async (
+        projectId: string,
+        issueId: string | undefined,
+        opts: { open?: boolean; agent?: string; pr?: string },
+      ) => {
+        const config = loadConfig();
+        if (!config.projects[projectId]) {
+          console.error(
+            chalk.red(
+              `Unknown project: ${projectId}\nAvailable: ${Object.keys(config.projects).join(", ")}`,
+            ),
+          );
+          process.exit(1);
+        }
 
-      try {
-        await runSpawnPreflight(config, projectId);
-        await spawnSession(config, projectId, issueId, opts.open, opts.agent);
-      } catch (err) {
-        console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
-        process.exit(1);
-      }
-    });
+        // Detect PR URL from either --pr flag or positional argument
+        let prUrl: string | undefined = opts.pr;
+        let effectiveIssueId = issueId;
+        if (!prUrl && issueId && GITHUB_PR_URL_PATTERN.test(issueId)) {
+          prUrl = issueId;
+          effectiveIssueId = undefined;
+        }
+
+        try {
+          await runSpawnPreflight(config, projectId, { prUrl });
+          await spawnSession(config, projectId, effectiveIssueId, opts.open, opts.agent, prUrl);
+        } catch (err) {
+          console.error(chalk.red(`✗ ${err instanceof Error ? err.message : String(err)}`));
+          process.exit(1);
+        }
+      },
+    );
 }
 
 export function registerBatchSpawn(program: Command): void {

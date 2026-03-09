@@ -1,9 +1,31 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import type childProcess from "node:child_process";
+type ExecFileFn = typeof childProcess.execFile;
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { createSessionManager } from "../session-manager.js";
+
+/**
+ * Mock node:child_process so we can intercept `gh` CLI calls in PR spawn tests.
+ * By default, delegates to the real execFile so non-PR tests work unchanged.
+ */
+let execFileOverride: ExecFileFn | null = null;
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const original = (await importOriginal()) as typeof childProcess;
+  return {
+    ...original,
+    execFile: (...args: unknown[]) => {
+      if (execFileOverride) {
+        return (execFileOverride as (...a: unknown[]) => unknown)(...args);
+      }
+      return (original.execFile as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+});
+
+import { createSessionManager, parseGitHubPrUrl } from "../session-manager.js";
 import {
   writeMetadata,
   readMetadata,
@@ -129,6 +151,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Reset execFile override so other tests use real implementation
+  execFileOverride = null;
+
   // Clean up hash-based directories in ~/.agent-orchestrator
   const projectBaseDir = getProjectBaseDir(configPath, join(tmpDir, "my-app"));
   if (existsSync(projectBaseDir)) {
@@ -199,7 +224,8 @@ describe("spawn", () => {
 
     const session = await sm.spawn({
       projectId: "my-app",
-      issueId: "this is a very long issue description that should be truncated to sixty characters maximum",
+      issueId:
+        "this is a very long issue description that should be truncated to sixty characters maximum",
     });
 
     expect(session.branch!.replace("", "").length).toBeLessThanOrEqual(60);
@@ -347,9 +373,9 @@ describe("spawn", () => {
     it("throws when agent override plugin is not found", async () => {
       const sm = createSessionManager({ config, registry: registryWithMultipleAgents });
 
-      await expect(
-        sm.spawn({ projectId: "my-app", agent: "nonexistent" }),
-      ).rejects.toThrow("Agent plugin 'nonexistent' not found");
+      await expect(sm.spawn({ projectId: "my-app", agent: "nonexistent" })).rejects.toThrow(
+        "Agent plugin 'nonexistent' not found",
+      );
     });
 
     it("uses default agent when no override specified", async () => {
@@ -678,6 +704,194 @@ describe("spawn", () => {
     await spawnPromise;
     expect(mockRuntime.sendMessage).toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+describe("parseGitHubPrUrl", () => {
+  it("parses valid PR URL", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/123");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 123 });
+  });
+
+  it("parses PR URL with trailing slash", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/123/");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 123 });
+  });
+
+  it("parses PR URL with /files suffix", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/123/files");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 123 });
+  });
+
+  it("parses PR URL with /commits suffix", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/456/commits");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 456 });
+  });
+
+  it("parses PR URL with query params", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/789?diff=unified&w=1");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 789 });
+  });
+
+  it("returns null for non-PR URL", () => {
+    expect(parseGitHubPrUrl("https://github.com/owner/repo/issues/123")).toBeNull();
+    expect(parseGitHubPrUrl("not-a-url")).toBeNull();
+    expect(parseGitHubPrUrl("https://github.com/owner/repo")).toBeNull();
+    expect(parseGitHubPrUrl("https://gitlab.com/owner/repo/pull/1")).toBeNull();
+  });
+});
+
+describe("spawn with prUrl", () => {
+  /** Create an execFile mock that routes gh/git calls to handler functions. */
+  function makeGhMock(handlers: {
+    prView?: object;
+    graphql?: object;
+    issueComments?: object;
+    prChecks?: object;
+    apiError?: boolean;
+  }) {
+    const mock: typeof realExecFile = ((
+      cmd: string,
+      args: string[],
+      optsOrCb: unknown,
+      maybeCb?: unknown,
+    ) => {
+      const cb = (typeof maybeCb === "function" ? maybeCb : optsOrCb) as (
+        err: Error | null,
+        result: { stdout: string; stderr: string },
+      ) => void;
+
+      if (cmd === "gh" && args[0] === "pr" && args[1] === "view") {
+        cb(null, { stdout: JSON.stringify(handlers.prView ?? {}), stderr: "" });
+      } else if (cmd === "gh" && args[0] === "api" && args[1] === "graphql") {
+        if (handlers.apiError) {
+          cb(new Error("API unavailable"), { stdout: "", stderr: "" });
+        } else {
+          cb(null, { stdout: JSON.stringify(handlers.graphql ?? {}), stderr: "" });
+        }
+      } else if (cmd === "gh" && args[0] === "api" && args.some((a) => a.includes("/comments"))) {
+        if (handlers.apiError) {
+          cb(new Error("API unavailable"), { stdout: "", stderr: "" });
+        } else {
+          cb(null, { stdout: JSON.stringify(handlers.issueComments ?? []), stderr: "" });
+        }
+      } else if (cmd === "gh" && args[0] === "pr" && args[1] === "checks") {
+        cb(null, { stdout: JSON.stringify(handlers.prChecks ?? []), stderr: "" });
+      } else if (cmd === "git") {
+        cb(null, { stdout: "", stderr: "" });
+      } else {
+        cb(null, { stdout: "", stderr: "" });
+      }
+    }) as typeof realExecFile;
+    return mock;
+  }
+
+  const openPrMetadata = {
+    headRefName: "feature-branch",
+    baseRefName: "main",
+    title: "Fix login bug",
+    body: "This PR fixes the login issue",
+    isDraft: false,
+    state: "OPEN",
+    headRefOid: "abc123",
+    headRepository: { name: "repo" },
+    headRepositoryOwner: { login: "owner" },
+    isCrossRepository: false,
+  };
+
+  const reviewThreads = {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: [
+              {
+                isResolved: false,
+                comments: {
+                  nodes: [
+                    {
+                      author: { login: "reviewer" },
+                      body: "Please fix this",
+                      path: "src/index.ts",
+                      line: 42,
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+
+  it("rejects invalid PR URL", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await expect(sm.spawn({ projectId: "my-app", prUrl: "not-a-pr-url" })).rejects.toThrow(
+      "Invalid GitHub PR URL",
+    );
+  });
+
+  it("rejects closed/merged PR", async () => {
+    execFileOverride = makeGhMock({
+      prView: { ...openPrMetadata, state: "MERGED" },
+    });
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await expect(
+      sm.spawn({ projectId: "my-app", prUrl: "https://github.com/owner/repo/pull/99" }),
+    ).rejects.toThrow("Only open PRs can be continued");
+  });
+
+  it("spawns session with PR branch, metadata, and prompt context", async () => {
+    execFileOverride = makeGhMock({
+      prView: openPrMetadata,
+      graphql: reviewThreads,
+      issueComments: [],
+      prChecks: [{ name: "CI", state: "SUCCESS", link: "" }],
+    });
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    const session = await sm.spawn({
+      projectId: "my-app",
+      prUrl: "https://github.com/owner/repo/pull/42",
+    });
+
+    // Branch should be from the PR, not generated
+    expect(session.branch).toBe("feature-branch");
+
+    // Metadata should have PR URL stored
+    const raw = readMetadataRaw(sessionsDir, session.id);
+    expect(raw?.["pr"]).toBe("https://github.com/owner/repo/pull/42");
+
+    // Agent prompt should contain PR context
+    const launchCall = (mockAgent.getLaunchCommand as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(launchCall.prompt).toContain("continuing work on an existing PR");
+    expect(launchCall.prompt).toContain("Fix login bug");
+    expect(launchCall.prompt).toContain("Please fix this");
+    // Should NOT contain issue-specific branch-creation guidance
+    expect(launchCall.prompt).not.toContain("Create a branch named so that");
+  });
+
+  it("surfaces comment fetch failure in prompt", async () => {
+    execFileOverride = makeGhMock({
+      prView: { ...openPrMetadata, headRefName: "fix-branch", title: "Test PR", body: "" },
+      apiError: true,
+      prChecks: [],
+    });
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    const session = await sm.spawn({
+      projectId: "my-app",
+      prUrl: "https://github.com/owner/repo/pull/10",
+    });
+
+    const launchCall = (mockAgent.getLaunchCommand as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(launchCall.prompt).toContain("Failed to fetch review comments");
+    expect(launchCall.prompt).not.toContain("No unresolved review comments");
+
+    // Session should still be created successfully
+    expect(session.branch).toBe("fix-branch");
   });
 });
 

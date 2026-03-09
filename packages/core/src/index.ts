@@ -46,7 +46,7 @@ export {
 } from "./tmux.js";
 
 // Session manager — session CRUD
-export { createSessionManager } from "./session-manager.js";
+export { createSessionManager, parseGitHubPrUrl } from "./session-manager.js";
 export type { SessionManagerDeps } from "./session-manager.js";
 
 // Lifecycle manager — state machine + reaction engine
@@ -62,7 +62,13 @@ export { generateOrchestratorPrompt } from "./orchestrator-prompt.js";
 export type { OrchestratorPromptConfig } from "./orchestrator-prompt.js";
 
 // Tailscale — remote access utilities
-export { getTailscaleIp, getTailscaleDnsName, getTailscaleServeUrl, getLocalHostname, getDashboardUrl } from "./tailscale.js";
+export {
+  getTailscaleIp,
+  getTailscaleDnsName,
+  getTailscaleServeUrl,
+  getLocalHostname,
+  getDashboardUrl,
+} from "./tailscale.js";
 
 // Shared utilities
 export { shellEscape, escapeAppleScript, validateUrl, readLastJsonlEntry } from "./utils.js";

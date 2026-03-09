@@ -178,6 +178,8 @@ export interface SessionSpawnConfig {
   prompt?: string;
   /** Override the agent plugin for this session (e.g. "codex", "claude-code") */
   agent?: string;
+  /** GitHub PR URL to continue working on (e.g. https://github.com/owner/repo/pull/123) */
+  prUrl?: string;
 }
 
 /** Config for creating an orchestrator session */

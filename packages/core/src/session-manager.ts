@@ -11,8 +11,10 @@
  * Reference: scripts/claude-ao-session, scripts/send-to-session
  */
 
+import { execFile } from "node:child_process";
 import { statSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   isIssueNotFoundError,
   isRestorable,
@@ -56,6 +58,333 @@ import {
   generateConfigHash,
   validateAndStoreOrigin,
 } from "./paths.js";
+
+const execFileAsync = promisify(execFile);
+
+// =============================================================================
+// PR URL Helpers
+// =============================================================================
+
+/**
+ * Parse a GitHub PR URL into owner, repo, and number. Returns null if not a PR URL.
+ *
+ * Accepts common URL variants: canonical, with suffixes (/files, /commits, /checks),
+ * with query params, and with trailing slashes.
+ * Examples:
+ *   https://github.com/owner/repo/pull/123
+ *   https://github.com/owner/repo/pull/123/files
+ *   https://github.com/owner/repo/pull/123/commits?query=1
+ */
+export function parseGitHubPrUrl(
+  url: string,
+): { owner: string; repo: string; number: number } | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "github.com") return null;
+    // pathname: /owner/repo/pull/123[/optional-suffix]
+    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+    if (!match) return null;
+    return { owner: match[1], repo: match[2], number: parseInt(match[3], 10) };
+  } catch {
+    return null;
+  }
+}
+
+/** Run a `gh` CLI command and return trimmed stdout. */
+async function ghExec(args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("gh", args, {
+    maxBuffer: 10 * 1024 * 1024,
+    timeout: 30_000,
+  });
+  return stdout.trim();
+}
+
+/** Fetched PR metadata for spawning a continuation session. */
+interface FetchedPrMetadata {
+  branch: string;
+  baseBranch: string;
+  title: string;
+  body: string;
+  isDraft: boolean;
+  state: string;
+  /** Whether the PR head is from a fork (different repo than base) */
+  isFork: boolean;
+  /** For fork PRs: "owner:branch" ref needed for git fetch */
+  headRefOid: string;
+  /** Fork head repo full name (e.g. "fork-owner/repo"), empty for same-repo PRs */
+  headRepoFullName: string;
+}
+
+/** PR states that are valid for spawning a continuation session. */
+const SPAWNABLE_PR_STATES = new Set(["OPEN"]);
+
+/** Fetch PR metadata via `gh pr view`. */
+async function fetchPrMetadata(
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<FetchedPrMetadata> {
+  const raw = await ghExec([
+    "pr",
+    "view",
+    String(prNumber),
+    "--repo",
+    `${owner}/${repo}`,
+    "--json",
+    "headRefName,baseRefName,title,body,isDraft,state,headRefOid,headRepository,headRepositoryOwner,isCrossRepository",
+  ]);
+  const data: {
+    headRefName: string;
+    baseRefName: string;
+    title: string;
+    body: string;
+    isDraft: boolean;
+    state: string;
+    headRefOid: string;
+    headRepository: { name: string } | null;
+    headRepositoryOwner: { login: string } | null;
+    isCrossRepository: boolean;
+  } = JSON.parse(raw);
+
+  const state = data.state?.toUpperCase() ?? "";
+  if (!SPAWNABLE_PR_STATES.has(state)) {
+    throw new Error(`PR #${prNumber} is ${state.toLowerCase()}. Only open PRs can be continued.`);
+  }
+
+  const isFork = data.isCrossRepository ?? false;
+  const headRepoFullName =
+    isFork && data.headRepositoryOwner && data.headRepository
+      ? `${data.headRepositoryOwner.login}/${data.headRepository.name}`
+      : "";
+
+  return {
+    branch: data.headRefName,
+    baseBranch: data.baseRefName,
+    title: data.title,
+    body: data.body ?? "",
+    isDraft: data.isDraft,
+    state: data.state,
+    isFork,
+    headRefOid: data.headRefOid ?? "",
+    headRepoFullName,
+  };
+}
+
+/** Result of fetching PR comments — distinguishes "no comments" from "fetch failed". */
+interface FetchedPrComments {
+  comments: string[];
+  fetchFailed: boolean;
+}
+
+/** Fetch review comments on a PR (unresolved thread comments + top-level comments). */
+async function fetchPrComments(
+  owner: string,
+  repo: string,
+  prNumber: number,
+): Promise<FetchedPrComments> {
+  const comments: string[] = [];
+  let fetchFailed = false;
+
+  // Unresolved review thread comments (GraphQL)
+  try {
+    const raw = await ghExec([
+      "api",
+      "graphql",
+      "-f",
+      `owner=${owner}`,
+      "-f",
+      `name=${repo}`,
+      "-F",
+      `number=${prNumber}`,
+      "-f",
+      `query=query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            reviewThreads(first: 100) {
+              nodes {
+                isResolved
+                comments(first: 5) {
+                  nodes {
+                    author { login }
+                    body
+                    path
+                    line
+                  }
+                }
+              }
+            }
+          }
+        }
+      }`,
+    ]);
+
+    const data: {
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: Array<{
+                isResolved: boolean;
+                comments: {
+                  nodes: Array<{
+                    author: { login: string } | null;
+                    body: string;
+                    path: string | null;
+                    line: number | null;
+                  }>;
+                };
+              }>;
+            };
+          };
+        };
+      };
+    } = JSON.parse(raw);
+
+    const threads = data.data.repository.pullRequest.reviewThreads.nodes;
+    for (const thread of threads) {
+      if (thread.isResolved) continue;
+      for (const c of thread.comments.nodes) {
+        const author = c.author?.login ?? "unknown";
+        const location = c.path ? `${c.path}${c.line ? `:${c.line}` : ""}` : "";
+        comments.push(`- [${author}]${location ? ` (${location})` : ""}: ${c.body}`);
+      }
+    }
+  } catch {
+    fetchFailed = true;
+  }
+
+  // Top-level PR conversation comments
+  try {
+    const raw = await ghExec([
+      "api",
+      "-F",
+      "per_page=100",
+      `repos/${owner}/${repo}/issues/${prNumber}/comments`,
+    ]);
+
+    const issueComments: Array<{
+      user: { login: string } | null;
+      body: string;
+    }> = JSON.parse(raw);
+
+    for (const c of issueComments) {
+      const login = c.user?.login ?? "unknown";
+      // Skip known bots
+      if (login.endsWith("[bot]")) continue;
+      comments.push(`- [${login}]: ${c.body}`);
+    }
+  } catch {
+    fetchFailed = true;
+  }
+
+  return { comments, fetchFailed };
+}
+
+/** Fetch CI status summary for a PR. */
+async function fetchPrCiStatus(owner: string, repo: string, prNumber: number): Promise<string> {
+  try {
+    const raw = await ghExec([
+      "pr",
+      "checks",
+      String(prNumber),
+      "--repo",
+      `${owner}/${repo}`,
+      "--json",
+      "name,state,link",
+    ]);
+
+    const checks: Array<{
+      name: string;
+      state: string;
+      link: string;
+    }> = JSON.parse(raw);
+
+    if (checks.length === 0) return "No CI checks configured.";
+
+    const failing = checks.filter((c) => {
+      const s = c.state?.toUpperCase();
+      return s === "FAILURE" || s === "TIMED_OUT" || s === "CANCELLED" || s === "ACTION_REQUIRED";
+    });
+    const pending = checks.filter((c) => {
+      const s = c.state?.toUpperCase();
+      return s === "PENDING" || s === "QUEUED" || s === "IN_PROGRESS";
+    });
+    const passing = checks.filter((c) => c.state?.toUpperCase() === "SUCCESS");
+
+    const lines: string[] = [];
+    if (failing.length > 0) {
+      lines.push(`Failing (${failing.length}):`);
+      for (const c of failing) {
+        lines.push(`  - ${c.name}: ${c.state}${c.link ? ` (${c.link})` : ""}`);
+      }
+    }
+    if (pending.length > 0) {
+      lines.push(`Pending (${pending.length}): ${pending.map((c) => c.name).join(", ")}`);
+    }
+    if (passing.length > 0) {
+      lines.push(`Passing (${passing.length}): ${passing.map((c) => c.name).join(", ")}`);
+    }
+    return lines.join("\n");
+  } catch {
+    return "Unable to fetch CI status.";
+  }
+}
+
+/** Build a complete PR context string for the agent prompt. */
+async function buildPrContext(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  prMeta: FetchedPrMetadata,
+): Promise<string> {
+  const [commentResult, ciStatus] = await Promise.all([
+    fetchPrComments(owner, repo, prNumber),
+    fetchPrCiStatus(owner, repo, prNumber),
+  ]);
+
+  const lines: string[] = [
+    `You are continuing work on an existing PR: ${prMeta.title}`,
+    `PR URL: https://github.com/${owner}/${repo}/pull/${prNumber}`,
+    `Branch: ${prMeta.branch} → ${prMeta.baseBranch}`,
+    `State: ${prMeta.state}${prMeta.isDraft ? " (draft)" : ""}`,
+  ];
+
+  if (prMeta.isFork) {
+    lines.push(`Fork: ${prMeta.headRepoFullName}`);
+  }
+
+  if (prMeta.body) {
+    lines.push("", "### PR Description", "", prMeta.body);
+  }
+
+  lines.push("", "### CI Status", "", ciStatus);
+
+  if (commentResult.comments.length > 0) {
+    lines.push("", "### Review Comments (unresolved)", "");
+    lines.push(...commentResult.comments);
+  } else if (commentResult.fetchFailed) {
+    lines.push(
+      "",
+      "### Review Comments",
+      "",
+      "⚠ Failed to fetch review comments — check the PR page manually for unresolved feedback.",
+    );
+  } else {
+    lines.push("", "### Review Comments", "", "No unresolved review comments.");
+  }
+
+  lines.push(
+    "",
+    "### Instructions",
+    "",
+    "Continue working on this PR. Fix any CI failures, address all review comments, " +
+      "resolve merge conflicts if any, and push your changes. " +
+      "Your goal is to get this PR to a mergeable state.",
+    "Do NOT create a new PR — push to the existing branch.",
+  );
+
+  return lines.join("\n");
+}
 
 /** Escape regex metacharacters in a string. */
 function escapeRegex(str: string): string {
@@ -223,7 +552,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   /** Resolve which plugins to use for a project. */
   function resolvePlugins(project: ProjectConfig, agentOverride?: string) {
     const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
-    const agent = registry.get<Agent>("agent", agentOverride ?? project.agent ?? config.defaults.agent);
+    const agent = registry.get<Agent>(
+      "agent",
+      agentOverride ?? project.agent ?? config.defaults.agent,
+    );
     const workspace = registry.get<Workspace>(
       "workspace",
       project.workspace ?? config.defaults.workspace,
@@ -261,9 +593,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    * Enrich session with live runtime state (alive/exited) and activity detection.
    * Mutates the session object in place.
    */
-  const TERMINAL_SESSION_STATUSES = new Set([
-    "killed", "done", "merged", "terminated", "cleanup",
-  ]);
+  const TERMINAL_SESSION_STATUSES = new Set(["killed", "done", "merged", "terminated", "cleanup"]);
 
   async function enrichSessionWithRuntimeState(
     session: Session,
@@ -347,9 +677,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
     }
 
+    // Handle PR URL — fetch metadata before any resource creation
+    let prMetadata: FetchedPrMetadata | undefined;
+    let prParsed: { owner: string; repo: string; number: number } | undefined;
+    let prContext: string | undefined;
+    if (spawnConfig.prUrl) {
+      const parsed = parseGitHubPrUrl(spawnConfig.prUrl);
+      if (!parsed) {
+        throw new Error(`Invalid GitHub PR URL: ${spawnConfig.prUrl}`);
+      }
+      prParsed = parsed;
+      prMetadata = await fetchPrMetadata(parsed.owner, parsed.repo, parsed.number);
+      prContext = await buildPrContext(parsed.owner, parsed.repo, parsed.number, prMetadata);
+    }
+
     // Validate issue exists BEFORE creating any resources
     let resolvedIssue: Issue | undefined;
-    if (spawnConfig.issueId && plugins.tracker) {
+    if (spawnConfig.issueId && !spawnConfig.prUrl && plugins.tracker) {
       try {
         // Fetch and validate the issue exists
         resolvedIssue = await plugins.tracker.getIssue(spawnConfig.issueId, project);
@@ -402,14 +746,16 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     let branch: string;
     if (spawnConfig.branch) {
       branch = spawnConfig.branch;
+    } else if (prMetadata) {
+      // Use the PR's existing branch
+      branch = prMetadata.branch;
     } else if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
       branch = plugins.tracker.branchName(spawnConfig.issueId, project);
     } else if (spawnConfig.issueId) {
       // If the issueId is already branch-safe (e.g. "INT-9999"), use as-is.
       // Otherwise sanitize free-text (e.g. "fix login bug") into a valid slug.
       const id = spawnConfig.issueId;
-      const isBranchSafe =
-        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
+      const isBranchSafe = /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) && !id.includes("..");
       const slug = isBranchSafe
         ? id
         : id
@@ -420,6 +766,36 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       branch = slug || sessionId;
     } else {
       branch = `session/${sessionId}`;
+    }
+
+    // For PR continuation, fetch the PR head ref before workspace creation
+    // so the worktree plugin can find the branch. For fork PRs we must fetch
+    // from the fork remote; for same-repo PRs we fetch via the PR ref.
+    if (prMetadata && prParsed) {
+      const repoPath = project.path;
+      try {
+        if (prMetadata.isFork && prMetadata.headRepoFullName) {
+          // Fork PR: fetch from the fork repo into a local branch
+          await execFileAsync(
+            "git",
+            [
+              "fetch",
+              `https://github.com/${prMetadata.headRepoFullName}.git`,
+              `${prMetadata.branch}:${prMetadata.branch}`,
+            ],
+            { cwd: repoPath, timeout: 30_000 },
+          );
+        } else {
+          // Same-repo PR: fetch the PR ref and create/update local branch
+          await execFileAsync(
+            "git",
+            ["fetch", "origin", `pull/${prParsed.number}/head:${prMetadata.branch}`],
+            { cwd: repoPath, timeout: 30_000 },
+          );
+        }
+      } catch {
+        // Branch may already exist locally — workspace plugin will handle it
+      }
     }
 
     // Create workspace (if workspace plugin is available)
@@ -460,9 +836,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
     }
 
-    // Generate prompt with validated issue
+    // Generate prompt with validated issue or PR context
     let issueContext: string | undefined;
-    if (spawnConfig.issueId && plugins.tracker && resolvedIssue) {
+    if (spawnConfig.issueId && !spawnConfig.prUrl && plugins.tracker && resolvedIssue) {
       try {
         issueContext = await plugins.tracker.generatePrompt(spawnConfig.issueId, project);
       } catch {
@@ -474,8 +850,11 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
     const composedPrompt = buildPrompt({
       project,
       projectId: spawnConfig.projectId,
-      issueId: spawnConfig.issueId,
+      // In PR mode, don't set issueId — it triggers issue-specific prompt text
+      // (branch-creation guidance) that conflicts with PR continuation semantics.
+      issueId: spawnConfig.prUrl ? undefined : spawnConfig.issueId,
       issueContext,
+      prContext,
       userPrompt: spawnConfig.prompt,
     });
 
@@ -548,6 +927,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         status: "spawning",
         tmuxName, // Store tmux name for mapping
         issue: spawnConfig.issueId,
+        pr: spawnConfig.prUrl, // Store PR URL if spawned from a PR
         project: spawnConfig.projectId,
         agent: plugins.agent.name, // Persist agent name for lifecycle manager
         createdAt: new Date().toISOString(),
@@ -739,36 +1119,41 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   async function list(projectId?: string): Promise<Session[]> {
     const allSessions = listAllSessions(projectId);
 
-    const sessionPromises = allSessions.map(async ({ sessionName, projectId: sessionProjectId }) => {
-      const project = config.projects[sessionProjectId];
-      if (!project) return null;
+    const sessionPromises = allSessions.map(
+      async ({ sessionName, projectId: sessionProjectId }) => {
+        const project = config.projects[sessionProjectId];
+        if (!project) return null;
 
-      const sessionsDir = getProjectSessionsDir(project);
-      const raw = readMetadataRaw(sessionsDir, sessionName);
-      if (!raw) return null;
+        const sessionsDir = getProjectSessionsDir(project);
+        const raw = readMetadataRaw(sessionsDir, sessionName);
+        if (!raw) return null;
 
-      // Get file timestamps for createdAt/lastActivityAt
-      let createdAt: Date | undefined;
-      let modifiedAt: Date | undefined;
-      try {
-        const metaPath = join(sessionsDir, sessionName);
-        const stats = statSync(metaPath);
-        createdAt = stats.birthtime;
-        modifiedAt = stats.mtime;
-      } catch {
-        // If stat fails, timestamps will fall back to current time
-      }
+        // Get file timestamps for createdAt/lastActivityAt
+        let createdAt: Date | undefined;
+        let modifiedAt: Date | undefined;
+        try {
+          const metaPath = join(sessionsDir, sessionName);
+          const stats = statSync(metaPath);
+          createdAt = stats.birthtime;
+          modifiedAt = stats.mtime;
+        } catch {
+          // If stat fails, timestamps will fall back to current time
+        }
 
-      const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
+        const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
 
-      const plugins = resolvePlugins(project, raw["agent"]);
-      // Cap per-session enrichment at 2s — subprocess calls (tmux/ps) can be
-      // slow under load. If we time out, session keeps its metadata values.
-      const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
-      await Promise.race([ensureHandleAndEnrich(session, sessionName, project, plugins), enrichTimeout]);
+        const plugins = resolvePlugins(project, raw["agent"]);
+        // Cap per-session enrichment at 2s — subprocess calls (tmux/ps) can be
+        // slow under load. If we time out, session keeps its metadata values.
+        const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        await Promise.race([
+          ensureHandleAndEnrich(session, sessionName, project, plugins),
+          enrichTimeout,
+        ]);
 
-      return session;
-    });
+        return session;
+      },
+    );
 
     const results = await Promise.all(sessionPromises);
     return results.filter((s): s is Session => s !== null);
@@ -885,10 +1270,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         // Never clean up orchestrator sessions — they manage the lifecycle.
         // Check explicit role metadata first, fall back to naming convention
         // for pre-existing sessions spawned before the role field was added.
-        if (
-          session.metadata["role"] === "orchestrator" ||
-          session.id.endsWith("-orchestrator")
-        ) {
+        if (session.metadata["role"] === "orchestrator" || session.id.endsWith("-orchestrator")) {
           result.skipped.push(session.id);
           continue;
         }
