@@ -25,7 +25,8 @@
     "release": "pnpm -r --filter '!@composio/ao-web' build && changeset publish",
     "prepare": "husky",
     "postinstall": "node scripts/rebuild-node-pty.js",
-    "dev:auto-pull": "bash scripts/dev-autoupdate.sh"
+    "dev:auto-pull": "bash scripts/dev-autoupdate.sh",
+    "start:auto-pull": "bash scripts/start-autoupdate.sh"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",
