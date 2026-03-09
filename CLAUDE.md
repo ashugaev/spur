@@ -212,6 +212,20 @@ Then use `browser_navigate` as normal. If Playwright was previously used in the 
 
 Config loaded from `agent-orchestrator.yaml` (see `agent-orchestrator.yaml.example`). Paths support `~` expansion. Validated with Zod at load time. Per-project overrides for plugins and reactions.
 
+## /ao Skill Maintenance
+
+The local `/ao` skill lives at `.claude/skills/ao/SKILL.md`. It documents all CLI commands, config options, plugin capabilities, and workflows.
+
+**When you change feature code, check if the skill needs updating:**
+- New CLI command or flag → add to the Commands section
+- New config option → add to the Configuration section
+- New plugin or plugin capability → update the Plugin Architecture section
+- Changed session lifecycle states → update the Session Lifecycle section
+- New API endpoint → update the Web API section
+- Changed reaction actions or events → update the Reactions section
+
+If the change affects user-facing behavior documented in the skill, update `.claude/skills/ao/SKILL.md` in the same PR/commit.
+
 ## Design Decisions
 
 1. **Stateless orchestrator** — no database, flat metadata files + event log
