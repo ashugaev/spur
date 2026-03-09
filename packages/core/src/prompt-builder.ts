@@ -60,6 +60,9 @@ export interface PromptBuildConfig {
   /** Pre-fetched issue context from tracker.generatePrompt() */
   issueContext?: string;
 
+  /** Pre-fetched PR context for continuing work on an existing PR */
+  prContext?: string;
+
   /** Explicit user prompt (appended last) */
   userPrompt?: string;
 }
@@ -92,6 +95,11 @@ function buildConfigLayer(config: PromptBuildConfig): string {
   if (issueContext) {
     lines.push(`\n## Issue Details`);
     lines.push(issueContext);
+  }
+
+  if (config.prContext) {
+    lines.push(`\n## PR Context`);
+    lines.push(config.prContext);
   }
 
   // Include reaction rules so the agent knows what to expect
@@ -151,12 +159,13 @@ function readUserRules(project: ProjectConfig): string | null {
  */
 export function buildPrompt(config: PromptBuildConfig): string | null {
   const hasIssue = Boolean(config.issueId);
+  const hasPrContext = Boolean(config.prContext);
   const userRules = readUserRules(config.project);
   const hasRules = Boolean(userRules);
   const hasUserPrompt = Boolean(config.userPrompt);
 
   // Nothing to compose — return null for backward compatibility
-  if (!hasIssue && !hasRules && !hasUserPrompt) {
+  if (!hasIssue && !hasPrContext && !hasRules && !hasUserPrompt) {
     return null;
   }
 

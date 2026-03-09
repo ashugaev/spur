@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { createSessionManager } from "../session-manager.js";
+import { createSessionManager, parseGitHubPrUrl } from "../session-manager.js";
 import {
   writeMetadata,
   readMetadata,
@@ -199,7 +199,8 @@ describe("spawn", () => {
 
     const session = await sm.spawn({
       projectId: "my-app",
-      issueId: "this is a very long issue description that should be truncated to sixty characters maximum",
+      issueId:
+        "this is a very long issue description that should be truncated to sixty characters maximum",
     });
 
     expect(session.branch!.replace("", "").length).toBeLessThanOrEqual(60);
@@ -347,9 +348,9 @@ describe("spawn", () => {
     it("throws when agent override plugin is not found", async () => {
       const sm = createSessionManager({ config, registry: registryWithMultipleAgents });
 
-      await expect(
-        sm.spawn({ projectId: "my-app", agent: "nonexistent" }),
-      ).rejects.toThrow("Agent plugin 'nonexistent' not found");
+      await expect(sm.spawn({ projectId: "my-app", agent: "nonexistent" })).rejects.toThrow(
+        "Agent plugin 'nonexistent' not found",
+      );
     });
 
     it("uses default agent when no override specified", async () => {
@@ -678,6 +679,33 @@ describe("spawn", () => {
     await spawnPromise;
     expect(mockRuntime.sendMessage).toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+describe("parseGitHubPrUrl", () => {
+  it("parses valid PR URL", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/123");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 123 });
+  });
+
+  it("parses PR URL with trailing slash", () => {
+    const result = parseGitHubPrUrl("https://github.com/owner/repo/pull/123/");
+    expect(result).toEqual({ owner: "owner", repo: "repo", number: 123 });
+  });
+
+  it("returns null for non-PR URL", () => {
+    expect(parseGitHubPrUrl("https://github.com/owner/repo/issues/123")).toBeNull();
+    expect(parseGitHubPrUrl("not-a-url")).toBeNull();
+    expect(parseGitHubPrUrl("https://github.com/owner/repo")).toBeNull();
+  });
+});
+
+describe("spawn with prUrl", () => {
+  it("rejects invalid PR URL", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await expect(sm.spawn({ projectId: "my-app", prUrl: "not-a-pr-url" })).rejects.toThrow(
+      "Invalid GitHub PR URL",
+    );
   });
 });
 
