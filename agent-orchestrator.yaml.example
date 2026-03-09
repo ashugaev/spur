@@ -43,7 +43,8 @@ projects:
     #   plugin: linear
     #   teamId: "your-team-id"
 
-    # Jira tracker — per-project connection config
+    # Jira tracker — per-project connection config (credentials + comment polling)
+    # JQL for auto-spawning tasks goes in the top-level `listeners` section (see below).
     # tracker:
     #   plugin: jira
     #   baseUrl: "https://myorg.atlassian.net"   # falls back to JIRA_URL / JIRA_HOST env var
