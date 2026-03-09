@@ -55,18 +55,6 @@ reactions:
     mergeMethod: squash
     priority: action
 
-# TODO: Jira to project level
-#listeners:
-#  jira-broai:
-#    enabled: true
-#    source: jira-backlog
-#    projectId: int
-#    intervalMs: 60000
-#    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-#    backlogStatus: "Backlog"
-#    trigger:
-#      type: spawn-session
-
 projects:
   ao:
     name: Agent Orchestrator
@@ -95,6 +83,8 @@ projects:
       plugin: github
     tracker:
       plugin: jira
+      baseUrl: "https://intelas.atlassian.net"
+      pollIntervalMs: 60000
     symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
     agentRulesFile: dev/.ao-agent-rules.md
     agentConfig:
