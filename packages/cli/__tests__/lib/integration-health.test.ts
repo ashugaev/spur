@@ -144,9 +144,9 @@ describe("integration health reporter", () => {
 
     reporter.markHealthy(
       {
-        id: "listener:jira-backlog",
-        label: "Listener jira-backlog",
-        service: "jira",
+        id: "listener:tracker-task",
+        label: "Listener tracker-task",
+        service: "tracker",
         kind: "listener",
       },
       "Listener healthy",
@@ -168,7 +168,7 @@ describe("integration health reporter", () => {
 
     expect(parsed.entries.map((entry) => entry.id)).toEqual([
       "jira-comment-polling",
-      "listener:jira-backlog",
+      "listener:tracker-task",
     ]);
   });
 });

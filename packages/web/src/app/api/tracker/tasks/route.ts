@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import { getServices } from "@/lib/services";
 import { buildJiraSprintTasksSnapshot } from "@/lib/jira-sprint-tasks";
-import { handleJiraSprintTaskStart } from "./start-handler";
+import { handleJiraSprintTaskStart } from "@/app/api/jira/sprint-tasks/start-handler";
 import type { JiraSprintTasksSnapshot } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/jira/sprint-tasks — legacy alias for tracker task snapshot endpoint. */
+/** GET /api/tracker/tasks — tracker tasks from active tracker-task listeners. */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const requestedProjectId = searchParams.get("projectId")?.trim();
@@ -35,7 +35,7 @@ export async function GET(request: Request) {
   }
 }
 
-/** POST /api/jira/sprint-tasks — legacy alias for tracker task start endpoint. */
+/** POST /api/tracker/tasks — Start a session for a tracker task. */
 export async function POST(request: Request) {
   return handleJiraSprintTaskStart(request);
 }

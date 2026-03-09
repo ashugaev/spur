@@ -159,6 +159,30 @@ reactions:
       expect(config.reactions["review-comments"]?.message).toBe("Custom review-comment prompt");
       expect(config.reactions["review-comments"]?.escalateAfter).toBe("30m");
     });
+
+    it("rejects legacy listener fields with migration guidance", () => {
+      const configPath = join(testDir, "legacy-listener-fields.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+listeners:
+  legacy-jira-listener:
+    source: jira-backlog
+    projectId: test-project
+    enabled: true
+    jql: 'assignee = "me"'
+    backlogStatus: "Backlog"
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/no longer supported/);
+      expect(() => loadConfig(configPath)).toThrow(/source: tracker-task/);
+    });
   });
 
   describe("Config Discovery Priority", () => {

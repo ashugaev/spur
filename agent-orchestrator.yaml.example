@@ -52,14 +52,17 @@ projects:
     #   apiToken: "your-api-token"               # falls back to JIRA_API_TOKEN / JIRA_TOKEN env var (prefer env var over hardcoding)
     #   pollIntervalMs: 30000                    # comment poll interval (default: 60000); falls back to AO_JIRA_POLL_INTERVAL_MS
 
-    # Per-project trigger listeners — JQL and auto-spawn config lives here.
+    # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
     # (Equivalent to top-level `listeners` but scoped to this project; no projectId needed.)
     # listeners:
-    #   jira-backlog:
-    #     source: jira-backlog
+    #   tracker-task:
+    #     source: tracker-task
     #     intervalMs: 60000
-    #     jql: 'assignee = "you@yourorg.com" AND labels = "ao" AND sprint in openSprints()'
-    #     backlogStatus: "Backlog"  # move to this status before spawning
+    #     filters:
+    #       state: open
+    #       assignee: "you@yourorg.com"
+    #       labels: ["ao"]
+    #       limit: 100
     #     trigger:
     #       type: spawn-session
 
@@ -131,14 +134,15 @@ projects:
 
 # Trigger listeners — poll external sources and auto-trigger current spawn flow.
 # listeners:
-#   jira-broai:
-#     enabled: true
-#     source: jira-backlog
+#   tracker-broai:
+#     source: tracker-task
 #     projectId: int
 #     intervalMs: 60000
-#     # Only backlog tickets assigned to you with BroAI label:
-#     jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-#     backlogStatus: "Backlog"   # enforced by listener; default is Backlog
+#     filters:
+#       state: open
+#       assignee: "aleksey@intelas.com"
+#       labels: ["BroAI"]
+#       limit: 100
 #     trigger:
 #       type: spawn-session
 #       # agent: codex            # optional agent override for auto-spawned sessions

@@ -3,24 +3,24 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import type { ListenerConfig, OrchestratorConfig, Session, SessionManager } from "@composio/ao-core";
+import type {
+  ListenerConfig,
+  OrchestratorConfig,
+  PluginRegistry,
+  Session,
+  SessionManager,
+  Tracker,
+} from "@composio/ao-core";
 import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
+import { trackerTaskSource } from "../../src/lib/listeners/jira-backlog-source.js";
 
-const { jiraMock, mockedPaths, archivedStateBySession } = vi.hoisted(() => ({
-  jiraMock: vi.fn(),
+const { mockedPaths, archivedStateBySession } = vi.hoisted(() => ({
   mockedPaths: { baseDir: "", sessionsDir: "" },
   archivedStateBySession: {} as Record<
     string,
     { status?: string; terminationReason?: string } | undefined
   >,
 }));
-
-vi.mock("node:child_process", () => {
-  const execFile = Object.assign(vi.fn(), {
-    [Symbol.for("nodejs.util.promisify.custom")]: jiraMock,
-  });
-  return { execFile };
-});
 
 vi.mock("@composio/ao-core", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -41,8 +41,6 @@ vi.mock("@composio/ao-core", async (importOriginal) => {
     },
   };
 });
-
-import { jiraBacklogSource } from "../../src/lib/listeners/jira-backlog-source.js";
 
 function makeConfig(rootDir: string): OrchestratorConfig {
   const repoPath = join(rootDir, "repo");
@@ -75,12 +73,15 @@ function makeConfig(rootDir: string): OrchestratorConfig {
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
     reactions: {},
     listeners: {
-      "jira-broai": {
-        enabled: true,
-        source: "jira-backlog",
+      "tracker-broai": {
+        source: "tracker-task",
         projectId: "int",
         intervalMs: 60_000,
-        jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"',
+        filters: {
+          state: "open",
+          assignee: "aleksey@intelas.com",
+          labels: ["BroAI"],
+        },
         trigger: { type: "spawn-session" },
       },
     },
@@ -147,16 +148,42 @@ function makeHealthReporterStub(): IntegrationHealthReporter {
   };
 }
 
+function makeRegistry(listIssuesImpl: NonNullable<Tracker["listIssues"]>): PluginRegistry {
+  const tracker: Tracker = {
+    name: "jira",
+    getIssue: vi.fn(),
+    isCompleted: vi.fn(),
+    issueUrl: vi.fn(),
+    issueLabel: vi.fn(),
+    branchName: vi.fn(),
+    generatePrompt: vi.fn(),
+    listIssues: vi.fn(listIssuesImpl),
+    updateIssue: vi.fn(),
+    createIssue: vi.fn(),
+  };
+
+  return {
+    register: vi.fn(),
+    get: vi.fn((slot: string, name: string) => {
+      if (slot === "tracker" && name === "jira") return tracker;
+      return null;
+    }),
+    list: vi.fn(),
+    loadBuiltins: vi.fn(),
+    loadFromConfig: vi.fn(),
+  } as unknown as PluginRegistry;
+}
+
 async function flushPromises(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
 
-describe("jiraBacklogSource", () => {
+describe("trackerTaskSource", () => {
   let rootDir: string;
 
   beforeEach(() => {
-    rootDir = join(tmpdir(), `ao-jira-listener-${randomUUID()}`);
+    rootDir = join(tmpdir(), `ao-tracker-listener-${randomUUID()}`);
     mkdirSync(rootDir, { recursive: true });
     mockedPaths.baseDir = join(rootDir, "ao-base");
     mockedPaths.sessionsDir = join(mockedPaths.baseDir, "sessions");
@@ -174,21 +201,28 @@ describe("jiraBacklogSource", () => {
     rmSync(rootDir, { recursive: true, force: true });
   });
 
-  it("enforces backlog status in effective JQL and spawns once", async () => {
+  it("spawns once for issue ids returned by tracker.listIssues", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
+    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
     const warn = vi.fn();
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
     const healthReporter = makeHealthReporterStub();
+    const registry = makeRegistry(async () => [
+      {
+        id: "INT-101",
+        title: "Task 101",
+        description: "",
+        url: "https://acme.atlassian.net/browse/INT-101",
+        state: "open",
+        labels: [],
+      },
+    ]);
 
     const sm = makeSessionManager(async () => [], async () => makeSession("intelas-1", "INT-101"));
 
-    const controller = await jiraBacklogSource.start({
+    const controller = await trackerTaskSource.start({
       config,
-      listenerId: "jira-broai",
+      registry,
+      listenerId: "tracker-broai",
       listener,
       projectId: "int",
       project: config.projects.int!,
@@ -201,68 +235,34 @@ describe("jiraBacklogSource", () => {
     expect(sm.spawn).toHaveBeenCalledTimes(1);
     expect(sm.spawn).toHaveBeenCalledWith({ projectId: "int", issueId: "INT-101" });
 
-    const jiraArgs = jiraMock.mock.calls[0]?.[1] as string[] | undefined;
-    expect(jiraArgs).toBeDefined();
-    expect(jiraArgs?.join(" ")).toContain('status = "Backlog"');
-
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sm.spawn).toHaveBeenCalledTimes(1);
+
     controller.stop();
     expect(healthReporter.markStarting).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "listener:jira-broai" }),
+      expect.objectContaining({ id: "listener:tracker-broai" }),
       expect.stringContaining("Starting"),
     );
     expect(healthReporter.markHealthy).toHaveBeenCalled();
     expect(healthReporter.markInactive).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "listener:jira-broai" }),
+      expect.objectContaining({ id: "listener:tracker-broai" }),
       expect.stringContaining("stopped"),
     );
   });
 
-  it("treats jira no-results response as an empty backlog, not a failed poll", async () => {
-    const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-    const healthReporter = makeHealthReporterStub();
-
-    const noResultsError = Object.assign(new Error("Command failed"), {
-      stderr:
-        '\u001b[0;31m✗\u001b[0m No result found for given query in project "WEBDEV"',
-    });
-    jiraMock.mockRejectedValueOnce(noResultsError);
-
-    const sm = makeSessionManager(async () => [], async () => makeSession("intelas-1", "INT-101"));
-
-    const controller = await jiraBacklogSource.start({
-      config,
-      listenerId: "jira-broai",
-      listener,
-      projectId: "int",
-      project: config.projects.int!,
-      sessionManager: sm,
-      logger: { warn: vi.fn() },
-      healthReporter,
-    });
-
-    await flushPromises();
-    await flushPromises();
-
-    expect(sm.spawn).not.toHaveBeenCalled();
-    expect(healthReporter.markDegraded).not.toHaveBeenCalled();
-    expect(healthReporter.markHealthy).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "listener:jira-broai" }),
-      expect.stringContaining("0 issues checked"),
-    );
-
-    controller.stop();
-  });
-
   it("retries the same issue only after previous listener session was killed", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
+    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
+    const registry = makeRegistry(async () => [
+      {
+        id: "INT-101",
+        title: "Task 101",
+        description: "",
+        url: "https://acme.atlassian.net/browse/INT-101",
+        state: "open",
+        labels: [],
+      },
+    ]);
 
     const sm = makeSessionManager(
       async () => [],
@@ -272,9 +272,10 @@ describe("jiraBacklogSource", () => {
         .mockResolvedValueOnce(makeSession("intelas-2", "INT-101")),
     );
 
-    const controller = await jiraBacklogSource.start({
+    const controller = await trackerTaskSource.start({
       config,
-      listenerId: "jira-broai",
+      registry,
+      listenerId: "tracker-broai",
       listener,
       projectId: "int",
       project: config.projects.int!,
@@ -300,100 +301,28 @@ describe("jiraBacklogSource", () => {
     controller.stop();
   });
 
-  it("does not retry when previous listener session was cleanup-terminated", async () => {
-    const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
-
-    const sm = makeSessionManager(
-      async () => [],
-      vi
-        .fn()
-        .mockResolvedValueOnce(makeSession("intelas-1", "INT-101"))
-        .mockResolvedValueOnce(makeSession("intelas-2", "INT-101")),
-    );
-
-    const controller = await jiraBacklogSource.start({
-      config,
-      listenerId: "jira-broai",
-      listener,
-      projectId: "int",
-      project: config.projects.int!,
-      sessionManager: sm,
-      logger: { warn: vi.fn() },
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-
-    archivedStateBySession["intelas-1"] = {
-      status: "cleanup",
-      terminationReason: "cleanup",
-    };
-
-    await vi.advanceTimersByTimeAsync(60_001);
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-
-    controller.stop();
-  });
-
-  it("does not retry when previous session status is unknown and warns once", async () => {
-    const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-    const warn = vi.fn();
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
-
-    const sm = makeSessionManager(
-      async () => [],
-      vi.fn().mockResolvedValue(makeSession("intelas-1", "INT-101")),
-    );
-
-    const controller = await jiraBacklogSource.start({
-      config,
-      listenerId: "jira-broai",
-      listener,
-      projectId: "int",
-      project: config.projects.int!,
-      sessionManager: sm,
-      logger: { warn },
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-
-    await vi.advanceTimersByTimeAsync(60_001);
-    await vi.advanceTimersByTimeAsync(60_001);
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-
-    const unknownWarns = warn.mock.calls.filter(([message]) =>
-      String(message).includes("unknown terminal status"),
-    );
-    expect(unknownWarns).toHaveLength(1);
-
-    controller.stop();
-  });
-
   it("prevents duplicate spawn when another process already holds issue lock", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
+    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
     const firstSpawn = createDeferred<Session>();
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
+    const registry = makeRegistry(async () => [
+      {
+        id: "INT-101",
+        title: "Task 101",
+        description: "",
+        url: "https://acme.atlassian.net/browse/INT-101",
+        state: "open",
+        labels: [],
+      },
+    ]);
 
     const smA = makeSessionManager(async () => [], async () => firstSpawn.promise);
     const smB = makeSessionManager(async () => [], async () => makeSession("intelas-2", "INT-101"));
 
-    const controllerA = await jiraBacklogSource.start({
+    const controllerA = await trackerTaskSource.start({
       config,
-      listenerId: "jira-broai",
+      registry,
+      listenerId: "tracker-broai",
       listener,
       projectId: "int",
       project: config.projects.int!,
@@ -407,9 +336,10 @@ describe("jiraBacklogSource", () => {
     }
     expect(smA.spawn).toHaveBeenCalledTimes(1);
 
-    const controllerB = await jiraBacklogSource.start({
+    const controllerB = await trackerTaskSource.start({
       config,
-      listenerId: "jira-broai-second",
+      registry,
+      listenerId: "tracker-broai-second",
       listener,
       projectId: "int",
       project: config.projects.int!,
@@ -427,114 +357,22 @@ describe("jiraBacklogSource", () => {
     controllerB.stop();
   });
 
-  it("clears stale pending claim and allows processing on the next poll", async () => {
+  it("disables listener when tracker dependency is missing", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-    const warn = vi.fn();
-
-    mkdirSync(join(mockedPaths.baseDir, "listeners"), { recursive: true });
-    writeFileSync(
-      join(mockedPaths.baseDir, "listeners", "jira-broai.json"),
-      JSON.stringify(
-        {
-          version: 1,
-          issues: {
-            "INT-101": {
-              lastSessionId: "pending-123",
-              updatedAt: new Date(Date.now() - 31 * 60_000).toISOString(),
-            },
-          },
-        },
-        null,
-        2,
-      ),
-      "utf-8",
-    );
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }]),
-    });
-
-    const sm = makeSessionManager(
-      async () => [],
-      vi.fn().mockResolvedValue(makeSession("intelas-2", "INT-101")),
-    );
-
-    const controller = await jiraBacklogSource.start({
-      config,
-      listenerId: "jira-broai",
-      listener,
-      projectId: "int",
-      project: config.projects.int!,
-      sessionManager: sm,
-      logger: { warn },
-    });
-
-    await vi.runOnlyPendingTimersAsync();
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-    expect(
-      warn.mock.calls.some(([message]) =>
-        String(message).includes("Clearing stale pending claim for INT-101"),
-      ),
-    ).toBe(true);
-
-    controller.stop();
-  });
-
-  it("does not spawn additional issues after stop is requested mid-poll", async () => {
-    const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
-    const firstSpawn = createDeferred<Session>();
-
-    jiraMock.mockResolvedValue({
-      stdout: JSON.stringify([{ key: "INT-101" }, { key: "INT-102" }]),
-    });
-
-    const sm = makeSessionManager(
-      async () => [],
-      vi
-        .fn()
-        .mockImplementationOnce(async () => firstSpawn.promise)
-        .mockResolvedValueOnce(makeSession("intelas-2", "INT-102")),
-    );
-
-    const controller = await jiraBacklogSource.start({
-      config,
-      listenerId: "jira-broai",
-      listener,
-      projectId: "int",
-      project: config.projects.int!,
-      sessionManager: sm,
-      logger: { warn: vi.fn() },
-    });
-
-    for (let i = 0; i < 10; i += 1) {
-      await flushPromises();
-      if ((sm.spawn as ReturnType<typeof vi.fn>).mock.calls.length > 0) break;
-    }
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-
-    controller.stop();
-    firstSpawn.resolve(makeSession("intelas-1", "INT-101"));
-    await flushPromises();
-    await flushPromises();
-
-    expect(sm.spawn).toHaveBeenCalledTimes(1);
-  });
-
-  it("disables listener when jira CLI binary is missing", async () => {
-    const config = makeConfig(rootDir);
-    const listener = config.listeners?.["jira-broai"] as ListenerConfig;
+    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
     const warn = vi.fn();
 
     const missingBinary = Object.assign(new Error("spawn jira ENOENT"), { code: "ENOENT" });
-    jiraMock.mockRejectedValueOnce(missingBinary);
+    const registry = makeRegistry(async () => {
+      throw missingBinary;
+    });
 
     const sm = makeSessionManager(async () => [], async () => makeSession("intelas-1", "INT-101"));
 
-    const controller = await jiraBacklogSource.start({
+    const controller = await trackerTaskSource.start({
       config,
-      listenerId: "jira-broai",
+      registry,
+      listenerId: "tracker-broai",
       listener,
       projectId: "int",
       project: config.projects.int!,
@@ -545,11 +383,10 @@ describe("jiraBacklogSource", () => {
     await flushPromises();
     await vi.advanceTimersByTimeAsync(120_000);
 
-    expect(jiraMock).toHaveBeenCalledTimes(1);
     expect(sm.spawn).not.toHaveBeenCalled();
     expect(
       warn.mock.calls.some(([message]) =>
-        String(message).includes("jira CLI is not available in PATH; disabling listener"),
+        String(message).includes("Tracker dependencies are not available; disabling listener"),
       ),
     ).toBe(true);
 

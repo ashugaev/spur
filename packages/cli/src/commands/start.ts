@@ -606,13 +606,14 @@ async function runStartup(
 
       configuredListeners = await maybeStartConfiguredListeners({
         config,
+        registry,
         sessionManager,
         healthReporter: integrationHealth,
       });
       if (configuredListeners && configuredListeners.activeListeners.length > 0) {
         console.log(
           chalk.dim(
-            `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (enabled)`,
+            `  Trigger listeners: ${configuredListeners.activeListeners.join(", ")} (active)`,
           ),
         );
       }

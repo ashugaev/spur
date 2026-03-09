@@ -80,17 +80,45 @@ const ListenerTriggerConfigSchema = z
   })
   .passthrough();
 
-const ListenerConfigSchema = z
+const ListenerConfigBaseSchema = z
   .object({
-    enabled: z.boolean().default(true),
     source: z.string(),
     projectId: z.string(),
     intervalMs: z.number().positive().optional(),
-    backlogStatus: z.string().min(1).optional(),
+    filters: z
+      .object({
+        state: z.enum(["open", "closed", "all"]).optional(),
+        labels: z.array(z.string().min(1)).optional(),
+        assignee: z.string().min(1).optional(),
+        limit: z.number().positive().optional(),
+      })
+      .optional(),
     lockStaleMs: z.number().positive().optional(),
     trigger: ListenerTriggerConfigSchema.default({ type: "spawn-session" }),
   })
   .passthrough();
+
+function validateLegacyListenerFields(
+  value: Record<string, unknown>,
+  ctx: z.RefinementCtx,
+): void {
+  const legacyFields = ["enabled", "jql", "backlogStatus"] as const;
+  for (const field of legacyFields) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          `Listener field "${field}" is no longer supported. ` +
+          `Use source: tracker-task with filters.{state,labels,assignee,limit}.`,
+      });
+    }
+  }
+}
+
+const ListenerConfigSchema = ListenerConfigBaseSchema.superRefine(validateLegacyListenerFields);
+const ProjectListenerConfigSchema = ListenerConfigBaseSchema.omit({ projectId: true }).superRefine(
+  validateLegacyListenerFields,
+);
 
 const AgentSpecificConfigSchema = z
   .object({
@@ -124,7 +152,7 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
-  listeners: z.record(ListenerConfigSchema.omit({ projectId: true })).optional(),
+  listeners: z.record(ProjectListenerConfigSchema).optional(),
 });
 
 const DefaultPluginsSchema = z.object({

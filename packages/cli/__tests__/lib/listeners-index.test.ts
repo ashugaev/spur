@@ -103,13 +103,11 @@ describe("maybeStartConfiguredListeners", () => {
     const config = makeConfig();
     config.listeners = {
       "listener-int": {
-        enabled: true,
         source: sourceName,
         projectId: "int",
         trigger: { type: "spawn-session" },
       },
       "listener-web": {
-        enabled: true,
         source: sourceName,
         projectId: "web",
         trigger: { type: "spawn-session" },
@@ -157,7 +155,6 @@ describe("maybeStartConfiguredListeners", () => {
     const config = makeConfig();
     config.listeners = {
       "listener-unknown-source": {
-        enabled: true,
         source: "missing-source",
         projectId: "int",
       },
@@ -181,6 +178,58 @@ describe("maybeStartConfiguredListeners", () => {
     );
   });
 
+  it("namespaces per-project listener ids when they collide with existing ids", async () => {
+    const sourceName = "test-source-collision";
+    const start = vi
+      .fn<ListenerSource["start"]>()
+      .mockResolvedValue({ stop: vi.fn() } satisfies ListenerController);
+    registerListenerSource({
+      source: sourceName,
+      start,
+    });
+
+    const warn = vi.fn();
+    const config = makeConfig();
+    config.listeners = {
+      duplicate: {
+        source: sourceName,
+        projectId: "int",
+      },
+    };
+    config.projects.web!.listeners = {
+      duplicate: {
+        source: sourceName,
+      },
+    };
+
+    const controller = await maybeStartConfiguredListeners({
+      config,
+      sessionManager: makeSessionManagerStub(),
+      logger: { warn },
+    });
+
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listenerId: "duplicate",
+        projectId: "int",
+      }),
+    );
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listenerId: "web:duplicate",
+        projectId: "web",
+      }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('using namespaced id "web:duplicate"'),
+    );
+    expect(controller?.activeListeners).toEqual(expect.arrayContaining(["duplicate", "web:duplicate"]));
+
+    controller?.stop();
+    unregisterListenerSource(sourceName);
+  });
+
   it("skips listener with unknown project and warns", async () => {
     const sourceName = "test-source-unknown-project";
     registerListenerSource({
@@ -193,7 +242,6 @@ describe("maybeStartConfiguredListeners", () => {
     const config = makeConfig();
     config.listeners = {
       "listener-unknown-project": {
-        enabled: true,
         source: sourceName,
         projectId: "does-not-exist",
       },

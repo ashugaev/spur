@@ -193,6 +193,9 @@ import { GET as integrationsStatusGET } from "@/app/api/integrations/status/rout
 import { GET as jiraSprintTasksGET, POST as jiraSprintTasksPOST } from "@/app/api/jira/sprint-tasks/route";
 import { POST as jiraSprintTasksStartPOST } from "@/app/api/jira/sprint-tasks/start/route";
 import { POST as jiraSprintTaskByKeyStartPOST } from "@/app/api/jira/sprint-tasks/[issueKey]/start/route";
+import { GET as trackerTasksGET, POST as trackerTasksPOST } from "@/app/api/tracker/tasks/route";
+import { POST as trackerTasksStartPOST } from "@/app/api/tracker/tasks/start/route";
+import { POST as trackerTaskByKeyStartPOST } from "@/app/api/tracker/tasks/[issueKey]/start/route";
 import { buildJiraSprintTasksSnapshot, startJiraSprintTask } from "@/lib/jira-sprint-tasks";
 
 const originalIntegrationsSnapshotPath = process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
@@ -625,8 +628,8 @@ describe("API Routes", () => {
         expect(data.integrations.telegramInboundPolling.ok).toBe(true);
         expect(data.integrations.jiraCommentPolling.ok).toBe(false);
         expect(data.integrations.jiraCommentPolling.message).toMatch(/Auth needs refresh/);
-        expect(data.integrations.jiraTriggerListeners.state).toBe("healthy");
-        expect(data.integrations.jiraTriggerListeners.ok).toBe(true);
+        expect(data.integrations.trackerTriggerListeners.state).toBe("healthy");
+        expect(data.integrations.trackerTriggerListeners.ok).toBe(true);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -648,10 +651,10 @@ describe("API Routes", () => {
         expect(data.source).toBe("fallback");
         expect(data.integrations.telegramInboundPolling.active).toBe(false);
         expect(data.integrations.jiraCommentPolling.active).toBe(false);
-        expect(data.integrations.jiraTriggerListeners.active).toBe(false);
+        expect(data.integrations.trackerTriggerListeners.active).toBe(false);
         expect(data.integrations.telegramInboundPolling.state).toBe("unknown");
         expect(data.integrations.jiraCommentPolling.state).toBe("unknown");
-        expect(data.integrations.jiraTriggerListeners.state).toBe("unknown");
+        expect(data.integrations.trackerTriggerListeners.state).toBe("unknown");
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -686,7 +689,7 @@ describe("API Routes", () => {
         expect(data.integrations.telegramInboundPolling.ok).toBe(false);
         expect(data.integrations.jiraCommentPolling.state).toBe("degraded");
         expect(data.integrations.jiraCommentPolling.message).toMatch(/Rate limit reached/);
-        expect(data.integrations.jiraTriggerListeners.state).toBe("healthy");
+        expect(data.integrations.trackerTriggerListeners.state).toBe("healthy");
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -771,7 +774,7 @@ describe("API Routes", () => {
           integrations: {
             telegramInboundPolling: { active: true, connected: true, ok: true, state: "healthy" },
             jiraCommentPolling: { active: false, connected: false, ok: false, state: "inactive" },
-            jiraTriggerListeners: { active: false, connected: false, ok: false, state: "inactive" },
+            trackerTriggerListeners: { active: false, connected: false, ok: false, state: "inactive" },
           },
         }),
         "utf-8",
@@ -810,9 +813,7 @@ describe("API Routes", () => {
             listenerId: "jira-my-app",
             projectId: "my-app",
             projectName: "My App",
-            jql: 'project = "MYAPP"',
-            backlogStatus: "Backlog",
-            effectiveJql: '(project = "MYAPP") AND status = "Backlog"',
+            filters: { state: "open", labels: ["ao"], limit: 100 },
           },
         ],
         tasks: [
@@ -852,9 +853,7 @@ describe("API Routes", () => {
             listenerId: "jira-my-app",
             projectId: "my-app",
             projectName: "My App",
-            jql: 'project = "MYAPP"',
-            backlogStatus: "Backlog",
-            effectiveJql: '(project = "MYAPP") AND status = "Backlog"',
+            filters: { state: "open", labels: ["ao"], limit: 100 },
           },
         ],
         tasks: [
@@ -966,7 +965,7 @@ describe("API Routes", () => {
       const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
       expect(res.status).toBe(500);
       const data = await res.json();
-      expect(data.error).toBe("Failed to load Jira sprint tasks");
+      expect(data.error).toBe("Failed to load tracker tasks");
     });
   });
 
@@ -1112,6 +1111,59 @@ describe("API Routes", () => {
       expect(res.status).toBe(201);
       expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
         expect.objectContaining({ issueKey: "MYAPP-205" }),
+      );
+    });
+  });
+
+  describe("tracker task route aliases", () => {
+    it("GET /api/tracker/tasks proxies to tracker snapshot", async () => {
+      const res = await trackerTasksGET(makeRequest("/api/tracker/tasks?projectId=my-app"));
+      expect(res.status).toBe(200);
+      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "my-app" }),
+      );
+    });
+
+    it("POST /api/tracker/tasks starts task via shared handler", async () => {
+      const req = makeRequest("/api/tracker/tasks", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-300", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await trackerTasksPOST(req);
+      expect(res.status).toBe(201);
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({ issueKey: "MYAPP-300", projectId: "my-app" }),
+      );
+    });
+
+    it("POST /api/tracker/tasks/start keeps legacy start alias behavior", async () => {
+      const req = makeRequest("/api/tracker/tasks/start", {
+        method: "POST",
+        body: JSON.stringify({ issueKey: "MYAPP-301", projectId: "my-app" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await trackerTasksStartPOST(req);
+      expect(res.status).toBe(201);
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({ issueKey: "MYAPP-301", projectId: "my-app" }),
+      );
+    });
+
+    it("POST /api/tracker/tasks/:issueKey/start supports key-scoped endpoint", async () => {
+      const req = makeRequest("/api/tracker/tasks/MYAPP-302/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await trackerTaskByKeyStartPOST(req, {
+        params: Promise.resolve({ issueKey: "MYAPP-302" }),
+      });
+      expect(res.status).toBe(201);
+      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
+        expect.objectContaining({ issueKey: "MYAPP-302" }),
       );
     });
   });

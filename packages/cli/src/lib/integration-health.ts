@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:f
 import { dirname, join } from "node:path";
 import { getProjectBaseDir, type OrchestratorConfig, type ProjectConfig } from "@composio/ao-core";
 
-export type IntegrationService = "telegram" | "jira";
+export type IntegrationService = "telegram" | "jira" | "tracker";
 export type IntegrationKind = "polling" | "listener";
 export type IntegrationState = "inactive" | "starting" | "healthy" | "degraded";
 

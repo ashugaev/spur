@@ -1,5 +1,10 @@
-import type { ListenerConfig, OrchestratorConfig, SessionManager } from "@composio/ao-core";
-import { jiraBacklogSource } from "./jira-backlog-source.js";
+import type {
+  ListenerConfig,
+  OrchestratorConfig,
+  PluginRegistry,
+  SessionManager,
+} from "@composio/ao-core";
+import { jiraBacklogSource, jiraTaskSource, trackerTaskSource } from "./jira-backlog-source.js";
 import type { ListenerController, ListenerLogger, ListenerSource } from "./types.js";
 import type { IntegrationHealthReporter, IntegrationIdentity, IntegrationService } from "../integration-health.js";
 
@@ -10,6 +15,7 @@ export interface ListenerGroupController {
 
 interface StartConfiguredListenersDeps {
   config: OrchestratorConfig;
+  registry?: PluginRegistry;
   sessionManager: SessionManager;
   projectId?: string;
   logger?: ListenerLogger;
@@ -31,15 +37,14 @@ export function unregisterListenerSource(sourceName: string): void {
 }
 
 // Built-in sources
+registerListenerSource(trackerTaskSource);
+registerListenerSource(jiraTaskSource);
 registerListenerSource(jiraBacklogSource);
-
-function isEnabled(listener: ListenerConfig): boolean {
-  return listener.enabled !== false;
-}
 
 function resolveListenerService(listener: ListenerConfig): IntegrationService {
   const source = listener.source.toLowerCase();
   if (source.startsWith("telegram-") || source.includes("telegram")) return "telegram";
+  if (source.startsWith("tracker-") || source.includes("tracker")) return "tracker";
   return "jira";
 }
 
@@ -62,14 +67,25 @@ export async function maybeStartConfiguredListeners(
   const health = deps.healthReporter;
 
   // Merge top-level listeners with per-project listeners (projectId is implicit for the latter).
-  const globalListeners = deps.config.listeners ?? {};
-  const projectListeners: Record<string, ListenerConfig> = {};
+  // If ids collide, namespace per-project listeners to avoid silent overrides.
+  const listeners: Record<string, ListenerConfig> = { ...(deps.config.listeners ?? {}) };
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
-    for (const [listenerId, listener] of Object.entries(project.listeners ?? {})) {
-      projectListeners[listenerId] = { ...(listener as ListenerConfig), projectId };
+    const perProjectListeners =
+      (project as { listeners?: Record<string, Omit<ListenerConfig, "projectId">> }).listeners ??
+      {};
+    for (const [listenerId, listener] of Object.entries(perProjectListeners)) {
+      const baseId = listenerId;
+      const effectiveId = listenerId in listeners ? `${projectId}:${listenerId}` : listenerId;
+
+      if (effectiveId !== baseId) {
+        logger.warn(
+          `[listener:${baseId}] Duplicate listener id detected; using namespaced id "${effectiveId}"`,
+        );
+      }
+
+      listeners[effectiveId] = { ...listener, projectId } as ListenerConfig;
     }
   }
-  const listeners = { ...globalListeners, ...projectListeners };
 
   const controllers: ListenerController[] = [];
   const activeListeners: string[] = [];
@@ -78,10 +94,6 @@ export async function maybeStartConfiguredListeners(
   for (const [listenerId, listener] of Object.entries(listeners)) {
     const healthIdentity = buildHealthIdentity(listenerId, listener);
 
-    if (!isEnabled(listener)) {
-      health?.markInactive(healthIdentity, "Listener inactive: disabled in config");
-      continue;
-    }
     if (deps.projectId && listener.projectId !== deps.projectId) continue;
 
     const source = getListenerSource(listener.source);
@@ -112,6 +124,7 @@ export async function maybeStartConfiguredListeners(
       health?.markStarting(healthIdentity, "Starting listener runtime");
       const controller = await source.start({
         config: deps.config,
+        registry: deps.registry,
         listenerId,
         listener,
         projectId: listener.projectId,

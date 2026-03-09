@@ -16,6 +16,7 @@ export type {
   MergeReadiness,
   PRState,
 } from "@composio/ao-core/types";
+import type { IssueFilters } from "@composio/ao-core";
 
 import {
   ACTIVITY_STATE,
@@ -130,7 +131,7 @@ export interface DashboardStats {
 export type IntegrationStatusKey =
   | "telegramInboundPolling"
   | "jiraCommentPolling"
-  | "jiraTriggerListeners";
+  | "trackerTriggerListeners";
 
 export type IntegrationStatusState =
   | "inactive"
@@ -150,13 +151,13 @@ export interface IntegrationStatusEntry {
 export const INTEGRATION_STATUS_KEYS = [
   "telegramInboundPolling",
   "jiraCommentPolling",
-  "jiraTriggerListeners",
+  "trackerTriggerListeners",
 ] as const satisfies readonly IntegrationStatusKey[];
 
 export const INTEGRATION_STATUS_LABELS: Record<IntegrationStatusKey, string> = {
   telegramInboundPolling: "Telegram inbound polling",
   jiraCommentPolling: "Jira comment polling",
-  jiraTriggerListeners: "Jira trigger listeners",
+  trackerTriggerListeners: "Tracker trigger listeners",
 };
 
 export interface IntegrationsStatusSnapshot {
@@ -205,15 +206,12 @@ export interface JiraSprintTask {
 }
 
 export interface JiraSprintTaskListener {
-  /** Source adapter id (currently jira-backlog). */
+  /** Source adapter id (tracker-task; jira-task/jira-backlog legacy aliases). */
   source?: string;
   listenerId: string;
   projectId: string;
   projectName: string;
-  jql: string;
-  backlogStatus: string;
-  effectiveJql: string;
-  sprintJql: string;
+  filters: IssueFilters;
   triggerAgent: string | null;
 }
 

@@ -463,19 +463,21 @@ To add a custom tracker (Jira, Asana, etc.), create a plugin:
 
 See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
 
-### Jira Backlog Trigger Listener
+### Tracker Task Trigger Listener
 
-Use a background listener to auto-spawn sessions from Jira backlog without moving issue state on the board:
+Use a background listener to auto-spawn sessions from any tracker plugin that implements `listIssues` (Jira, Linear, GitHub, etc.):
 
 ```yaml
 listeners:
-  jira-broai:
-    enabled: true
-    source: jira-backlog
+  tracker-broai:
+    source: tracker-task
     projectId: int
     intervalMs: 60000
-    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-    backlogStatus: "Backlog"
+    filters:
+      state: open
+      assignee: "aleksey@intelas.com"
+      labels: ["BroAI"]
+      limit: 100
     trigger:
       type: spawn-session
 ```
@@ -483,7 +485,7 @@ listeners:
 Behavior:
 
 - Runs while `ao start` is running.
-- Enforces backlog-only selection in code (`status = "Backlog"` by default).
+- Pulls issues through the configured `tracker.plugin` for each project.
 - Triggers the same spawn flow as `ao spawn <project> <issue>`.
 - Takes each issue once; retries only after that issue's previous session is `killed` (not `cleanup`/`done`/etc.).
 - Never calls tracker state transitions (does not move cards on the board).

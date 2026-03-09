@@ -1015,21 +1015,19 @@ export interface ListenerTriggerConfig {
 }
 
 export interface ListenerConfig {
-  /** Whether this listener is enabled (default: true) */
-  enabled?: boolean;
-  /** Source adapter name (e.g. "jira-backlog") */
+  /** Source adapter name (e.g. "tracker-task"; jira-task/jira-backlog are legacy aliases) */
   source: string;
   /** Project id this listener operates on */
   projectId: string;
   /** Poll interval in milliseconds */
   intervalMs?: number;
-  /** Source-specific: backlog status name to enforce for jira-backlog (default: Backlog) */
-  backlogStatus?: string;
-  /** Source-specific: stale lock timeout in milliseconds for jira-backlog */
+  /** Generic tracker filters (mapped to tracker.listIssues). */
+  filters?: IssueFilters;
+  /** Source-specific: stale lock timeout in milliseconds for tracker-task */
   lockStaleMs?: number;
   /** Trigger behavior configuration */
   trigger?: ListenerTriggerConfig;
-  /** Source-specific fields (e.g. jql for jira-backlog) */
+  /** Source-specific fields/extensions */
   [key: string]: unknown;
 }
 

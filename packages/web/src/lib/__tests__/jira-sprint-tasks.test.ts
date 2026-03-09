@@ -2,8 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { OrchestratorConfig, Session, SessionManager } from "@composio/ao-core";
 import {
   buildJiraSprintTasksSnapshot,
-  buildListenerEffectiveJql,
-  buildListenerSprintJql,
+  buildListenerEffectiveFilters,
   extractJiraIssueKey,
 } from "../jira-sprint-tasks";
 
@@ -54,11 +53,14 @@ function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
     reactions: {},
     listeners: {
-      "jira-int": {
-        enabled: true,
-        source: "jira-backlog",
+      "tracker-int": {
+        source: "tracker-task",
         projectId: "int",
-        jql: 'assignee = currentUser() AND sprint in openSprints()',
+        filters: {
+          state: "open",
+          assignee: "currentUser",
+          labels: ["ao"],
+        },
       },
     },
     ...overrides,
@@ -79,28 +81,40 @@ function makeSessionManager(listImpl: SessionManager["list"]): SessionManager {
 }
 
 describe("jira-sprint-tasks helpers", () => {
-  it("builds effective listener JQL with escaped backlog status", () => {
-    const effective = buildListenerEffectiveJql('project = "INT"', 'Backlog "Now"');
-    expect(effective).toBe('(project = "INT") AND status = "Backlog \\"Now\\""');
+  it("builds effective tracker filters with defaults", () => {
+    expect(
+      buildListenerEffectiveFilters({
+        source: "tracker-task",
+        projectId: "int",
+      }),
+    ).toEqual({ state: "open", limit: 100 });
+
+    expect(
+      buildListenerEffectiveFilters({
+        source: "tracker-task",
+        projectId: "int",
+        filters: {
+          state: "all",
+          assignee: "alek",
+          labels: ["ao", "ao", "ops"],
+          limit: 50,
+        },
+      }),
+    ).toEqual({
+      state: "all",
+      assignee: "alek",
+      labels: ["ao", "ops"],
+      limit: 50,
+    });
   });
 
-  it("preserves ORDER BY when appending backlog/sprint constraints", () => {
-    const base = "project = INT ORDER BY created DESC";
-    expect(buildListenerEffectiveJql(base, "Backlog")).toBe(
-      '(project = INT) AND status = "Backlog" ORDER BY created DESC',
-    );
-    expect(buildListenerSprintJql(base)).toBe(
-      "(project = INT) AND sprint in openSprints() ORDER BY created DESC",
-    );
-  });
-
-  it("extracts Jira issue keys from keys and URLs", () => {
+  it("extracts Jira-like issue keys from keys and URLs", () => {
     expect(extractJiraIssueKey("INT-123")).toBe("INT-123");
     expect(extractJiraIssueKey(" https://acme.atlassian.net/browse/int-123 ")).toBe("INT-123");
     expect(extractJiraIssueKey("not-an-issue")).toBeNull();
   });
 
-  it("maps jira tasks to related active sessions and spawn availability", async () => {
+  it("maps tracker tasks to related active sessions and spawn availability", async () => {
     const config = makeConfig();
     const sessions = [
       makeSession({ id: "int-1", issueId: "INT-101", status: "working", activity: "active" }),
@@ -118,15 +132,15 @@ describe("jira-sprint-tasks helpers", () => {
         issueKey: "INT-101",
         issueUrl: "https://acme.atlassian.net/browse/INT-101",
         summary: "First task",
-        status: "Backlog",
-        statusCategory: "new",
+        status: "open",
+        statusCategory: "open",
       },
       {
         issueKey: "INT-102",
         issueUrl: "https://acme.atlassian.net/browse/INT-102",
         summary: "Second task",
-        status: "Backlog",
-        statusCategory: "new",
+        status: "open",
+        statusCategory: "open",
       },
     ]);
 
@@ -137,8 +151,13 @@ describe("jira-sprint-tasks helpers", () => {
     });
 
     expect(snapshot.listeners).toHaveLength(1);
-    expect(snapshot.listeners[0]?.listenerId).toBe("jira-int");
-    expect(snapshot.listeners[0]?.effectiveJql).toContain('status = "Backlog"');
+    expect(snapshot.listeners[0]?.listenerId).toBe("tracker-int");
+    expect(snapshot.listeners[0]?.filters).toEqual({
+      state: "open",
+      assignee: "currentUser",
+      labels: ["ao"],
+      limit: 100,
+    });
     expect(snapshot.tasks).toHaveLength(2);
 
     const firstTask = snapshot.tasks.find((task) => task.issueKey === "INT-101");
@@ -172,33 +191,45 @@ describe("jira-sprint-tasks helpers", () => {
   it("deduplicates tasks across listeners and supports project filtering", async () => {
     const config = makeConfig({
       listeners: {
-        "jira-int-a": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-int-a": {
+          source: "tracker-task",
           projectId: "int",
-          jql: "project = INT",
+          filters: { state: "open" },
         },
-        "jira-int-b": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-int-b": {
+          source: "tracker-task",
           projectId: "int",
-          jql: "project = INT",
-          backlogStatus: "To Do",
+          filters: { state: "open" },
         },
-        "jira-ao": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-ao": {
+          source: "tracker-task",
           projectId: "ao",
-          jql: "project = AO",
+          filters: { state: "open" },
         },
       },
     });
     const sessionManager = makeSessionManager(vi.fn(async () => []));
-    const issueFetcher = vi.fn(async (effectiveJql: string) => {
-      if (effectiveJql.includes("project = AO")) {
-        return [{ issueKey: "AO-1", issueUrl: null, summary: "AO task", status: "Backlog", statusCategory: "new" }];
+    const issueFetcher = vi.fn(async ({ listener }) => {
+      if (listener.projectId === "ao") {
+        return [
+          {
+            issueKey: "AO-1",
+            issueUrl: null,
+            summary: "AO task",
+            status: "open",
+            statusCategory: "open",
+          },
+        ];
       }
-      return [{ issueKey: "INT-200", issueUrl: null, summary: "INT task", status: "Backlog", statusCategory: "new" }];
+      return [
+        {
+          issueKey: "INT-200",
+          issueUrl: null,
+          summary: "INT task",
+          status: "open",
+          statusCategory: "open",
+        },
+      ];
     });
 
     const snapshot = await buildJiraSprintTasksSnapshot({
@@ -209,26 +240,27 @@ describe("jira-sprint-tasks helpers", () => {
     });
 
     expect(snapshot.projectId).toBe("int");
-    expect(snapshot.listeners.map((listener) => listener.listenerId)).toEqual(["jira-int-a", "jira-int-b"]);
+    expect(snapshot.listeners.map((listener) => listener.listenerId)).toEqual([
+      "tracker-int-a",
+      "tracker-int-b",
+    ]);
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]?.issueKey).toBe("INT-200");
-    expect(snapshot.tasks[0]?.listenerIds).toEqual(["jira-int-a", "jira-int-b"]);
+    expect(snapshot.tasks[0]?.listenerIds).toEqual(["tracker-int-a", "tracker-int-b"]);
   });
 
   it("deduplicates related active sessions across multiple listeners for same issue", async () => {
     const config = makeConfig({
       listeners: {
-        "jira-int-a": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-int-a": {
+          source: "tracker-task",
           projectId: "int",
-          jql: "project = INT",
+          filters: { state: "open" },
         },
-        "jira-int-b": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-int-b": {
+          source: "tracker-task",
           projectId: "int",
-          jql: "project = INT",
+          filters: { state: "open" },
         },
       },
     });
@@ -242,8 +274,8 @@ describe("jira-sprint-tasks helpers", () => {
         issueKey: "INT-300",
         issueUrl: "https://acme.atlassian.net/browse/INT-300",
         summary: "Task with active session",
-        status: "Backlog",
-        statusCategory: "new",
+        status: "open",
+        statusCategory: "open",
       },
     ]);
 
@@ -255,7 +287,7 @@ describe("jira-sprint-tasks helpers", () => {
 
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]?.issueKey).toBe("INT-300");
-    expect(snapshot.tasks[0]?.listenerIds).toEqual(["jira-int-a", "jira-int-b"]);
+    expect(snapshot.tasks[0]?.listenerIds).toEqual(["tracker-int-a", "tracker-int-b"]);
     expect(snapshot.tasks[0]?.relatedActiveSessions.map((session) => session.id)).toEqual([
       "int-dup",
     ]);
@@ -264,15 +296,13 @@ describe("jira-sprint-tasks helpers", () => {
     expect(sessionManager.list).toHaveBeenCalledTimes(1);
   });
 
-  it("marks task as non-startable when issue is not in backlog status", async () => {
+  it("treats task as startable when it is in listener scope and has no active session", async () => {
     const config = makeConfig({
       listeners: {
-        "jira-int-a": {
-          enabled: true,
-          source: "jira-backlog",
+        "tracker-int-a": {
+          source: "tracker-task",
           projectId: "int",
-          jql: "project = INT",
-          backlogStatus: "Backlog",
+          filters: { state: "open" },
         },
       },
     });
@@ -282,8 +312,8 @@ describe("jira-sprint-tasks helpers", () => {
         issueKey: "INT-301",
         issueUrl: "https://acme.atlassian.net/browse/INT-301",
         summary: "In progress task",
-        status: "In Progress",
-        statusCategory: "indeterminate",
+        status: "in_progress",
+        statusCategory: "in_progress",
       },
     ]);
 
@@ -295,7 +325,7 @@ describe("jira-sprint-tasks helpers", () => {
 
     expect(snapshot.tasks).toHaveLength(1);
     expect(snapshot.tasks[0]?.issueKey).toBe("INT-301");
-    expect(snapshot.tasks[0]?.spawnAvailable).toBe(false);
-    expect(snapshot.tasks[0]?.canStart).toBe(false);
+    expect(snapshot.tasks[0]?.spawnAvailable).toBe(true);
+    expect(snapshot.tasks[0]?.canStart).toBe(true);
   });
 });

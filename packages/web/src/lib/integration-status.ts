@@ -26,10 +26,13 @@ const KEY_ALIASES: Record<IntegrationStatusKey, readonly string[]> = {
     "jiraPolling",
     "jira_comment_polling",
   ],
-  jiraTriggerListeners: [
+  trackerTriggerListeners: [
+    "trackerTriggerListeners",
     "jiraTriggerListeners",
     "triggerListeners",
     "listeners",
+    "trackerListeners",
+    "tracker_trigger_listeners",
     "jiraListeners",
     "jira_trigger_listeners",
   ],
@@ -355,27 +358,27 @@ function buildFromEntries(entries: JsonRecord[]): Record<IntegrationStatusKey, I
       return service === "jira" && kind === "polling";
     });
 
-  const jiraListenerEntries = entries.filter((entry) => {
+  const trackerListenerEntries = entries.filter((entry) => {
     const kind = toNullableLower(entry["kind"]);
     const service = toNullableLower(entry["service"]);
     const id = toNullableLower(entry["id"]);
     if (kind !== "listener") return false;
-    if (service === "jira") return true;
-    return typeof id === "string" && id.startsWith("listener:jira");
+    if (service === "tracker" || service === "jira") return true;
+    return typeof id === "string" && (id.startsWith("listener:tracker") || id.startsWith("listener:jira"));
   });
 
   const listenersEntry: IntegrationStatusEntry = (() => {
-    if (jiraListenerEntries.length === 0) {
+    if (trackerListenerEntries.length === 0) {
       return {
         active: false,
         connected: false,
         ok: false,
         state: "inactive",
-        message: "No Jira trigger listeners configured",
+        message: "No tracker trigger listeners configured",
       };
     }
 
-    const normalized = jiraListenerEntries.map((entry) => normalizeEntry(entry));
+    const normalized = trackerListenerEntries.map((entry) => normalizeEntry(entry));
     const total = normalized.length;
     const activeCount = normalized.filter((entry) => entry.active).length;
     const connectedCount = normalized.filter((entry) => entry.connected).length;
@@ -402,7 +405,7 @@ function buildFromEntries(entries: JsonRecord[]): Record<IntegrationStatusKey, I
   return {
     telegramInboundPolling: normalizeEntry(telegramPolling),
     jiraCommentPolling: normalizeEntry(jiraCommentPolling),
-    jiraTriggerListeners: listenersEntry,
+    trackerTriggerListeners: listenersEntry,
   };
 }
 
