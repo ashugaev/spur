@@ -153,8 +153,6 @@ See [`agent-orchestrator.yaml.example`](agent-orchestrator.yaml.example) for the
 
 Auto-spawn from issue trackers uses `source: tracker-task` plus portable `filters` (`state`, `assignee`, `labels`, `limit`). The same contract works in top-level `listeners` and per-project `projects.<id>.listeners`.
 
-`jql` is intentionally not part of this schema. It is Jira-specific and would hardcode Jira into a tracker-generic listener. The shared listener calls `tracker.listIssues(...)`; Jira-specific query semantics belong inside the Jira tracker plugin, not in the common config format.
-
 ## CLI
 
 ```bash
