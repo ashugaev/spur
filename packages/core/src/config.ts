@@ -85,6 +85,7 @@ const ListenerConfigBaseSchema = z
     source: z.string(),
     projectId: z.string(),
     intervalMs: z.number().positive().optional(),
+    mode: z.enum(["spawn", "observe"]).default("spawn"),
     filters: z
       .object({
         state: z.enum(["open", "closed", "all"]).optional(),
@@ -98,10 +99,7 @@ const ListenerConfigBaseSchema = z
   })
   .passthrough();
 
-function validateLegacyListenerFields(
-  value: Record<string, unknown>,
-  ctx: z.RefinementCtx,
-): void {
+function validateLegacyListenerFields(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
   const legacyFields = ["enabled", "jql", "backlogStatus"] as const;
   for (const field of legacyFields) {
     if (Object.prototype.hasOwnProperty.call(value, field)) {

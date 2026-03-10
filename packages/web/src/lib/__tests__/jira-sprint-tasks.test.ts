@@ -4,6 +4,7 @@ import {
   buildJiraSprintTasksSnapshot,
   buildListenerEffectiveFilters,
   extractJiraIssueKey,
+  startJiraSprintTask,
 } from "../jira-sprint-tasks";
 
 function makeSession(overrides: Partial<Session> & { id: string }): Session {
@@ -327,5 +328,120 @@ describe("jira-sprint-tasks helpers", () => {
     expect(snapshot.tasks[0]?.issueKey).toBe("INT-301");
     expect(snapshot.tasks[0]?.spawnAvailable).toBe(true);
     expect(snapshot.tasks[0]?.canStart).toBe(true);
+  });
+
+  it("treats task as not startable in observe mode", async () => {
+    const config = makeConfig({
+      listeners: {
+        "tracker-int-observe": {
+          source: "tracker-task",
+          projectId: "int",
+          mode: "observe",
+          filters: { state: "open" },
+        },
+      },
+    });
+    const sessionManager = makeSessionManager(vi.fn(async () => []));
+    const issueFetcher = vi.fn(async () => [
+      {
+        issueKey: "INT-401",
+        issueUrl: "https://acme.atlassian.net/browse/INT-401",
+        summary: "Observe only task",
+        status: "open",
+        statusCategory: "open",
+      },
+    ]);
+
+    const snapshot = await buildJiraSprintTasksSnapshot({
+      config,
+      sessionManager,
+      issueFetcher,
+    });
+
+    expect(snapshot.tasks).toHaveLength(1);
+    expect(snapshot.tasks[0]?.issueKey).toBe("INT-401");
+    expect(snapshot.tasks[0]?.spawnAvailable).toBe(false);
+    expect(snapshot.tasks[0]?.canStart).toBe(false);
+  });
+
+  it("blocks start when issue is linked only to observe listeners", async () => {
+    const config = makeConfig({
+      listeners: {
+        "tracker-int-observe": {
+          source: "tracker-task",
+          projectId: "int",
+          mode: "observe",
+          filters: { state: "open" },
+        },
+      },
+    });
+    const sessionManager = makeSessionManager(vi.fn(async () => []));
+    const issueFetcher = vi.fn(async () => [
+      {
+        issueKey: "INT-402",
+        issueUrl: "https://acme.atlassian.net/browse/INT-402",
+        summary: "Observe only task",
+        status: "open",
+        statusCategory: "open",
+      },
+    ]);
+
+    await expect(
+      startJiraSprintTask({
+        config,
+        sessionManager,
+        issueFetcher,
+        issueKey: "INT-402",
+        projectId: "int",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "not_startable",
+    });
+    expect(sessionManager.spawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects explicit observe listener when spawn listener also exists", async () => {
+    const config = makeConfig({
+      listeners: {
+        "tracker-int-observe": {
+          source: "tracker-task",
+          projectId: "int",
+          mode: "observe",
+          filters: { state: "open" },
+        },
+        "tracker-int-spawn": {
+          source: "tracker-task",
+          projectId: "int",
+          mode: "spawn",
+          filters: { state: "open" },
+        },
+      },
+    });
+    const sessionManager = makeSessionManager(vi.fn(async () => []));
+    const issueFetcher = vi.fn(async () => [
+      {
+        issueKey: "INT-403",
+        issueUrl: "https://acme.atlassian.net/browse/INT-403",
+        summary: "Mixed listeners task",
+        status: "open",
+        statusCategory: "open",
+      },
+    ]);
+
+    await expect(
+      startJiraSprintTask({
+        config,
+        sessionManager,
+        issueFetcher,
+        issueKey: "INT-403",
+        projectId: "int",
+        listenerId: "tracker-int-observe",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "not_startable",
+    });
+    expect(sessionManager.spawn).not.toHaveBeenCalled();
   });
 });

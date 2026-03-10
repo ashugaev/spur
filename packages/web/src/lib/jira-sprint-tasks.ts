@@ -20,6 +20,7 @@ import { buildProjectSessionPath } from "./project-routes";
 
 const TERMINAL_STATUS_SET: ReadonlySet<string> = TERMINAL_STATUSES;
 const SPRINT_TASKS_START_ENDPOINT = "/api/tracker/tasks";
+type TrackerTaskListenerMode = "spawn" | "observe";
 
 const globalForJiraSprintTasks = globalThis as typeof globalThis & {
   _jiraSprintTaskStartLocks?: Set<string>;
@@ -167,8 +168,9 @@ function toStringArray(value: unknown): string[] {
 }
 
 export function buildListenerEffectiveFilters(listener: ListenerConfig): IssueFilters {
-  const rawFilters =
-    isRecord(listener.filters) ? (listener.filters as Record<string, unknown>) : {};
+  const rawFilters = isRecord(listener.filters)
+    ? (listener.filters as Record<string, unknown>)
+    : {};
 
   const resolvedState = toNullableString(rawFilters["state"] ?? listener["state"]);
   const state: IssueFilters["state"] =
@@ -198,6 +200,15 @@ function readTriggerAgent(listener: ListenerConfig): string | null {
   return toNullableString(listener.trigger["agent"]);
 }
 
+function readListenerMode(listener: ListenerConfig): TrackerTaskListenerMode {
+  const rawMode = toNullableString(listener["mode"]);
+  return rawMode === "observe" ? "observe" : "spawn";
+}
+
+function isSpawnListenerMode(mode: TrackerTaskListenerMode | null | undefined): boolean {
+  return mode !== "observe";
+}
+
 function collectTrackerTaskListeners(
   config: OrchestratorConfig,
   projectId?: string,
@@ -217,6 +228,7 @@ function collectTrackerTaskListeners(
       listenerId,
       projectId: listener.projectId,
       projectName: project.name ?? listener.projectId,
+      mode: readListenerMode(listener),
       filters: buildListenerEffectiveFilters(listener),
       triggerAgent: readTriggerAgent(listener),
     });
@@ -400,11 +412,14 @@ export async function buildJiraSprintTasksSnapshot(
   const tasksByIssueKey = new Map<string, JiraSprintTask>();
   const startEligibleIssueKeys = new Set<string>();
 
-  const getSessionsByIssueForProject = async (projectId: string): Promise<Map<string, Session[]>> => {
+  const getSessionsByIssueForProject = async (
+    projectId: string,
+  ): Promise<Map<string, Session[]>> => {
     const cached = sessionsByIssueCache.get(projectId);
     if (cached) return cached;
 
-    const sessions = projectSessionsCache.get(projectId) ?? (await opts.sessionManager.list(projectId));
+    const sessions =
+      projectSessionsCache.get(projectId) ?? (await opts.sessionManager.list(projectId));
     projectSessionsCache.set(projectId, sessions);
 
     const sessionsByIssue = new Map<string, Session[]>();
@@ -437,7 +452,9 @@ export async function buildJiraSprintTasksSnapshot(
     for (const issue of issues) {
       const relatedSessions = sessionsByIssue.get(issue.issueKey) ?? [];
       const relatedActiveSessions = relatedSessions.filter(isActiveSession).map(toTaskSession);
-      startEligibleIssueKeys.add(issue.issueKey);
+      if (isSpawnListenerMode(listener.mode)) {
+        startEligibleIssueKeys.add(issue.issueKey);
+      }
       upsertTask(tasksByIssueKey, issue, listener, relatedActiveSessions);
     }
   }
@@ -497,7 +514,9 @@ async function resolveStartContext(
   });
 
   const task = snapshot.tasks.find((entry) => entry.issueKey === opts.normalizedIssueKey);
-  const listenersById = new Map(snapshot.listeners.map((listener) => [listener.listenerId, listener]));
+  const listenersById = new Map(
+    snapshot.listeners.map((listener) => [listener.listenerId, listener]),
+  );
 
   if (!task) {
     throw new JiraSprintTaskError(
@@ -538,8 +557,8 @@ async function resolveStartContext(
     );
   }
 
-  const projectIds = [...new Set(candidateListeners.map((listener) => listener.projectId))].sort((a, b) =>
-    a.localeCompare(b),
+  const projectIds = [...new Set(candidateListeners.map((listener) => listener.projectId))].sort(
+    (a, b) => a.localeCompare(b),
   );
 
   const resolvedProjectId = requestedProjectId ?? projectIds[0];
@@ -574,7 +593,9 @@ async function resolveStartContext(
     );
   }
 
-  const listenerForProject = candidateListeners.find((listener) => listener.projectId === resolvedProjectId);
+  const listenerForProject = candidateListeners.find(
+    (listener) => listener.projectId === resolvedProjectId,
+  );
   if (!listenerForProject) {
     throw new JiraSprintTaskError(
       409,
@@ -587,12 +608,51 @@ async function resolveStartContext(
     );
   }
 
+  const listenersForProject = candidateListeners.filter(
+    (listener) => listener.projectId === resolvedProjectId,
+  );
+  const requestedListener =
+    requestedListenerId !== undefined
+      ? (listenersForProject.find((listener) => listener.listenerId === requestedListenerId) ??
+        null)
+      : null;
+  const spawnCapableListener =
+    requestedListener ??
+    listenersForProject.find((listener) => isSpawnListenerMode(listener.mode)) ??
+    null;
+
+  if (!spawnCapableListener || !isSpawnListenerMode(spawnCapableListener.mode)) {
+    if (requestedListenerId !== undefined && requestedListener) {
+      throw new JiraSprintTaskError(
+        409,
+        "not_startable",
+        `Listener ${requestedListener.listenerId} is observe-only and cannot start sessions`,
+        {
+          listenerId: requestedListener.listenerId,
+          mode: requestedListener.mode ?? "spawn",
+          issueKey: opts.normalizedIssueKey,
+          projectId: resolvedProjectId,
+        },
+      );
+    }
+
+    throw new JiraSprintTaskError(
+      409,
+      "not_startable",
+      `Issue ${opts.normalizedIssueKey} is linked only to observe listeners in project ${resolvedProjectId}`,
+      {
+        issueKey: opts.normalizedIssueKey,
+        projectId: resolvedProjectId,
+      },
+    );
+  }
+
   return {
     issueKey: opts.normalizedIssueKey,
     projectId: resolvedProjectId,
-    listenerId: listenerForProject.listenerId,
-    triggerAgent: listenerForProject.triggerAgent,
-    spawnAvailable: task.spawnAvailable,
+    listenerId: spawnCapableListener.listenerId,
+    triggerAgent: spawnCapableListener.triggerAgent,
+    spawnAvailable: task.relatedActiveSessions.length === 0,
   };
 }
 

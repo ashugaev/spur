@@ -1014,6 +1014,8 @@ export interface ListenerTriggerConfig {
   [key: string]: unknown;
 }
 
+export type ListenerMode = "spawn" | "observe";
+
 export interface ListenerConfig {
   /** Source adapter name (e.g. "tracker-task"; jira-task/jira-backlog are legacy aliases) */
   source: string;
@@ -1021,6 +1023,8 @@ export interface ListenerConfig {
   projectId: string;
   /** Poll interval in milliseconds */
   intervalMs?: number;
+  /** Listener behavior mode: spawn sessions or only observe/list issues */
+  mode?: ListenerMode;
   /** Generic tracker filters (mapped to tracker.listIssues). */
   filters?: IssueFilters;
   /** Source-specific: stale lock timeout in milliseconds for tracker-task */

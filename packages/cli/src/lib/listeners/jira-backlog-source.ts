@@ -88,7 +88,9 @@ function readState(statePath: string): TrackerTaskListenerState {
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as Partial<TrackerTaskListenerState>;
+    const parsed = JSON.parse(
+      readFileSync(statePath, "utf-8"),
+    ) as Partial<TrackerTaskListenerState>;
     if (
       parsed &&
       parsed.version === STATE_VERSION &&
@@ -312,6 +314,11 @@ function toStringArray(value: unknown): string[] {
   return [...new Set(values)];
 }
 
+function readListenerMode(listener: ListenerStartDeps["listener"]): "spawn" | "observe" {
+  const value = toNonEmptyString(listener["mode"]);
+  return value === "observe" ? "observe" : "spawn";
+}
+
 function readListenerIssueFilters(listener: ListenerStartDeps["listener"]): IssueFilters {
   const rawFilters =
     typeof listener.filters === "object" && listener.filters !== null
@@ -326,8 +333,7 @@ function readListenerIssueFilters(listener: ListenerStartDeps["listener"]): Issu
 
   const labels = toStringArray(rawFilters["labels"] ?? listener["labels"]);
   const assignee = toNonEmptyString(rawFilters["assignee"] ?? listener["assignee"]);
-  const limit =
-    toPositiveNumber(rawFilters["limit"] ?? listener["limit"]) ?? DEFAULT_ISSUE_LIMIT;
+  const limit = toPositiveNumber(rawFilters["limit"] ?? listener["limit"]) ?? DEFAULT_ISSUE_LIMIT;
 
   return {
     state,
@@ -342,7 +348,9 @@ function assertNoLegacyListenerFields(
   listenerId: string,
 ): void {
   const legacyFields = ["enabled", "jql", "backlogStatus"] as const;
-  const present = legacyFields.filter((field) => Object.prototype.hasOwnProperty.call(listener, field));
+  const present = legacyFields.filter((field) =>
+    Object.prototype.hasOwnProperty.call(listener, field),
+  );
   if (present.length === 0) return;
 
   throw new Error(
@@ -488,9 +496,7 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
       : DEFAULT_LOCK_STALE_MS;
   const pendingClaimTtlMs = Math.max(lockStaleMs * 2, DEFAULT_PENDING_CLAIM_TTL_MS);
   const triggerType =
-    typeof listener.trigger === "object" &&
-    listener.trigger !== null &&
-    "type" in listener.trigger
+    typeof listener.trigger === "object" && listener.trigger !== null && "type" in listener.trigger
       ? String(listener.trigger.type)
       : "spawn-session";
   const agentOverride =
@@ -526,6 +532,7 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
   }
 
   const issueFilters = readListenerIssueFilters(listener);
+  const listenerMode = readListenerMode(listener);
   assertNoLegacyListenerFields(listener, listenerId);
   const jiraStyleCaseInsensitive = trackerPluginName.toLowerCase() === "jira";
   const statePath = buildStatePath(config.configPath, project.path, listenerId);
@@ -553,20 +560,33 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
     healthReporter?.markInactive(integrationIdentity, "Tracker task listener stopped");
   };
 
-  healthReporter?.markStarting(integrationIdentity, "Starting tracker task listener");
+  healthReporter?.markStarting(
+    integrationIdentity,
+    `Starting tracker task listener (mode: ${listenerMode})`,
+  );
 
   const pollOnce = async () => {
     if (stopped || inFlight) return;
     inFlight = true;
     let cycleHadErrors = false;
-    let cycleIssueCount: number;
+    let cycleIssueCount = 0;
 
     try {
-      const [issueIdMap, sessions] = await Promise.all([
-        listIssueIdentifiersByFilters(tracker, issueFilters, project, { jiraStyleCaseInsensitive }),
-        sessionManager.list(projectId),
-      ]);
+      const issueIdMap = await listIssueIdentifiersByFilters(tracker, issueFilters, project, {
+        jiraStyleCaseInsensitive,
+      });
       cycleIssueCount = issueIdMap.size;
+      if (stopped) return;
+
+      if (listenerMode === "observe") {
+        healthReporter?.markHealthy(
+          integrationIdentity,
+          `Listener active (observe mode); cycle completed (${cycleIssueCount} issues checked)`,
+        );
+        return;
+      }
+
+      const sessions = await sessionManager.list(projectId);
       if (stopped) return;
 
       const sessionsByIssue = new Map<string, KnownSessionState[]>();

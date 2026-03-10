@@ -217,7 +217,10 @@ describe("trackerTaskSource", () => {
       },
     ]);
 
-    const sm = makeSessionManager(async () => [], async () => makeSession("intelas-1", "INT-101"));
+    const sm = makeSessionManager(
+      async () => [],
+      async () => makeSession("intelas-1", "INT-101"),
+    );
 
     const controller = await trackerTaskSource.start({
       config,
@@ -316,8 +319,14 @@ describe("trackerTaskSource", () => {
       },
     ]);
 
-    const smA = makeSessionManager(async () => [], async () => firstSpawn.promise);
-    const smB = makeSessionManager(async () => [], async () => makeSession("intelas-2", "INT-101"));
+    const smA = makeSessionManager(
+      async () => [],
+      async () => firstSpawn.promise,
+    );
+    const smB = makeSessionManager(
+      async () => [],
+      async () => makeSession("intelas-2", "INT-101"),
+    );
 
     const controllerA = await trackerTaskSource.start({
       config,
@@ -367,7 +376,10 @@ describe("trackerTaskSource", () => {
       throw missingBinary;
     });
 
-    const sm = makeSessionManager(async () => [], async () => makeSession("intelas-1", "INT-101"));
+    const sm = makeSessionManager(
+      async () => [],
+      async () => makeSession("intelas-1", "INT-101"),
+    );
 
     const controller = await trackerTaskSource.start({
       config,
@@ -389,6 +401,57 @@ describe("trackerTaskSource", () => {
         String(message).includes("Tracker dependencies are not available; disabling listener"),
       ),
     ).toBe(true);
+
+    controller.stop();
+  });
+
+  it("supports observe mode without spawning sessions", async () => {
+    const config = makeConfig(rootDir);
+    const listener = {
+      ...(config.listeners?.["tracker-broai"] as ListenerConfig),
+      mode: "observe",
+    } as ListenerConfig;
+    const healthReporter = makeHealthReporterStub();
+    const listIssues = vi.fn(async () => [
+      {
+        id: "INT-102",
+        title: "Task 102",
+        description: "",
+        url: "https://acme.atlassian.net/browse/INT-102",
+        state: "open",
+        labels: [],
+      },
+    ]);
+    const registry = makeRegistry(listIssues);
+
+    const sm = makeSessionManager(
+      async () => [],
+      async () => makeSession("intelas-2", "INT-102"),
+    );
+
+    const controller = await trackerTaskSource.start({
+      config,
+      registry,
+      listenerId: "tracker-broai-observe",
+      listener,
+      projectId: "int",
+      project: config.projects.int!,
+      sessionManager: sm,
+      logger: { warn: vi.fn() },
+      healthReporter,
+    });
+
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(listIssues).toHaveBeenCalled();
+    expect(sm.spawn).not.toHaveBeenCalled();
+    expect(healthReporter.markHealthy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "listener:tracker-broai-observe" }),
+      expect.stringContaining("observe mode"),
+    );
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(sm.spawn).not.toHaveBeenCalled();
 
     controller.stop();
   });

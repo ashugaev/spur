@@ -134,12 +134,7 @@ export type IntegrationStatusKey =
   | "trackerTriggerListeners"
   | "reactionEngine";
 
-export type IntegrationStatusState =
-  | "inactive"
-  | "starting"
-  | "healthy"
-  | "degraded"
-  | "unknown";
+export type IntegrationStatusState = "inactive" | "starting" | "healthy" | "degraded" | "unknown";
 
 export interface IntegrationStatusEntry {
   id?: string;
@@ -224,6 +219,7 @@ export interface JiraSprintTaskListener {
   listenerId: string;
   projectId: string;
   projectName: string;
+  mode?: "spawn" | "observe";
   filters: IssueFilters;
   triggerAgent: string | null;
 }

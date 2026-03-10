@@ -183,6 +183,53 @@ listeners:
       expect(() => loadConfig(configPath)).toThrow(/no longer supported/);
       expect(() => loadConfig(configPath)).toThrow(/source: tracker-task/);
     });
+
+    it("supports listener mode and defaults to spawn", () => {
+      const configPath = join(testDir, "listener-mode.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+listeners:
+  observe-only:
+    source: tracker-task
+    projectId: test-project
+    mode: observe
+  spawn-default:
+    source: tracker-task
+    projectId: test-project
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.listeners["observe-only"]?.mode).toBe("observe");
+      expect(config.listeners["spawn-default"]?.mode).toBe("spawn");
+    });
+
+    it("rejects unknown listener mode", () => {
+      const configPath = join(testDir, "listener-mode-invalid.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+listeners:
+  invalid-mode:
+    source: tracker-task
+    projectId: test-project
+    mode: watch
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/mode/);
+    });
   });
 
   describe("Config Discovery Priority", () => {
