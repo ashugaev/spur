@@ -877,9 +877,6 @@ export interface OrchestratorConfig {
   /** Default reaction configs */
   reactions: Record<string, ReactionConfig>;
 
-  /** Background listeners (issue/event sources that auto-trigger actions) */
-  listeners?: Record<string, ListenerConfig>;
-
   /** Shared services config (transcriber, etc). */
   services?: ServicesConfig;
 
@@ -946,10 +943,7 @@ export interface ProjectConfig {
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
 
-  /**
-   * Per-project trigger listeners (alternative to top-level listeners).
-   * projectId is implicit — no need to set it here.
-   */
+  /** Per-project trigger listeners (projectId is implicit). */
   listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
 }
 
@@ -1017,7 +1011,7 @@ export interface ListenerTriggerConfig {
 export type ListenerMode = "spawn" | "observe";
 
 export interface ListenerConfig {
-  /** Source adapter name (e.g. "tracker-task"; jira-task/jira-backlog are legacy aliases) */
+  /** Source adapter name (v1: "tracker-task") */
   source: string;
   /** Project id this listener operates on */
   projectId: string;

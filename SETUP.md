@@ -469,26 +469,28 @@ See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
 Use a background listener to auto-spawn sessions from any tracker plugin that implements `listIssues` (Jira, Linear, GitHub, etc.):
 
 ```yaml
-listeners:
-  tracker-broai:
-    source: tracker-task
-    projectId: int
-    intervalMs: 60000
-    mode: spawn
-    filters:
-      state: open
-      assignee: "aleksey@intelas.com"
-      labels: ["BroAI"]
-      limit: 100
-    trigger:
-      type: spawn-session
+projects:
+  int:
+    repo: acme/int
+    path: /path/to/int
+    listeners:
+      tracker-broai:
+        source: tracker-task
+        intervalMs: 60000
+        mode: spawn
+        filters:
+          state: open
+          assignee: "aleksey@intelas.com"
+          labels: ["BroAI"]
+          limit: 100
+        trigger:
+          type: spawn-session
 ```
 
 Supported variants:
 
-- Top-level `listeners.<id>`: use when you want one shared listener registry for the whole orchestrator.
-- Per-project `projects.<projectId>.listeners.<id>`: same schema, but `projectId` is implicit.
-- Canonical source is `tracker-task`; `jira-task` and `jira-backlog` are legacy aliases only.
+- Only per-project listeners are supported: `projects.<projectId>.listeners.<id>`.
+- Source is `tracker-task`.
 
 Arguments:
 

@@ -4,9 +4,13 @@ import type {
   PluginRegistry,
   SessionManager,
 } from "@composio/ao-core";
-import { jiraBacklogSource, jiraTaskSource, trackerTaskSource } from "./jira-backlog-source.js";
+import { trackerTaskSource } from "./jira-task-source.js";
 import type { ListenerController, ListenerLogger, ListenerSource } from "./types.js";
-import type { IntegrationHealthReporter, IntegrationIdentity, IntegrationService } from "../integration-health.js";
+import type {
+  IntegrationHealthReporter,
+  IntegrationIdentity,
+  IntegrationService,
+} from "../integration-health.js";
 
 export interface ListenerGroupController {
   activeListeners: string[];
@@ -38,8 +42,6 @@ export function unregisterListenerSource(sourceName: string): void {
 
 // Built-in sources
 registerListenerSource(trackerTaskSource);
-registerListenerSource(jiraTaskSource);
-registerListenerSource(jiraBacklogSource);
 
 function resolveListenerService(listener: ListenerConfig): IntegrationService {
   const source = listener.source.toLowerCase();
@@ -48,10 +50,7 @@ function resolveListenerService(listener: ListenerConfig): IntegrationService {
   return "jira";
 }
 
-function buildHealthIdentity(
-  listenerId: string,
-  listener: ListenerConfig,
-): IntegrationIdentity {
+function buildHealthIdentity(listenerId: string, listener: ListenerConfig): IntegrationIdentity {
   return {
     id: `listener:${listenerId}`,
     label: `Listener ${listenerId} (${listener.source})`,
@@ -66,9 +65,9 @@ export async function maybeStartConfiguredListeners(
   const logger = deps.logger ?? console;
   const health = deps.healthReporter;
 
-  // Merge top-level listeners with per-project listeners (projectId is implicit for the latter).
-  // If ids collide, namespace per-project listeners to avoid silent overrides.
-  const listeners: Record<string, ListenerConfig> = { ...(deps.config.listeners ?? {}) };
+  // Collect per-project listeners only. projectId is implicit and injected here.
+  // If ids collide across projects, namespace with projectId to avoid overrides.
+  const listeners: Record<string, ListenerConfig> = {};
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
     const perProjectListeners =
       (project as { listeners?: Record<string, Omit<ListenerConfig, "projectId">> }).listeners ??
@@ -137,17 +136,11 @@ export async function maybeStartConfiguredListeners(
       controllers.push(controller);
       activeListeners.push(listenerId);
       activeListenerHealthIdentities.push(healthIdentity);
-      health?.markHealthy(
-        healthIdentity,
-        `Listener active: source "${listener.source}"`,
-      );
+      health?.markHealthy(healthIdentity, `Listener active: source "${listener.source}"`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`[listener:${listenerId}] Failed to start listener: ${msg}`);
-      health?.markInactive(
-        healthIdentity,
-        `Listener inactive: failed to start (${msg})`,
-      );
+      health?.markInactive(healthIdentity, `Listener inactive: failed to start (${msg})`);
     }
   }
 

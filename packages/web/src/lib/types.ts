@@ -214,7 +214,7 @@ export interface JiraSprintTask {
 }
 
 export interface JiraSprintTaskListener {
-  /** Source adapter id (tracker-task; jira-task/jira-backlog legacy aliases). */
+  /** Source adapter id (v1: tracker-task). */
   source?: string;
   listenerId: string;
   projectId: string;

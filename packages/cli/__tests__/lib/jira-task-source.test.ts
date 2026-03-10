@@ -12,7 +12,7 @@ import type {
   Tracker,
 } from "@composio/ao-core";
 import type { IntegrationHealthReporter } from "../../src/lib/integration-health.js";
-import { trackerTaskSource } from "../../src/lib/listeners/jira-backlog-source.js";
+import { trackerTaskSource } from "../../src/lib/listeners/jira-task-source.js";
 
 const { mockedPaths, archivedStateBySession } = vi.hoisted(() => ({
   mockedPaths: { baseDir: "", sessionsDir: "" },
@@ -67,24 +67,23 @@ function makeConfig(rootDir: string): OrchestratorConfig {
         defaultBranch: "main",
         sessionPrefix: "intelas",
         tracker: { plugin: "jira" },
+        listeners: {
+          "tracker-broai": {
+            source: "tracker-task",
+            intervalMs: 60_000,
+            filters: {
+              state: "open",
+              assignee: "aleksey@intelas.com",
+              labels: ["BroAI"],
+            },
+            trigger: { type: "spawn-session" },
+          },
+        },
       },
     },
     notifiers: {},
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
     reactions: {},
-    listeners: {
-      "tracker-broai": {
-        source: "tracker-task",
-        projectId: "int",
-        intervalMs: 60_000,
-        filters: {
-          state: "open",
-          assignee: "aleksey@intelas.com",
-          labels: ["BroAI"],
-        },
-        trigger: { type: "spawn-session" },
-      },
-    },
   };
 }
 
@@ -203,7 +202,7 @@ describe("trackerTaskSource", () => {
 
   it("spawns once for issue ids returned by tracker.listIssues", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
+    const listener = config.projects.int?.listeners?.["tracker-broai"] as ListenerConfig;
     const warn = vi.fn();
     const healthReporter = makeHealthReporterStub();
     const registry = makeRegistry(async () => [
@@ -255,7 +254,7 @@ describe("trackerTaskSource", () => {
 
   it("retries the same issue only after previous listener session was killed", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
+    const listener = config.projects.int?.listeners?.["tracker-broai"] as ListenerConfig;
     const registry = makeRegistry(async () => [
       {
         id: "INT-101",
@@ -306,7 +305,7 @@ describe("trackerTaskSource", () => {
 
   it("prevents duplicate spawn when another process already holds issue lock", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
+    const listener = config.projects.int?.listeners?.["tracker-broai"] as ListenerConfig;
     const firstSpawn = createDeferred<Session>();
     const registry = makeRegistry(async () => [
       {
@@ -368,7 +367,7 @@ describe("trackerTaskSource", () => {
 
   it("disables listener when tracker dependency is missing", async () => {
     const config = makeConfig(rootDir);
-    const listener = config.listeners?.["tracker-broai"] as ListenerConfig;
+    const listener = config.projects.int?.listeners?.["tracker-broai"] as ListenerConfig;
     const warn = vi.fn();
 
     const missingBinary = Object.assign(new Error("spawn jira ENOENT"), { code: "ENOENT" });
@@ -408,7 +407,7 @@ describe("trackerTaskSource", () => {
   it("supports observe mode without spawning sessions", async () => {
     const config = makeConfig(rootDir);
     const listener = {
-      ...(config.listeners?.["tracker-broai"] as ListenerConfig),
+      ...(config.projects.int?.listeners?.["tracker-broai"] as ListenerConfig),
       mode: "observe",
     } as ListenerConfig;
     const healthReporter = makeHealthReporterStub();

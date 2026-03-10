@@ -824,14 +824,3 @@ export const trackerTaskSource: ListenerSource = {
   source: "tracker-task",
   start: startTrackerTaskListener,
 };
-
-// Legacy aliases for old source names.
-export const jiraTaskSource: ListenerSource = {
-  source: "jira-task",
-  start: startTrackerTaskListener,
-};
-
-export const jiraBacklogSource: ListenerSource = {
-  source: "jira-backlog",
-  start: startTrackerTaskListener,
-};

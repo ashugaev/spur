@@ -1,5 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import type { OrchestratorConfig, Session, SessionManager } from "@composio/ao-core";
+import type {
+  ListenerConfig,
+  OrchestratorConfig,
+  Session,
+  SessionManager,
+} from "@composio/ao-core";
 import {
   buildJiraSprintTasksSnapshot,
   buildListenerEffectiveFilters,
@@ -26,8 +31,10 @@ function makeSession(overrides: Partial<Session> & { id: string }): Session {
   };
 }
 
-function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig {
-  return {
+function makeConfig(
+  projectListeners?: Record<string, Record<string, Omit<ListenerConfig, "projectId">>>,
+): OrchestratorConfig {
+  const config: OrchestratorConfig = {
     configPath: "/tmp/agent-orchestrator.yaml",
     port: 3000,
     readyThresholdMs: 300_000,
@@ -53,19 +60,28 @@ function makeConfig(overrides?: Partial<OrchestratorConfig>): OrchestratorConfig
     notifiers: {},
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
     reactions: {},
-    listeners: {
-      "tracker-int": {
-        source: "tracker-task",
-        projectId: "int",
-        filters: {
-          state: "open",
-          assignee: "currentUser",
-          labels: ["ao"],
-        },
+  };
+
+  config.projects.int!.listeners = {
+    "tracker-int": {
+      source: "tracker-task",
+      filters: {
+        state: "open",
+        assignee: "currentUser",
+        labels: ["ao"],
       },
     },
-    ...overrides,
   };
+
+  if (projectListeners) {
+    for (const [projectId, listeners] of Object.entries(projectListeners)) {
+      const project = config.projects[projectId];
+      if (!project) continue;
+      project.listeners = listeners;
+    }
+  }
+
+  return config;
 }
 
 function makeSessionManager(listImpl: SessionManager["list"]): SessionManager {
@@ -191,20 +207,19 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("deduplicates tasks across listeners and supports project filtering", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-a": {
           source: "tracker-task",
-          projectId: "int",
           filters: { state: "open" },
         },
         "tracker-int-b": {
           source: "tracker-task",
-          projectId: "int",
           filters: { state: "open" },
         },
+      },
+      ao: {
         "tracker-ao": {
           source: "tracker-task",
-          projectId: "ao",
           filters: { state: "open" },
         },
       },
@@ -252,15 +267,13 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("deduplicates related active sessions across multiple listeners for same issue", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-a": {
           source: "tracker-task",
-          projectId: "int",
           filters: { state: "open" },
         },
         "tracker-int-b": {
           source: "tracker-task",
-          projectId: "int",
           filters: { state: "open" },
         },
       },
@@ -299,10 +312,9 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("treats task as startable when it is in listener scope and has no active session", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-a": {
           source: "tracker-task",
-          projectId: "int",
           filters: { state: "open" },
         },
       },
@@ -332,10 +344,9 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("treats task as not startable in observe mode", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-observe": {
           source: "tracker-task",
-          projectId: "int",
           mode: "observe",
           filters: { state: "open" },
         },
@@ -366,10 +377,9 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("blocks start when issue is linked only to observe listeners", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-observe": {
           source: "tracker-task",
-          projectId: "int",
           mode: "observe",
           filters: { state: "open" },
         },
@@ -403,16 +413,14 @@ describe("jira-sprint-tasks helpers", () => {
 
   it("rejects explicit observe listener when spawn listener also exists", async () => {
     const config = makeConfig({
-      listeners: {
+      int: {
         "tracker-int-observe": {
           source: "tracker-task",
-          projectId: "int",
           mode: "observe",
           filters: { state: "open" },
         },
         "tracker-int-spawn": {
           source: "tracker-task",
-          projectId: "int",
           mode: "spawn",
           filters: { state: "open" },
         },

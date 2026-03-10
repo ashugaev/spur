@@ -113,7 +113,6 @@ function validateLegacyListenerFields(value: Record<string, unknown>, ctx: z.Ref
   }
 }
 
-const ListenerConfigSchema = ListenerConfigBaseSchema.superRefine(validateLegacyListenerFields);
 const ProjectListenerConfigSchema = ListenerConfigBaseSchema.omit({ projectId: true }).superRefine(
   validateLegacyListenerFields,
 );
@@ -175,7 +174,6 @@ const OrchestratorConfigSchema = z.object({
     info: ["composio"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
-  listeners: z.record(ListenerConfigSchema).default({}),
   services: ServicesConfigSchema.optional(),
   remote: RemoteConfigSchema.optional(),
 });
@@ -503,6 +501,13 @@ export function validateConfig(raw: unknown): OrchestratorConfig {
   if (raw && typeof raw === "object" && "vibeTunnel" in raw) {
     console.warn(
       "[config] vibeTunnel has been removed. Use `remote: { tailscaleHost: auto }` instead.",
+    );
+  }
+
+  if (raw && typeof raw === "object" && Object.prototype.hasOwnProperty.call(raw, "listeners")) {
+    throw new Error(
+      'Top-level "listeners" is no longer supported. Move listeners under ' +
+        '"projects.<projectId>.listeners" and remove "projectId" from each listener entry.',
     );
   }
 

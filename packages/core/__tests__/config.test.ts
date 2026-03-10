@@ -170,18 +170,38 @@ projects:
     repo: test/repo
     path: ${testDir}
     defaultBranch: main
-listeners:
-  legacy-jira-listener:
-    source: jira-backlog
-    projectId: test-project
-    enabled: true
-    jql: 'assignee = "me"'
-    backlogStatus: "Backlog"
+    listeners:
+      legacy-jira-listener:
+        source: tracker-task
+        enabled: true
+        jql: 'assignee = "me"'
+        backlogStatus: "Backlog"
 `,
       );
 
       expect(() => loadConfig(configPath)).toThrow(/no longer supported/);
       expect(() => loadConfig(configPath)).toThrow(/source: tracker-task/);
+    });
+
+    it("rejects top-level listeners with migration guidance", () => {
+      const configPath = join(testDir, "top-level-listeners.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+listeners:
+  tracker-listener:
+    source: tracker-task
+    projectId: test-project
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/Top-level "listeners" is no longer supported/);
+      expect(() => loadConfig(configPath)).toThrow(/projects\.<projectId>\.listeners/);
     });
 
     it("supports listener mode and defaults to spawn", () => {
@@ -194,20 +214,18 @@ projects:
     repo: test/repo
     path: ${testDir}
     defaultBranch: main
-listeners:
-  observe-only:
-    source: tracker-task
-    projectId: test-project
-    mode: observe
-  spawn-default:
-    source: tracker-task
-    projectId: test-project
+    listeners:
+      observe-only:
+        source: tracker-task
+        mode: observe
+      spawn-default:
+        source: tracker-task
 `,
       );
 
       const config = loadConfig(configPath);
-      expect(config.listeners["observe-only"]?.mode).toBe("observe");
-      expect(config.listeners["spawn-default"]?.mode).toBe("spawn");
+      expect(config.projects["test-project"]?.listeners?.["observe-only"]?.mode).toBe("observe");
+      expect(config.projects["test-project"]?.listeners?.["spawn-default"]?.mode).toBe("spawn");
     });
 
     it("rejects unknown listener mode", () => {
@@ -220,11 +238,10 @@ projects:
     repo: test/repo
     path: ${testDir}
     defaultBranch: main
-listeners:
-  invalid-mode:
-    source: tracker-task
-    projectId: test-project
-    mode: watch
+    listeners:
+      invalid-mode:
+        source: tracker-task
+        mode: watch
 `,
       );
 

@@ -53,7 +53,7 @@ projects:
     #   pollIntervalMs: 30000                    # comment poll interval (default: 60000); falls back to AO_JIRA_POLL_INTERVAL_MS
 
     # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
-    # (Equivalent to top-level `listeners` but scoped to this project; no projectId needed.)
+    # Listeners are only supported under project config.
     # Canonical source is `tracker-task`.
     # `jql` is intentionally not supported here: it is Jira-specific and would break tracker portability.
     # Jira-specific query semantics belong inside the Jira tracker plugin, not the shared listener schema.
@@ -134,23 +134,6 @@ projects:
 #   action: [desktop, telegram]   # PR ready to merge
 #   warning: [telegram]           # auto-fix failed
 #   info: [telegram]              # summary, all done
-
-# Trigger listeners — poll external sources and auto-trigger current spawn flow.
-# Shared contract only exposes portable `filters`; no `jql` here by design.
-# listeners:
-#   tracker-broai:
-#     source: tracker-task
-#     projectId: int
-#     intervalMs: 60000
-#     mode: spawn              # spawn (default) | observe
-#     filters:
-#       state: open
-#       assignee: "aleksey@intelas.com"
-#       labels: ["BroAI"]
-#       limit: 100
-#     trigger:
-#       type: spawn-session
-#       # agent: codex            # optional agent override for auto-spawned sessions
 
 # Reactions — auto-responses to events (these are the defaults)
 # reactions:

@@ -192,7 +192,7 @@ export function buildListenerEffectiveFilters(listener: ListenerConfig): IssueFi
 
 function isTrackerTaskListener(listener: ListenerConfig): boolean {
   const source = listener.source.toLowerCase();
-  return source === "tracker-task" || source === "jira-task" || source === "jira-backlog";
+  return source === "tracker-task";
 }
 
 function readTriggerAgent(listener: ListenerConfig): string | null {
@@ -214,24 +214,38 @@ function collectTrackerTaskListeners(
   projectId?: string,
 ): JiraSprintTaskListener[] {
   const listeners: JiraSprintTaskListener[] = [];
+  const seenListenerIds = new Set<string>();
 
-  for (const [listenerId, listener] of Object.entries(config.listeners ?? {})) {
-    if (!isTrackerTaskListener(listener)) continue;
-    if (projectId && listener.projectId !== projectId) continue;
-
-    const project = config.projects[listener.projectId];
-    if (!project) continue;
+  for (const [resolvedProjectId, project] of Object.entries(config.projects)) {
+    if (projectId && resolvedProjectId !== projectId) continue;
     if (!project.tracker?.plugin) continue;
 
-    listeners.push({
-      source: listener.source,
-      listenerId,
-      projectId: listener.projectId,
-      projectName: project.name ?? listener.projectId,
-      mode: readListenerMode(listener),
-      filters: buildListenerEffectiveFilters(listener),
-      triggerAgent: readTriggerAgent(listener),
-    });
+    const projectListeners =
+      (project as { listeners?: Record<string, Omit<ListenerConfig, "projectId">> }).listeners ??
+      {};
+
+    for (const [baseListenerId, projectListener] of Object.entries(projectListeners)) {
+      const listener = {
+        ...projectListener,
+        projectId: resolvedProjectId,
+      } as ListenerConfig;
+      if (!isTrackerTaskListener(listener)) continue;
+
+      const effectiveListenerId = seenListenerIds.has(baseListenerId)
+        ? `${resolvedProjectId}:${baseListenerId}`
+        : baseListenerId;
+      seenListenerIds.add(effectiveListenerId);
+
+      listeners.push({
+        source: listener.source,
+        listenerId: effectiveListenerId,
+        projectId: resolvedProjectId,
+        projectName: project.name ?? resolvedProjectId,
+        mode: readListenerMode(listener),
+        filters: buildListenerEffectiveFilters(listener),
+        triggerAgent: readTriggerAgent(listener),
+      });
+    }
   }
 
   return listeners.sort((a, b) => a.listenerId.localeCompare(b.listenerId));
