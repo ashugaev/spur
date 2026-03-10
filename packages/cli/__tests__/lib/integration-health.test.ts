@@ -106,6 +106,7 @@ describe("integration health reporter", () => {
       message: "Stopped",
     });
     expect(entry.updatedAt).toBeTypeOf("string");
+    expect(entry.lastCheckAt).toBeTypeOf("string");
     expect(entry.lastSuccessAt).toBeTypeOf("string");
     expect(entry.lastErrorAt).toBeTypeOf("string");
     expect(entry.lastError).toContain("boom");

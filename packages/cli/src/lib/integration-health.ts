@@ -2,8 +2,13 @@ import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:f
 import { dirname, join } from "node:path";
 import { getProjectBaseDir, type OrchestratorConfig, type ProjectConfig } from "@composio/ao-core";
 
-export type IntegrationService = "telegram" | "jira" | "tracker";
-export type IntegrationKind = "polling" | "listener";
+export type IntegrationService =
+  | "telegram"
+  | "jira"
+  | "tracker"
+  | "orchestrator"
+  | (string & {});
+export type IntegrationKind = "polling" | "listener" | "reaction" | (string & {});
 export type IntegrationState = "inactive" | "starting" | "healthy" | "degraded";
 
 export interface IntegrationIdentity {
@@ -19,6 +24,7 @@ export interface IntegrationHealthEntry extends IntegrationIdentity {
   ok: boolean;
   state: IntegrationState;
   message: string;
+  lastCheckAt: string;
   updatedAt: string;
   lastSuccessAt?: string;
   lastErrorAt?: string;
@@ -137,6 +143,7 @@ export function createIntegrationHealthReporter(
       ok: patch.ok,
       state: patch.state,
       message: normalizeMessage(patch.message),
+      lastCheckAt: timestamp,
       updatedAt: timestamp,
       lastSuccessAt: previous?.lastSuccessAt,
       lastErrorAt: previous?.lastErrorAt,

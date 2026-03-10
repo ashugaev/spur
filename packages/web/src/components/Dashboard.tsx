@@ -1153,11 +1153,26 @@ function IntegrationStatusPanel({ status }: { status: IntegrationsStatusSnapshot
     status.updatedAt && status.source === "snapshot"
       ? `updated ${formatStatusTimestamp(status.updatedAt)}`
       : "snapshot unavailable";
-  const entries = INTEGRATION_STATUS_KEYS.map((key) => ({
-    key,
-    label: INTEGRATION_STATUS_LABELS[key],
-    entry: status.integrations[key],
-  }));
+  const dynamicEntries = status.entries.length > 0
+    ? status.entries.map((entry, index) => {
+        const fallbackLabel =
+          entry.id && entry.id in INTEGRATION_STATUS_LABELS
+            ? INTEGRATION_STATUS_LABELS[entry.id as keyof typeof INTEGRATION_STATUS_LABELS]
+            : undefined;
+        return {
+          key: entry.id ?? `integration-${index + 1}`,
+          label: entry.label ?? fallbackLabel ?? entry.id ?? `Integration ${index + 1}`,
+          entry,
+        };
+      })
+    : [];
+  const entries = dynamicEntries.length > 0
+    ? dynamicEntries
+    : INTEGRATION_STATUS_KEYS.map((key) => ({
+        key,
+        label: INTEGRATION_STATUS_LABELS[key],
+        entry: status.integrations[key],
+      }));
   const summary = entries.reduce(
     (counts, item) => {
       counts[integrationTone(item.entry)] += 1;
@@ -1252,6 +1267,14 @@ function IntegrationStatusPanel({ status }: { status: IntegrationsStatusSnapshot
                     </div>
                     <span className={stateBadgeClass(entry)}>{formatStateLabel(entry.state)}</span>
                   </div>
+                  {(entry.kind || entry.service || entry.lastCheckAt) && (
+                    <p className="mb-2 text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+                      {[entry.kind, entry.service].filter(Boolean).join(" · ")}
+                      {entry.lastCheckAt
+                        ? `${entry.kind || entry.service ? " · " : ""}checked ${formatStatusTimestamp(entry.lastCheckAt)}`
+                        : ""}
+                    </p>
+                  )}
                   <div className="grid gap-1.5">
                     <BooleanPill label="active" value={entry.active} />
                     <BooleanPill label="connected" value={entry.connected} />

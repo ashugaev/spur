@@ -610,6 +610,17 @@ describe("API Routes", () => {
               state: "healthy",
               message: "Listener running",
             },
+            {
+              id: "reaction-engine",
+              service: "orchestrator",
+              kind: "reaction",
+              active: true,
+              connected: true,
+              ok: true,
+              state: "healthy",
+              message: "Lifecycle poll completed (3 session(s) checked, 1 active)",
+              lastCheckAt: "2026-03-06T11:22:40.000Z",
+            },
           ],
         }),
         "utf-8",
@@ -630,6 +641,9 @@ describe("API Routes", () => {
         expect(data.integrations.jiraCommentPolling.message).toMatch(/Auth needs refresh/);
         expect(data.integrations.trackerTriggerListeners.state).toBe("healthy");
         expect(data.integrations.trackerTriggerListeners.ok).toBe(true);
+        expect(data.integrations.reactionEngine.state).toBe("healthy");
+        expect(Array.isArray(data.entries)).toBe(true);
+        expect(data.entries.some((entry: { id?: string }) => entry.id === "reaction-engine")).toBe(true);
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

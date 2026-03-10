@@ -186,6 +186,35 @@ describe("start / stop", () => {
     // Should not throw on double stop
     lm.stop();
   });
+
+  it("reports lifecycle poll health through hooks", async () => {
+    const onPollStarting = vi.fn();
+    const onPollHealthy = vi.fn();
+    const onPollDegraded = vi.fn();
+    const onPollInactive = vi.fn();
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+      healthHooks: {
+        onPollStarting,
+        onPollHealthy,
+        onPollDegraded,
+        onPollInactive,
+      },
+    });
+
+    lm.start(60_000);
+    await vi.waitFor(() => {
+      expect(onPollHealthy).toHaveBeenCalled();
+    });
+    lm.stop();
+
+    expect(onPollStarting).toHaveBeenCalledWith("Starting lifecycle polling runtime");
+    expect(onPollDegraded).not.toHaveBeenCalled();
+    expect(onPollInactive).toHaveBeenCalledWith("Lifecycle polling stopped");
+  });
 });
 
 describe("check (single session)", () => {

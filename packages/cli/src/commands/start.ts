@@ -37,7 +37,7 @@ import {
   maybeStartConfiguredListeners,
   type ListenerGroupController,
 } from "../lib/listeners/index.js";
-import { createIntegrationHealthReporter } from "../lib/integration-health.js";
+import { createIntegrationHealthReporter, type IntegrationIdentity } from "../lib/integration-health.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
 import { preflight } from "../lib/preflight.js";
@@ -45,6 +45,12 @@ import { preflight } from "../lib/preflight.js";
 const DEFAULT_PORT = 3000;
 const START_RUNTIME_STATE_FILE = ".ao-start-runtime.json";
 const START_RUNTIME_STATE_VERSION = 1;
+const REACTION_ENGINE_HEALTH: IntegrationIdentity = {
+  id: "reaction-engine",
+  label: "Reaction engine",
+  service: "orchestrator",
+  kind: "reaction",
+};
 
 interface StartRuntimeState {
   version: number;
@@ -581,6 +587,16 @@ async function runStartup(
         config,
         registry,
         sessionManager,
+        healthHooks: {
+          onPollStarting: (message) =>
+            integrationHealth.markStarting(REACTION_ENGINE_HEALTH, message),
+          onPollHealthy: (message) =>
+            integrationHealth.markHealthy(REACTION_ENGINE_HEALTH, message),
+          onPollDegraded: (message, error) =>
+            integrationHealth.markDegraded(REACTION_ENGINE_HEALTH, message, error),
+          onPollInactive: (message) =>
+            integrationHealth.markInactive(REACTION_ENGINE_HEALTH, message),
+        },
       });
       lifecycleManager.start();
 
@@ -601,7 +617,7 @@ async function runStartup(
         healthReporter: integrationHealth,
       });
       if (jiraPolling) {
-        console.log(chalk.dim("  Jira inbound: comment polling enabled (60s)"));
+        console.log(chalk.dim("  Tracker inbound: comment polling enabled (60s)"));
       }
 
       configuredListeners = await maybeStartConfiguredListeners({

@@ -303,7 +303,7 @@ describe("maybeStartJiraCommentPolling", () => {
     await vi.runOnlyPendingTimersAsync();
     expect(sm.send).toHaveBeenCalledWith("test-1", "Please retry");
     expect(healthReporter.markDegraded).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "jira-comment-polling" }),
+      expect.objectContaining({ id: "tracker-comment-polling" }),
       expect.stringContaining("one or more issue errors"),
     );
 

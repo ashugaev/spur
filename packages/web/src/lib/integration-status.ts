@@ -21,10 +21,16 @@ const KEY_ALIASES: Record<IntegrationStatusKey, readonly string[]> = {
     "telegram_inbound_polling",
   ],
   jiraCommentPolling: [
+    "trackerCommentPolling",
     "jiraCommentPolling",
+    "trackerComments",
+    "trackerPolling",
+    "tracker_comment_polling",
+    "tracker-comment-polling",
     "jiraComments",
     "jiraPolling",
     "jira_comment_polling",
+    "jira-comment-polling",
   ],
   trackerTriggerListeners: [
     "trackerTriggerListeners",
@@ -35,6 +41,13 @@ const KEY_ALIASES: Record<IntegrationStatusKey, readonly string[]> = {
     "tracker_trigger_listeners",
     "jiraListeners",
     "jira_trigger_listeners",
+  ],
+  reactionEngine: [
+    "reactionEngine",
+    "reaction-engine",
+    "reactions",
+    "reactionHealth",
+    "reaction_engine",
   ],
 };
 
@@ -154,17 +167,44 @@ export function fallbackIntegrationsStatus(
   message = DEFAULT_FALLBACK_MESSAGE,
   snapshotPath: string | null = null,
 ): IntegrationsStatusSnapshot {
+  const integrations = buildIntegrations(() => buildFallbackEntry(message));
+  const entries = INTEGRATION_STATUS_KEYS.map((key) => ({
+    id: key,
+    label: key,
+    ...integrations[key],
+  }));
   return {
     updatedAt: null,
     source: "fallback",
     snapshotPath,
-    integrations: buildIntegrations(() => buildFallbackEntry(message)),
+    entries,
+    integrations,
   };
 }
 
 function normalizeEntry(raw: unknown): IntegrationStatusEntry {
+  const metadata = isRecord(raw)
+    ? {
+        id: toNullableString(raw["id"]) ?? undefined,
+        label: toNullableString(raw["label"]) ?? undefined,
+        service: toNullableString(raw["service"]) ?? undefined,
+        kind: toNullableString(raw["kind"]) ?? undefined,
+        updatedAt: toNullableString(raw["updatedAt"]),
+        lastCheckAt:
+          toNullableString(raw["lastCheckAt"]) ??
+          toNullableString(raw["checkedAt"]) ??
+          toNullableString(raw["updatedAt"]),
+        lastSuccessAt: toNullableString(raw["lastSuccessAt"]),
+        lastErrorAt: toNullableString(raw["lastErrorAt"]),
+        lastError:
+          toNullableString(raw["lastError"]) ??
+          toNullableString(raw["error"]),
+      }
+    : {};
+
   if (typeof raw === "boolean") {
     return {
+      ...metadata,
       active: raw,
       connected: raw,
       ok: raw,
@@ -175,6 +215,7 @@ function normalizeEntry(raw: unknown): IntegrationStatusEntry {
 
   if (!isRecord(raw)) {
     return {
+      ...metadata,
       active: false,
       connected: false,
       ok: false,
@@ -185,6 +226,7 @@ function normalizeEntry(raw: unknown): IntegrationStatusEntry {
 
   if (!hasStatusSignal(raw)) {
     return {
+      ...metadata,
       active: false,
       connected: false,
       ok: false,
@@ -228,6 +270,7 @@ function normalizeEntry(raw: unknown): IntegrationStatusEntry {
     toNullableString(raw["error"]);
 
   return {
+    ...metadata,
     active,
     connected,
     ok,
@@ -341,6 +384,21 @@ function pickFirstByPredicate(entries: JsonRecord[], predicate: (entry: JsonReco
   return null;
 }
 
+function buildEntryListFromSnapshotEntries(entries: JsonRecord[]): IntegrationStatusEntry[] {
+  return entries
+    .map((entry) => normalizeEntry(entry))
+    .map((entry, index) => ({
+      ...entry,
+      id: entry.id ?? `integration-${index + 1}`,
+      label: entry.label ?? entry.id ?? `Integration ${index + 1}`,
+    }))
+    .sort((a, b) => {
+      const byKind = (a.kind ?? "").localeCompare(b.kind ?? "");
+      if (byKind !== 0) return byKind;
+      return (a.label ?? a.id ?? "").localeCompare(b.label ?? b.id ?? "");
+    });
+}
+
 function buildFromEntries(entries: JsonRecord[]): Record<IntegrationStatusKey, IntegrationStatusEntry> {
   const telegramPolling =
     pickFirstByPredicate(entries, (entry) => toNullableLower(entry["id"]) === "telegram-polling") ??
@@ -350,12 +408,15 @@ function buildFromEntries(entries: JsonRecord[]): Record<IntegrationStatusKey, I
       return service === "telegram" && kind === "polling";
     });
 
-  const jiraCommentPolling =
-    pickFirstByPredicate(entries, (entry) => toNullableLower(entry["id"]) === "jira-comment-polling") ??
+  const trackerCommentPolling =
+    pickFirstByPredicate(entries, (entry) => {
+      const id = toNullableLower(entry["id"]);
+      return id === "tracker-comment-polling" || id === "jira-comment-polling";
+    }) ??
     pickFirstByPredicate(entries, (entry) => {
       const service = toNullableLower(entry["service"]);
       const kind = toNullableLower(entry["kind"]);
-      return service === "jira" && kind === "polling";
+      return (service === "tracker" || service === "jira") && kind === "polling";
     });
 
   const trackerListenerEntries = entries.filter((entry) => {
@@ -402,10 +463,41 @@ function buildFromEntries(entries: JsonRecord[]): Record<IntegrationStatusKey, I
     };
   })();
 
+  const reactionEntries = entries.filter((entry) => {
+    const kind = toNullableLower(entry["kind"]);
+    const id = toNullableLower(entry["id"]);
+    return kind === "reaction" || id === "reaction-engine";
+  });
+
+  const reactionEntry: IntegrationStatusEntry = (() => {
+    if (reactionEntries.length === 0) {
+      return {
+        active: false,
+        connected: false,
+        ok: false,
+        state: "inactive",
+        message: "No reaction engine health found",
+      };
+    }
+
+    const normalized = reactionEntries.map((entry) => normalizeEntry(entry));
+    const latest = normalized.sort((a, b) =>
+      (b.lastCheckAt ?? b.updatedAt ?? "").localeCompare(a.lastCheckAt ?? a.updatedAt ?? ""),
+    )[0];
+    return latest ?? {
+      active: false,
+      connected: false,
+      ok: false,
+      state: "inactive",
+      message: "No reaction engine health found",
+    };
+  })();
+
   return {
     telegramInboundPolling: normalizeEntry(telegramPolling),
-    jiraCommentPolling: normalizeEntry(jiraCommentPolling),
+    jiraCommentPolling: normalizeEntry(trackerCommentPolling),
     trackerTriggerListeners: listenersEntry,
+    reactionEngine: reactionEntry,
   };
 }
 
@@ -446,6 +538,7 @@ export function readIntegrationsStatusSnapshot(): IntegrationsStatusSnapshot {
       updatedAt,
       source: "snapshot",
       snapshotPath,
+      entries: buildEntryListFromSnapshotEntries(entries),
       integrations: buildFromEntries(entries),
     };
   }
@@ -459,11 +552,17 @@ export function readIntegrationsStatusSnapshot(): IntegrationsStatusSnapshot {
     const rawEntry = pickObjectField(rawIntegrations, KEY_ALIASES[key]);
     return normalizeEntry(rawEntry);
   });
+  const entryList = INTEGRATION_STATUS_KEYS.map((key) => ({
+    id: key,
+    label: key,
+    ...integrations[key],
+  }));
 
   return {
     updatedAt,
     source: "snapshot",
     snapshotPath,
+    entries: entryList,
     integrations,
   };
 }

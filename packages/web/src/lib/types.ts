@@ -131,7 +131,8 @@ export interface DashboardStats {
 export type IntegrationStatusKey =
   | "telegramInboundPolling"
   | "jiraCommentPolling"
-  | "trackerTriggerListeners";
+  | "trackerTriggerListeners"
+  | "reactionEngine";
 
 export type IntegrationStatusState =
   | "inactive"
@@ -141,29 +142,41 @@ export type IntegrationStatusState =
   | "unknown";
 
 export interface IntegrationStatusEntry {
+  id?: string;
+  label?: string;
+  service?: string;
+  kind?: string;
   active: boolean;
   connected: boolean;
   ok: boolean;
   state: IntegrationStatusState;
   message: string | null;
+  updatedAt?: string | null;
+  lastCheckAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastErrorAt?: string | null;
+  lastError?: string | null;
 }
 
 export const INTEGRATION_STATUS_KEYS = [
   "telegramInboundPolling",
   "jiraCommentPolling",
   "trackerTriggerListeners",
+  "reactionEngine",
 ] as const satisfies readonly IntegrationStatusKey[];
 
 export const INTEGRATION_STATUS_LABELS: Record<IntegrationStatusKey, string> = {
   telegramInboundPolling: "Telegram inbound polling",
-  jiraCommentPolling: "Jira comment polling",
+  jiraCommentPolling: "Tracker comment polling",
   trackerTriggerListeners: "Tracker trigger listeners",
+  reactionEngine: "Reaction engine",
 };
 
 export interface IntegrationsStatusSnapshot {
   updatedAt: string | null;
   source: "snapshot" | "fallback";
   snapshotPath: string | null;
+  entries: IntegrationStatusEntry[];
   integrations: Record<IntegrationStatusKey, IntegrationStatusEntry>;
 }
 

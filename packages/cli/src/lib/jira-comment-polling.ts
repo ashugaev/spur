@@ -68,9 +68,9 @@ interface TrackerCommentReactionConfig extends Partial<ReactionConfig> {
 }
 
 const JIRA_COMMENT_POLLING_HEALTH: IntegrationIdentity = {
-  id: "jira-comment-polling",
-  label: "Jira Comment Polling",
-  service: "jira",
+  id: "tracker-comment-polling",
+  label: "Tracker comment polling",
+  service: "tracker",
   kind: "polling",
 };
 
@@ -235,7 +235,7 @@ export async function maybeStartJiraCommentPolling(
   const logger = deps.logger ?? console;
   const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
 
-  health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting Jira comment polling runtime");
+  health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting tracker comment polling runtime");
 
   // Track last seen comment IDs per project+issue to avoid re-processing.
   const seenCommentIds = new Map<string, Set<string>>();
@@ -515,7 +515,7 @@ export async function maybeStartJiraCommentPolling(
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      health?.markInactive(JIRA_COMMENT_POLLING_HEALTH, "Jira comment polling stopped");
+      health?.markInactive(JIRA_COMMENT_POLLING_HEALTH, "Tracker comment polling stopped");
     },
   };
 }

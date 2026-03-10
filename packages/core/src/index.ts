@@ -51,7 +51,7 @@ export type { SessionManagerDeps } from "./session-manager.js";
 
 // Lifecycle manager — state machine + reaction engine
 export { createLifecycleManager } from "./lifecycle-manager.js";
-export type { LifecycleManagerDeps } from "./lifecycle-manager.js";
+export type { LifecycleManagerDeps, LifecycleHealthHooks } from "./lifecycle-manager.js";
 
 // Prompt builder — layered prompt composition
 export { buildPrompt, BASE_AGENT_PROMPT } from "./prompt-builder.js";
