@@ -11,17 +11,17 @@ interface CIBadgeProps {
 const statusConfig: Record<CIStatus, { label: string; className: string; icon: string }> = {
   passing: {
     label: "CI passing",
-    className: "bg-[rgba(63,185,80,0.1)] text-[var(--color-accent-green)]",
+    className: "border-[rgba(94,204,150,0.36)] bg-[rgba(15,72,46,0.76)] text-[#95e7bc]",
     icon: "\u2713",
   },
   failing: {
     label: "CI failing",
-    className: "bg-[rgba(248,81,73,0.15)] text-[var(--color-accent-red)]",
+    className: "border-[rgba(112,169,137,0.34)] bg-[rgba(24,60,42,0.76)] text-[#b9e6cd]",
     icon: "\u2717",
   },
   pending: {
     label: "CI pending",
-    className: "bg-[rgba(210,153,34,0.1)] text-[var(--color-accent-yellow)]",
+    className: "border-[rgba(101,169,128,0.34)] bg-[rgba(20,64,43,0.74)] text-[#a8dfbf]",
     icon: "\u25CF",
   },
   none: {
@@ -46,7 +46,7 @@ export function CIBadge({ status, checks, compact }: CIBadgeProps) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold tracking-wide ${config.className}`}
+      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-[0.02em] ${config.className}`}
     >
       {!compact && <span>{config.icon}</span>}
       {label}
@@ -63,8 +63,8 @@ interface CICheckListProps {
 export const checkStatusIcon: Record<DashboardCICheck["status"], { icon: string; color: string }> =
   {
     passed: { icon: "\u2713", color: "var(--color-accent-green)" },
-    failed: { icon: "\u2717", color: "var(--color-accent-red)" },
-    running: { icon: "\u25CF", color: "var(--color-accent-yellow)" },
+    failed: { icon: "\u2717", color: "#81cca3" },
+    running: { icon: "\u25CF", color: "#9dddb8" },
     pending: { icon: "\u25CB", color: "var(--color-text-muted)" },
     skipped: { icon: "\u25CB", color: "var(--color-text-muted)" },
   };

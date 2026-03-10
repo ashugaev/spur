@@ -10,42 +10,66 @@ function getSizeLabel(additions: number, deletions: number): string {
 
 interface PRStatusProps {
   pr: DashboardPR;
+  hideLink?: boolean;
 }
 
-export function PRStatus({ pr }: PRStatusProps) {
+const baseBadgeClass =
+  "inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-[0.02em]";
+
+export function PRStatus({ pr, hideLink = false }: PRStatusProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex flex-wrap items-center gap-2">
       {/* PR number */}
-      <a
-        href={pr.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-[11px] font-medium text-[var(--color-accent)] underline-offset-2 hover:underline"
-        onClick={(e) => e.stopPropagation()}
-      >
-        #{pr.number}
-      </a>
+      {!hideLink && (
+        <a
+          href={pr.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={[
+            baseBadgeClass,
+            "border-[rgba(101,206,153,0.34)] bg-[rgba(16,63,42,0.74)] text-[#9be8c2] hover:no-underline hover:brightness-110",
+          ].join(" ")}
+          onClick={(e) => e.stopPropagation()}
+        >
+          #{pr.number}
+        </a>
+      )}
 
       {/* Size — hide when rate limited (would show +0 -0 XS) */}
       {!rateLimited && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]">
+        <span
+          className={[
+            baseBadgeClass,
+            "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.05)] text-[rgba(226,231,240,0.72)]",
+          ].join(" ")}
+        >
           +{pr.additions} -{pr.deletions} {sizeLabel}
         </span>
       )}
 
       {/* Merged badge */}
       {pr.state === "merged" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(163,113,247,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-violet)]">
+        <span
+          className={[
+            baseBadgeClass,
+            "border-[rgba(108,205,156,0.34)] bg-[rgba(17,66,44,0.76)] text-[#a8eac8]",
+          ].join(" ")}
+        >
           merged
         </span>
       )}
 
       {/* Draft badge */}
       {pr.isDraft && pr.state === "open" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]">
+        <span
+          className={[
+            baseBadgeClass,
+            "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.05)] text-[rgba(226,231,240,0.72)]",
+          ].join(" ")}
+        >
           draft
         </span>
       )}
@@ -57,7 +81,12 @@ export function PRStatus({ pr }: PRStatusProps) {
 
       {/* Review decision (only for open PRs with real data) */}
       {pr.state === "open" && pr.reviewDecision === "approved" && !rateLimited && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(63,185,80,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-green)]">
+        <span
+          className={[
+            baseBadgeClass,
+            "border-[rgba(101,208,170,0.26)] bg-[rgba(24,74,61,0.64)] text-[#87dfbf]",
+          ].join(" ")}
+        >
           approved
         </span>
       )}

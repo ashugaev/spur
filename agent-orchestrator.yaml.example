@@ -146,4 +146,10 @@ projects:
 #   agent-stuck:
 #     threshold: 10m
 #     action: notify
-#     priority: urgent
+#     priority: urgent#
+#
+#   tracker-comment:
+#     kind: any (any message send to agent) | tagged (agent was tagged) | reply (reply to agent message with id)
+#     auto: true
+#     action: send-to-agent
+#     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
