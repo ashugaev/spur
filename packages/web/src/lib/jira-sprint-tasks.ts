@@ -1,12 +1,14 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   ACTIVITY_STATE,
   TERMINAL_STATUSES,
+  type IssueFilters,
   type ListenerConfig,
   type OrchestratorConfig,
+  type PluginRegistry,
+  type ProjectConfig,
   type Session,
   type SessionManager,
+  type Tracker,
 } from "@composio/ao-core";
 import type {
   JiraSprintTask,
@@ -16,22 +18,13 @@ import type {
 } from "./types";
 import { buildProjectSessionPath } from "./project-routes";
 
-const execFileAsync = promisify(execFile);
-const DEFAULT_BACKLOG_STATUS = "Backlog";
 const TERMINAL_STATUS_SET: ReadonlySet<string> = TERMINAL_STATUSES;
-const SPRINT_TASKS_START_ENDPOINT = "/api/jira/sprint-tasks";
-const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+const SPRINT_TASKS_START_ENDPOINT = "/api/tracker/tasks";
+type TrackerTaskListenerMode = "spawn" | "observe";
 
 const globalForJiraSprintTasks = globalThis as typeof globalThis & {
   _jiraSprintTaskStartLocks?: Set<string>;
 };
-
-interface ErrorWithStreams {
-  message?: unknown;
-  stdout?: unknown;
-  stderr?: unknown;
-  cause?: unknown;
-}
 
 interface JiraIssueSummary {
   issueKey: string;
@@ -49,20 +42,27 @@ interface ResolveStartContext {
   spawnAvailable: boolean;
 }
 
+interface ListenerIssueFetcherArgs {
+  listener: JiraSprintTaskListener;
+  project: ProjectConfig;
+}
+
 export interface BuildJiraSprintTasksSnapshotOptions {
   config: OrchestratorConfig;
   sessionManager: SessionManager;
+  registry?: PluginRegistry;
   projectId?: string;
-  issueFetcher?: (effectiveJql: string) => Promise<JiraIssueSummary[]>;
+  issueFetcher?: (args: ListenerIssueFetcherArgs) => Promise<JiraIssueSummary[]>;
 }
 
 export interface StartJiraSprintTaskOptions {
   config: OrchestratorConfig;
   sessionManager: SessionManager;
+  registry?: PluginRegistry;
   issueKey: string;
   projectId?: string;
   listenerId?: string;
-  issueFetcher?: (effectiveJql: string) => Promise<JiraIssueSummary[]>;
+  issueFetcher?: (args: ListenerIssueFetcherArgs) => Promise<JiraIssueSummary[]>;
 }
 
 export type StartJiraSprintTaskResult =
@@ -111,8 +111,35 @@ function toNullableString(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-function normalizeIssueKey(issueKey: string): string {
+function normalizeIssueIdentifier(issueKey: string): string {
+  return issueKey.trim();
+}
+
+function normalizeJiraIssueKey(issueKey: string): string {
   return issueKey.trim().toUpperCase();
+}
+
+function normalizeTrackerIssueId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  const jiraLikeMatch = trimmed.match(/([A-Z][A-Z0-9]+-\d+)/i);
+  if (jiraLikeMatch?.[1]) {
+    return normalizeJiraIssueKey(jiraLikeMatch[1]);
+  }
+
+  const githubIssueUrlMatch = trimmed.match(/\/issues\/(\d+)/i);
+  if (githubIssueUrlMatch?.[1]) {
+    return githubIssueUrlMatch[1];
+  }
+
+  const numericMatch = trimmed.match(/^#?(\d+)$/);
+  if (numericMatch?.[1]) {
+    return numericMatch[1];
+  }
+
+  return normalizeIssueIdentifier(trimmed);
 }
 
 export function extractJiraIssueKey(value: string | null | undefined): string | null {
@@ -121,45 +148,51 @@ export function extractJiraIssueKey(value: string | null | undefined): string | 
   if (!trimmed) return null;
   const match = trimmed.match(/([A-Z][A-Z0-9]+-\d+)/i);
   if (!match?.[1]) return null;
-  return normalizeIssueKey(match[1]);
+  return normalizeJiraIssueKey(match[1]);
 }
 
-function escapeJqlString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+function toPositiveInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
 }
 
-function appendJqlCondition(jql: string, clause: string): string {
-  const trimmed = jql.trim();
-  if (!trimmed) return clause;
-
-  const orderByMatch = /\border\s+by\b/i.exec(trimmed);
-  if (!orderByMatch) {
-    return `(${trimmed}) AND ${clause}`;
-  }
-
-  const orderByIndex = orderByMatch.index;
-  const queryPart = trimmed.slice(0, orderByIndex).trim();
-  const orderByPart = trimmed.slice(orderByIndex).trim();
-  if (!queryPart) {
-    return `${clause} ${orderByPart}`;
-  }
-  return `(${queryPart}) AND ${clause} ${orderByPart}`;
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter((entry) => entry.length > 0),
+    ),
+  ];
 }
 
-export function buildListenerEffectiveJql(jql: string, backlogStatus: string): string {
-  return appendJqlCondition(jql, `status = "${escapeJqlString(backlogStatus)}"`);
+export function buildListenerEffectiveFilters(listener: ListenerConfig): IssueFilters {
+  const rawFilters = isRecord(listener.filters)
+    ? (listener.filters as Record<string, unknown>)
+    : {};
+
+  const resolvedState = toNullableString(rawFilters["state"] ?? listener["state"]);
+  const state: IssueFilters["state"] =
+    resolvedState === "open" || resolvedState === "closed" || resolvedState === "all"
+      ? resolvedState
+      : "open";
+
+  const labels = toStringArray(rawFilters["labels"] ?? listener["labels"]);
+  const assignee = toNullableString(rawFilters["assignee"] ?? listener["assignee"]);
+  const limit = toPositiveInt(rawFilters["limit"] ?? listener["limit"]) ?? 100;
+
+  return {
+    state,
+    ...(labels.length > 0 ? { labels } : {}),
+    ...(assignee ? { assignee } : {}),
+    limit,
+  };
 }
 
-export function buildListenerSprintJql(jql: string): string {
-  return appendJqlCondition(jql, "sprint in openSprints()");
-}
-
-function isEnabled(listener: ListenerConfig): boolean {
-  return listener.enabled !== false;
-}
-
-function isJiraBacklogListener(listener: ListenerConfig): boolean {
-  return listener.source.toLowerCase() === "jira-backlog";
+function isTrackerTaskListener(listener: ListenerConfig): boolean {
+  const source = listener.source.toLowerCase();
+  return source === "tracker-task";
 }
 
 function readTriggerAgent(listener: ListenerConfig): string | null {
@@ -167,160 +200,87 @@ function readTriggerAgent(listener: ListenerConfig): string | null {
   return toNullableString(listener.trigger["agent"]);
 }
 
-function collectJiraBacklogListeners(
+function readListenerMode(listener: ListenerConfig): TrackerTaskListenerMode {
+  const rawMode = toNullableString(listener["mode"]);
+  return rawMode === "observe" ? "observe" : "spawn";
+}
+
+function isSpawnListenerMode(mode: TrackerTaskListenerMode | null | undefined): boolean {
+  return mode !== "observe";
+}
+
+function collectTrackerTaskListeners(
   config: OrchestratorConfig,
   projectId?: string,
 ): JiraSprintTaskListener[] {
   const listeners: JiraSprintTaskListener[] = [];
+  const seenListenerIds = new Set<string>();
 
-  for (const [listenerId, listener] of Object.entries(config.listeners ?? {})) {
-    if (!isEnabled(listener)) continue;
-    if (!isJiraBacklogListener(listener)) continue;
-    if (projectId && listener.projectId !== projectId) continue;
+  for (const [resolvedProjectId, project] of Object.entries(config.projects)) {
+    if (projectId && resolvedProjectId !== projectId) continue;
+    if (!project.tracker?.plugin) continue;
 
-    const project = config.projects[listener.projectId];
-    if (!project) continue;
-    if (project.tracker?.plugin !== "jira") continue;
+    const projectListeners =
+      (project as { listeners?: Record<string, Omit<ListenerConfig, "projectId">> }).listeners ??
+      {};
 
-    const jql = typeof listener.jql === "string" ? listener.jql.trim() : "";
-    if (!jql) continue;
+    for (const [baseListenerId, projectListener] of Object.entries(projectListeners)) {
+      const listener = {
+        ...projectListener,
+        projectId: resolvedProjectId,
+      } as ListenerConfig;
+      if (!isTrackerTaskListener(listener)) continue;
 
-    const backlogStatus =
-      typeof listener.backlogStatus === "string" && listener.backlogStatus.trim().length > 0
-        ? listener.backlogStatus.trim()
-        : DEFAULT_BACKLOG_STATUS;
+      const effectiveListenerId = seenListenerIds.has(baseListenerId)
+        ? `${resolvedProjectId}:${baseListenerId}`
+        : baseListenerId;
+      seenListenerIds.add(effectiveListenerId);
 
-    listeners.push({
-      source: listener.source,
-      listenerId,
-      projectId: listener.projectId,
-      projectName: project.name ?? listener.projectId,
-      jql,
-      backlogStatus,
-      effectiveJql: buildListenerEffectiveJql(jql, backlogStatus),
-      sprintJql: buildListenerSprintJql(jql),
-      triggerAgent: readTriggerAgent(listener),
-    });
+      listeners.push({
+        source: listener.source,
+        listenerId: effectiveListenerId,
+        projectId: resolvedProjectId,
+        projectName: project.name ?? resolvedProjectId,
+        mode: readListenerMode(listener),
+        filters: buildListenerEffectiveFilters(listener),
+        triggerAgent: readTriggerAgent(listener),
+      });
+    }
   }
 
   return listeners.sort((a, b) => a.listenerId.localeCompare(b.listenerId));
 }
 
-function stripAnsi(value: string): string {
-  return value.replace(ANSI_ESCAPE_PATTERN, "");
-}
+export async function listTrackerIssuesForListener(
+  listener: JiraSprintTaskListener,
+  project: ProjectConfig,
+  registry: PluginRegistry,
+): Promise<JiraIssueSummary[]> {
+  const trackerPlugin = toNullableString(project.tracker?.plugin);
+  if (!trackerPlugin) return [];
 
-function extractStreamText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (Buffer.isBuffer(value)) return value.toString("utf-8");
-  return "";
-}
+  const tracker = registry.get<Tracker>("tracker", trackerPlugin);
+  if (!tracker || typeof tracker.listIssues !== "function") return [];
 
-function flattenErrorText(error: unknown): string {
-  const parts: string[] = [];
-  const visited = new Set<unknown>();
-  let current: unknown = error;
+  const issues = await tracker.listIssues(listener.filters, project);
+  const summaries: JiraIssueSummary[] = [];
+  const seen = new Set<string>();
 
-  while (current && typeof current === "object" && !visited.has(current)) {
-    visited.add(current);
-    const typed = current as ErrorWithStreams;
+  for (const issue of issues) {
+    const normalizedIssueKey = normalizeTrackerIssueId(issue.id);
+    if (!normalizedIssueKey || seen.has(normalizedIssueKey)) continue;
+    seen.add(normalizedIssueKey);
 
-    if (typeof typed.message === "string" && typed.message.trim().length > 0) {
-      parts.push(typed.message);
-    }
-
-    const stderr = extractStreamText(typed.stderr);
-    if (stderr.trim().length > 0) parts.push(stderr);
-
-    const stdout = extractStreamText(typed.stdout);
-    if (stdout.trim().length > 0) parts.push(stdout);
-
-    current = typed.cause;
-  }
-
-  return stripAnsi(parts.join("\n")).toLowerCase();
-}
-
-function isJiraNoResultsError(error: unknown): boolean {
-  const text = flattenErrorText(error);
-  return (
-    text.includes("no result found for given query") ||
-    text.includes("no results found for given query")
-  );
-}
-
-async function jiraCli(args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("jira", args, {
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    });
-    return stdout.trim();
-  } catch (err) {
-    throw new Error(`jira ${args.slice(0, 3).join(" ")} failed: ${(err as Error).message}`, {
-      cause: err,
-    });
-  }
-}
-
-function toIssueBrowseUrl(rawSelf: unknown, issueKey: string): string | null {
-  const self = toNullableString(rawSelf);
-  if (!self) return null;
-  try {
-    const url = new URL(self);
-    return `${url.origin}/browse/${issueKey}`;
-  } catch {
-    return null;
-  }
-}
-
-function parseIssueList(raw: string): JiraIssueSummary[] {
-  if (!raw) return [];
-
-  const parsed = JSON.parse(raw) as unknown;
-  if (!Array.isArray(parsed)) return [];
-
-  const issues: JiraIssueSummary[] = [];
-  const seenKeys = new Set<string>();
-
-  for (const value of parsed) {
-    if (!isRecord(value)) continue;
-
-    const issueKey = toNullableString(value["key"]);
-    if (!issueKey) continue;
-
-    const normalizedIssueKey = normalizeIssueKey(issueKey);
-    if (seenKeys.has(normalizedIssueKey)) continue;
-    seenKeys.add(normalizedIssueKey);
-
-    const fields = isRecord(value["fields"]) ? value["fields"] : null;
-    const rawStatus = fields && isRecord(fields["status"]) ? fields["status"] : null;
-    const rawCategory =
-      rawStatus && isRecord(rawStatus["statusCategory"]) ? rawStatus["statusCategory"] : null;
-
-    issues.push({
+    summaries.push({
       issueKey: normalizedIssueKey,
-      issueUrl: toIssueBrowseUrl(value["self"], normalizedIssueKey),
-      summary: fields ? toNullableString(fields["summary"]) : null,
-      status: rawStatus ? toNullableString(rawStatus["name"]) : null,
-      statusCategory: rawCategory ? toNullableString(rawCategory["key"]) : null,
+      issueUrl: issue.url ?? null,
+      summary: issue.title ?? null,
+      status: issue.state ?? null,
+      statusCategory: issue.state ?? null,
     });
   }
 
-  return issues;
-}
-
-export async function listJiraIssuesForJql(jql: string): Promise<JiraIssueSummary[]> {
-  let raw: string;
-  try {
-    raw = await jiraCli(["issue", "list", "-q", jql, "--raw"]);
-  } catch (err) {
-    if (isJiraNoResultsError(err)) {
-      return [];
-    }
-    throw err;
-  }
-  return parseIssueList(raw);
+  return summaries;
 }
 
 function isActiveSession(session: Session): boolean {
@@ -354,8 +314,8 @@ function syncTaskComputedFields(task: JiraSprintTask): void {
   task.relatedActiveSessions.sort(compareTaskSessions);
   task.listenerIds = [...new Set(task.listenerIds)].sort((a, b) => a.localeCompare(b));
   task.projectIds = [...new Set(task.projectIds)].sort((a, b) => a.localeCompare(b));
-  task.source = task.source ?? "jira-backlog";
-  task.taskManager = task.taskManager ?? "jira";
+  task.source = task.source ?? "tracker-task";
+  task.taskManager = task.taskManager ?? "tracker";
 
   const primarySession = getTaskPrimarySession(task);
   const sessionId = primarySession?.id ?? null;
@@ -392,14 +352,6 @@ function releaseTaskStartLock(lockKey: string): void {
   getTaskStartLocks().delete(lockKey);
 }
 
-function isBacklogStatusMatch(
-  issueStatus: string | null,
-  backlogStatus: string,
-): boolean {
-  if (!issueStatus) return false;
-  return issueStatus.trim().toLowerCase() === backlogStatus.trim().toLowerCase();
-}
-
 function upsertTask(
   tasksByIssueKey: Map<string, JiraSprintTask>,
   issue: JiraIssueSummary,
@@ -411,7 +363,7 @@ function upsertTask(
   if (!existing) {
     tasksByIssueKey.set(issue.issueKey, {
       source: listener.source,
-      taskManager: "jira",
+      taskManager: "tracker",
       issueKey: issue.issueKey,
       issueUrl: issue.issueUrl,
       summary: issue.summary,
@@ -436,7 +388,7 @@ function upsertTask(
 
   if (!existing.issueUrl && issue.issueUrl) existing.issueUrl = issue.issueUrl;
   if (!existing.source) existing.source = listener.source;
-  if (!existing.taskManager) existing.taskManager = "jira";
+  if (!existing.taskManager) existing.taskManager = "tracker";
   if (!existing.summary && issue.summary) existing.summary = issue.summary;
   if (!existing.status && issue.status) existing.status = issue.status;
   if (!existing.statusCategory && issue.statusCategory) {
@@ -461,24 +413,32 @@ function upsertTask(
 export async function buildJiraSprintTasksSnapshot(
   opts: BuildJiraSprintTasksSnapshotOptions,
 ): Promise<JiraSprintTasksSnapshot> {
-  const listeners = collectJiraBacklogListeners(opts.config, opts.projectId);
-  const issueFetcher = opts.issueFetcher ?? listJiraIssuesForJql;
+  const listeners = collectTrackerTaskListeners(opts.config, opts.projectId);
+  const issueFetcher = opts.issueFetcher;
+  const registry = opts.registry;
+
+  if (!issueFetcher && !registry) {
+    throw new Error("buildJiraSprintTasksSnapshot requires registry or issueFetcher");
+  }
 
   const projectSessionsCache = new Map<string, Session[]>();
   const sessionsByIssueCache = new Map<string, Map<string, Session[]>>();
   const tasksByIssueKey = new Map<string, JiraSprintTask>();
-  const startEligibleByIssueKey = new Map<string, boolean>();
+  const startEligibleIssueKeys = new Set<string>();
 
-  const getSessionsByIssueForProject = async (projectId: string): Promise<Map<string, Session[]>> => {
+  const getSessionsByIssueForProject = async (
+    projectId: string,
+  ): Promise<Map<string, Session[]>> => {
     const cached = sessionsByIssueCache.get(projectId);
     if (cached) return cached;
 
-    const sessions = projectSessionsCache.get(projectId) ?? (await opts.sessionManager.list(projectId));
+    const sessions =
+      projectSessionsCache.get(projectId) ?? (await opts.sessionManager.list(projectId));
     projectSessionsCache.set(projectId, sessions);
 
     const sessionsByIssue = new Map<string, Session[]>();
     for (const session of sessions) {
-      const issueKey = extractJiraIssueKey(session.issueId);
+      const issueKey = normalizeTrackerIssueId(session.issueId);
       if (!issueKey) continue;
 
       const existing = sessionsByIssue.get(issueKey);
@@ -494,26 +454,28 @@ export async function buildJiraSprintTasksSnapshot(
   };
 
   for (const listener of listeners) {
+    const project = opts.config.projects[listener.projectId];
+    if (!project) continue;
     const [issues, sessionsByIssue] = await Promise.all([
-      issueFetcher(listener.sprintJql),
+      issueFetcher
+        ? issueFetcher({ listener, project })
+        : listTrackerIssuesForListener(listener, project, registry as PluginRegistry),
       getSessionsByIssueForProject(listener.projectId),
     ]);
 
     for (const issue of issues) {
       const relatedSessions = sessionsByIssue.get(issue.issueKey) ?? [];
       const relatedActiveSessions = relatedSessions.filter(isActiveSession).map(toTaskSession);
-      const canStartForListener = isBacklogStatusMatch(issue.status, listener.backlogStatus);
-      startEligibleByIssueKey.set(
-        issue.issueKey,
-        (startEligibleByIssueKey.get(issue.issueKey) ?? false) || canStartForListener,
-      );
+      if (isSpawnListenerMode(listener.mode)) {
+        startEligibleIssueKeys.add(issue.issueKey);
+      }
       upsertTask(tasksByIssueKey, issue, listener, relatedActiveSessions);
     }
   }
 
   for (const task of tasksByIssueKey.values()) {
-    const canStartFromStatus = startEligibleByIssueKey.get(task.issueKey) ?? false;
-    task.spawnAvailable = canStartFromStatus && task.relatedActiveSessions.length === 0;
+    const isInListenerScope = startEligibleIssueKeys.has(task.issueKey);
+    task.spawnAvailable = isInListenerScope && task.relatedActiveSessions.length === 0;
     syncTaskComputedFields(task);
   }
 
@@ -536,11 +498,12 @@ async function findActiveSessionForIssue(
   issueKey: string,
 ): Promise<Session | null> {
   const sessions = await sessionManager.list(projectId);
-  const normalizedIssueKey = normalizeIssueKey(issueKey);
+  const normalizedIssueKey =
+    normalizeTrackerIssueId(issueKey) ?? normalizeIssueIdentifier(issueKey);
 
   const active = sessions
     .filter((session) => isActiveSession(session))
-    .filter((session) => extractJiraIssueKey(session.issueId) === normalizedIssueKey)
+    .filter((session) => normalizeTrackerIssueId(session.issueId) === normalizedIssueKey)
     .sort((a, b) => {
       const byActivity = b.lastActivityAt.getTime() - a.lastActivityAt.getTime();
       if (byActivity !== 0) return byActivity;
@@ -559,18 +522,21 @@ async function resolveStartContext(
   const snapshot = await buildJiraSprintTasksSnapshot({
     config: opts.config,
     sessionManager: opts.sessionManager,
+    registry: opts.registry,
     projectId: requestedProjectId,
     issueFetcher: opts.issueFetcher,
   });
 
   const task = snapshot.tasks.find((entry) => entry.issueKey === opts.normalizedIssueKey);
-  const listenersById = new Map(snapshot.listeners.map((listener) => [listener.listenerId, listener]));
+  const listenersById = new Map(
+    snapshot.listeners.map((listener) => [listener.listenerId, listener]),
+  );
 
   if (!task) {
     throw new JiraSprintTaskError(
       409,
       "out_of_scope",
-      `Issue ${opts.normalizedIssueKey} is outside the current sprint backlog scope`,
+      `Issue ${opts.normalizedIssueKey} is outside the current tracker task scope`,
       {
         projectId: requestedProjectId ?? null,
         listenerId: requestedListenerId ?? null,
@@ -605,8 +571,8 @@ async function resolveStartContext(
     );
   }
 
-  const projectIds = [...new Set(candidateListeners.map((listener) => listener.projectId))].sort((a, b) =>
-    a.localeCompare(b),
+  const projectIds = [...new Set(candidateListeners.map((listener) => listener.projectId))].sort(
+    (a, b) => a.localeCompare(b),
   );
 
   const resolvedProjectId = requestedProjectId ?? projectIds[0];
@@ -641,7 +607,9 @@ async function resolveStartContext(
     );
   }
 
-  const listenerForProject = candidateListeners.find((listener) => listener.projectId === resolvedProjectId);
+  const listenerForProject = candidateListeners.find(
+    (listener) => listener.projectId === resolvedProjectId,
+  );
   if (!listenerForProject) {
     throw new JiraSprintTaskError(
       409,
@@ -654,21 +622,60 @@ async function resolveStartContext(
     );
   }
 
+  const listenersForProject = candidateListeners.filter(
+    (listener) => listener.projectId === resolvedProjectId,
+  );
+  const requestedListener =
+    requestedListenerId !== undefined
+      ? (listenersForProject.find((listener) => listener.listenerId === requestedListenerId) ??
+        null)
+      : null;
+  const spawnCapableListener =
+    requestedListener ??
+    listenersForProject.find((listener) => isSpawnListenerMode(listener.mode)) ??
+    null;
+
+  if (!spawnCapableListener || !isSpawnListenerMode(spawnCapableListener.mode)) {
+    if (requestedListenerId !== undefined && requestedListener) {
+      throw new JiraSprintTaskError(
+        409,
+        "not_startable",
+        `Listener ${requestedListener.listenerId} is observe-only and cannot start sessions`,
+        {
+          listenerId: requestedListener.listenerId,
+          mode: requestedListener.mode ?? "spawn",
+          issueKey: opts.normalizedIssueKey,
+          projectId: resolvedProjectId,
+        },
+      );
+    }
+
+    throw new JiraSprintTaskError(
+      409,
+      "not_startable",
+      `Issue ${opts.normalizedIssueKey} is linked only to observe listeners in project ${resolvedProjectId}`,
+      {
+        issueKey: opts.normalizedIssueKey,
+        projectId: resolvedProjectId,
+      },
+    );
+  }
+
   return {
     issueKey: opts.normalizedIssueKey,
     projectId: resolvedProjectId,
-    listenerId: listenerForProject.listenerId,
-    triggerAgent: listenerForProject.triggerAgent,
-    spawnAvailable: task.spawnAvailable,
+    listenerId: spawnCapableListener.listenerId,
+    triggerAgent: spawnCapableListener.triggerAgent,
+    spawnAvailable: task.relatedActiveSessions.length === 0,
   };
 }
 
 export async function startJiraSprintTask(
   opts: StartJiraSprintTaskOptions,
 ): Promise<StartJiraSprintTaskResult> {
-  const parsedIssueKey = extractJiraIssueKey(opts.issueKey);
+  const parsedIssueKey = normalizeTrackerIssueId(opts.issueKey);
   if (!parsedIssueKey) {
-    throw new JiraSprintTaskError(400, "invalid_issue_key", "issueKey must look like ABC-123");
+    throw new JiraSprintTaskError(400, "invalid_issue_key", "issueKey must be non-empty");
   }
 
   const context = await resolveStartContext({
@@ -695,7 +702,7 @@ export async function startJiraSprintTask(
     throw new JiraSprintTaskError(
       409,
       "not_startable",
-      `Issue ${context.issueKey} is not startable right now (must be in backlog and not already active)`,
+      `Issue ${context.issueKey} is not startable right now (already active or currently starting)`,
     );
   }
 

@@ -149,6 +149,10 @@ CI fails → agent gets the logs and fixes it. Reviewer requests changes → age
 
 See [`agent-orchestrator.yaml.example`](agent-orchestrator.yaml.example) for the full reference.
 
+### Tracker Intake
+
+Auto-spawn from issue trackers uses `source: tracker-task` plus portable `filters` (`state`, `assignee`, `labels`, `limit`). The same contract works in top-level `listeners` and per-project `projects.<id>.listeners`.
+
 ## CLI
 
 ```bash

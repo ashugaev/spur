@@ -169,6 +169,14 @@ export interface LifecycleManagerDeps {
   config: OrchestratorConfig;
   registry: PluginRegistry;
   sessionManager: SessionManager;
+  healthHooks?: LifecycleHealthHooks;
+}
+
+export interface LifecycleHealthHooks {
+  onPollStarting?: (message: string) => void;
+  onPollHealthy?: (message: string) => void;
+  onPollDegraded?: (message: string, error?: unknown) => void;
+  onPollInactive?: (message: string) => void;
 }
 
 /** Track attempt counts for reactions per session. */
@@ -208,7 +216,7 @@ function pendingCommentsFingerprint(comments: ReviewComment[]): string {
 
 /** Create a LifecycleManager instance. */
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
-  const { config, registry, sessionManager } = deps;
+  const { config, registry, sessionManager, healthHooks } = deps;
 
   const states = new Map<SessionId, SessionStatus>();
   const mergeConflictStates = new Map<SessionId, boolean>();
@@ -889,8 +897,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           }
         }
       }
-    } catch {
+      healthHooks?.onPollHealthy?.(
+        `Lifecycle poll completed (${sessionsToCheck.length} session(s) checked, ${activeSessions.length} active)`,
+      );
+    } catch (error) {
       // Poll cycle failed — will retry next interval
+      healthHooks?.onPollDegraded?.("Lifecycle poll cycle failed", error);
     } finally {
       polling = false;
     }
@@ -899,6 +911,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   return {
     start(intervalMs = 30_000): void {
       if (pollTimer) return; // Already running
+      healthHooks?.onPollStarting?.("Starting lifecycle polling runtime");
       pollTimer = setInterval(() => void pollAll(), intervalMs);
       // Run immediately on start
       void pollAll();
@@ -909,6 +922,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      healthHooks?.onPollInactive?.("Lifecycle polling stopped");
     },
 
     getStates(): Map<SessionId, SessionStatus> {

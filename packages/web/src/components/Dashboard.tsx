@@ -28,7 +28,7 @@ interface DashboardProps {
   orchestratorByProject?: Record<string, string>;
 }
 
-type DashboardTab = "sessions" | "jira";
+type DashboardTab = "sessions" | "tracker";
 export interface DashboardProjectFilterOption {
   id: string;
   label: string;
@@ -181,8 +181,8 @@ export function Dashboard({
     }
     try {
       const endpoint = effectiveProjectId
-        ? `/api/jira/sprint-tasks?projectId=${encodeURIComponent(effectiveProjectId)}`
-        : "/api/jira/sprint-tasks";
+        ? `/api/tracker/tasks?projectId=${encodeURIComponent(effectiveProjectId)}`
+        : "/api/tracker/tasks";
       const response = await fetch(endpoint, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(await readErrorMessage(response));
@@ -192,7 +192,7 @@ export function Dashboard({
       setJiraError(null);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Unexpected error";
-      setJiraError(`Failed to load Jira sprint tasks: ${detail}`);
+      setJiraError(`Failed to load tracker tasks: ${detail}`);
     } finally {
       setJiraLoadedOnce(true);
       if (showLoading) {
@@ -301,7 +301,7 @@ export function Dashboard({
   }, []);
 
   useEffect(() => {
-    if (activeTab !== "jira") return;
+    if (activeTab !== "tracker") return;
     void refreshJiraTasks(!jiraLoadedOnce);
     const timer = setInterval(() => {
       void refreshJiraTasks(false);
@@ -436,16 +436,16 @@ export function Dashboard({
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab("jira")}
-          aria-pressed={activeTab === "jira"}
+          onClick={() => setActiveTab("tracker")}
+          aria-pressed={activeTab === "tracker"}
           className={[
             "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
-            activeTab === "jira"
+            activeTab === "tracker"
               ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
               : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
           ].join(" ")}
         >
-          Jira Tasks
+          Tracker Tasks
         </button>
       </div>
 
@@ -596,7 +596,7 @@ function JiraTasksPanel({
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-[10px] font-bold uppercase tracking-[0.10em] text-[var(--color-text-secondary)]">
-            Jira Sprint Tasks
+            Tracker Tasks
           </h2>
           <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
             Task status, related active sessions, and one-click agent start.
@@ -649,19 +649,19 @@ function JiraTasksPanel({
 
       {showRefreshing && (
         <p className="mb-3 rounded-[6px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-secondary)]">
-          Refreshing Jira sprint tasks…
+          Refreshing tracker tasks…
         </p>
       )}
 
       {showBlockingLoading ? (
         <p className="rounded-[6px] border border-[var(--color-border-default)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
-          Loading Jira sprint tasks…
+          Loading tracker tasks…
         </p>
       ) : orderedTasks.length === 0 ? (
         <p className="rounded-[6px] border border-[var(--color-border-default)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
           {error
-            ? "Unable to load Jira sprint tasks right now."
-            : "No Jira tasks found in the active sprint."}
+            ? "Unable to load tracker tasks right now."
+            : "No tracker tasks found for the current listener scope."}
         </p>
       ) : (
         <div className="overflow-x-auto rounded-[6px] border border-[var(--color-border-default)]">
@@ -845,7 +845,7 @@ function buildJiraTaskStartPayload(task: JiraTaskView): JiraTaskStartPayload | n
 }
 
 async function startJiraTask(task: JiraTaskView, payload: JiraTaskStartPayload): Promise<Response> {
-  const endpoint = task.startEndpoint ?? "/api/jira/sprint-tasks";
+  const endpoint = task.startEndpoint ?? "/api/tracker/tasks";
   return fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -916,7 +916,7 @@ function parseJiraSprintTasks(payload: unknown, fallbackProjectId?: string): Jir
       projectId,
       startEndpoint:
         readStringField(rawTask, ["startEndpoint", "startUrl", "spawnEndpoint"]) ??
-        "/api/jira/sprint-tasks",
+        "/api/tracker/tasks",
     });
   }
 
@@ -1024,7 +1024,7 @@ function extractTaskArray(payload: unknown): unknown[] {
 }
 
 function readTaskArrayFromRecord(value: Record<string, unknown>): unknown[] {
-  const candidates = ["tasks", "items", "jiraTasks", "sprintTasks"];
+  const candidates = ["tasks", "items", "trackerTasks", "jiraTasks", "sprintTasks"];
   for (const key of candidates) {
     const next = value[key];
     if (Array.isArray(next)) {
@@ -1153,11 +1153,26 @@ function IntegrationStatusPanel({ status }: { status: IntegrationsStatusSnapshot
     status.updatedAt && status.source === "snapshot"
       ? `updated ${formatStatusTimestamp(status.updatedAt)}`
       : "snapshot unavailable";
-  const entries = INTEGRATION_STATUS_KEYS.map((key) => ({
-    key,
-    label: INTEGRATION_STATUS_LABELS[key],
-    entry: status.integrations[key],
-  }));
+  const dynamicEntries = status.entries.length > 0
+    ? status.entries.map((entry, index) => {
+        const fallbackLabel =
+          entry.id && entry.id in INTEGRATION_STATUS_LABELS
+            ? INTEGRATION_STATUS_LABELS[entry.id as keyof typeof INTEGRATION_STATUS_LABELS]
+            : undefined;
+        return {
+          key: entry.id ?? `integration-${index + 1}`,
+          label: entry.label ?? fallbackLabel ?? entry.id ?? `Integration ${index + 1}`,
+          entry,
+        };
+      })
+    : [];
+  const entries = dynamicEntries.length > 0
+    ? dynamicEntries
+    : INTEGRATION_STATUS_KEYS.map((key) => ({
+        key,
+        label: INTEGRATION_STATUS_LABELS[key],
+        entry: status.integrations[key],
+      }));
   const summary = entries.reduce(
     (counts, item) => {
       counts[integrationTone(item.entry)] += 1;
@@ -1252,6 +1267,14 @@ function IntegrationStatusPanel({ status }: { status: IntegrationsStatusSnapshot
                     </div>
                     <span className={stateBadgeClass(entry)}>{formatStateLabel(entry.state)}</span>
                   </div>
+                  {(entry.kind || entry.service || entry.lastCheckAt) && (
+                    <p className="mb-2 text-[10px] uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+                      {[entry.kind, entry.service].filter(Boolean).join(" · ")}
+                      {entry.lastCheckAt
+                        ? `${entry.kind || entry.service ? " · " : ""}checked ${formatStatusTimestamp(entry.lastCheckAt)}`
+                        : ""}
+                    </p>
+                  )}
                   <div className="grid gap-1.5">
                     <BooleanPill label="active" value={entry.active} />
                     <BooleanPill label="connected" value={entry.connected} />

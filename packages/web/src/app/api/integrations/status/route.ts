@@ -4,7 +4,7 @@ import type { IntegrationsStatusSnapshot } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/integrations/status — telegram/jira listener health snapshot */
+/** GET /api/integrations/status — integration health snapshot */
 export async function GET() {
   let snapshot: IntegrationsStatusSnapshot;
   try {

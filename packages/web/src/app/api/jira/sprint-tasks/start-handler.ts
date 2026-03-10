@@ -89,11 +89,12 @@ export async function handleJiraSprintTaskStart(
   }
 
   try {
-    const { config, sessionManager } = await getServices();
+    const { config, registry, sessionManager } = await getServices();
     const jiraSprintTasks = await import("@/lib/jira-sprint-tasks");
 
     const result = await jiraSprintTasks.startJiraSprintTask({
       config,
+      registry,
       sessionManager,
       issueKey: payload.issueKey,
       projectId: payload.projectId,
@@ -141,7 +142,6 @@ export async function handleJiraSprintTaskStart(
       { status: 409 },
     );
   } catch (err) {
-    return toErrorResponse(err, "Failed to start Jira sprint task");
+    return toErrorResponse(err, "Failed to start tracker task");
   }
 }
-

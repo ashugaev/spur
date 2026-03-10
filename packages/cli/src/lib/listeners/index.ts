@@ -1,7 +1,16 @@
-import type { ListenerConfig, OrchestratorConfig, SessionManager } from "@composio/ao-core";
-import { jiraBacklogSource } from "./jira-backlog-source.js";
+import type {
+  ListenerConfig,
+  OrchestratorConfig,
+  PluginRegistry,
+  SessionManager,
+} from "@composio/ao-core";
+import { trackerTaskSource } from "./jira-task-source.js";
 import type { ListenerController, ListenerLogger, ListenerSource } from "./types.js";
-import type { IntegrationHealthReporter, IntegrationIdentity, IntegrationService } from "../integration-health.js";
+import type {
+  IntegrationHealthReporter,
+  IntegrationIdentity,
+  IntegrationService,
+} from "../integration-health.js";
 
 export interface ListenerGroupController {
   activeListeners: string[];
@@ -10,6 +19,7 @@ export interface ListenerGroupController {
 
 interface StartConfiguredListenersDeps {
   config: OrchestratorConfig;
+  registry?: PluginRegistry;
   sessionManager: SessionManager;
   projectId?: string;
   logger?: ListenerLogger;
@@ -31,22 +41,16 @@ export function unregisterListenerSource(sourceName: string): void {
 }
 
 // Built-in sources
-registerListenerSource(jiraBacklogSource);
-
-function isEnabled(listener: ListenerConfig): boolean {
-  return listener.enabled !== false;
-}
+registerListenerSource(trackerTaskSource);
 
 function resolveListenerService(listener: ListenerConfig): IntegrationService {
   const source = listener.source.toLowerCase();
   if (source.startsWith("telegram-") || source.includes("telegram")) return "telegram";
+  if (source.startsWith("tracker-") || source.includes("tracker")) return "tracker";
   return "jira";
 }
 
-function buildHealthIdentity(
-  listenerId: string,
-  listener: ListenerConfig,
-): IntegrationIdentity {
+function buildHealthIdentity(listenerId: string, listener: ListenerConfig): IntegrationIdentity {
   return {
     id: `listener:${listenerId}`,
     label: `Listener ${listenerId} (${listener.source})`,
@@ -60,7 +64,27 @@ export async function maybeStartConfiguredListeners(
 ): Promise<ListenerGroupController | null> {
   const logger = deps.logger ?? console;
   const health = deps.healthReporter;
-  const listeners = deps.config.listeners ?? {};
+
+  // Collect per-project listeners only. projectId is implicit and injected here.
+  // If ids collide across projects, namespace with projectId to avoid overrides.
+  const listeners: Record<string, ListenerConfig> = {};
+  for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    const perProjectListeners =
+      (project as { listeners?: Record<string, Omit<ListenerConfig, "projectId">> }).listeners ??
+      {};
+    for (const [listenerId, listener] of Object.entries(perProjectListeners)) {
+      const baseId = listenerId;
+      const effectiveId = listenerId in listeners ? `${projectId}:${listenerId}` : listenerId;
+
+      if (effectiveId !== baseId) {
+        logger.warn(
+          `[listener:${baseId}] Duplicate listener id detected; using namespaced id "${effectiveId}"`,
+        );
+      }
+
+      listeners[effectiveId] = { ...listener, projectId } as ListenerConfig;
+    }
+  }
 
   const controllers: ListenerController[] = [];
   const activeListeners: string[] = [];
@@ -69,10 +93,6 @@ export async function maybeStartConfiguredListeners(
   for (const [listenerId, listener] of Object.entries(listeners)) {
     const healthIdentity = buildHealthIdentity(listenerId, listener);
 
-    if (!isEnabled(listener)) {
-      health?.markInactive(healthIdentity, "Listener inactive: disabled in config");
-      continue;
-    }
     if (deps.projectId && listener.projectId !== deps.projectId) continue;
 
     const source = getListenerSource(listener.source);
@@ -103,6 +123,7 @@ export async function maybeStartConfiguredListeners(
       health?.markStarting(healthIdentity, "Starting listener runtime");
       const controller = await source.start({
         config: deps.config,
+        registry: deps.registry,
         listenerId,
         listener,
         projectId: listener.projectId,
@@ -115,17 +136,11 @@ export async function maybeStartConfiguredListeners(
       controllers.push(controller);
       activeListeners.push(listenerId);
       activeListenerHealthIdentities.push(healthIdentity);
-      health?.markHealthy(
-        healthIdentity,
-        `Listener active: source "${listener.source}"`,
-      );
+      health?.markHealthy(healthIdentity, `Listener active: source "${listener.source}"`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`[listener:${listenerId}] Failed to start listener: ${msg}`);
-      health?.markInactive(
-        healthIdentity,
-        `Listener inactive: failed to start (${msg})`,
-      );
+      health?.markInactive(healthIdentity, `Listener inactive: failed to start (${msg})`);
     }
   }
 

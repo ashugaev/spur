@@ -196,16 +196,16 @@ See [agent-orchestrator.yaml.example](./agent-orchestrator.yaml.example) for a f
 
 Agent Orchestrator has 8 plugin slots. All are swappable:
 
-| Slot          | Purpose              | Default       | Alternatives                                    |
-| ------------- | -------------------- | ------------- | ----------------------------------------------- |
-| **Runtime**   | How sessions run     | `tmux`        | `process`, `docker`, `kubernetes`, `ssh`, `e2b` |
-| **Agent**     | AI coding assistant  | `claude-code` | `codex`, `aider`, `goose`, custom               |
-| **Workspace** | Workspace isolation  | `worktree`    | `clone`, `copy`                                 |
-| **Tracker**   | Issue tracking       | `github`      | `linear`, `jira`, custom                        |
-| **SCM**       | Source control       | `github`      | GitLab, Bitbucket (future)                      |
+| Slot          | Purpose              | Default       | Alternatives                                       |
+| ------------- | -------------------- | ------------- | -------------------------------------------------- |
+| **Runtime**   | How sessions run     | `tmux`        | `process`, `docker`, `kubernetes`, `ssh`, `e2b`    |
+| **Agent**     | AI coding assistant  | `claude-code` | `codex`, `aider`, `goose`, custom                  |
+| **Workspace** | Workspace isolation  | `worktree`    | `clone`, `copy`                                    |
+| **Tracker**   | Issue tracking       | `github`      | `linear`, `jira`, custom                           |
+| **SCM**       | Source control       | `github`      | GitLab, Bitbucket (future)                         |
 | **Notifier**  | Notifications        | `desktop`     | `slack`, `telegram`, `discord`, `webhook`, `email` |
-| **Terminal**  | Terminal integration | `iterm2`      | `web`, custom                                   |
-| **Lifecycle** | Session lifecycle    | (core)        | Non-pluggable                                   |
+| **Terminal**  | Terminal integration | `iterm2`      | `web`, custom                                      |
+| **Lifecycle** | Session lifecycle    | (core)        | Non-pluggable                                      |
 
 ### Reactions
 
@@ -415,6 +415,7 @@ curl -X POST -H 'Content-type: application/json' \
    ```
 
 4. Configure in `agent-orchestrator.yaml`:
+
    ```yaml
    defaults:
      notifiers: [desktop, telegram]
@@ -463,30 +464,75 @@ To add a custom tracker (Jira, Asana, etc.), create a plugin:
 
 See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
 
-### Jira Backlog Trigger Listener
+### Tracker Task Trigger Listener
 
-Use a background listener to auto-spawn sessions from Jira backlog without moving issue state on the board:
+Use a background listener to auto-spawn sessions from any tracker plugin that implements `listIssues` (Jira, Linear, GitHub, etc.):
 
 ```yaml
-listeners:
-  jira-broai:
-    enabled: true
-    source: jira-backlog
-    projectId: int
-    intervalMs: 60000
-    jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-    backlogStatus: "Backlog"
-    trigger:
-      type: spawn-session
+projects:
+  int:
+    repo: acme/int
+    path: /path/to/int
+    listeners:
+      tracker-broai:
+        source: tracker-task
+        intervalMs: 60000
+        mode: spawn
+        filters:
+          state: open
+          assignee: "aleksey@intelas.com"
+          labels: ["BroAI"]
+          limit: 100
+        trigger:
+          type: spawn-session
 ```
+
+Supported variants:
+
+- Only per-project listeners are supported: `projects.<projectId>.listeners.<id>`.
+- Source is `tracker-task`.
+
+Arguments:
+
+- `intervalMs`: poll interval for issue discovery.
+- `mode`: listener behavior mode:
+  - `spawn` (default): discovers issues and auto-starts sessions via `trigger`.
+  - `observe`: discovers issues for UI/monitoring only; never starts sessions.
+- `filters.state`: portable issue state filter (`open | closed | all`).
+- `filters.assignee`: assignee filter passed to the tracker plugin.
+- `filters.labels`: label/tag filter passed to the tracker plugin.
+- `filters.limit`: max issues to fetch per poll cycle.
+- `trigger.type`: currently `spawn-session`.
+- `trigger.agent`: optional agent override for auto-spawned sessions.
 
 Behavior:
 
 - Runs while `ao start` is running.
-- Enforces backlog-only selection in code (`status = "Backlog"` by default).
-- Triggers the same spawn flow as `ao spawn <project> <issue>`.
+- Pulls issues through the configured `tracker.plugin` for each project.
+- In `spawn` mode, triggers the same spawn flow as `ao spawn <project> <issue>`.
+- In `observe` mode, updates task snapshots/monitoring only (no session spawn).
 - Takes each issue once; retries only after that issue's previous session is `killed` (not `cleanup`/`done`/etc.).
 - Never calls tracker state transitions (does not move cards on the board).
+
+Common setups:
+
+- UI-only task list:
+  - `source: tracker-task`
+  - `mode: observe`
+  - keep `filters` as needed
+- Tracker comment monitoring:
+  - configure `reactions.tracker-comment` (kind `any|tagged|reply`) and keep listener mode as needed.
+- Auto-start by tracker filters:
+  - `source: tracker-task`
+  - `mode: spawn`
+  - `trigger.type: spawn-session`
+
+Why there is no `jql`:
+
+- `jql` is Jira-specific. Keeping it in the shared listener schema would hardcode Jira into a tracker-generic contract.
+- The listener now depends on `tracker.listIssues(filters, project)`, not on a Jira CLI or Jira query language.
+- Portable filters live in `filters`. Jira-specific auth, query translation, and workflow semantics belong inside the Jira tracker plugin.
+- `backlogStatus` was removed for the same reason: backlog semantics are workflow-specific, not universal across Jira, Linear, GitHub Issues, or custom trackers.
 
 ## Troubleshooting
 

@@ -4,6 +4,8 @@ import {
   formatInboundMessageForSession,
   type InboundContextStore,
   type OrchestratorConfig,
+  type ProjectConfig,
+  type ReactionConfig,
   type Session,
   type SessionManager,
 } from "@composio/ao-core";
@@ -22,6 +24,7 @@ export interface JiraCommentPollingController {
 }
 
 interface JiraPollingConfig {
+  projectId: string;
   baseUrl: string;
   email: string;
   apiToken: string;
@@ -58,12 +61,20 @@ interface StartJiraCommentPollingDeps {
   healthReporter?: IntegrationHealthReporter;
 }
 
+type TrackerCommentReactionKind = "any" | "tagged" | "reply";
+
+interface TrackerCommentReactionConfig extends Partial<ReactionConfig> {
+  kind?: TrackerCommentReactionKind;
+}
+
 const JIRA_COMMENT_POLLING_HEALTH: IntegrationIdentity = {
-  id: "jira-comment-polling",
-  label: "Jira Comment Polling",
-  service: "jira",
+  id: "tracker-comment-polling",
+  label: "Tracker comment polling",
+  service: "tracker",
   kind: "polling",
 };
+
+const TRACKER_COMMENT_REACTION_KEY = "tracker-comment";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -95,6 +106,35 @@ function normalizeBaseUrl(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `https://${trimmed}`;
+}
+
+function normalizeReactionKind(value: unknown): TrackerCommentReactionKind {
+  if (value === "any" || value === "tagged" || value === "reply") {
+    return value;
+  }
+  return "reply";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isTaggedComment(text: string, sessionId: string): boolean {
+  if (/(^|\s)@(ao|agent|orchestrator)\b/i.test(text)) return true;
+  const escapedSession = escapeRegExp(sessionId);
+  const directSessionTag = new RegExp(`\\b@${escapedSession}\\b`, "i");
+  return directSessionTag.test(text);
+}
+
+function resolveTrackerCommentReaction(
+  config: OrchestratorConfig,
+  projectId: string,
+): TrackerCommentReactionConfig | null {
+  const globalReaction = config.reactions?.[TRACKER_COMMENT_REACTION_KEY];
+  const projectReaction = config.projects[projectId]?.reactions?.[TRACKER_COMMENT_REACTION_KEY];
+  const merged = projectReaction ? { ...globalReaction, ...projectReaction } : globalReaction;
+  if (!merged) return null;
+  return merged as TrackerCommentReactionConfig;
 }
 
 /** Simple recursive ADF (Atlassian Document Format) to plain text. */
@@ -129,35 +169,40 @@ function commentBodyToText(body: unknown): string {
   return "";
 }
 
-function resolvePollingConfig(config: OrchestratorConfig): JiraPollingConfig | null {
-  // Find any project that uses tracker: jira — grab baseUrl from there
-  let baseUrl: string | undefined;
-  for (const project of Object.values(config.projects)) {
-    const tracker = project.tracker as Record<string, unknown> | undefined;
-    if (tracker?.plugin === "jira") {
-      baseUrl = toStringOrUndefined(tracker.baseUrl);
-      break;
-    }
-  }
-  baseUrl = baseUrl || env("JIRA_URL", "JIRA_HOST");
-  if (!baseUrl) return null;
-  baseUrl = normalizeBaseUrl(baseUrl);
+/**
+ * Resolve per-project Jira polling config from project tracker settings and env vars.
+ * Returns null if the project does not use the jira tracker or is missing required fields.
+ */
+function resolveProjectPollingConfig(
+  projectId: string,
+  project: ProjectConfig,
+): JiraPollingConfig | null {
+  const tracker = project.tracker;
+  if (!tracker || tracker.plugin !== "jira") return null;
 
-  const email = env("JIRA_EMAIL", "JIRA_USER");
-  const apiToken = env("JIRA_API_TOKEN", "JIRA_TOKEN");
-  if (!email || !apiToken) return null;
+  // baseUrl: config first, then env fallback
+  const rawBaseUrl =
+    toStringOrUndefined(tracker.baseUrl) ?? env("JIRA_URL", "JIRA_HOST");
+  if (!rawBaseUrl) return null;
+  const baseUrl = normalizeBaseUrl(rawBaseUrl);
 
+  // email: config first, then env fallback
+  const email =
+    toStringOrUndefined(tracker.email) ?? env("JIRA_EMAIL", "JIRA_USER");
+  if (!email) return null;
+
+  // apiToken: config first, then env fallback
+  const apiToken =
+    toStringOrUndefined(tracker.apiToken) ?? env("JIRA_API_TOKEN", "JIRA_TOKEN");
+  if (!apiToken) return null;
+
+  // pollIntervalMs: config first, then env fallback, then default
   const intervalMs =
-    toPositiveNumber(env("AO_JIRA_POLL_INTERVAL_MS", "JIRA_POLL_INTERVAL_MS")) ??
+    toPositiveNumber(tracker.pollIntervalMs) ??
+    toPositiveNumber(env("AO_JIRA_POLL_INTERVAL_MS")) ??
     DEFAULT_POLL_INTERVAL_MS;
 
-  return { baseUrl, email, apiToken, intervalMs };
-}
-
-function hasJiraTrackerProject(config: OrchestratorConfig): boolean {
-  return Object.values(config.projects).some(
-    (p) => (p.tracker as Record<string, unknown> | undefined)?.plugin === "jira",
-  );
+  return { projectId, baseUrl, email, apiToken, intervalMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +213,17 @@ export async function maybeStartJiraCommentPolling(
   deps: StartJiraCommentPollingDeps,
 ): Promise<JiraCommentPollingController | null> {
   const health = deps.healthReporter;
-  if (!hasJiraTrackerProject(deps.config)) {
+
+  // Build per-project config map
+  const projectConfigs = new Map<string, JiraPollingConfig>();
+  for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    const cfg = resolveProjectPollingConfig(projectId, project);
+    if (cfg) {
+      projectConfigs.set(projectId, cfg);
+    }
+  }
+
+  if (projectConfigs.size === 0) {
     health?.markInactive(
       JIRA_COMMENT_POLLING_HEALTH,
       "Jira polling inactive: no project configured with Jira tracker",
@@ -176,39 +231,33 @@ export async function maybeStartJiraCommentPolling(
     return null;
   }
 
-  const cfg = resolvePollingConfig(deps.config);
-  if (!cfg) {
-    health?.markInactive(
-      JIRA_COMMENT_POLLING_HEALTH,
-      "Jira polling inactive: base URL, JIRA_EMAIL, or JIRA_API_TOKEN is missing",
-    );
-    return null;
-  }
-
   const fetchImpl = deps.fetchImpl ?? fetch;
   const logger = deps.logger ?? console;
   const inboundContextStore = deps.inboundContextStore ?? createInboundContextStore(deps.config);
-  const { baseUrl, email, apiToken } = cfg;
-  health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting Jira comment polling runtime");
 
-  // Track last seen comment ID per issue to avoid re-processing
+  health?.markStarting(JIRA_COMMENT_POLLING_HEALTH, "Starting tracker comment polling runtime");
+
+  // Track last seen comment IDs per project+issue to avoid re-processing.
   const seenCommentIds = new Map<string, Set<string>>();
+
+  // Track last poll timestamps per project so larger project intervals are respected.
+  const lastPolledAt = new Map<string, number>();
 
   let stopped = false;
   let inFlight = false;
 
-  async function fetchComments(issueKey: string): Promise<JiraComment[]> {
+  async function fetchComments(issueKey: string, cfg: JiraPollingConfig): Promise<JiraComment[]> {
     const collected: JiraComment[] = [];
     let startAt = 0;
     const maxResults = 100;
     const maxPages = 50;
 
     for (let page = 0; page < maxPages; page += 1) {
-      const url = `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
+      const url = `${cfg.baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?orderBy=created&startAt=${startAt}&maxResults=${maxResults}`;
       const response = await fetchImpl(url, {
         method: "GET",
         headers: {
-          Authorization: `Basic ${btoa(`${email}:${apiToken}`)}`,
+          Authorization: `Basic ${btoa(`${cfg.email}:${cfg.apiToken}`)}`,
           Accept: "application/json",
         },
       });
@@ -247,23 +296,27 @@ export async function maybeStartJiraCommentPolling(
    * 1. Walk comments in order
    * 2. Track the latest AO_SESSION:xxx marker seen so far
    * 3. Any NEW comment (not seen before, no AO_SESSION marker itself) after a
-   *    marker comment is a human reply → route to that session
+   *    marker comment is a human reply -> route to that session
    */
   function findNewReplies(
+    seenKey: string,
     issueKey: string,
+    projectId: string,
     comments: JiraComment[],
   ): Array<{
     sessionId: string;
+    projectId: string;
     text: string;
     issueKey: string;
     commentId: string;
     authorEmail?: string;
     authorDisplayName?: string;
   }> {
-    const seen = seenCommentIds.get(issueKey);
+    const seen = seenCommentIds.get(seenKey);
     const nowSeen = new Set<string>();
     const replies: Array<{
       sessionId: string;
+      projectId: string;
       text: string;
       issueKey: string;
       commentId: string;
@@ -291,6 +344,7 @@ export async function maybeStartJiraCommentPolling(
         if (sanitized.length > 0 && sanitized.length <= MAX_COMMENT_LENGTH) {
           replies.push({
             sessionId: activeSessionId,
+            projectId,
             text: sanitized,
             issueKey,
             commentId: id,
@@ -301,7 +355,7 @@ export async function maybeStartJiraCommentPolling(
       }
     }
 
-    seenCommentIds.set(issueKey, nowSeen);
+    seenCommentIds.set(seenKey, nowSeen);
     return replies;
   }
 
@@ -320,72 +374,109 @@ export async function maybeStartJiraCommentPolling(
           s.status !== "done",
       );
 
-      // Deduplicate by issueId (multiple sessions could share an issue)
-      const issueToSessions = new Map<string, string[]>();
+      // Group active sessions by projectId to avoid cross-project key collisions.
+      const projectSessions = new Map<string, Map<string, string[]>>();
       for (const session of activeSessions) {
         if (!session.issueId) continue;
-        const existing = issueToSessions.get(session.issueId);
+        if (!projectSessions.has(session.projectId)) {
+          projectSessions.set(session.projectId, new Map<string, string[]>());
+        }
+        const byIssue = projectSessions.get(session.projectId)!;
+        const existing = byIssue.get(session.issueId);
         if (existing) {
           existing.push(session.id);
         } else {
-          issueToSessions.set(session.issueId, [session.id]);
+          byIssue.set(session.issueId, [session.id]);
         }
       }
 
-      for (const [issueKey] of issueToSessions) {
-        cycleIssueCount += 1;
-        try {
-          const comments = await fetchComments(issueKey);
-          const replies = findNewReplies(issueKey, comments);
+      const now = Date.now();
 
-          for (const reply of replies) {
-            const jiraRouting = buildJiraInboundRouting({
-              issueKey: reply.issueKey,
-              commentId: reply.commentId,
-              authorEmail: reply.authorEmail,
-              authorDisplayName: reply.authorDisplayName,
-            });
+      for (const [projectId, byIssue] of projectSessions) {
+        const cfg = projectConfigs.get(projectId);
+        if (!cfg) continue;
 
-            let sourceReplyAvailable = false;
-            try {
-              await inboundContextStore.enqueue({
-                sessionId: reply.sessionId,
-                source: "jira",
-                text: reply.text,
-                routing: jiraRouting,
+        const lastPoll = lastPolledAt.get(projectId) ?? 0;
+        if (now - lastPoll < cfg.intervalMs) {
+          continue;
+        }
+        lastPolledAt.set(projectId, now);
+
+        for (const [issueKey] of byIssue) {
+          cycleIssueCount += 1;
+          try {
+            const comments = await fetchComments(issueKey, cfg);
+            const seenKey = `${projectId}:${issueKey}`;
+            const replies = findNewReplies(seenKey, issueKey, projectId, comments);
+
+            for (const reply of replies) {
+              const reaction = resolveTrackerCommentReaction(deps.config, reply.projectId);
+              if (!reaction) {
+                continue;
+              }
+              const reactionKind = normalizeReactionKind(reaction?.kind);
+              if (reactionKind === "tagged" && !isTaggedComment(reply.text, reply.sessionId)) {
+                continue;
+              }
+
+              const shouldAutoSend = reaction.auto !== false && reaction.action === "send-to-agent";
+              if (!shouldAutoSend) {
+                continue;
+              }
+
+              const outboundText =
+                typeof reaction.message === "string" && reaction.message.trim().length > 0
+                  ? reaction.message.trim()
+                  : reply.text;
+
+              const jiraRouting = buildJiraInboundRouting({
+                issueKey: reply.issueKey,
+                commentId: reply.commentId,
+                authorEmail: reply.authorEmail,
+                authorDisplayName: reply.authorDisplayName,
               });
-              sourceReplyAvailable = true;
-            } catch (err) {
-              cycleHadErrors = true;
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.warn(
-                `[jira-polling] Failed to persist inbound source context for ${reply.sessionId}: ${msg}`,
-              );
-            }
 
-            try {
-              await deps.sessionManager.send(
-                reply.sessionId,
-                formatInboundMessageForSession({
+              let sourceReplyAvailable = false;
+              try {
+                await inboundContextStore.enqueue({
                   sessionId: reply.sessionId,
                   source: "jira",
                   text: reply.text,
                   routing: jiraRouting,
-                  includeReplyCommand: sourceReplyAvailable,
-                }),
-              );
-            } catch (err) {
-              cycleHadErrors = true;
-              const msg = err instanceof Error ? err.message : String(err);
-              logger.warn(
-                `[jira-polling] Failed to send to session ${reply.sessionId}: ${msg}`,
-              );
+                });
+                sourceReplyAvailable = true;
+              } catch (err) {
+                cycleHadErrors = true;
+                const msg = err instanceof Error ? err.message : String(err);
+                logger.warn(
+                  `[jira-polling] Failed to persist inbound source context for ${reply.sessionId}: ${msg}`,
+                );
+              }
+
+              try {
+                await deps.sessionManager.send(
+                  reply.sessionId,
+                  formatInboundMessageForSession({
+                    sessionId: reply.sessionId,
+                    source: "jira",
+                    text: outboundText,
+                    routing: jiraRouting,
+                    includeReplyCommand: sourceReplyAvailable,
+                  }),
+                );
+              } catch (err) {
+                cycleHadErrors = true;
+                const msg = err instanceof Error ? err.message : String(err);
+                logger.warn(
+                  `[jira-polling] Failed to send to session ${reply.sessionId}: ${msg}`,
+                );
+              }
             }
+          } catch (err) {
+            cycleHadErrors = true;
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`[jira-polling] Failed to fetch comments for ${issueKey}: ${msg}`);
           }
-        } catch (err) {
-          cycleHadErrors = true;
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.warn(`[jira-polling] Failed to fetch comments for ${issueKey}: ${msg}`);
         }
       }
 
@@ -409,9 +500,12 @@ export async function maybeStartJiraCommentPolling(
     }
   }
 
+  // Use the minimum interval across all configured projects
+  const intervalMs = Math.min(...Array.from(projectConfigs.values()).map((c) => c.intervalMs));
+
   const timer = setInterval(() => {
     void pollOnce();
-  }, cfg.intervalMs);
+  }, intervalMs);
 
   // Initial poll
   void pollOnce();
@@ -421,7 +515,7 @@ export async function maybeStartJiraCommentPolling(
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      health?.markInactive(JIRA_COMMENT_POLLING_HEALTH, "Jira comment polling stopped");
+      health?.markInactive(JIRA_COMMENT_POLLING_HEALTH, "Tracker comment polling stopped");
     },
   };
 }

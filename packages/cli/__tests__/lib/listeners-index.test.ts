@@ -54,7 +54,6 @@ function makeConfig(): OrchestratorConfig {
     notifiers: {},
     notificationRouting: { urgent: [], action: [], warning: [], info: [] },
     reactions: {},
-    listeners: {},
   };
 }
 
@@ -101,17 +100,15 @@ describe("maybeStartConfiguredListeners", () => {
     const healthReporter = makeHealthReporterStub();
 
     const config = makeConfig();
-    config.listeners = {
+    config.projects.int!.listeners = {
       "listener-int": {
-        enabled: true,
         source: sourceName,
-        projectId: "int",
         trigger: { type: "spawn-session" },
       },
+    };
+    config.projects.web!.listeners = {
       "listener-web": {
-        enabled: true,
         source: sourceName,
-        projectId: "web",
         trigger: { type: "spawn-session" },
       },
     };
@@ -155,11 +152,9 @@ describe("maybeStartConfiguredListeners", () => {
     const warn = vi.fn();
     const healthReporter = makeHealthReporterStub();
     const config = makeConfig();
-    config.listeners = {
+    config.projects.int!.listeners = {
       "listener-unknown-source": {
-        enabled: true,
         source: "missing-source",
-        projectId: "int",
       },
     };
 
@@ -172,30 +167,33 @@ describe("maybeStartConfiguredListeners", () => {
     });
 
     expect(controller).toBeNull();
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Unknown source "missing-source"'),
-    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Unknown source "missing-source"'));
     expect(healthReporter.markInactive).toHaveBeenCalledWith(
       expect.objectContaining({ id: "listener:listener-unknown-source" }),
       expect.stringContaining("unsupported source"),
     );
   });
 
-  it("skips listener with unknown project and warns", async () => {
-    const sourceName = "test-source-unknown-project";
+  it("namespaces listener ids when they collide across projects", async () => {
+    const sourceName = "test-source-collision";
+    const start = vi
+      .fn<ListenerSource["start"]>()
+      .mockResolvedValue({ stop: vi.fn() } satisfies ListenerController);
     registerListenerSource({
       source: sourceName,
-      start: async () => ({ stop: vi.fn() }),
+      start,
     });
 
     const warn = vi.fn();
-    const healthReporter = makeHealthReporterStub();
     const config = makeConfig();
-    config.listeners = {
-      "listener-unknown-project": {
-        enabled: true,
+    config.projects.int!.listeners = {
+      duplicate: {
         source: sourceName,
-        projectId: "does-not-exist",
+      },
+    };
+    config.projects.web!.listeners = {
+      duplicate: {
+        source: sourceName,
       },
     };
 
@@ -203,18 +201,29 @@ describe("maybeStartConfiguredListeners", () => {
       config,
       sessionManager: makeSessionManagerStub(),
       logger: { warn },
-      healthReporter,
     });
 
-    expect(controller).toBeNull();
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Unknown project "does-not-exist"'),
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listenerId: "duplicate",
+        projectId: "int",
+      }),
     );
-    expect(healthReporter.markInactive).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "listener:listener-unknown-project" }),
-      expect.stringContaining('unknown project "does-not-exist"'),
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({
+        listenerId: "web:duplicate",
+        projectId: "web",
+      }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('using namespaced id "web:duplicate"'),
+    );
+    expect(controller?.activeListeners).toEqual(
+      expect.arrayContaining(["duplicate", "web:duplicate"]),
     );
 
+    controller?.stop();
     unregisterListenerSource(sourceName);
   });
 });

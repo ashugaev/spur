@@ -27,6 +27,7 @@ const ReactionConfigSchema = z.object({
   action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
   mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
   message: z.string().optional(),
+  kind: z.enum(["any", "tagged", "reply"]).optional(),
   priority: z.enum(["urgent", "action", "warning", "info"]).optional(),
   retries: z.number().optional(),
   escalateAfter: z.union([z.number(), z.string()]).optional(),
@@ -79,17 +80,42 @@ const ListenerTriggerConfigSchema = z
   })
   .passthrough();
 
-const ListenerConfigSchema = z
+const ListenerConfigBaseSchema = z
   .object({
-    enabled: z.boolean().default(true),
     source: z.string(),
     projectId: z.string(),
     intervalMs: z.number().positive().optional(),
-    backlogStatus: z.string().min(1).optional(),
+    mode: z.enum(["spawn", "observe"]).default("spawn"),
+    filters: z
+      .object({
+        state: z.enum(["open", "closed", "all"]).optional(),
+        labels: z.array(z.string().min(1)).optional(),
+        assignee: z.string().min(1).optional(),
+        limit: z.number().positive().optional(),
+      })
+      .optional(),
     lockStaleMs: z.number().positive().optional(),
     trigger: ListenerTriggerConfigSchema.default({ type: "spawn-session" }),
   })
   .passthrough();
+
+function validateLegacyListenerFields(value: Record<string, unknown>, ctx: z.RefinementCtx): void {
+  const legacyFields = ["enabled", "jql", "backlogStatus"] as const;
+  for (const field of legacyFields) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          `Listener field "${field}" is no longer supported. ` +
+          `Use source: tracker-task with filters.{state,labels,assignee,limit}.`,
+      });
+    }
+  }
+}
+
+const ProjectListenerConfigSchema = ListenerConfigBaseSchema.omit({ projectId: true }).superRefine(
+  validateLegacyListenerFields,
+);
 
 const AgentSpecificConfigSchema = z
   .object({
@@ -123,6 +149,7 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
+  listeners: z.record(ProjectListenerConfigSchema).optional(),
 });
 
 const DefaultPluginsSchema = z.object({
@@ -147,7 +174,6 @@ const OrchestratorConfigSchema = z.object({
     info: ["composio"],
   }),
   reactions: z.record(ReactionConfigSchema).default({}),
-  listeners: z.record(ListenerConfigSchema).default({}),
   services: ServicesConfigSchema.optional(),
   remote: RemoteConfigSchema.optional(),
 });
@@ -294,6 +320,13 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       action: "send-to-agent",
       message: "Your branch has merge conflicts. Rebase on the default branch and resolve them.",
       escalateAfter: "15m",
+    },
+    "tracker-comment": {
+      auto: true,
+      action: "send-to-agent",
+      kind: "reply",
+      message: "A new tracker comment arrived. Review it and update your implementation.",
+      escalateAfter: "30m",
     },
     "approved-and-green": {
       auto: false,
@@ -468,6 +501,13 @@ export function validateConfig(raw: unknown): OrchestratorConfig {
   if (raw && typeof raw === "object" && "vibeTunnel" in raw) {
     console.warn(
       "[config] vibeTunnel has been removed. Use `remote: { tailscaleHost: auto }` instead.",
+    );
+  }
+
+  if (raw && typeof raw === "object" && Object.prototype.hasOwnProperty.call(raw, "listeners")) {
+    throw new Error(
+      'Top-level "listeners" is no longer supported. Move listeners under ' +
+        '"projects.<projectId>.listeners" and remove "projectId" from each listener entry.',
     );
   }
 

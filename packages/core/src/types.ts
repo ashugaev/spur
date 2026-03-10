@@ -819,6 +819,14 @@ export interface ReactionConfig {
 
   /** Whether to include a summary in the notification */
   includeSummary?: boolean;
+
+  /**
+   * Optional reaction discriminator for tracker comment reactions.
+   * - any: every routed tracker comment
+   * - tagged: only comments explicitly tagging AO/agent/session
+   * - reply: comments detected as replies to AO marker messages
+   */
+  kind?: "any" | "tagged" | "reply";
 }
 
 export interface ReactionResult {
@@ -868,9 +876,6 @@ export interface OrchestratorConfig {
 
   /** Default reaction configs */
   reactions: Record<string, ReactionConfig>;
-
-  /** Background listeners (issue/event sources that auto-trigger actions) */
-  listeners?: Record<string, ListenerConfig>;
 
   /** Shared services config (transcriber, etc). */
   services?: ServicesConfig;
@@ -937,10 +942,23 @@ export interface ProjectConfig {
 
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
+
+  /** Per-project trigger listeners (projectId is implicit). */
+  listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
 }
 
 export interface TrackerConfig {
   plugin: string;
+  /** Jira: base URL (e.g. "https://myorg.atlassian.net"). Falls back to JIRA_URL / JIRA_HOST. */
+  baseUrl?: string;
+  /** Jira: project key (e.g. "INT"). Required for listIssues/createIssue. */
+  projectKey?: string;
+  /** Jira: Atlassian account email. Falls back to JIRA_EMAIL / JIRA_USER. */
+  email?: string;
+  /** Jira: Atlassian API token. Falls back to JIRA_API_TOKEN / JIRA_TOKEN. */
+  apiToken?: string;
+  /** Jira: comment poll interval ms (default: 60000). Falls back to AO_JIRA_POLL_INTERVAL_MS. */
+  pollIntervalMs?: number;
   /** Plugin-specific config (e.g. teamId for Linear) */
   [key: string]: unknown;
 }
@@ -990,22 +1008,24 @@ export interface ListenerTriggerConfig {
   [key: string]: unknown;
 }
 
+export type ListenerMode = "spawn" | "observe";
+
 export interface ListenerConfig {
-  /** Whether this listener is enabled (default: true) */
-  enabled?: boolean;
-  /** Source adapter name (e.g. "jira-backlog") */
+  /** Source adapter name (v1: "tracker-task") */
   source: string;
   /** Project id this listener operates on */
   projectId: string;
   /** Poll interval in milliseconds */
   intervalMs?: number;
-  /** Source-specific: backlog status name to enforce for jira-backlog (default: Backlog) */
-  backlogStatus?: string;
-  /** Source-specific: stale lock timeout in milliseconds for jira-backlog */
+  /** Listener behavior mode: spawn sessions or only observe/list issues */
+  mode?: ListenerMode;
+  /** Generic tracker filters (mapped to tracker.listIssues). */
+  filters?: IssueFilters;
+  /** Source-specific: stale lock timeout in milliseconds for tracker-task */
   lockStaleMs?: number;
   /** Trigger behavior configuration */
   trigger?: ListenerTriggerConfig;
-  /** Source-specific fields (e.g. jql for jira-backlog) */
+  /** Source-specific fields/extensions */
   [key: string]: unknown;
 }
 

@@ -159,6 +159,94 @@ reactions:
       expect(config.reactions["review-comments"]?.message).toBe("Custom review-comment prompt");
       expect(config.reactions["review-comments"]?.escalateAfter).toBe("30m");
     });
+
+    it("rejects legacy listener fields with migration guidance", () => {
+      const configPath = join(testDir, "legacy-listener-fields.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+    listeners:
+      legacy-jira-listener:
+        source: tracker-task
+        enabled: true
+        jql: 'assignee = "me"'
+        backlogStatus: "Backlog"
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/no longer supported/);
+      expect(() => loadConfig(configPath)).toThrow(/source: tracker-task/);
+    });
+
+    it("rejects top-level listeners with migration guidance", () => {
+      const configPath = join(testDir, "top-level-listeners.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+listeners:
+  tracker-listener:
+    source: tracker-task
+    projectId: test-project
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/Top-level "listeners" is no longer supported/);
+      expect(() => loadConfig(configPath)).toThrow(/projects\.<projectId>\.listeners/);
+    });
+
+    it("supports listener mode and defaults to spawn", () => {
+      const configPath = join(testDir, "listener-mode.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+    listeners:
+      observe-only:
+        source: tracker-task
+        mode: observe
+      spawn-default:
+        source: tracker-task
+`,
+      );
+
+      const config = loadConfig(configPath);
+      expect(config.projects["test-project"]?.listeners?.["observe-only"]?.mode).toBe("observe");
+      expect(config.projects["test-project"]?.listeners?.["spawn-default"]?.mode).toBe("spawn");
+    });
+
+    it("rejects unknown listener mode", () => {
+      const configPath = join(testDir, "listener-mode-invalid.yaml");
+      writeFileSync(
+        configPath,
+        `
+projects:
+  test-project:
+    repo: test/repo
+    path: ${testDir}
+    defaultBranch: main
+    listeners:
+      invalid-mode:
+        source: tracker-task
+        mode: watch
+`,
+      );
+
+      expect(() => loadConfig(configPath)).toThrow(/mode/);
+    });
   });
 
   describe("Config Discovery Priority", () => {

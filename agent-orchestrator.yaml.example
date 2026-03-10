@@ -24,10 +24,10 @@ port: 3000
 
 # Default plugins (these are the defaults — you can omit this section)
 defaults:
-  runtime: tmux           # tmux | process | docker | kubernetes | ssh | e2b
-  agent: claude-code      # claude-code | codex | aider | goose | custom
-  workspace: worktree     # worktree | clone | copy
-  notifiers: [desktop]    # desktop | slack | telegram | discord | webhook | email
+  runtime: tmux # tmux | process | docker | kubernetes | ssh | e2b
+  agent: claude-code # claude-code | codex | aider | goose | custom
+  workspace: worktree # worktree | clone | copy
+  notifiers: [desktop] # desktop | slack | telegram | discord | webhook | email
 
 # Projects — at minimum, specify repo and path
 projects:
@@ -42,6 +42,32 @@ projects:
     # tracker:
     #   plugin: linear
     #   teamId: "your-team-id"
+
+    # Jira tracker — per-project connection config
+    # tracker:
+    #   plugin: jira
+    #   baseUrl: "https://myorg.atlassian.net"   # falls back to JIRA_URL / JIRA_HOST env var
+    #   projectKey: "INT"                         # required for listIssues / createIssue
+    #   email: "you@yourorg.com"                  # falls back to JIRA_EMAIL / JIRA_USER env var
+    #   apiToken: "your-api-token"               # falls back to JIRA_API_TOKEN / JIRA_TOKEN env var (prefer env var over hardcoding)
+    #   pollIntervalMs: 30000                    # comment poll interval (default: 60000); falls back to AO_JIRA_POLL_INTERVAL_MS
+
+    # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
+    # Listeners are only supported under project config.
+    # Canonical source is `tracker-task`.
+    # `jql` is intentionally not supported here: it is Jira-specific and would break tracker portability.
+    # Jira-specific query semantics belong inside the Jira tracker plugin, not the shared listener schema.
+    # listeners:
+    #   tracker-task:
+    #     source: tracker-task
+    #     intervalMs: 60000
+    #     filters:
+    #       state: open
+    #       assignee: "you@yourorg.com"
+    #       labels: ["ao"]
+    #       limit: 100
+    #     trigger:
+    #       type: spawn-session
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]
@@ -73,6 +99,11 @@ projects:
     #     auto: true         # enable auto-merge for this project
     #     action: auto-merge
     #     mergeMethod: squash # optional: merge | squash | rebase
+    #   tracker-comment:
+    #     auto: true
+    #     action: send-to-agent
+    #     kind: reply         # any | tagged | reply
+    #     # message: "New tracker comment received. Check context and update implementation."
 
 # Notification channels
 # notifiers:
@@ -104,20 +135,6 @@ projects:
 #   warning: [telegram]           # auto-fix failed
 #   info: [telegram]              # summary, all done
 
-# Trigger listeners — poll external sources and auto-trigger current spawn flow.
-# listeners:
-#   jira-broai:
-#     enabled: true
-#     source: jira-backlog
-#     projectId: int
-#     intervalMs: 60000
-#     # Only backlog tickets assigned to you with BroAI label:
-#     jql: 'assignee = "aleksey@intelas.com" AND labels = "BroAI"'
-#     backlogStatus: "Backlog"   # enforced by listener; default is Backlog
-#     trigger:
-#       type: spawn-session
-#       # agent: codex            # optional agent override for auto-spawned sessions
-
 # Reactions — auto-responses to events (these are the defaults)
 # reactions:
 #   ci-failed:
@@ -136,6 +153,12 @@ projects:
 #     action: send-to-agent
 #     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
 #     escalateAfter: 15m
+#
+#   tracker-comment:
+#     auto: true
+#     action: send-to-agent
+#     kind: reply            # any | tagged | reply
+#     # message: "A new tracker comment arrived. Review and address it."
 #
 #   approved-and-green:
 #     auto: false              # set to true for auto-merge

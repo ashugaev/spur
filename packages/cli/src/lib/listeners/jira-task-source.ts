@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -10,27 +9,26 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
-import { getProjectBaseDir, getSessionsDir, readArchivedMetadataRaw } from "@composio/ao-core";
+import {
+  getProjectBaseDir,
+  getSessionsDir,
+  readArchivedMetadataRaw,
+  type IssueFilters,
+  type Tracker,
+} from "@composio/ao-core";
 import type { ListenerController, ListenerSource, ListenerStartDeps } from "./types.js";
 
-const execFileAsync = promisify(execFile);
-
 const DEFAULT_INTERVAL_MS = 60_000;
-const DEFAULT_BACKLOG_STATUS = "Backlog";
 const DEFAULT_LOCK_STALE_MS = 5 * 60_000;
 const DEFAULT_PENDING_CLAIM_TTL_MS = 30 * 60_000;
+const DEFAULT_ISSUE_LIMIT = 100;
 const LOCK_RETRY_ATTEMPTS = 200;
 const LOCK_RETRY_DELAY_MS = 25;
 const STATE_VERSION = 1;
 
-interface JiraBacklogListenerState {
+interface TrackerTaskListenerState {
   version: number;
   issues: Record<string, { lastSessionId: string; updatedAt: string }>;
-}
-
-interface JiraIssueListItem {
-  key?: unknown;
 }
 
 interface KnownSessionState {
@@ -43,25 +41,35 @@ interface FileLockHandle {
   release(): void;
 }
 
-interface ErrorWithStreams {
-  message?: unknown;
-  stdout?: unknown;
-  stderr?: unknown;
-  cause?: unknown;
-}
-
 function sanitizeListenerId(listenerId: string): string {
   const sanitized = listenerId.replace(/[^a-zA-Z0-9_-]+/g, "_");
   return sanitized.length > 0 ? sanitized : "listener";
 }
 
-function normalizeIssueKey(issueKey: string): string {
-  return issueKey.trim().toUpperCase();
+function normalizeIssueIdentifier(issueId: string): string {
+  return issueId.trim();
 }
 
-function sanitizeIssueKeyForLock(issueKey: string): string {
-  const normalized = normalizeIssueKey(issueKey).replace(/[^a-zA-Z0-9_.-]+/g, "_");
-  return normalized.length > 0 ? normalized : "issue";
+function canonicalIssueIdentifier(
+  issueId: string,
+  opts?: { jiraStyleCaseInsensitive?: boolean },
+): string {
+  const normalized = normalizeIssueIdentifier(issueId);
+  if (!normalized) return normalized;
+
+  if (opts?.jiraStyleCaseInsensitive === true) {
+    // Keep Jira-style keys case-insensitive, but preserve non-Jira identifiers as-is.
+    return /^[A-Z][A-Z0-9]+-\d+$/i.test(normalized) ? normalized.toUpperCase() : normalized;
+  }
+  return normalized;
+}
+
+function sanitizeIssueKeyForLock(
+  issueId: string,
+  opts?: { jiraStyleCaseInsensitive?: boolean },
+): string {
+  const canonical = canonicalIssueIdentifier(issueId, opts).replace(/[^a-zA-Z0-9_.-]+/g, "_");
+  return canonical.length > 0 ? canonical : "issue";
 }
 
 function buildStatePath(configPath: string, projectPath: string, listenerId: string): string {
@@ -74,13 +82,15 @@ function buildIssueLocksDir(configPath: string, projectPath: string): string {
   return join(baseDir, "listeners", "_issue-locks");
 }
 
-function readState(statePath: string): JiraBacklogListenerState {
+function readState(statePath: string): TrackerTaskListenerState {
   if (!existsSync(statePath)) {
     return { version: STATE_VERSION, issues: {} };
   }
 
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as Partial<JiraBacklogListenerState>;
+    const parsed = JSON.parse(
+      readFileSync(statePath, "utf-8"),
+    ) as Partial<TrackerTaskListenerState>;
     if (
       parsed &&
       parsed.version === STATE_VERSION &&
@@ -96,7 +106,7 @@ function readState(statePath: string): JiraBacklogListenerState {
   return { version: STATE_VERSION, issues: {} };
 }
 
-function writeState(statePath: string, state: JiraBacklogListenerState): void {
+function writeState(statePath: string, state: TrackerTaskListenerState): void {
   mkdirSync(dirname(statePath), { recursive: true });
   const tmpPath = `${statePath}.tmp.${process.pid}.${Date.now()}`;
   writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf-8");
@@ -127,7 +137,7 @@ function isNodeErrorWithCode(error: unknown, code: string): boolean {
   );
 }
 
-function isJiraCommandMissingError(error: unknown): boolean {
+function isCommandMissingError(error: unknown): boolean {
   if (isNodeErrorWithCode(error, "ENOENT")) {
     return true;
   }
@@ -140,50 +150,6 @@ function isJiraCommandMissingError(error: unknown): boolean {
     return true;
   }
   return false;
-}
-
-function stripAnsi(value: string): string {
-  // eslint-disable-next-line no-control-regex
-  return value.replace(/\u001b\[[0-9;]*m/g, "");
-}
-
-function extractStreamText(value: unknown): string {
-  if (typeof value === "string") return value;
-  if (Buffer.isBuffer(value)) return value.toString("utf-8");
-  return "";
-}
-
-function flattenErrorText(error: unknown): string {
-  const parts: string[] = [];
-  const visited = new Set<unknown>();
-  let current: unknown = error;
-
-  while (current && typeof current === "object" && !visited.has(current)) {
-    visited.add(current);
-    const typed = current as ErrorWithStreams;
-
-    if (typeof typed.message === "string" && typed.message.trim().length > 0) {
-      parts.push(typed.message);
-    }
-
-    const stderr = extractStreamText(typed.stderr);
-    if (stderr.trim().length > 0) parts.push(stderr);
-
-    const stdout = extractStreamText(typed.stdout);
-    if (stdout.trim().length > 0) parts.push(stdout);
-
-    current = typed.cause;
-  }
-
-  return stripAnsi(parts.join("\n")).toLowerCase();
-}
-
-function isJiraNoResultsError(error: unknown): boolean {
-  const text = flattenErrorText(error);
-  return (
-    text.includes("no result found for given query") ||
-    text.includes("no results found for given query")
-  );
 }
 
 function acquireFileLock(lockPath: string, staleMs: number): FileLockHandle | null {
@@ -291,7 +257,7 @@ async function withRetriedFileLock<T>(
 async function withLockedState<T>(
   statePath: string,
   lockStaleMs: number,
-  fn: (state: JiraBacklogListenerState) => T | Promise<T>,
+  fn: (state: TrackerTaskListenerState) => T | Promise<T>,
 ): Promise<T> {
   const stateLockPath = `${statePath}.lock`;
   return withRetriedFileLock(stateLockPath, lockStaleMs, async () => {
@@ -305,7 +271,7 @@ async function withLockedState<T>(
 async function setIssueStateEntry(
   statePath: string,
   issueKey: string,
-  entry: JiraBacklogListenerState["issues"][string],
+  entry: TrackerTaskListenerState["issues"][string],
   lockStaleMs: number,
 ): Promise<void> {
   await withLockedState(statePath, lockStaleMs, (latestState) => {
@@ -316,7 +282,7 @@ async function setIssueStateEntry(
 async function restoreIssueStateEntry(
   statePath: string,
   issueKey: string,
-  previousEntry: JiraBacklogListenerState["issues"][string] | null,
+  previousEntry: TrackerTaskListenerState["issues"][string] | null,
   lockStaleMs: number,
 ): Promise<void> {
   await withLockedState(statePath, lockStaleMs, (latestState) => {
@@ -329,44 +295,96 @@ async function restoreIssueStateEntry(
   });
 }
 
-async function jiraCli(args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("jira", args, {
-      maxBuffer: 10 * 1024 * 1024,
-      timeout: 30_000,
-    });
-    return stdout.trim();
-  } catch (err) {
-    throw new Error(`jira ${args.slice(0, 3).join(" ")} failed: ${(err as Error).message}`, {
-      cause: err,
-    });
-  }
+function toNonEmptyString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
-async function listIssueKeysByJql(jql: string): Promise<string[]> {
-  let raw: string;
-  try {
-    raw = await jiraCli(["issue", "list", "-q", jql, "--raw"]);
-  } catch (err) {
-    if (isJiraNoResultsError(err)) {
-      return [];
-    }
-    throw err;
+function toPositiveNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return Math.floor(value);
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const values = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((item) => item.length > 0);
+  return [...new Set(values)];
+}
+
+function readListenerMode(listener: ListenerStartDeps["listener"]): "spawn" | "observe" {
+  const value = toNonEmptyString(listener["mode"]);
+  return value === "observe" ? "observe" : "spawn";
+}
+
+function readListenerIssueFilters(listener: ListenerStartDeps["listener"]): IssueFilters {
+  const rawFilters =
+    typeof listener.filters === "object" && listener.filters !== null
+      ? (listener.filters as Record<string, unknown>)
+      : {};
+
+  const resolvedState = toNonEmptyString(rawFilters["state"] ?? listener["state"]);
+  const state: IssueFilters["state"] =
+    resolvedState === "closed" || resolvedState === "all" || resolvedState === "open"
+      ? resolvedState
+      : "open";
+
+  const labels = toStringArray(rawFilters["labels"] ?? listener["labels"]);
+  const assignee = toNonEmptyString(rawFilters["assignee"] ?? listener["assignee"]);
+  const limit = toPositiveNumber(rawFilters["limit"] ?? listener["limit"]) ?? DEFAULT_ISSUE_LIMIT;
+
+  return {
+    state,
+    ...(labels.length > 0 ? { labels } : {}),
+    ...(assignee ? { assignee } : {}),
+    limit,
+  };
+}
+
+function assertNoLegacyListenerFields(
+  listener: ListenerStartDeps["listener"],
+  listenerId: string,
+): void {
+  const legacyFields = ["enabled", "jql", "backlogStatus"] as const;
+  const present = legacyFields.filter((field) =>
+    Object.prototype.hasOwnProperty.call(listener, field),
+  );
+  if (present.length === 0) return;
+
+  throw new Error(
+    `[listener:${listenerId}] Legacy listener field(s) not supported: ${present.join(", ")}. ` +
+      `Use source: tracker-task and filters.{state,labels,assignee,limit}.`,
+  );
+}
+
+async function listIssueIdentifiersByFilters(
+  tracker: Tracker,
+  filters: IssueFilters,
+  project: ListenerStartDeps["project"],
+  opts?: { jiraStyleCaseInsensitive?: boolean },
+): Promise<Map<string, string>> {
+  if (typeof tracker.listIssues !== "function") {
+    throw new Error(
+      `tracker plugin "${tracker.name}" does not implement listIssues(), required by tracker-task listener`,
+    );
   }
 
-  if (!raw) return [];
+  const issues = await tracker.listIssues(filters, project);
+  const byCanonicalId = new Map<string, string>();
 
-  const parsed = JSON.parse(raw) as JiraIssueListItem[];
-  if (!Array.isArray(parsed)) return [];
+  for (const issue of issues) {
+    const issueId = normalizeIssueIdentifier(issue.id);
+    if (!issueId) continue;
 
-  const unique = new Set<string>();
-  for (const item of parsed) {
-    if (typeof item?.key !== "string") continue;
-    const key = normalizeIssueKey(item.key);
-    if (key.length > 0) unique.add(key);
+    const canonicalId = canonicalIssueIdentifier(issueId, opts);
+    if (!canonicalId || byCanonicalId.has(canonicalId)) continue;
+
+    byCanonicalId.set(canonicalId, issueId);
   }
 
-  return [...unique];
+  return byCanonicalId;
 }
 
 function isBlockingSessionStatus(status: string | undefined): boolean {
@@ -386,6 +404,7 @@ function getArchivedSessionState(sessionsDir: string, sessionId: string): KnownS
 function getLatestArchivedSessionStateForIssue(
   sessionsDir: string,
   issueKey: string,
+  opts?: { jiraStyleCaseInsensitive?: boolean },
 ): KnownSessionState {
   const archiveDir = join(sessionsDir, "archive");
   if (!existsSync(archiveDir)) return {};
@@ -397,7 +416,7 @@ function getLatestArchivedSessionStateForIssue(
     try {
       const archivePath = join(archiveDir, filename);
       const raw = parseMetadataContent(readFileSync(archivePath, "utf-8"));
-      if (normalizeIssueKey(raw["issue"] ?? "") !== issueKey) continue;
+      if (canonicalIssueIdentifier(raw["issue"] ?? "", opts) !== issueKey) continue;
       const fileMtimeMs = statSync(archivePath).mtimeMs;
       if (fileMtimeMs <= latestMtimeMs) continue;
       latestMtimeMs = fileMtimeMs;
@@ -450,26 +469,18 @@ function shouldAllowRetryFromLastSession(state: KnownSessionState): {
   return { allow: true, reason: "killed" };
 }
 
-function escapeJqlString(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function buildEffectiveJql(jql: string, backlogStatus: string): string {
-  const escapedBacklogStatus = escapeJqlString(backlogStatus);
-  return `(${jql}) AND status = "${escapedBacklogStatus}"`;
-}
-
 function currentIsoTime(): string {
   return new Date().toISOString();
 }
 
-async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<ListenerController> {
+async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<ListenerController> {
   const {
     listener,
     listenerId,
     sessionManager,
     logger,
     config,
+    registry,
     projectId,
     project,
     healthReporter,
@@ -479,19 +490,13 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
     typeof listener.intervalMs === "number" && listener.intervalMs > 0
       ? listener.intervalMs
       : DEFAULT_INTERVAL_MS;
-  const backlogStatus =
-    typeof listener.backlogStatus === "string" && listener.backlogStatus.trim()
-      ? listener.backlogStatus.trim()
-      : DEFAULT_BACKLOG_STATUS;
   const lockStaleMs =
     typeof listener.lockStaleMs === "number" && listener.lockStaleMs > 0
       ? listener.lockStaleMs
       : DEFAULT_LOCK_STALE_MS;
   const pendingClaimTtlMs = Math.max(lockStaleMs * 2, DEFAULT_PENDING_CLAIM_TTL_MS);
   const triggerType =
-    typeof listener.trigger === "object" &&
-    listener.trigger !== null &&
-    "type" in listener.trigger
+    typeof listener.trigger === "object" && listener.trigger !== null && "type" in listener.trigger
       ? String(listener.trigger.type)
       : "spawn-session";
   const agentOverride =
@@ -501,29 +506,35 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
     typeof listener.trigger.agent === "string"
       ? listener.trigger.agent
       : undefined;
-  const jql = typeof listener.jql === "string" ? listener.jql.trim() : "";
 
   if (triggerType !== "spawn-session") {
     throw new Error(
-      `[listener:${listenerId}] Unsupported trigger type "${triggerType}" for jira-backlog`,
+      `[listener:${listenerId}] Unsupported trigger type "${triggerType}" for tracker-task`,
     );
   }
 
-  if (!jql) {
-    throw new Error(`[listener:${listenerId}] Missing required field: jql`);
+  if (!registry) {
+    throw new Error(`[listener:${listenerId}] tracker-task listener requires plugin registry`);
   }
 
-  if (!backlogStatus) {
-    throw new Error(`[listener:${listenerId}] Missing required field: backlogStatus`);
-  }
-
-  if (project.tracker?.plugin !== "jira") {
+  const trackerPluginName = toNonEmptyString(project.tracker?.plugin);
+  if (!trackerPluginName) {
     throw new Error(
-      `[listener:${listenerId}] jira-backlog listener requires tracker plugin "jira" for project "${projectId}"`,
+      `[listener:${listenerId}] tracker-task listener requires tracker.plugin for project "${projectId}"`,
     );
   }
 
-  const effectiveJql = buildEffectiveJql(jql, backlogStatus);
+  const tracker = registry.get<Tracker>("tracker", trackerPluginName);
+  if (!tracker) {
+    throw new Error(
+      `[listener:${listenerId}] tracker plugin "${trackerPluginName}" is not registered`,
+    );
+  }
+
+  const issueFilters = readListenerIssueFilters(listener);
+  const listenerMode = readListenerMode(listener);
+  assertNoLegacyListenerFields(listener, listenerId);
+  const jiraStyleCaseInsensitive = trackerPluginName.toLowerCase() === "jira";
   const statePath = buildStatePath(config.configPath, project.path, listenerId);
   const issueLocksDir = buildIssueLocksDir(config.configPath, project.path);
   const sessionsDir = getSessionsDir(config.configPath, project.path);
@@ -531,7 +542,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
   const integrationIdentity = healthIdentity ?? {
     id: `listener:${listenerId}`,
     label: `Listener ${listenerId} (${listener.source})`,
-    service: "jira" as const,
+    service: "tracker" as const,
     kind: "listener" as const,
   };
 
@@ -546,10 +557,13 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
       clearInterval(timer);
       timer = null;
     }
-    healthReporter?.markInactive(integrationIdentity, "Jira backlog listener stopped");
+    healthReporter?.markInactive(integrationIdentity, "Tracker task listener stopped");
   };
 
-  healthReporter?.markStarting(integrationIdentity, "Starting Jira backlog listener");
+  healthReporter?.markStarting(
+    integrationIdentity,
+    `Starting tracker task listener (mode: ${listenerMode})`,
+  );
 
   const pollOnce = async () => {
     if (stopped || inFlight) return;
@@ -558,11 +572,21 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
     let cycleIssueCount: number;
 
     try {
-      const [issueKeys, sessions] = await Promise.all([
-        listIssueKeysByJql(effectiveJql),
-        sessionManager.list(projectId),
-      ]);
-      cycleIssueCount = issueKeys.length;
+      const issueIdMap = await listIssueIdentifiersByFilters(tracker, issueFilters, project, {
+        jiraStyleCaseInsensitive,
+      });
+      cycleIssueCount = issueIdMap.size;
+      if (stopped) return;
+
+      if (listenerMode === "observe") {
+        healthReporter?.markHealthy(
+          integrationIdentity,
+          `Listener active (observe mode); cycle completed (${cycleIssueCount} issues checked)`,
+        );
+        return;
+      }
+
+      const sessions = await sessionManager.list(projectId);
       if (stopped) return;
 
       const sessionsByIssue = new Map<string, KnownSessionState[]>();
@@ -570,7 +594,9 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
 
       for (const session of sessions) {
         if (!session.issueId) continue;
-        const issueKey = normalizeIssueKey(session.issueId);
+        const issueKey = canonicalIssueIdentifier(session.issueId, { jiraStyleCaseInsensitive });
+        if (!issueKey) continue;
+
         const sessionState: KnownSessionState = {
           status: session.status,
           terminationReason: session.metadata["terminationReason"],
@@ -584,10 +610,13 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
         sessionsById.set(session.id, sessionState);
       }
 
-      for (const issueKey of issueKeys) {
+      for (const [issueKey, issueIdentifier] of issueIdMap.entries()) {
         if (stopped) break;
 
-        const issueLockPath = join(issueLocksDir, `${sanitizeIssueKeyForLock(issueKey)}.lock`);
+        const issueLockPath = join(
+          issueLocksDir,
+          `${sanitizeIssueKeyForLock(issueKey, { jiraStyleCaseInsensitive })}.lock`,
+        );
         const issueLock = acquireFileLock(issueLockPath, lockStaleMs);
         if (!issueLock) {
           continue;
@@ -617,6 +646,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
               const archivedIssueState = getLatestArchivedSessionStateForIssue(
                 sessionsDir,
                 issueKey,
+                { jiraStyleCaseInsensitive },
               );
               if (archivedIssueState.status) {
                 lastState = archivedIssueState;
@@ -630,7 +660,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
                   if (ageMs !== null && ageMs > pendingClaimTtlMs) {
                     await restoreIssueStateEntry(statePath, issueKey, null, lockStaleMs);
                     logger.warn(
-                      `[listener:${listenerId}] Clearing stale pending claim for ${issueKey} (age ${ageMs}ms)`,
+                      `[listener:${listenerId}] Clearing stale pending claim for ${issueIdentifier} (age ${ageMs}ms)`,
                     );
                     continue;
                   }
@@ -639,7 +669,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
                 if (!warnedUnknownStatuses.has(warningId)) {
                   warnedUnknownStatuses.add(warningId);
                   logger.warn(
-                    `[listener:${listenerId}] Blocking retry for ${issueKey}: previous session ${entry.lastSessionId} has unknown terminal status`,
+                    `[listener:${listenerId}] Blocking retry for ${issueIdentifier}: previous session ${entry.lastSessionId} has unknown terminal status`,
                   );
                 }
               }
@@ -677,7 +707,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
 
             const session = await sessionManager.spawn({
               projectId,
-              issueId: issueKey,
+              issueId: issueIdentifier,
               ...(agentOverride ? { agent: agentOverride } : {}),
             });
             spawnedSessionId = session.id;
@@ -707,7 +737,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
                 const persistMsg =
                   persistErr instanceof Error ? persistErr.message : String(persistErr);
                 logger.warn(
-                  `[listener:${listenerId}] Spawned session ${spawnedSessionId} for ${issueKey}, but failed to persist listener state: ${persistMsg}. Disabling listener to avoid duplicate processing.`,
+                  `[listener:${listenerId}] Spawned session ${spawnedSessionId} for ${issueIdentifier}, but failed to persist listener state: ${persistMsg}. Disabling listener to avoid duplicate processing.`,
                 );
                 stopPolling();
               }
@@ -721,14 +751,14 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
                 const restoreMsg =
                   restoreErr instanceof Error ? restoreErr.message : String(restoreErr);
                 logger.warn(
-                  `[listener:${listenerId}] Failed to rollback claim for ${issueKey}: ${restoreMsg}`,
+                  `[listener:${listenerId}] Failed to rollback claim for ${issueIdentifier}: ${restoreMsg}`,
                 );
               }
             }
 
             const msg = err instanceof Error ? err.message : String(err);
             logger.warn(
-              `[listener:${listenerId}] Failed to spawn session for ${issueKey}: ${msg}`,
+              `[listener:${listenerId}] Failed to spawn session for ${issueIdentifier}: ${msg}`,
             );
             cycleHadErrors = true;
           } finally {
@@ -737,7 +767,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.warn(
-            `[listener:${listenerId}] Failed to process issue ${issueKey}: ${msg}`,
+            `[listener:${listenerId}] Failed to process issue ${issueIdentifier}: ${msg}`,
           );
           cycleHadErrors = true;
         } finally {
@@ -748,7 +778,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
       if (cycleHadErrors) {
         healthReporter?.markDegraded(
           integrationIdentity,
-          "Jira backlog listener cycle completed with errors",
+          "Tracker task listener cycle completed with errors",
         );
       } else {
         healthReporter?.markHealthy(
@@ -757,13 +787,14 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
         );
       }
     } catch (err) {
-      if (isJiraCommandMissingError(err)) {
+      if (isCommandMissingError(err)) {
+        const msg = err instanceof Error ? err.message : String(err);
         logger.warn(
-          `[listener:${listenerId}] jira CLI is not available in PATH; disabling listener`,
+          `[listener:${listenerId}] Tracker dependencies are not available; disabling listener (${msg})`,
         );
         healthReporter?.markInactive(
           integrationIdentity,
-          "Jira backlog listener inactive: jira CLI is not available in PATH",
+          "Tracker task listener inactive: required tracker dependencies are not available",
         );
         stopPolling();
         return;
@@ -789,7 +820,7 @@ async function startJiraBacklogListener(deps: ListenerStartDeps): Promise<Listen
   };
 }
 
-export const jiraBacklogSource: ListenerSource = {
-  source: "jira-backlog",
-  start: startJiraBacklogListener,
+export const trackerTaskSource: ListenerSource = {
+  source: "tracker-task",
+  start: startTrackerTaskListener,
 };

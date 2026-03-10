@@ -1,6 +1,7 @@
 import type {
   ListenerConfig,
   OrchestratorConfig,
+  PluginRegistry,
   SessionManager,
   Session,
   ProjectConfig,
@@ -14,6 +15,7 @@ export interface ListenerLogger {
 
 export interface ListenerStartDeps {
   config: OrchestratorConfig;
+  registry?: PluginRegistry;
   listenerId: string;
   listener: ListenerConfig;
   projectId: string;
