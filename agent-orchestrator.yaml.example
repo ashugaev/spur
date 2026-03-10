@@ -54,6 +54,9 @@ projects:
 
     # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
     # (Equivalent to top-level `listeners` but scoped to this project; no projectId needed.)
+    # Canonical source is `tracker-task`.
+    # `jql` is intentionally not supported here: it is Jira-specific and would break tracker portability.
+    # Jira-specific query semantics belong inside the Jira tracker plugin, not the shared listener schema.
     # listeners:
     #   tracker-task:
     #     source: tracker-task
@@ -133,6 +136,7 @@ projects:
 #   info: [telegram]              # summary, all done
 
 # Trigger listeners — poll external sources and auto-trigger current spawn flow.
+# Shared contract only exposes portable `filters`; no `jql` here by design.
 # listeners:
 #   tracker-broai:
 #     source: tracker-task

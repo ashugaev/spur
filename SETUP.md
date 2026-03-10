@@ -482,6 +482,22 @@ listeners:
       type: spawn-session
 ```
 
+Supported variants:
+
+- Top-level `listeners.<id>`: use when you want one shared listener registry for the whole orchestrator.
+- Per-project `projects.<projectId>.listeners.<id>`: same schema, but `projectId` is implicit.
+- Canonical source is `tracker-task`; `jira-task` and `jira-backlog` are legacy aliases only.
+
+Arguments:
+
+- `intervalMs`: poll interval for issue discovery.
+- `filters.state`: portable issue state filter (`open | closed | all`).
+- `filters.assignee`: assignee filter passed to the tracker plugin.
+- `filters.labels`: label/tag filter passed to the tracker plugin.
+- `filters.limit`: max issues to fetch per poll cycle.
+- `trigger.type`: currently `spawn-session`.
+- `trigger.agent`: optional agent override for auto-spawned sessions.
+
 Behavior:
 
 - Runs while `ao start` is running.
@@ -489,6 +505,13 @@ Behavior:
 - Triggers the same spawn flow as `ao spawn <project> <issue>`.
 - Takes each issue once; retries only after that issue's previous session is `killed` (not `cleanup`/`done`/etc.).
 - Never calls tracker state transitions (does not move cards on the board).
+
+Why there is no `jql`:
+
+- `jql` is Jira-specific. Keeping it in the shared listener schema would hardcode Jira into a tracker-generic contract.
+- The listener now depends on `tracker.listIssues(filters, project)`, not on a Jira CLI or Jira query language.
+- Portable filters live in `filters`. Jira-specific auth, query translation, and workflow semantics belong inside the Jira tracker plugin.
+- `backlogStatus` was removed for the same reason: backlog semantics are workflow-specific, not universal across Jira, Linear, GitHub Issues, or custom trackers.
 
 ## Troubleshooting
 
