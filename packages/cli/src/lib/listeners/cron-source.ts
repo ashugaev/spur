@@ -17,14 +17,20 @@ async function startCronListener(deps: ListenerStartDeps): Promise<ListenerContr
   }
 
   const trigger = listener.trigger;
-  const prompt =
-    typeof trigger?.prompt === "string" && trigger.prompt.length > 0
+
+  // skill takes precedence: "find-cars" → "/find-cars"
+  const skillName = typeof trigger?.skill === "string" && trigger.skill.length > 0
+    ? trigger.skill
+    : undefined;
+  const prompt = skillName
+    ? `/${skillName}`
+    : typeof trigger?.prompt === "string" && trigger.prompt.length > 0
       ? trigger.prompt
       : undefined;
 
   if (!prompt) {
     throw new Error(
-      `[listener:${listenerId}] cron source requires trigger.prompt to be set`,
+      `[listener:${listenerId}] cron source requires trigger.skill or trigger.prompt to be set`,
     );
   }
 

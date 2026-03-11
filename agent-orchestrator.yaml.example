@@ -86,7 +86,7 @@ projects:
     #     trigger:
     #       type: spawn-session
     #
-    #   # Cron listener — spawn a session on a schedule
+    #   # Cron listener — spawn a session on a schedule (prompt variant)
     #   nightly-audit:
     #     source: cron
     #     intervalMs: 86400000   # every 24h
@@ -99,6 +99,14 @@ projects:
     #         secrets, SQL injection, XSS, OWASP top 10. Create a markdown
     #         report at docs/security-audit.md and open a PR.
     #       # branch: main        # optional: branch to work on (default: project.defaultBranch)
+    #
+    #   # Cron listener — invoke a skill from .claude/skills/ or .agents/skills/
+    #   find-cars:
+    #     source: cron
+    #     intervalMs: 3600000    # every hour
+    #     trigger:
+    #       type: spawn-session
+    #       skill: find-cars     # agent receives "/find-cars" — activates the skill
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]

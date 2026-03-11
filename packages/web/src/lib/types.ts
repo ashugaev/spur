@@ -240,6 +240,8 @@ export interface CronListenerView {
   projectId: string;
   projectName: string;
   intervalMs: number;
+  /** Skill name if set (e.g. "find-cars" → agent receives "/find-cars") */
+  skill?: string;
   prompt: string;
   agent?: string;
   branch?: string;

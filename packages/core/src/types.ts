@@ -1015,6 +1015,12 @@ export interface ListenerTriggerConfig {
   type: "spawn-session" | string;
   /** Optional agent override for spawned sessions */
   agent?: string;
+  /**
+   * Skill name to invoke (e.g. "find-cars" → agent receives "/find-cars").
+   * Skill files live in .claude/skills/ or .agents/skills/.
+   * Takes precedence over `prompt` when both are set.
+   */
+  skill?: string;
   /** Prompt to send to the agent when spawning a session */
   prompt?: string;
   /** Branch to work on (default: project.defaultBranch) */

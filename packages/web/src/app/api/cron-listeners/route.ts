@@ -18,19 +18,25 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       for (const [listenerId, listener] of Object.entries(listeners)) {
         if (listener.source !== "cron") continue;
         const trigger = listener.trigger as Record<string, unknown> | undefined;
-        const prompt = typeof trigger?.prompt === "string" ? trigger.prompt : "";
-        if (!prompt) continue; // skip invalid cron listeners
+        const skill = typeof trigger?.skill === "string" && trigger.skill.length > 0
+          ? trigger.skill
+          : undefined;
+        const prompt = skill
+          ? `/${skill}`
+          : typeof trigger?.prompt === "string" ? trigger.prompt : "";
+        if (!prompt) continue; // skip invalid cron listeners (no skill or prompt)
         jobs.push({
           listenerId,
           projectId,
           projectName: project.name ?? projectId,
           intervalMs:
             typeof listener.intervalMs === "number" ? listener.intervalMs : 60_000,
+          skill,
           prompt,
           agent: typeof trigger?.agent === "string" ? trigger.agent : undefined,
           branch: typeof trigger?.branch === "string" ? trigger.branch : undefined,
           runOnStart: listener.runOnStart === true,
-          health: "unknown", // health tracking TBD
+          health: "unknown",
         });
       }
     }
