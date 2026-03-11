@@ -157,6 +157,20 @@ export function parseTmuxName(tmuxName: string): {
 }
 
 /**
+ * Get the listener issue cache file path.
+ * Format: ~/.agent-orchestrator/{hash}-{projectId}/listeners/{listenerId}-issues.json
+ */
+export function getListenerIssueCachePath(
+  configPath: string,
+  projectPath: string,
+  listenerId: string,
+): string {
+  const sanitized = listenerId.replace(/[^a-zA-Z0-9_-]+/g, "_");
+  const safeName = sanitized.length > 0 ? sanitized : "listener";
+  return join(getProjectBaseDir(configPath, projectPath), "listeners", `${safeName}-issues.json`);
+}
+
+/**
  * Expand ~ to home directory.
  */
 export function expandHome(filepath: string): string {

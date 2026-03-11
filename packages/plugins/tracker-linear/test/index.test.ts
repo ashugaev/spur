@@ -186,6 +186,7 @@ describe("tracker-linear plugin", () => {
         description: "Users can't log in with SSO",
         url: "https://linear.app/acme/issue/INT-123",
         state: "in_progress",
+        statusLabel: "In Progress",
         labels: ["bug", "high-priority"],
         assignee: "Alice",
         priority: 2,

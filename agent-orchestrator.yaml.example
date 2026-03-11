@@ -51,6 +51,23 @@ projects:
     #   email: "you@yourorg.com"                  # falls back to JIRA_EMAIL / JIRA_USER env var
     #   apiToken: "your-api-token"               # falls back to JIRA_API_TOKEN / JIRA_TOKEN env var (prefer env var over hardcoding)
     #   pollIntervalMs: 30000                    # comment poll interval (default: 60000); falls back to AO_JIRA_POLL_INTERVAL_MS
+    #
+    #   # Map Jira status names → system categories (open | in_progress | closed).
+    #   # Used for color-coding and sorting in the dashboard tracker view.
+    #   statusMapping:
+    #     Backlog: open
+    #     "On Hold": open
+    #     "In Dev": in_progress
+    #     "In Progress": in_progress
+    #     "In Review": in_progress
+    #     "Code Review": in_progress
+    #     "In Prod": closed
+    #     Done: closed
+    #
+    #   # Jira status names to hide from the dashboard tracker view entirely.
+    #   ignoreStatuses:
+    #     - "On Hold"
+    #     - "Cancelled"
 
     # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
     # Listeners are only supported under project config.

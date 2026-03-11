@@ -197,6 +197,7 @@ export interface JiraSprintTask {
   listenerIds: string[];
   projectIds: string[];
   relatedActiveSessions: JiraSprintTaskSession[];
+  relatedDoneSessions: JiraSprintTaskSession[];
   spawnAvailable: boolean;
   /**
    * Compatibility aliases consumed by dashboard variants.
@@ -222,10 +223,13 @@ export interface JiraSprintTaskListener {
   mode?: "spawn" | "observe";
   filters: IssueFilters;
   triggerAgent: string | null;
+  statusMapping?: Record<string, string>;
+  ignoreStatuses?: string[];
 }
 
 export interface JiraSprintTasksSnapshot {
   updatedAt: string;
+  issuesCachedAt: string | null;
   projectId: string | null;
   listeners: JiraSprintTaskListener[];
   tasks: JiraSprintTask[];
