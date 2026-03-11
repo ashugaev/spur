@@ -1,8 +1,12 @@
+import { existsSync, readFileSync } from "node:fs";
 import {
   ACTIVITY_STATE,
+  getListenerIssueCachePath,
   TERMINAL_STATUSES,
+  type Issue,
   type IssueFilters,
   type ListenerConfig,
+  type ListenerIssueCache,
   type OrchestratorConfig,
   type PluginRegistry,
   type ProjectConfig,
@@ -180,12 +184,14 @@ export function buildListenerEffectiveFilters(listener: ListenerConfig): IssueFi
 
   const labels = toStringArray(rawFilters["labels"] ?? listener["labels"]);
   const assignee = toNullableString(rawFilters["assignee"] ?? listener["assignee"]);
+  const iteration = toNullableString(rawFilters["iteration"] ?? listener["iteration"]);
   const limit = toPositiveInt(rawFilters["limit"] ?? listener["limit"]) ?? 100;
 
   return {
     state,
     ...(labels.length > 0 ? { labels } : {}),
     ...(assignee ? { assignee } : {}),
+    ...(iteration ? { iteration } : {}),
     limit,
   };
 }
@@ -251,18 +257,12 @@ function collectTrackerTaskListeners(
   return listeners.sort((a, b) => a.listenerId.localeCompare(b.listenerId));
 }
 
-export async function listTrackerIssuesForListener(
-  listener: JiraSprintTaskListener,
-  project: ProjectConfig,
-  registry: PluginRegistry,
-): Promise<JiraIssueSummary[]> {
-  const trackerPlugin = toNullableString(project.tracker?.plugin);
-  if (!trackerPlugin) return [];
+interface IssuesWithTimestamp {
+  summaries: JiraIssueSummary[];
+  cachedAt: string | null;
+}
 
-  const tracker = registry.get<Tracker>("tracker", trackerPlugin);
-  if (!tracker || typeof tracker.listIssues !== "function") return [];
-
-  const issues = await tracker.listIssues(listener.filters, project);
+function issuesToSummaries(issues: Issue[]): JiraIssueSummary[] {
   const summaries: JiraIssueSummary[] = [];
   const seen = new Set<string>();
 
@@ -275,12 +275,67 @@ export async function listTrackerIssuesForListener(
       issueKey: normalizedIssueKey,
       issueUrl: issue.url ?? null,
       summary: issue.title ?? null,
-      status: issue.state ?? null,
+      status: issue.statusLabel ?? issue.state ?? null,
       statusCategory: issue.state ?? null,
     });
   }
 
   return summaries;
+}
+
+function readIssueCache(configPath: string, projectPath: string, listenerId: string): ListenerIssueCache | null {
+  const cachePath = getListenerIssueCachePath(configPath, projectPath, listenerId);
+  if (!existsSync(cachePath)) return null;
+
+  try {
+    const raw = JSON.parse(readFileSync(cachePath, "utf-8")) as Partial<ListenerIssueCache>;
+    if (raw && typeof raw.cachedAt === "string" && Array.isArray(raw.issues)) {
+      return raw as ListenerIssueCache;
+    }
+  } catch {
+    // Corrupt cache — will fall back to direct API.
+  }
+  return null;
+}
+
+function fetchIssuesFromCache(
+  config: OrchestratorConfig,
+  project: ProjectConfig,
+  listener: JiraSprintTaskListener,
+): IssuesWithTimestamp | null {
+  const cache = readIssueCache(config.configPath, project.path, listener.listenerId);
+  if (!cache) return null;
+  return { summaries: issuesToSummaries(cache.issues), cachedAt: cache.cachedAt };
+}
+
+async function fetchIssuesFromTracker(
+  listener: JiraSprintTaskListener,
+  project: ProjectConfig,
+  registry: PluginRegistry,
+): Promise<IssuesWithTimestamp> {
+  const trackerPlugin = toNullableString(project.tracker?.plugin);
+  if (!trackerPlugin) return { summaries: [], cachedAt: null };
+
+  const tracker = registry.get<Tracker>("tracker", trackerPlugin);
+  if (!tracker || typeof tracker.listIssues !== "function") {
+    return { summaries: [], cachedAt: null };
+  }
+
+  const issues = await tracker.listIssues(listener.filters, project);
+  return { summaries: issuesToSummaries(issues), cachedAt: null };
+}
+
+export async function listTrackerIssuesForListener(
+  listener: JiraSprintTaskListener,
+  project: ProjectConfig,
+  registry: PluginRegistry,
+  config?: OrchestratorConfig,
+): Promise<IssuesWithTimestamp> {
+  if (config) {
+    const cached = fetchIssuesFromCache(config, project, listener);
+    if (cached) return cached;
+  }
+  return fetchIssuesFromTracker(listener, project, registry);
 }
 
 function isActiveSession(session: Session): boolean {
@@ -312,6 +367,7 @@ function getTaskPrimarySession(task: JiraSprintTask): JiraSprintTaskSession | nu
 
 function syncTaskComputedFields(task: JiraSprintTask): void {
   task.relatedActiveSessions.sort(compareTaskSessions);
+  task.relatedDoneSessions.sort(compareTaskSessions);
   task.listenerIds = [...new Set(task.listenerIds)].sort((a, b) => a.localeCompare(b));
   task.projectIds = [...new Set(task.projectIds)].sort((a, b) => a.localeCompare(b));
   task.source = task.source ?? "tracker-task";
@@ -357,6 +413,7 @@ function upsertTask(
   issue: JiraIssueSummary,
   listener: JiraSprintTaskListener,
   relatedActiveSessions: JiraSprintTaskSession[],
+  relatedDoneSessions: JiraSprintTaskSession[],
 ): void {
   const existing = tasksByIssueKey.get(issue.issueKey);
 
@@ -372,6 +429,7 @@ function upsertTask(
       listenerIds: [listener.listenerId],
       projectIds: [listener.projectId],
       relatedActiveSessions: [...relatedActiveSessions],
+      relatedDoneSessions: [...relatedDoneSessions],
       spawnAvailable: false,
       key: issue.issueKey,
       title: issue.summary,
@@ -401,11 +459,19 @@ function upsertTask(
     existing.projectIds.push(listener.projectId);
   }
 
-  const existingSessionIds = new Set(existing.relatedActiveSessions.map((session) => session.id));
+  const existingActiveIds = new Set(existing.relatedActiveSessions.map((s) => s.id));
   for (const session of relatedActiveSessions) {
-    if (!existingSessionIds.has(session.id)) {
+    if (!existingActiveIds.has(session.id)) {
       existing.relatedActiveSessions.push(session);
-      existingSessionIds.add(session.id);
+      existingActiveIds.add(session.id);
+    }
+  }
+
+  const existingDoneIds = new Set(existing.relatedDoneSessions.map((s) => s.id));
+  for (const session of relatedDoneSessions) {
+    if (!existingDoneIds.has(session.id)) {
+      existing.relatedDoneSessions.push(session);
+      existingDoneIds.add(session.id);
     }
   }
 }
@@ -453,34 +519,46 @@ export async function buildJiraSprintTasksSnapshot(
     return sessionsByIssue;
   };
 
+  let oldestCachedAt: string | null = null;
+
   for (const listener of listeners) {
     const project = opts.config.projects[listener.projectId];
     if (!project) continue;
-    const [issues, sessionsByIssue] = await Promise.all([
-      issueFetcher
-        ? issueFetcher({ listener, project })
-        : listTrackerIssuesForListener(listener, project, registry as PluginRegistry),
+
+    const issuesFetchPromise = issueFetcher
+      ? issueFetcher({ listener, project }).then(
+          (summaries) => ({ summaries, cachedAt: null }) as IssuesWithTimestamp,
+        )
+      : listTrackerIssuesForListener(listener, project, registry as PluginRegistry, opts.config);
+
+    const [issuesResult, sessionsByIssue] = await Promise.all([
+      issuesFetchPromise,
       getSessionsByIssueForProject(listener.projectId),
     ]);
 
-    for (const issue of issues) {
+    if (issuesResult.cachedAt) {
+      if (!oldestCachedAt || issuesResult.cachedAt < oldestCachedAt) {
+        oldestCachedAt = issuesResult.cachedAt;
+      }
+    }
+
+    for (const issue of issuesResult.summaries) {
       const relatedSessions = sessionsByIssue.get(issue.issueKey) ?? [];
       const relatedActiveSessions = relatedSessions.filter(isActiveSession).map(toTaskSession);
-      if (isSpawnListenerMode(listener.mode)) {
-        startEligibleIssueKeys.add(issue.issueKey);
-      }
-      upsertTask(tasksByIssueKey, issue, listener, relatedActiveSessions);
+      const relatedDoneSessions = relatedSessions.filter((s) => !isActiveSession(s)).map(toTaskSession);
+      startEligibleIssueKeys.add(issue.issueKey);
+      upsertTask(tasksByIssueKey, issue, listener, relatedActiveSessions, relatedDoneSessions);
     }
   }
 
   for (const task of tasksByIssueKey.values()) {
-    const isInListenerScope = startEligibleIssueKeys.has(task.issueKey);
-    task.spawnAvailable = isInListenerScope && task.relatedActiveSessions.length === 0;
+    task.spawnAvailable = startEligibleIssueKeys.has(task.issueKey) && task.relatedActiveSessions.length === 0;
     syncTaskComputedFields(task);
   }
 
   return {
     updatedAt: new Date().toISOString(),
+    issuesCachedAt: oldestCachedAt,
     projectId: opts.projectId ?? null,
     listeners,
     tasks: [...tasksByIssueKey.values()].sort((a, b) => a.issueKey.localeCompare(b.issueKey)),
@@ -630,42 +708,25 @@ async function resolveStartContext(
       ? (listenersForProject.find((listener) => listener.listenerId === requestedListenerId) ??
         null)
       : null;
-  const spawnCapableListener =
+  const selectedListener =
     requestedListener ??
     listenersForProject.find((listener) => isSpawnListenerMode(listener.mode)) ??
+    listenersForProject[0] ??
     null;
 
-  if (!spawnCapableListener || !isSpawnListenerMode(spawnCapableListener.mode)) {
-    if (requestedListenerId !== undefined && requestedListener) {
-      throw new JiraSprintTaskError(
-        409,
-        "not_startable",
-        `Listener ${requestedListener.listenerId} is observe-only and cannot start sessions`,
-        {
-          listenerId: requestedListener.listenerId,
-          mode: requestedListener.mode ?? "spawn",
-          issueKey: opts.normalizedIssueKey,
-          projectId: resolvedProjectId,
-        },
-      );
-    }
-
+  if (!selectedListener) {
     throw new JiraSprintTaskError(
-      409,
-      "not_startable",
-      `Issue ${opts.normalizedIssueKey} is linked only to observe listeners in project ${resolvedProjectId}`,
-      {
-        issueKey: opts.normalizedIssueKey,
-        projectId: resolvedProjectId,
-      },
+      500,
+      "invalid_snapshot",
+      `No listener found for issue ${opts.normalizedIssueKey} in project ${resolvedProjectId}`,
     );
   }
 
   return {
     issueKey: opts.normalizedIssueKey,
     projectId: resolvedProjectId,
-    listenerId: spawnCapableListener.listenerId,
-    triggerAgent: spawnCapableListener.triggerAgent,
+    listenerId: selectedListener.listenerId,
+    triggerAgent: selectedListener.triggerAgent,
     spawnAvailable: task.relatedActiveSessions.length === 0,
   };
 }

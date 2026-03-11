@@ -91,6 +91,7 @@ const ListenerConfigBaseSchema = z
         state: z.enum(["open", "closed", "all"]).optional(),
         labels: z.array(z.string().min(1)).optional(),
         assignee: z.string().min(1).optional(),
+        iteration: z.string().min(1).optional(),
         limit: z.number().positive().optional(),
       })
       .optional(),

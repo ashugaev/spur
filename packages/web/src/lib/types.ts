@@ -197,6 +197,7 @@ export interface JiraSprintTask {
   listenerIds: string[];
   projectIds: string[];
   relatedActiveSessions: JiraSprintTaskSession[];
+  relatedDoneSessions: JiraSprintTaskSession[];
   spawnAvailable: boolean;
   /**
    * Compatibility aliases consumed by dashboard variants.
@@ -226,6 +227,7 @@ export interface JiraSprintTaskListener {
 
 export interface JiraSprintTasksSnapshot {
   updatedAt: string;
+  issuesCachedAt: string | null;
   projectId: string | null;
   listeners: JiraSprintTaskListener[];
   tasks: JiraSprintTask[];

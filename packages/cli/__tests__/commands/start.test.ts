@@ -578,7 +578,7 @@ describe("start command — browser open waits for port", () => {
       AbortSignal,
     ];
     expect(port).toBe(3000);
-    expect(url).toContain("/sessions/app-orchestrator");
+    expect(url).toBe("http://localhost:3000");
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(mockMaybeStartTelegramLongPolling).toHaveBeenCalledTimes(1);
     expect(mockMaybeStartJiraCommentPolling).toHaveBeenCalledTimes(1);

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Dashboard, type DashboardProjectFilterOption } from "@/components/Dashboard";
 import type { DashboardSession, IntegrationsStatusSnapshot } from "@/lib/types";
 import { getServices, getSCM } from "@/lib/services";
@@ -57,7 +58,9 @@ export default async function Home({ searchParams }: HomePageProps) {
     const allSessions = await sessionManager.list();
 
     for (const [id, project] of Object.entries(config.projects)) {
-      projectFilters.push({ id, label: project.name || id });
+      const listeners = (project as { listeners?: Record<string, unknown> }).listeners;
+      const hasTracker = Boolean(project.tracker?.plugin && listeners && Object.keys(listeners).length > 0);
+      projectFilters.push({ id, label: project.name || id, hasTracker });
     }
 
     for (const session of allSessions) {
@@ -121,12 +124,14 @@ export default async function Home({ searchParams }: HomePageProps) {
   }
 
   return (
-    <Dashboard
-      initialSessions={sessions}
-      initialIntegrationsStatus={initialIntegrationsStatus}
-      initialProjectId={initialProjectId}
-      projectFilters={projectFilters}
-      orchestratorByProject={orchestratorByProject}
-    />
+    <Suspense>
+      <Dashboard
+        initialSessions={sessions}
+        initialIntegrationsStatus={initialIntegrationsStatus}
+        initialProjectId={initialProjectId}
+        projectFilters={projectFilters}
+        orchestratorByProject={orchestratorByProject}
+      />
+    </Suspense>
   );
 }

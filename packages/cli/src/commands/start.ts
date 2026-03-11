@@ -749,10 +749,7 @@ async function runStartup(
   let openAbort: AbortController | undefined;
   if (opts?.dashboard !== false && !attachedToExistingRuntime) {
     openAbort = new AbortController();
-    const fallbackSessionId = `${primaryProject.sessionPrefix}-orchestrator`;
-    const preferredSessionId = orchestratorResults[0]?.sessionId ?? fallbackSessionId;
-    const orchestratorUrl = `http://localhost:${port}/sessions/${preferredSessionId}`;
-    void waitForPortAndOpen(port, orchestratorUrl, openAbort.signal);
+    void waitForPortAndOpen(port, `http://localhost:${port}`, openAbort.signal);
   }
 
   // Keep dashboard process alive if it was started

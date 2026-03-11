@@ -167,6 +167,14 @@ function createGitHubTracker(): Tracker {
         args.push("--state", "open");
       }
 
+      if (filters.iteration) {
+        if (filters.iteration.toLowerCase() === "current") {
+          args.push("--milestone", "@current");
+        } else {
+          args.push("--milestone", filters.iteration);
+        }
+      }
+
       if (filters.labels && filters.labels.length > 0) {
         args.push("--label", filters.labels.join(","));
       }
