@@ -191,12 +191,12 @@ describe("scm-github plugin", () => {
   // ---- mergePR -----------------------------------------------------------
 
   describe("mergePR", () => {
-    it("uses --squash by default", async () => {
+    it("uses --merge by default", async () => {
       ghMock.mockResolvedValueOnce({ stdout: "" });
       await scm.mergePR(pr);
       expect(ghMock).toHaveBeenCalledWith(
         "gh",
-        ["pr", "merge", "42", "--repo", "acme/repo", "--squash", "--delete-branch"],
+        ["pr", "merge", "42", "--repo", "acme/repo", "--merge", "--delete-branch"],
         expect.any(Object),
       );
     });

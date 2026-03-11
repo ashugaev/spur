@@ -1564,6 +1564,17 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
     }
 
+    const restoreMessage = config.reactions?.["agent-exited"]?.message;
+    if (restoreMessage && plugins.runtime) {
+      setTimeout(async () => {
+        try {
+          await send(sessionId, restoreMessage);
+        } catch {
+          // Agent may not be ready yet — non-fatal
+        }
+      }, 5_000);
+    }
+
     return restoredSession;
   }
 

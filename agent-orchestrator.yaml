@@ -47,12 +47,12 @@ reactions:
   merge-conflicts:
     auto: true
     action: send-to-agent
-    message: "Your PR has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+    message: "Your PR has merge conflicts. Merge the default branch into your branch, resolve conflicts, run tests, and push. Do not rebase. Do not force push."
     escalateAfter: 15m
   approved-and-green:
     auto: true
     action: auto-merge
-    mergeMethod: squash
+    mergeMethod: merge
     priority: action
 
 projects:

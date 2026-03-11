@@ -473,6 +473,92 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         };
       }
 
+      case "restore": {
+        try {
+          const session = await sessionManager.get(sessionId);
+          if (!session) {
+            const reason = `Session '${sessionId}' not found`;
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' restore failed: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "restore",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          if (session.pr) {
+            const project = config.projects[session.projectId];
+            const scm = project?.scm
+              ? registry.get<SCM>("scm", project.scm.plugin)
+              : null;
+            if (scm) {
+              const prState = await scm.getPRState(session.pr).catch(() => null);
+              if (prState === PR_STATE.MERGED || prState === PR_STATE.CLOSED) {
+                const reason = `PR is ${prState}, restore skipped`;
+                const event = createEvent("reaction.triggered", {
+                  sessionId,
+                  projectId,
+                  message: `Reaction '${reactionKey}' restore skipped: ${reason}`,
+                  data: { reactionKey, reason },
+                });
+                await notifyHuman(event, "info");
+                return {
+                  reactionType: reactionKey,
+                  success: false,
+                  action: "restore",
+                  message: reason,
+                  escalated: false,
+                };
+              }
+            }
+          }
+
+          const restored = await sessionManager.restore(sessionId);
+
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' auto-restored session ${sessionId}`,
+            data: { reactionKey },
+          });
+          await notifyHuman(event, "action");
+
+          states.set(sessionId, restored.status);
+
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action: "restore",
+            message: `Restored session ${sessionId}`,
+            escalated: false,
+          };
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : "Restore failed";
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' restore failed: ${reason}`,
+            data: { reactionKey, reason },
+          });
+          await notifyHuman(event, "warning");
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "restore",
+            message: reason,
+            escalated: false,
+          };
+        }
+      }
+
       case "auto-merge": {
         try {
           const session = await sessionManager.get(sessionId);
@@ -596,7 +682,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             };
           }
 
-          const mergeMethod = reactionConfig.mergeMethod ?? "squash";
+          const mergeMethod = reactionConfig.mergeMethod ?? "merge";
           await scm.mergePR(session.pr, mergeMethod);
 
           const event = createEvent("reaction.triggered", {
@@ -680,7 +766,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       const project = config.projects[session.projectId];
       if (project) {
         const sessionsDir = getSessionsDir(config.configPath, project.path);
-        updateMetadata(sessionsDir, session.id, { status: newStatus });
+        const metaUpdate: Record<string, string> = { status: newStatus };
+        if (newStatus === "killed") {
+          metaUpdate["terminationReason"] = "system";
+        }
+        updateMetadata(sessionsDir, session.id, metaUpdate);
       }
 
       // Reset allCompleteEmitted when any session becomes active again

@@ -806,10 +806,10 @@ export interface ReactionConfig {
   /** Whether this reaction is enabled */
   auto: boolean;
 
-  /** What to do: send message to agent, notify human, auto-merge */
-  action: "send-to-agent" | "notify" | "auto-merge";
+  /** What to do: send message to agent, notify human, auto-merge, restore session */
+  action: "send-to-agent" | "notify" | "auto-merge" | "restore";
 
-  /** Merge strategy for auto-merge actions (default: squash) */
+  /** Merge strategy for auto-merge actions (default: merge) */
   mergeMethod?: MergeMethod;
 
   /** Message to send (for send-to-agent) */
@@ -940,6 +940,9 @@ export interface ProjectConfig {
 
   /** Agent-specific configuration */
   agentConfig?: AgentSpecificConfig;
+
+  /** Whether agents should create draft PRs (true) or ready PRs (false). Default: true */
+  prDraft?: boolean;
 
   /** Per-project reaction overrides */
   reactions?: Record<string, Partial<ReactionConfig>>;

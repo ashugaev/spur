@@ -34,7 +34,7 @@ reactions:
   merge-conflicts:
     auto: true
     action: send-to-agent
-    message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+    message: "Your branch has merge conflicts. Merge the default branch into your branch, resolve conflicts, run tests, and push. Do not rebase. Do not force push."
     escalateAfter: 15m # Escalate if conflicts are not resolved quickly
 
   # Notify when agent is stuck
