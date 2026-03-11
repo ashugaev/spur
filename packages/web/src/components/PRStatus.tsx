@@ -1,7 +1,9 @@
 "use client";
 
-import { type DashboardPR, isPRRateLimited } from "@/lib/types";
+import { type DashboardPR, type DashboardSession, isPRRateLimited } from "@/lib/types";
+import { buildSessionPath } from "@/lib/project-routes";
 import { CIBadge } from "./CIBadge";
+import { ActivityDot } from "./ActivityDot";
 
 function getSizeLabel(additions: number, deletions: number): string {
   const size = additions + deletions;
@@ -67,9 +69,11 @@ export function PRStatus({ pr }: PRStatusProps) {
 
 interface PRTableRowProps {
   pr: DashboardPR;
+  session?: DashboardSession;
+  onRestore?: (sessionId: string) => void;
 }
 
-export function PRTableRow({ pr }: PRTableRowProps) {
+export function PRTableRow({ pr, session, onRestore }: PRTableRowProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
 
@@ -124,6 +128,42 @@ export function PRTableRow({ pr }: PRTableRowProps) {
         className={`px-3 py-2.5 text-center text-sm font-bold ${pr.unresolvedThreads > 0 ? "text-[var(--color-accent-red)]" : "text-[var(--color-border-default)]"}`}
       >
         {pr.unresolvedThreads}
+      </td>
+      <td className="px-3 py-2.5">
+        {session ? (
+          <a
+            href={buildSessionPath(session.id, session.projectId)}
+            className="inline-flex items-center gap-1 rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:underline"
+          >
+            {session.id}
+          </a>
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        {session ? (
+          session.status === "killed" || session.status === "terminated" ? (
+            <span className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-[rgba(248,81,73,0.1)] text-[var(--color-accent-red)]">
+              {session.status}
+            </span>
+          ) : (
+            <ActivityDot activity={session.activity} />
+          )
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5 text-right">
+        {(session?.status === "killed" || session?.status === "terminated") && onRestore && (
+          <button
+            type="button"
+            onClick={() => onRestore(session.id)}
+            className="rounded border border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.12)] px-2 py-1 text-[11px] font-medium text-[var(--color-status-attention)] hover:bg-[rgba(210,153,34,0.2)]"
+          >
+            Reactivate
+          </button>
+        )}
       </td>
     </tr>
   );

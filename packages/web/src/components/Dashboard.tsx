@@ -174,8 +174,7 @@ export function Dashboard({
   const openPRs = useMemo(() => {
     return filteredSessions
       .filter((s): s is DashboardSession & { pr: DashboardPR } => s.pr?.state === "open")
-      .map((s) => s.pr)
-      .sort((a, b) => mergeScore(a) - mergeScore(b));
+      .sort((a, b) => mergeScore(a.pr) - mergeScore(b.pr));
   }, [filteredSessions]);
 
   const handleSend = async (sessionId: string, message: string) => {
@@ -558,11 +557,23 @@ export function Dashboard({
                     <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
                       Unresolved
                     </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Session
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Agent
+                    </th>
+                    <th className="px-3 py-2" />
                   </tr>
                 </thead>
                 <tbody>
-                  {openPRs.map((pr) => (
-                    <PRTableRow key={pr.number} pr={pr} />
+                  {openPRs.map((session) => (
+                    <PRTableRow
+                      key={session.pr.number}
+                      pr={session.pr}
+                      session={session}
+                      onRestore={handleRestore}
+                    />
                   ))}
                 </tbody>
               </table>

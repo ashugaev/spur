@@ -100,6 +100,15 @@ export function SessionCard({
         <span className="font-[var(--font-mono)] text-[11px] tracking-wide text-[var(--color-text-muted)]">
           {session.id}
         </span>
+        {session.status === "killed" && (
+          <span className="rounded border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.07)] px-1.5 py-0.5 text-[10px] text-[var(--color-status-error)] opacity-70">
+            {session.metadata["terminationReason"] === "manual"
+              ? "killed manually"
+              : session.metadata["terminationReason"] === "cleanup"
+                ? "cleanup"
+                : "auto-killed"}
+          </span>
+        )}
         <div className="flex-1" />
         {isRestorable && (
           <button
