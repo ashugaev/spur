@@ -38,6 +38,11 @@ projects:
     defaultBranch: main
     sessionPrefix: app
 
+    # SCM configuration
+    # scm:
+    #   plugin: github
+    #   prDraft: true        # true = draft PRs, false = ready PRs (default)
+
     # Issue tracker (defaults to github issues)
     # tracker:
     #   plugin: linear
@@ -85,9 +90,6 @@ projects:
     #       limit: 100
     #     trigger:
     #       type: spawn-session
-
-    # PR mode: draft (default) or ready
-    # prDraft: true       # true = agents create draft PRs, false = agents create ready PRs
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]

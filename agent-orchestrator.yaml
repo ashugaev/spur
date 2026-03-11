@@ -81,6 +81,7 @@ projects:
     sessionPrefix: intelas
     scm:
       plugin: github
+      prDraft: true
     tracker:
       plugin: jira
       projectKey: WEBDEV
