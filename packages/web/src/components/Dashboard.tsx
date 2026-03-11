@@ -631,7 +631,6 @@ function JiraTasksPanel({
   const readyCount = orderedTasks.filter((task) => canStartTask(task)).length;
   const activeCount = orderedTasks.filter((task) => task.relatedActiveSessions.length > 0).length;
   const blockedCount = Math.max(orderedTasks.length - readyCount - activeCount, 0);
-  const nextReadyTask = orderedTasks.find((task) => canStartTask(task)) ?? null;
   const anyStartInProgress = Object.values(startingTaskKeys).some(Boolean);
   const showBlockingLoading = loading && (!loadedOnce || orderedTasks.length === 0);
   const showRefreshing = loading && loadedOnce && orderedTasks.length > 0;
@@ -653,21 +652,6 @@ function JiraTasksPanel({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {nextReadyTask && (
-            <button
-              type="button"
-              onClick={() => onStartTask(nextReadyTask)}
-              disabled={anyStartInProgress}
-              className={[
-                "rounded border px-2.5 py-1 text-[11px] font-semibold transition-colors",
-                anyStartInProgress
-                  ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
-                  : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
-              ].join(" ")}
-            >
-              {anyStartInProgress ? "Starting..." : `Start ${nextReadyTask.issueKey}`}
-            </button>
-          )}
           <button
             type="button"
             onClick={onRefresh}
