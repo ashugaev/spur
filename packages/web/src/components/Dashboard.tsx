@@ -582,6 +582,7 @@ export function Dashboard({
           projectId={effectiveProjectId}
           onRefresh={() => void refreshJiraTasks(true)}
           onStartTask={(task) => void handleStartJiraTask(task)}
+          onRestoreSession={(sessionId) => void handleRestore(sessionId)}
         />
       )}
     </div>
@@ -598,6 +599,7 @@ interface JiraTasksPanelProps {
   projectId?: string;
   onRefresh: () => void;
   onStartTask: (task: JiraTaskView) => void;
+  onRestoreSession: (sessionId: string) => void;
 }
 
 function JiraTasksPanel({
@@ -610,6 +612,7 @@ function JiraTasksPanel({
   projectId,
   onRefresh,
   onStartTask,
+  onRestoreSession,
 }: JiraTasksPanelProps) {
   const canStartTask = (task: JiraTaskView): boolean =>
     task.spawnAvailable &&
@@ -621,9 +624,8 @@ function JiraTasksPanel({
     const bActive = b.relatedActiveSessions.length > 0;
     if (aActive !== bActive) return aActive ? -1 : 1;
 
-    const aReady = a.spawnAvailable && !aActive;
-    const bReady = b.spawnAvailable && !bActive;
-    if (aReady !== bReady) return aReady ? -1 : 1;
+    const catOrder = statusCategoryOrder(a.statusCategory) - statusCategoryOrder(b.statusCategory);
+    if (catOrder !== 0) return catOrder;
     return a.issueKey.localeCompare(b.issueKey);
   });
   const readyCount = orderedTasks.filter((task) => canStartTask(task)).length;
@@ -743,6 +745,9 @@ function JiraTasksPanel({
                 const isStarting = Boolean(startingTaskKeys[task.issueKey]);
                 const canStartNow = canStartTask(task) && !hasActiveSession;
                 const isDisabled = isStarting || !canStartNow || anyStartInProgress;
+                const killedSession = !hasActiveSession
+                  ? (task.relatedDoneSessions ?? []).find((s) => s.status === "killed")
+                  : undefined;
                 return (
                   <tr
                     key={task.issueKey}
@@ -859,25 +864,36 @@ function JiraTasksPanel({
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right align-top">
-                      <button
-                        type="button"
-                        disabled={isDisabled}
-                        onClick={() => onStartTask(task)}
-                        className={[
-                          "rounded border px-2 py-1 text-[11px] font-medium",
-                          isDisabled
-                            ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
-                            : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
-                        ].join(" ")}
-                      >
-                        {hasActiveSession
-                          ? "Session active"
-                          : isStarting
-                            ? "Starting..."
-                            : canStartNow
-                              ? "Start Agent"
-                              : "Unavailable"}
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {killedSession && (
+                          <button
+                            type="button"
+                            onClick={() => onRestoreSession(killedSession.id)}
+                            className="rounded border border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.12)] px-2 py-1 text-[11px] font-medium text-[var(--color-status-attention)] hover:bg-[rgba(210,153,34,0.2)]"
+                          >
+                            Reactivate
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={isDisabled}
+                          onClick={() => onStartTask(task)}
+                          className={[
+                            "rounded border px-2 py-1 text-[11px] font-medium",
+                            isDisabled
+                              ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
+                              : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
+                          ].join(" ")}
+                        >
+                          {hasActiveSession
+                            ? "Session active"
+                            : isStarting
+                              ? "Starting..."
+                              : canStartNow
+                                ? "Start Agent"
+                                : "Unavailable"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -890,13 +906,34 @@ function JiraTasksPanel({
   );
 }
 
+function statusCategoryOrder(statusCategory: string | null): number {
+  const normalized = statusCategory?.trim().toLowerCase() ?? "";
+  if (normalized === "in_progress" || normalized === "indeterminate" || normalized === "in-progress")
+    return 1;
+  if (normalized === "done" || normalized === "closed" || normalized === "complete" || normalized === "completed")
+    return 2;
+  return 0;
+}
+
 function jiraTaskStatusBadgeClass(statusCategory: string | null): string {
   const normalized = statusCategory?.trim().toLowerCase() ?? "";
-  if (normalized === "done" || normalized === "complete" || normalized === "completed") {
+  if (
+    normalized === "done" ||
+    normalized === "closed" ||
+    normalized === "complete" ||
+    normalized === "completed"
+  ) {
     return "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.14)] text-[var(--color-status-ready)]";
   }
-  if (normalized === "in-progress" || normalized === "indeterminate") {
+  if (
+    normalized === "in_progress" ||
+    normalized === "in-progress" ||
+    normalized === "indeterminate"
+  ) {
     return "border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.14)] text-[var(--color-status-attention)]";
+  }
+  if (normalized === "open" || normalized === "new" || normalized === "todo" || normalized === "backlog") {
+    return "border-[rgba(88,166,255,0.35)] bg-[rgba(88,166,255,0.10)] text-[var(--color-status-working)]";
   }
 
   return "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)]";

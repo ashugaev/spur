@@ -223,6 +223,8 @@ export interface JiraSprintTaskListener {
   mode?: "spawn" | "observe";
   filters: IssueFilters;
   triggerAgent: string | null;
+  statusMapping?: Record<string, string>;
+  ignoreStatuses?: string[];
 }
 
 export interface JiraSprintTasksSnapshot {

@@ -38,6 +38,8 @@ const ReactionConfigSchema = z.object({
 const TrackerConfigSchema = z
   .object({
     plugin: z.string(),
+    statusMapping: z.record(z.string()).optional(),
+    ignoreStatuses: z.array(z.string()).optional(),
   })
   .passthrough();
 

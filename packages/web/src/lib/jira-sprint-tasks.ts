@@ -242,6 +242,9 @@ function collectTrackerTaskListeners(
         : baseListenerId;
       seenListenerIds.add(effectiveListenerId);
 
+      const trackerRaw = project.tracker as Record<string, unknown>;
+      const rawStatusMapping = trackerRaw.statusMapping;
+      const rawIgnoreStatuses = trackerRaw.ignoreStatuses;
       listeners.push({
         source: listener.source,
         listenerId: effectiveListenerId,
@@ -250,6 +253,13 @@ function collectTrackerTaskListeners(
         mode: readListenerMode(listener),
         filters: buildListenerEffectiveFilters(listener),
         triggerAgent: readTriggerAgent(listener),
+        statusMapping:
+          rawStatusMapping && typeof rawStatusMapping === "object" && !Array.isArray(rawStatusMapping)
+            ? (rawStatusMapping as Record<string, string>)
+            : undefined,
+        ignoreStatuses: Array.isArray(rawIgnoreStatuses)
+          ? (rawIgnoreStatuses as string[])
+          : undefined,
       });
     }
   }
@@ -262,21 +272,32 @@ interface IssuesWithTimestamp {
   cachedAt: string | null;
 }
 
-function issuesToSummaries(issues: Issue[]): JiraIssueSummary[] {
+function issuesToSummaries(
+  issues: Issue[],
+  statusMapping?: Record<string, string>,
+  ignoreStatuses?: string[],
+): JiraIssueSummary[] {
   const summaries: JiraIssueSummary[] = [];
   const seen = new Set<string>();
+  const ignoreSet = ignoreStatuses && ignoreStatuses.length > 0 ? new Set(ignoreStatuses) : null;
 
   for (const issue of issues) {
     const normalizedIssueKey = normalizeTrackerIssueId(issue.id);
     if (!normalizedIssueKey || seen.has(normalizedIssueKey)) continue;
     seen.add(normalizedIssueKey);
 
+    const statusLabel = issue.statusLabel ?? issue.state ?? null;
+    if (ignoreSet && statusLabel && ignoreSet.has(statusLabel)) continue;
+
+    const mappedCategory =
+      statusLabel && statusMapping ? (statusMapping[statusLabel] ?? null) : null;
+
     summaries.push({
       issueKey: normalizedIssueKey,
       issueUrl: issue.url ?? null,
       summary: issue.title ?? null,
-      status: issue.statusLabel ?? issue.state ?? null,
-      statusCategory: issue.state ?? null,
+      status: statusLabel,
+      statusCategory: mappedCategory ?? issue.state ?? null,
     });
   }
 
@@ -305,7 +326,7 @@ function fetchIssuesFromCache(
 ): IssuesWithTimestamp | null {
   const cache = readIssueCache(config.configPath, project.path, listener.listenerId);
   if (!cache) return null;
-  return { summaries: issuesToSummaries(cache.issues), cachedAt: cache.cachedAt };
+  return { summaries: issuesToSummaries(cache.issues, listener.statusMapping, listener.ignoreStatuses), cachedAt: cache.cachedAt };
 }
 
 async function fetchIssuesFromTracker(
@@ -322,7 +343,7 @@ async function fetchIssuesFromTracker(
   }
 
   const issues = await tracker.listIssues(listener.filters, project);
-  return { summaries: issuesToSummaries(issues), cachedAt: null };
+  return { summaries: issuesToSummaries(issues, listener.statusMapping, listener.ignoreStatuses), cachedAt: null };
 }
 
 export async function listTrackerIssuesForListener(

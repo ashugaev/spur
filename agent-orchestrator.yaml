@@ -84,6 +84,16 @@ projects:
     tracker:
       plugin: jira
       projectKey: WEBDEV
+      ignoreStatuses:
+        - "On Hold"
+      statusMapping:
+        Backlog: open
+        "In Progress": in_progress
+        "In Review": in_progress
+        "Code Review": in_progress
+        "In Dev": closed
+        "In Prod": closed
+        Done: closed
     listeners:
       jira-broai:
         source: tracker-task
