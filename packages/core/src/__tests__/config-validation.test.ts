@@ -283,13 +283,13 @@ describe("Config Schema Validation", () => {
     expect(() => validateConfig(config)).toThrow();
   });
 
-  it("requires path, repo, and defaultBranch for each project", () => {
+  it("path and repo are optional; defaultBranch defaults to main", () => {
+    // path and repo are optional — cron-only projects don't need them
     const missingPath = {
       projects: {
         proj1: {
           repo: "org/test",
           defaultBranch: "main",
-          // Missing path
         },
       },
     };
@@ -299,7 +299,6 @@ describe("Config Schema Validation", () => {
         proj1: {
           path: "/repos/test",
           defaultBranch: "main",
-          // Missing repo
         },
       },
     };
@@ -314,9 +313,9 @@ describe("Config Schema Validation", () => {
       },
     };
 
-    expect(() => validateConfig(missingPath)).toThrow();
-    expect(() => validateConfig(missingRepo)).toThrow();
-    // missingBranch should work (defaults to "main")
+    // All three should work — path and repo have defaults
+    expect(() => validateConfig(missingPath)).not.toThrow();
+    expect(() => validateConfig(missingRepo)).not.toThrow();
     expect(() => validateConfig(missingBranch)).not.toThrow();
   });
 

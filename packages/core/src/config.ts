@@ -133,8 +133,8 @@ const RemoteConfigSchema = z.object({
 
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
-  repo: z.string(),
-  path: z.string(),
+  repo: z.string().default(""),
+  path: z.string().default(""),
   defaultBranch: z.string().default("main"),
   sessionPrefix: z
     .string()
@@ -196,7 +196,7 @@ function expandHome(filepath: string): string {
 /** Expand all path fields in the config */
 function expandPaths(config: OrchestratorConfig): OrchestratorConfig {
   for (const project of Object.values(config.projects)) {
-    project.path = expandHome(project.path);
+    if (project.path) project.path = expandHome(project.path);
   }
 
   return config;
@@ -210,19 +210,24 @@ function applyProjectDefaults(config: OrchestratorConfig): OrchestratorConfig {
       project.name = id;
     }
 
-    // Derive session prefix from project path basename if not set
-    if (!project.sessionPrefix) {
-      const projectId = basename(project.path);
-      project.sessionPrefix = generateSessionPrefix(projectId);
+    // For cron-only projects without a path, use a scratch directory
+    if (!project.path) {
+      project.path = expandHome(join("~/.agent-orchestrator", "scratch", id));
     }
 
-    // Infer SCM from repo if not set
-    if (!project.scm && project.repo.includes("/")) {
+    // Derive session prefix from project path basename (or config key) if not set
+    if (!project.sessionPrefix) {
+      const baseName = project.path ? basename(project.path) : id;
+      project.sessionPrefix = generateSessionPrefix(baseName);
+    }
+
+    // Infer SCM from repo if not set (skip for repo-less/cron-only projects)
+    if (!project.scm && project.repo?.includes("/")) {
       project.scm = { plugin: "github" };
     }
 
-    // Infer tracker from repo if not set (default to github issues)
-    if (!project.tracker) {
+    // Infer tracker from repo if not set (skip for repo-less/cron-only projects)
+    if (!project.tracker && project.repo) {
       project.tracker = { plugin: "github" };
     }
   }
@@ -236,13 +241,13 @@ function validateProjectUniqueness(config: OrchestratorConfig): void {
   const projectIds = new Set<string>();
   const projectIdToPaths: Record<string, string[]> = {};
 
-  for (const [_configKey, project] of Object.entries(config.projects)) {
-    const projectId = basename(project.path);
+  for (const [configKey, project] of Object.entries(config.projects)) {
+    const projectId = project.path ? basename(project.path) : configKey;
 
     if (!projectIdToPaths[projectId]) {
       projectIdToPaths[projectId] = [];
     }
-    projectIdToPaths[projectId].push(project.path);
+    projectIdToPaths[projectId].push(project.path ?? configKey);
 
     if (projectIds.has(projectId)) {
       const paths = projectIdToPaths[projectId].join(", ");
@@ -262,7 +267,7 @@ function validateProjectUniqueness(config: OrchestratorConfig): void {
   const prefixToProject: Record<string, string> = {};
 
   for (const [configKey, project] of Object.entries(config.projects)) {
-    const projectId = basename(project.path);
+    const projectId = project.path ? basename(project.path) : configKey;
     const prefix = project.sessionPrefix || generateSessionPrefix(projectId);
 
     if (prefixes.has(prefix)) {
@@ -274,10 +279,10 @@ function validateProjectUniqueness(config: OrchestratorConfig): void {
           `To fix this, add an explicit sessionPrefix to one of these projects:\n\n` +
           `projects:\n` +
           `  ${firstProjectKey}:\n` +
-          `    path: ${firstProject?.path}\n` +
+          `    path: ${firstProject?.path ?? "(no path)"}\n` +
           `    sessionPrefix: ${prefix}1  # Add explicit prefix\n` +
           `  ${configKey}:\n` +
-          `    path: ${project.path}\n` +
+          `    path: ${project.path ?? "(no path)"}\n` +
           `    sessionPrefix: ${prefix}2  # Add explicit prefix\n`,
       );
     }

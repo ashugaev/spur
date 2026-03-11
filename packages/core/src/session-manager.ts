@@ -798,9 +798,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
     }
 
-    // Create workspace (if workspace plugin is available)
+    // Create workspace (if workspace plugin is available and project has a git repo)
     let workspacePath = project.path;
-    if (plugins.workspace) {
+    if (plugins.workspace && project.repo) {
       try {
         const wsInfo = await plugins.workspace.create({
           projectId: spawnConfig.projectId,

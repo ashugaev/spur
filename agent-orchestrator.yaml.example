@@ -29,7 +29,7 @@ defaults:
   workspace: worktree # worktree | clone | copy
   notifiers: [desktop] # desktop | slack | telegram | discord | webhook | email
 
-# Projects — at minimum, specify repo and path
+# Projects — repo and path are optional for cron-only (non-coding) projects
 projects:
   my-app:
     name: My App
@@ -143,6 +143,28 @@ projects:
     #     action: send-to-agent
     #     kind: reply         # any | tagged | reply
     #     # message: "New tracker comment received. Check context and update implementation."
+
+# Cron-only project — no repo, no GitHub, no git worktree.
+# The agent runs a skill (or prompt) on a schedule, completely unrelated to coding.
+# Use this for: reports, monitoring, scraping, notifications, etc.
+# A scratch directory is created automatically under ~/.agent-orchestrator/scratch/<id>
+# my-automations:
+#   name: My Automations
+#   # No repo or path needed — omit them for non-coding tasks
+#   listeners:
+#     find-cars:
+#       source: cron
+#       intervalMs: 3600000    # every hour
+#       trigger:
+#         type: spawn-session
+#         skill: find-cars     # activates /find-cars skill from .claude/skills/
+#     daily-report:
+#       source: cron
+#       intervalMs: 86400000   # every 24h
+#       trigger:
+#         type: spawn-session
+#         prompt: |
+#           Check the latest stats and send a summary to Telegram.
 
 # Notification channels
 # notifiers:
