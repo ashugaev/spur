@@ -58,18 +58,33 @@ State file: `${AO_DATA_DIR}/state.json`
    {
      "issue_id": "WEBDEV-XXX",
      "state": "INIT",
+     "complexity_score": null,
      "review_attempts": 0,
      "test_attempts": 0,
      "created_at": "<timestamp>"
    }
    ```
-4. Classify complexity:
-   - Trivial (< 3 steps) → skip RESEARCH
-   - Complex → include RESEARCH
+4. **Quick complexity assessment** (no tools, pure reasoning, < 5 sec):
+
+   Score the task on a 1–5 scale based solely on the task description:
+
+   | Score | Meaning | Criteria |
+   |-------|---------|----------|
+   | 1 | Trivial | Single file, < 3 steps, no design decisions, obvious implementation |
+   | 2 | Simple | 2–5 files, clear approach, minor trade-offs |
+   | 3 | Moderate | Multiple files/packages, some design decisions required |
+   | 4 | Complex | Cross-cutting concerns, multiple valid approaches, significant risk |
+   | 5 | Very complex | Deep architectural decisions, high uncertainty, many unknowns |
+
+   Store score in state: `"complexity_score": <N>`
+
+5. Route based on score:
+   - Score **1** → skip RESEARCH entirely, go directly to PLANNING
+   - Score **> 1** → run full RESEARCH (options + evaluation + selected approach)
 
 ---
 
-## Phase: RESEARCH (complex tasks only)
+## Phase: RESEARCH (complexity score > 1 only)
 
 Invoke: `/ao-architect` with research mode
 
@@ -178,9 +193,11 @@ echo "$(date -Iseconds) | ${OLD_STATE} → ${NEW_STATE}" >> "${AO_DATA_DIR}/tran
 ```
 START
   │
-  ├─ Trivial? ─YES─→ PLANNING
+  ├─ Assess complexity (1–5, no tools, pure reasoning)
+  │
+  ├─ Score = 1? ─YES─→ PLANNING
   │     │
-  │    NO
+  │    NO (score > 1)
   │     ↓
   │  RESEARCH (options + evaluate)
   │     │

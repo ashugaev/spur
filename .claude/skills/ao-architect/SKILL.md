@@ -7,6 +7,8 @@ allowed-tools: Read, Grep, Glob, Bash
 
 Research the task and produce a concrete implementation plan.
 
+> **Note:** This skill is invoked by the orchestrator only when the task complexity score is **> 1/5**. Trivial tasks (score = 1) skip directly to planning without running this skill.
+
 ## Context
 
 Environment variables:
