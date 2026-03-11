@@ -235,6 +235,24 @@ export interface JiraSprintTasksSnapshot {
   tasks: JiraSprintTask[];
 }
 
+export interface CronListenerView {
+  listenerId: string;
+  projectId: string;
+  projectName: string;
+  intervalMs: number;
+  prompt: string;
+  agent?: string;
+  branch?: string;
+  runOnStart: boolean;
+  health: "healthy" | "degraded" | "inactive" | "starting" | "unknown";
+}
+
+export interface CronListenersSnapshot {
+  projectId: string | null;
+  jobs: CronListenerView[];
+  fetchedAt: string; // ISO timestamp
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
