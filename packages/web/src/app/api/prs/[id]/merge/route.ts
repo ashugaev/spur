@@ -41,8 +41,8 @@ export async function POST(_request: NextRequest, { params }: { params: Promise<
       );
     }
 
-    await scm.mergePR(session.pr, "squash");
-    return NextResponse.json({ ok: true, prNumber, method: "squash" });
+    await scm.mergePR(session.pr, "merge");
+    return NextResponse.json({ ok: true, prNumber, method: "merge" });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to merge PR" },

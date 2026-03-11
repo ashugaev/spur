@@ -86,12 +86,13 @@ function buildConfigLayer(config: PromptBuildConfig): string {
     lines.push(`- Tracker: ${project.tracker.plugin}`);
   }
 
-  const prType = project.prDraft === false ? "ready (open)" : "draft";
+  const prDraft = project.scm?.prDraft ?? false;
+  const prType = prDraft ? "draft" : "ready (open)";
   lines.push(`- PR mode: ${prType}`);
   lines.push(
-    project.prDraft === false
-      ? "- When creating a PR, open it as **ready for review** (do NOT use --draft)."
-      : "- When creating a PR, open it as a **draft** (use --draft flag).",
+    prDraft
+      ? "- When creating a PR, open it as a **draft** (use --draft flag). Don't change to ready without a clear command."
+      : "- When creating a PR, open it as **ready for review** (do NOT use --draft).",
   );
 
   if (issueId) {

@@ -941,9 +941,6 @@ export interface ProjectConfig {
   /** Agent-specific configuration */
   agentConfig?: AgentSpecificConfig;
 
-  /** Whether agents should create draft PRs (true) or ready PRs (false). Default: true */
-  prDraft?: boolean;
-
   /** Per-project reaction overrides */
   reactions?: Record<string, Partial<ReactionConfig>>;
 
@@ -978,6 +975,8 @@ export interface TrackerConfig {
 
 export interface SCMConfig {
   plugin: string;
+  /** Whether agents create draft PRs (true) or ready PRs (false). Default: false */
+  prDraft?: boolean;
   [key: string]: unknown;
 }
 

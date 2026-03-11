@@ -46,6 +46,7 @@ const TrackerConfigSchema = z
 const SCMConfigSchema = z
   .object({
     plugin: z.string(),
+    prDraft: z.boolean().default(false),
   })
   .passthrough();
 
@@ -147,7 +148,6 @@ const ProjectConfigSchema = z.object({
   scm: SCMConfigSchema.optional(),
   symlinks: z.array(z.string()).optional(),
   postCreate: z.array(z.string()).optional(),
-  prDraft: z.boolean().default(true),
   agentConfig: AgentSpecificConfigSchema.default({}),
   reactions: z.record(ReactionConfigSchema.partial()).optional(),
   agentRules: z.string().optional(),
