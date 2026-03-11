@@ -10,10 +10,13 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  getListenerIssueCachePath,
   getProjectBaseDir,
   getSessionsDir,
   readArchivedMetadataRaw,
+  type Issue,
   type IssueFilters,
+  type ListenerIssueCache,
   type Tracker,
 } from "@composio/ao-core";
 import type { ListenerController, ListenerSource, ListenerStartDeps } from "./types.js";
@@ -333,12 +336,14 @@ function readListenerIssueFilters(listener: ListenerStartDeps["listener"]): Issu
 
   const labels = toStringArray(rawFilters["labels"] ?? listener["labels"]);
   const assignee = toNonEmptyString(rawFilters["assignee"] ?? listener["assignee"]);
+  const iteration = toNonEmptyString(rawFilters["iteration"] ?? listener["iteration"]);
   const limit = toPositiveNumber(rawFilters["limit"] ?? listener["limit"]) ?? DEFAULT_ISSUE_LIMIT;
 
   return {
     state,
     ...(labels.length > 0 ? { labels } : {}),
     ...(assignee ? { assignee } : {}),
+    ...(iteration ? { iteration } : {}),
     limit,
   };
 }
@@ -359,12 +364,17 @@ function assertNoLegacyListenerFields(
   );
 }
 
+interface ListIssuesResult {
+  idMap: Map<string, string>;
+  rawIssues: Issue[];
+}
+
 async function listIssueIdentifiersByFilters(
   tracker: Tracker,
   filters: IssueFilters,
   project: ListenerStartDeps["project"],
   opts?: { jiraStyleCaseInsensitive?: boolean },
-): Promise<Map<string, string>> {
+): Promise<ListIssuesResult> {
   if (typeof tracker.listIssues !== "function") {
     throw new Error(
       `tracker plugin "${tracker.name}" does not implement listIssues(), required by tracker-task listener`,
@@ -384,7 +394,25 @@ async function listIssueIdentifiersByFilters(
     byCanonicalId.set(canonicalId, issueId);
   }
 
-  return byCanonicalId;
+  return { idMap: byCanonicalId, rawIssues: issues };
+}
+
+function writeIssueCache(
+  cachePath: string,
+  listenerId: string,
+  projectId: string,
+  issues: Issue[],
+): void {
+  const cache: ListenerIssueCache = {
+    cachedAt: new Date().toISOString(),
+    listenerId,
+    projectId,
+    issues,
+  };
+  mkdirSync(dirname(cachePath), { recursive: true });
+  const tmpPath = `${cachePath}.tmp.${process.pid}.${Date.now()}`;
+  writeFileSync(tmpPath, JSON.stringify(cache, null, 2), "utf-8");
+  renameSync(tmpPath, cachePath);
 }
 
 function isBlockingSessionStatus(status: string | undefined): boolean {
@@ -538,6 +566,7 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
   const statePath = buildStatePath(config.configPath, project.path, listenerId);
   const issueLocksDir = buildIssueLocksDir(config.configPath, project.path);
   const sessionsDir = getSessionsDir(config.configPath, project.path);
+  const issueCachePath = getListenerIssueCachePath(config.configPath, project.path, listenerId);
   const warnedUnknownStatuses = new Set<string>();
   const integrationIdentity = healthIdentity ?? {
     id: `listener:${listenerId}`,
@@ -572,11 +601,21 @@ async function startTrackerTaskListener(deps: ListenerStartDeps): Promise<Listen
     let cycleIssueCount: number;
 
     try {
-      const issueIdMap = await listIssueIdentifiersByFilters(tracker, issueFilters, project, {
-        jiraStyleCaseInsensitive,
-      });
+      const { idMap: issueIdMap, rawIssues } = await listIssueIdentifiersByFilters(
+        tracker,
+        issueFilters,
+        project,
+        { jiraStyleCaseInsensitive },
+      );
       cycleIssueCount = issueIdMap.size;
       if (stopped) return;
+
+      try {
+        writeIssueCache(issueCachePath, listenerId, projectId, rawIssues);
+      } catch (cacheErr) {
+        const msg = cacheErr instanceof Error ? cacheErr.message : String(cacheErr);
+        logger.warn(`[listener:${listenerId}] Failed to write issue cache: ${msg}`);
+      }
 
       if (listenerMode === "observe") {
         healthReporter?.markHealthy(

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   type DashboardSession,
   type DashboardStats,
@@ -28,10 +29,11 @@ interface DashboardProps {
   orchestratorByProject?: Record<string, string>;
 }
 
-type DashboardTab = "sessions" | "tracker";
+type DashboardTab = "sessions" | "prs" | "tracker";
 export interface DashboardProjectFilterOption {
   id: string;
   label: string;
+  hasTracker?: boolean;
 }
 interface JiraTaskSessionView {
   id: string;
@@ -55,6 +57,7 @@ interface JiraTaskView {
   projectId: string | null;
   startEndpoint: string | null;
   relatedActiveSessions: JiraTaskSessionView[];
+  relatedDoneSessions?: JiraTaskSessionView[];
 }
 
 const KANBAN_LEVELS = ["working", "pending", "review", "respond", "merge"] as const;
@@ -66,16 +69,25 @@ export function Dashboard({
   projectFilters = [],
   orchestratorByProject = {},
 }: DashboardProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const sessions = useSessionEvents(initialSessions);
   const [integrationsStatus, setIntegrationsStatus] = useState(initialIntegrationsStatus);
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
-  const [activeTab, setActiveTab] = useState<DashboardTab>("sessions");
+  const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
+    const tab = searchParams.get("tab");
+    if (tab === "prs" || tab === "tracker" || tab === "sessions") return tab;
+    return "sessions";
+  });
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
+    const urlProject = searchParams.get("projectId");
+    if (urlProject) {
+      const trimmed = urlProject.trim();
+      if (trimmed.length > 0) return trimmed;
+    }
     if (typeof initialProjectId === "string") {
       const trimmed = initialProjectId.trim();
-      if (trimmed.length > 0) {
-        return trimmed;
-      }
+      if (trimmed.length > 0) return trimmed;
     }
     return projectFilters[0]?.id ?? "";
   });
@@ -83,7 +95,35 @@ export function Dashboard({
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraLoadedOnce, setJiraLoadedOnce] = useState(false);
   const [jiraError, setJiraError] = useState<string | null>(null);
+  const [jiraCachedAt, setJiraCachedAt] = useState<string | null>(null);
   const [startingJiraTaskKeys, setStartingJiraTaskKeys] = useState<Record<string, boolean>>({});
+
+  const updateUrl = useCallback(
+    (tab: DashboardTab, projectId: string) => {
+      const params = new URLSearchParams();
+      if (tab !== "sessions") params.set("tab", tab);
+      if (projectId) params.set("projectId", projectId);
+      const qs = params.toString();
+      router.replace(qs ? `?${qs}` : "/", { scroll: false });
+    },
+    [router],
+  );
+
+  const handleTabChange = useCallback(
+    (tab: DashboardTab) => {
+      setActiveTab(tab);
+      updateUrl(tab, selectedProjectId);
+    },
+    [selectedProjectId, updateUrl],
+  );
+
+  const handleProjectChange = useCallback(
+    (projectId: string) => {
+      setSelectedProjectId(projectId);
+      updateUrl(activeTab, projectId);
+    },
+    [activeTab, updateUrl],
+  );
 
   const filterOptions = useMemo(
     () =>
@@ -99,6 +139,7 @@ export function Dashboard({
     [filterOptions, effectiveProjectId],
   );
   const displayProjectName = selectedProjectOption?.label;
+  const showTrackerTab = selectedProjectOption?.hasTracker === true;
 
   const filteredSessions = useMemo(() => {
     if (!effectiveProjectId) {
@@ -187,8 +228,9 @@ export function Dashboard({
       if (!response.ok) {
         throw new Error(await readErrorMessage(response));
       }
-      const payload = (await response.json()) as unknown;
+      const payload = (await response.json()) as Record<string, unknown>;
       setJiraTasks(parseJiraSprintTasks(payload, effectiveProjectId));
+      setJiraCachedAt(typeof payload.issuesCachedAt === "string" ? payload.issuesCachedAt : null);
       setJiraError(null);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Unexpected error";
@@ -269,9 +311,13 @@ export function Dashboard({
   useEffect(() => {
     setJiraTasks([]);
     setJiraError(null);
+    setJiraCachedAt(null);
     setJiraLoadedOnce(false);
     setStartingJiraTaskKeys({});
-  }, [effectiveProjectId]);
+    if (!showTrackerTab && activeTab === "tracker") {
+      setActiveTab("sessions");
+    }
+  }, [effectiveProjectId, showTrackerTab, activeTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -373,7 +419,7 @@ export function Dashboard({
           <select
             id="project-filter"
             value={selectedProjectId}
-            onChange={(event) => setSelectedProjectId(event.target.value)}
+            onChange={(event) => handleProjectChange(event.target.value)}
             className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1 text-[12px] text-[var(--color-text-primary)]"
           >
             {filterOptions.map((option) => (
@@ -421,35 +467,25 @@ export function Dashboard({
       )}
 
       <div className="mb-6 flex items-center gap-1 rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-1">
-        <button
-          type="button"
-          onClick={() => setActiveTab("sessions")}
-          aria-pressed={activeTab === "sessions"}
-          className={[
-            "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
-            activeTab === "sessions"
-              ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
-              : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
-          ].join(" ")}
-        >
-          Sessions
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("tracker")}
-          aria-pressed={activeTab === "tracker"}
-          className={[
-            "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
-            activeTab === "tracker"
-              ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
-              : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
-          ].join(" ")}
-        >
-          Tracker Tasks
-        </button>
+        {(["sessions", "prs", ...(showTrackerTab ? ["tracker"] : [])] as DashboardTab[]).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            onClick={() => handleTabChange(tab)}
+            aria-pressed={activeTab === tab}
+            className={[
+              "rounded-[6px] px-3 py-1.5 text-[12px] font-medium transition-colors",
+              activeTab === tab
+                ? "bg-[var(--color-accent)] text-[var(--color-bg-base)]"
+                : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
+            ].join(" ")}
+          >
+            {tab === "sessions" ? "Sessions" : tab === "prs" ? "Pull Requests" : "Tracker Tasks"}
+          </button>
+        ))}
       </div>
 
-      {activeTab === "sessions" ? (
+      {activeTab === "sessions" && (
         <>
           <IntegrationStatusPanel status={integrationsStatus} />
 
@@ -490,57 +526,63 @@ export function Dashboard({
               />
             </div>
           )}
+        </>
+      )}
 
-          {/* PR Table */}
-          {openPRs.length > 0 && (
-            <div className="mx-auto max-w-[900px]">
-              <h2 className="mb-3 px-1 text-[10px] font-bold uppercase tracking-[0.10em] text-[var(--color-text-tertiary)]">
-                Pull Requests
-              </h2>
-              <div className="overflow-hidden rounded-[6px] border border-[var(--color-border-default)]">
-                <table className="w-full border-collapse">
-                  <thead>
-                    <tr className="border-b border-[var(--color-border-muted)]">
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        PR
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        Title
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        Size
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        CI
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        Review
-                      </th>
-                      <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
-                        Unresolved
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {openPRs.map((pr) => (
-                      <PRTableRow key={pr.number} pr={pr} />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+      {activeTab === "prs" && (
+        <div className="mx-auto max-w-[900px]">
+          {openPRs.length === 0 ? (
+            <p className="rounded-[6px] border border-[var(--color-border-default)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
+              No open pull requests.
+            </p>
+          ) : (
+            <div className="overflow-hidden rounded-[6px] border border-[var(--color-border-default)]">
+              <table className="w-full border-collapse">
+                <thead>
+                  <tr className="border-b border-[var(--color-border-muted)]">
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      PR
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Title
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Size
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      CI
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Review
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Unresolved
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openPRs.map((pr) => (
+                    <PRTableRow key={pr.number} pr={pr} />
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
-        </>
-      ) : (
+        </div>
+      )}
+
+      {activeTab === "tracker" && (
         <JiraTasksPanel
           tasks={jiraTasks}
           loading={jiraLoading}
           loadedOnce={jiraLoadedOnce}
           error={jiraError}
+          cachedAt={jiraCachedAt}
           startingTaskKeys={startingJiraTaskKeys}
           projectId={effectiveProjectId}
           onRefresh={() => void refreshJiraTasks(true)}
           onStartTask={(task) => void handleStartJiraTask(task)}
+          onRestoreSession={(sessionId) => void handleRestore(sessionId)}
         />
       )}
     </div>
@@ -552,10 +594,12 @@ interface JiraTasksPanelProps {
   loading: boolean;
   loadedOnce: boolean;
   error: string | null;
+  cachedAt: string | null;
   startingTaskKeys: Record<string, boolean>;
   projectId?: string;
   onRefresh: () => void;
   onStartTask: (task: JiraTaskView) => void;
+  onRestoreSession: (sessionId: string) => void;
 }
 
 function JiraTasksPanel({
@@ -563,10 +607,12 @@ function JiraTasksPanel({
   loading,
   loadedOnce,
   error,
+  cachedAt,
   startingTaskKeys,
   projectId,
   onRefresh,
   onStartTask,
+  onRestoreSession,
 }: JiraTasksPanelProps) {
   const canStartTask = (task: JiraTaskView): boolean =>
     task.spawnAvailable &&
@@ -578,15 +624,13 @@ function JiraTasksPanel({
     const bActive = b.relatedActiveSessions.length > 0;
     if (aActive !== bActive) return aActive ? -1 : 1;
 
-    const aReady = a.spawnAvailable && !aActive;
-    const bReady = b.spawnAvailable && !bActive;
-    if (aReady !== bReady) return aReady ? -1 : 1;
+    const catOrder = statusCategoryOrder(a.statusCategory) - statusCategoryOrder(b.statusCategory);
+    if (catOrder !== 0) return catOrder;
     return a.issueKey.localeCompare(b.issueKey);
   });
   const readyCount = orderedTasks.filter((task) => canStartTask(task)).length;
   const activeCount = orderedTasks.filter((task) => task.relatedActiveSessions.length > 0).length;
   const blockedCount = Math.max(orderedTasks.length - readyCount - activeCount, 0);
-  const nextReadyTask = orderedTasks.find((task) => canStartTask(task)) ?? null;
   const anyStartInProgress = Object.values(startingTaskKeys).some(Boolean);
   const showBlockingLoading = loading && (!loadedOnce || orderedTasks.length === 0);
   const showRefreshing = loading && loadedOnce && orderedTasks.length > 0;
@@ -600,24 +644,14 @@ function JiraTasksPanel({
           </h2>
           <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
             Task status, related active sessions, and one-click agent start.
+            {cachedAt && (
+              <span className="ml-2 opacity-70" title={cachedAt}>
+                · updated {formatRelativeTime(cachedAt)}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {nextReadyTask && (
-            <button
-              type="button"
-              onClick={() => onStartTask(nextReadyTask)}
-              disabled={anyStartInProgress}
-              className={[
-                "rounded border px-2.5 py-1 text-[11px] font-semibold transition-colors",
-                anyStartInProgress
-                  ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
-                  : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
-              ].join(" ")}
-            >
-              {anyStartInProgress ? "Starting..." : `Start ${nextReadyTask.issueKey}`}
-            </button>
-          )}
           <button
             type="button"
             onClick={onRefresh}
@@ -675,7 +709,10 @@ function JiraTasksPanel({
                   Title
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
-                  Status
+                  AO Status
+                </th>
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Tracker Status
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
                   Session
@@ -692,6 +729,9 @@ function JiraTasksPanel({
                 const isStarting = Boolean(startingTaskKeys[task.issueKey]);
                 const canStartNow = canStartTask(task) && !hasActiveSession;
                 const isDisabled = isStarting || !canStartNow || anyStartInProgress;
+                const killedSession = !hasActiveSession
+                  ? (task.relatedDoneSessions ?? []).find((s) => s.status === "killed")
+                  : undefined;
                 return (
                   <tr
                     key={task.issueKey}
@@ -727,15 +767,26 @@ function JiraTasksPanel({
                       </span>
                     </td>
                     <td className="px-3 py-2.5 align-top">
+                      {hasActiveSession ? (
+                        <span className="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] border-[rgba(88,166,255,0.45)] bg-[rgba(88,166,255,0.14)] text-[var(--color-status-working)]">
+                          In progress
+                        </span>
+                      ) : (task.relatedDoneSessions?.length ?? 0) > 0 ? (
+                        <span className="inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.14)] text-[var(--color-status-ready)]">
+                          Done
+                        </span>
+                      ) : (
+                        <span className="text-[var(--color-text-secondary)] text-[11px]">—</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 align-top">
                       <span
                         className={[
                           "inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em]",
-                          jiraTaskStatusBadgeClass(task.statusCategory, hasActiveSession),
+                          jiraTaskStatusBadgeClass(task.statusCategory),
                         ].join(" ")}
                       >
-                        {hasActiveSession
-                          ? "In progress"
-                          : formatStateLabel(task.status ?? "unknown")}
+                        {formatStateLabel(task.status ?? "unknown")}
                       </span>
                       {task.statusCategory && (
                         <p className="mt-1 text-[10px] text-[var(--color-text-muted)]">
@@ -768,30 +819,65 @@ function JiraTasksPanel({
                             </span>
                           )}
                         </div>
+                      ) : (task.relatedDoneSessions?.length ?? 0) > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {(task.relatedDoneSessions ?? []).slice(0, 2).map((session) => (
+                            <a
+                              key={session.id}
+                              href={resolveSessionPath({
+                                sessionId: session.id,
+                                projectId: session.projectId ?? task.projectId ?? projectId ?? undefined,
+                                sessionUrl: session.sessionUrl,
+                              })}
+                              className="inline-flex items-center gap-1 rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)] opacity-60 hover:opacity-100 hover:underline"
+                            >
+                              <span>{session.id}</span>
+                              <span className="text-[10px]">
+                                {formatStateLabel(session.status ?? "done")}
+                              </span>
+                            </a>
+                          ))}
+                          {(task.relatedDoneSessions?.length ?? 0) > 2 && (
+                            <span className="inline-flex items-center rounded border border-[var(--color-border-default)] px-1.5 py-0.5 text-[11px] text-[var(--color-text-secondary)] opacity-60">
+                              +{(task.relatedDoneSessions?.length ?? 0) - 2}
+                            </span>
+                          )}
+                        </div>
                       ) : (
                         <span className="text-[var(--color-text-secondary)]">—</span>
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-right align-top">
-                      <button
-                        type="button"
-                        disabled={isDisabled}
-                        onClick={() => onStartTask(task)}
-                        className={[
-                          "rounded border px-2 py-1 text-[11px] font-medium",
-                          isDisabled
-                            ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
-                            : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
-                        ].join(" ")}
-                      >
-                        {hasActiveSession
-                          ? "Session active"
-                          : isStarting
-                            ? "Starting..."
-                            : canStartNow
-                              ? "Start Agent"
-                              : "Unavailable"}
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {killedSession && (
+                          <button
+                            type="button"
+                            onClick={() => onRestoreSession(killedSession.id)}
+                            className="rounded border border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.12)] px-2 py-1 text-[11px] font-medium text-[var(--color-status-attention)] hover:bg-[rgba(210,153,34,0.2)]"
+                          >
+                            Reactivate
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          disabled={isDisabled}
+                          onClick={() => onStartTask(task)}
+                          className={[
+                            "rounded border px-2 py-1 text-[11px] font-medium",
+                            isDisabled
+                              ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
+                              : "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.12)] text-[var(--color-status-ready)] hover:bg-[rgba(63,185,80,0.2)]",
+                          ].join(" ")}
+                        >
+                          {hasActiveSession
+                            ? "Session active"
+                            : isStarting
+                              ? "Starting..."
+                              : canStartNow
+                                ? "Start Agent"
+                                : "Unavailable"}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -804,20 +890,34 @@ function JiraTasksPanel({
   );
 }
 
-function jiraTaskStatusBadgeClass(
-  statusCategory: string | null,
-  hasActiveSession: boolean,
-): string {
-  if (hasActiveSession) {
-    return "border-[rgba(88,166,255,0.45)] bg-[rgba(88,166,255,0.14)] text-[var(--color-status-working)]";
-  }
-
+function statusCategoryOrder(statusCategory: string | null): number {
   const normalized = statusCategory?.trim().toLowerCase() ?? "";
-  if (normalized === "done" || normalized === "complete" || normalized === "completed") {
+  if (normalized === "in_progress" || normalized === "indeterminate" || normalized === "in-progress")
+    return 1;
+  if (normalized === "done" || normalized === "closed" || normalized === "complete" || normalized === "completed")
+    return 2;
+  return 0;
+}
+
+function jiraTaskStatusBadgeClass(statusCategory: string | null): string {
+  const normalized = statusCategory?.trim().toLowerCase() ?? "";
+  if (
+    normalized === "done" ||
+    normalized === "closed" ||
+    normalized === "complete" ||
+    normalized === "completed"
+  ) {
     return "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.14)] text-[var(--color-status-ready)]";
   }
-  if (normalized === "in-progress" || normalized === "indeterminate") {
+  if (
+    normalized === "in_progress" ||
+    normalized === "in-progress" ||
+    normalized === "indeterminate"
+  ) {
     return "border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.14)] text-[var(--color-status-attention)]";
+  }
+  if (normalized === "open" || normalized === "new" || normalized === "todo" || normalized === "backlog") {
+    return "border-[rgba(88,166,255,0.35)] bg-[rgba(88,166,255,0.10)] text-[var(--color-status-working)]";
   }
 
   return "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)]";
@@ -896,6 +996,7 @@ function parseJiraSprintTasks(payload: unknown, fallbackProjectId?: string): Jir
     const listenerIds = readStringArrayField(rawTask, ["listenerIds", "listeners"]);
     const projectId = readProjectId(rawTask, listenerIds, listenerProjectById, fallbackProjectId);
     const relatedActiveSessions = parseRelatedTaskSessions(rawTask, projectId);
+    const relatedDoneSessions = parseDoneTaskSessions(rawTask, projectId);
 
     parsed.push({
       source: readStringField(rawTask, ["source", "taskSource", "tracker"]),
@@ -910,6 +1011,7 @@ function parseJiraSprintTasks(payload: unknown, fallbackProjectId?: string): Jir
         readStringField(rawTask, ["listenerId", "sourceListenerId"]) ??
         (listenerIds.length === 1 ? listenerIds[0] : null),
       relatedActiveSessions,
+      relatedDoneSessions,
       spawnAvailable:
         readBooleanField(rawTask, ["spawnAvailable", "canStart", "startable", "startEnabled"]) ??
         relatedActiveSessions.length === 0,
@@ -1000,6 +1102,32 @@ function parseRelatedTaskSessions(
   }
 
   return parsed.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function parseDoneTaskSessions(
+  task: Record<string, unknown>,
+  fallbackProjectId: string | null,
+): JiraTaskSessionView[] {
+  const candidate = task["relatedDoneSessions"];
+  if (!Array.isArray(candidate)) return [];
+
+  const parsed: JiraTaskSessionView[] = [];
+  for (const rawSession of candidate) {
+    if (!isObjectRecord(rawSession)) continue;
+    const sessionId = readStringField(rawSession, ["id", "sessionId"]);
+    if (!sessionId) continue;
+    parsed.push({
+      id: sessionId,
+      sessionUrl: readStringField(rawSession, ["sessionUrl", "url", "link"]),
+      projectId:
+        readStringField(rawSession, ["projectId"]) ??
+        readNestedStringField(rawSession, "project", ["id", "projectId"]) ??
+        fallbackProjectId,
+      status: readStringField(rawSession, ["status", "sessionStatus"]),
+      activity: readStringField(rawSession, ["activity", "sessionActivity"]),
+    });
+  }
+  return parsed;
 }
 
 function extractTaskArray(payload: unknown): unknown[] {
@@ -1404,6 +1532,18 @@ function formatStatusTimestamp(value: string): string {
     return value;
   }
   return `${date.toISOString().slice(11, 19)}Z`;
+}
+
+function formatRelativeTime(isoString: string): string {
+  const ms = Date.now() - Date.parse(isoString);
+  if (!Number.isFinite(ms) || ms < 0) return formatStatusTimestamp(isoString);
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ${min % 60}m ago`;
+  return formatStatusTimestamp(isoString);
 }
 
 function computeStatsForDashboard(sessions: DashboardSession[]): DashboardStats {

@@ -467,6 +467,7 @@ export interface Issue {
   description: string;
   url: string;
   state: "open" | "in_progress" | "closed" | "cancelled";
+  statusLabel?: string;
   labels: string[];
   assignee?: string;
   priority?: number;
@@ -476,7 +477,16 @@ export interface IssueFilters {
   state?: "open" | "closed" | "all";
   labels?: string[];
   assignee?: string;
+  /** Filter by iteration: "current" for active sprint/cycle/milestone, or a name/id. */
+  iteration?: string;
   limit?: number;
+}
+
+export interface ListenerIssueCache {
+  cachedAt: string;
+  listenerId: string;
+  projectId: string;
+  issues: Issue[];
 }
 
 export interface IssueUpdate {

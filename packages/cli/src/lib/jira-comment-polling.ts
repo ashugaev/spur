@@ -14,6 +14,7 @@ import type { IntegrationHealthReporter, IntegrationIdentity } from "./integrati
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 const MAX_COMMENT_LENGTH = 10_000;
 const SESSION_MARKER_REGEX = /\bAO_SESSION:([a-zA-Z0-9_-]+)\b/;
+const JIRA_ISSUE_KEY_REGEX = /[A-Z][A-Z0-9]*-\d+/i;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -214,9 +215,11 @@ export async function maybeStartJiraCommentPolling(
 ): Promise<JiraCommentPollingController | null> {
   const health = deps.healthReporter;
 
-  // Build per-project config map
+  // Build per-project config map — only include projects that have a tracker-comment reaction
   const projectConfigs = new Map<string, JiraPollingConfig>();
   for (const [projectId, project] of Object.entries(deps.config.projects)) {
+    const reaction = resolveTrackerCommentReaction(deps.config, projectId);
+    if (!reaction) continue;
     const cfg = resolveProjectPollingConfig(projectId, project);
     if (cfg) {
       projectConfigs.set(projectId, cfg);
@@ -226,7 +229,7 @@ export async function maybeStartJiraCommentPolling(
   if (projectConfigs.size === 0) {
     health?.markInactive(
       JIRA_COMMENT_POLLING_HEALTH,
-      "Jira polling inactive: no project configured with Jira tracker",
+      "Jira polling inactive: no project with tracker-comment reaction configured",
     );
     return null;
   }
@@ -378,15 +381,19 @@ export async function maybeStartJiraCommentPolling(
       const projectSessions = new Map<string, Map<string, string[]>>();
       for (const session of activeSessions) {
         if (!session.issueId) continue;
+        if (!projectConfigs.has(session.projectId)) continue;
+        const match = session.issueId.match(JIRA_ISSUE_KEY_REGEX);
+        if (!match) continue;
+        const issueKey = match[0].toUpperCase();
         if (!projectSessions.has(session.projectId)) {
           projectSessions.set(session.projectId, new Map<string, string[]>());
         }
         const byIssue = projectSessions.get(session.projectId)!;
-        const existing = byIssue.get(session.issueId);
+        const existing = byIssue.get(issueKey);
         if (existing) {
           existing.push(session.id);
         } else {
-          byIssue.set(session.issueId, [session.id]);
+          byIssue.set(issueKey, [session.id]);
         }
       }
 

@@ -148,6 +148,7 @@ function toIssue(data: JiraIssueRaw, baseUrl: string): Issue {
         : adfToPlainText(fields.description),
     url: `${baseUrl}/browse/${data.key}`,
     state: mapState(fields.status?.statusCategory?.key ?? "new"),
+    statusLabel: fields.status?.name,
     labels: fields.labels ?? [],
     assignee: fields.assignee?.displayName,
     priority: fields.priority?.id ? Number(fields.priority.id) : undefined,
@@ -227,6 +228,14 @@ function createJiraTracker(): Tracker {
         jqlParts.push("statusCategory = Done");
       } else if (filters.state !== "all") {
         jqlParts.push("NOT statusCategory = Done");
+      }
+
+      if (filters.iteration) {
+        if (filters.iteration.toLowerCase() === "current") {
+          jqlParts.push("sprint in openSprints()");
+        } else {
+          jqlParts.push(`sprint = "${filters.iteration}"`);
+        }
       }
 
       if (filters.labels && filters.labels.length > 0) {

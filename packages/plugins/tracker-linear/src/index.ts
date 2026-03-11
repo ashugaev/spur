@@ -309,6 +309,7 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         description: node.description ?? "",
         url: node.url,
         state: mapLinearState(node.state.type),
+        statusLabel: node.state.name,
         labels: node.labels.nodes.map((l) => l.name),
         assignee: node.assignee?.displayName ?? node.assignee?.name,
         priority: node.priority,
@@ -413,6 +414,14 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         filter["labels"] = { name: { in: filters.labels } };
       }
 
+      if (filters.iteration) {
+        if (filters.iteration.toLowerCase() === "current") {
+          filter["cycle"] = { isActive: { eq: true } };
+        } else {
+          filter["cycle"] = { name: { eq: filters.iteration } };
+        }
+      }
+
       // Add team filter if available from project config
       const teamId = project.tracker?.["teamId"];
       if (teamId) {
@@ -441,6 +450,7 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         description: node.description ?? "",
         url: node.url,
         state: mapLinearState(node.state.type),
+        statusLabel: node.state.name,
         labels: node.labels.nodes.map((l) => l.name),
         assignee: node.assignee?.displayName ?? node.assignee?.name,
         priority: node.priority,
@@ -633,6 +643,7 @@ function createLinearTracker(query: GraphQLTransport): Tracker {
         description: node.description ?? "",
         url: node.url,
         state: mapLinearState(node.state.type),
+        statusLabel: node.state.name,
         labels: node.labels.nodes.map((l) => l.name),
         assignee: node.assignee?.displayName ?? node.assignee?.name,
         priority: node.priority,

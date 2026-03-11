@@ -38,6 +38,8 @@ const ReactionConfigSchema = z.object({
 const TrackerConfigSchema = z
   .object({
     plugin: z.string(),
+    statusMapping: z.record(z.string()).optional(),
+    ignoreStatuses: z.array(z.string()).optional(),
   })
   .passthrough();
 
@@ -91,6 +93,7 @@ const ListenerConfigBaseSchema = z
         state: z.enum(["open", "closed", "all"]).optional(),
         labels: z.array(z.string().min(1)).optional(),
         assignee: z.string().min(1).optional(),
+        iteration: z.string().min(1).optional(),
         limit: z.number().positive().optional(),
       })
       .optional(),

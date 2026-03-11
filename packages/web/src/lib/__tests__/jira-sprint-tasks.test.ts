@@ -114,6 +114,7 @@ describe("jira-sprint-tasks helpers", () => {
           state: "all",
           assignee: "alek",
           labels: ["ao", "ao", "ops"],
+          iteration: "current",
           limit: 50,
         },
       }),
@@ -121,6 +122,7 @@ describe("jira-sprint-tasks helpers", () => {
       state: "all",
       assignee: "alek",
       labels: ["ao", "ops"],
+      iteration: "current",
       limit: 50,
     });
   });

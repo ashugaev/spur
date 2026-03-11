@@ -116,6 +116,7 @@ describe("tracker-jira plugin", () => {
         description: "Users can't log in with SSO",
         url: "https://myorg.atlassian.net/browse/WEBDEV-123",
         state: "open",
+        statusLabel: "To Do",
         labels: ["bug", "priority-high"],
         assignee: "Alice Smith",
         priority: 2,

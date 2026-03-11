@@ -120,6 +120,7 @@ export {
   getSessionsDir,
   getWorktreesDir,
   getArchiveDir,
+  getListenerIssueCachePath,
   getOriginFilePath,
   generateSessionName,
   generateTmuxName,
