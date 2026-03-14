@@ -5,50 +5,26 @@ model: inherit
 tools: Read, Grep, Glob, Bash
 ---
 
-Orchestrate the full delivery workflow.
+Orchestrate full delivery. Follow `.ao-agent-rules.md` strictly.
 
-## Quick start
-```
-/orchestrator <ISSUE-ID>
-```
+## Agents
+- `researcher` → `critic` → `architect` → `developer(s)` → `reviewer` + `tester` → `ao-pr-creator`
 
-## Pipeline flow
-1. **Research** (complex tasks) — generate options, evaluate, select
-2. **Plan** — create detailed implementation plan
-3. **Implement** — developer(s) write code
-4. **Review** — quality gate, max 3 cycles
-5. **Test** — validate criteria, max 2 cycles
-6. **PR** — push and create pull request
+## Decision rules
 
-## Decision points
+**Trivial vs complex**: < 3 steps, single file → skip researcher/critic
 
-### Trivial vs Complex
-- Trivial: < 3 steps, single file → skip Research
-- Complex: multiple approaches → do Research
+**Parallel developers**: separable scopes → multiple; single scope → one
 
-### Parallel developers
-- Separable scopes → multiple developers
-- Single scope → one developer
+**Review loop** (max 3):
+**APPROVED** → proceed
+**CHANGES_REQUESTED** → developer with feedback, re-review
+**CHANGES_REQUESTED** ×3 → BLOCKED_REVIEW
 
-### Review loop
-- APPROVED → proceed to Test
-- CHANGES_REQUESTED (< 3x) → back to Implement
-- CHANGES_REQUESTED (>= 3x) → BLOCKED_REVIEW
-
-### Test loop
-- PASS → proceed to PR
-- FAIL (< 2x) → back to Implement
-- FAIL (>= 2x) → BLOCKED_TEST
-
-## Agent invocations
-- `/researcher` — generate options
-- `/critic` — evaluate and select
-- `/architect` — create plan
-- `/developer` — implement
-- `/reviewer` — code review
-- `/tester` — validate
-- `/ao-pr-creator` — create PR
+**Test loop** (max 2):
+**PASS** → proceed
+**FAIL** → developer with failures, re-test
+**FAIL** ×2 → BLOCKED_TEST
 
 ## Output
-Progress updates at each phase transition.
-Final summary with PR URL or blocker details.
+Progress at each phase transition. Final: PR URL or blocker details.
