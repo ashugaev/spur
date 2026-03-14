@@ -957,6 +957,9 @@ export interface ProjectConfig {
   /** Rules for the orchestrator agent (stored, reserved for future use) */
   orchestratorRules?: string;
 
+  /** Pipeline steps configuration */
+  pipeline?: PipelineConfig;
+
   /** Per-project trigger listeners (projectId is implicit). */
   listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
 }
@@ -1230,6 +1233,86 @@ export class SessionNotRestorableError extends Error {
     super(`Session ${sessionId} cannot be restored: ${reason}`);
     this.name = "SessionNotRestorableError";
   }
+}
+
+// =============================================================================
+// PIPELINE
+// =============================================================================
+
+export type StepState = "pending" | "running" | "completed" | "failed" | "rewound" | "skipped";
+export type PipelineState = "running" | "completed" | "failed" | "paused";
+
+export type StepResult =
+  | { status: "completed"; output?: Record<string, unknown> }
+  | { status: "failed"; reason: string };
+
+export type OnHandler =
+  | "done"
+  | "fail"
+  | "pause"
+  | "send"
+  | `goto ${string}`
+  | string
+  | { send?: string; retries?: number; goto?: string };
+
+export interface PipelineStep {
+  id: string;
+  prompt?: string;
+  run?: string;
+  channel?: string;
+  message?: string;
+  options?: string[];
+  allowText?: boolean;
+  on?: Record<string, OnHandler>;
+  all?: string[];
+  timeout?: string;
+  when?: string;
+  goto?: string;
+  maxIterations?: number;
+  recovery?: "skip" | "pause" | "fail";
+}
+
+export interface PipelineConfig {
+  maxIterations?: number;
+  recovery?: "skip" | "pause" | "fail";
+  steps: PipelineStep[];
+}
+
+export interface PipelineStepState {
+  id: string;
+  state: StepState;
+  iterations: number;
+  output?: Record<string, unknown>;
+  startedAt?: string;
+  completedAt?: string;
+  failReason?: string;
+  satisfiedConditions?: string[];
+}
+
+export interface PipelineSessionState {
+  state: PipelineState;
+  currentStepIndex: number;
+  steps: PipelineStepState[];
+  totalIterations: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EventBus {
+  emit(event: string, data?: unknown): void;
+  on(event: string, handler: (data: unknown) => void): () => void;
+  once(event: string, handler: (data: unknown) => void): () => void;
+}
+
+export interface PipelineEngine {
+  initialize(sessionId: SessionId, config: PipelineConfig): void;
+  load(sessionId: SessionId, config?: PipelineConfig): PipelineSessionState | null;
+  getState(sessionId: SessionId): PipelineSessionState | null;
+  done(sessionId: SessionId, output?: Record<string, unknown>): void;
+  fail(sessionId: SessionId, reason: string): void;
+  goto(sessionId: SessionId, stepId: string): void;
+  respond(sessionId: SessionId, response: string): void;
+  tick(sessionId: SessionId, events: Record<string, unknown>): void;
 }
 
 /** Thrown when a workspace is missing and cannot be recreated. */

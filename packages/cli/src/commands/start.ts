@@ -18,6 +18,9 @@ import type { Command } from "commander";
 import {
   loadConfig,
   createLifecycleManager,
+  createEventBus,
+  createPipelineEngine,
+  getSessionsDir,
   generateOrchestratorPrompt,
   isRepoUrl,
   parseRepoUrl,
@@ -583,10 +586,24 @@ async function runStartup(
         getPluginRegistry(config),
       ]);
       sharedSessionManager = sessionManager;
+
+      const hasPipeline = Object.values(config.projects).some(
+        (p) => p.pipeline?.steps && p.pipeline.steps.length > 0,
+      );
+      const eventBus = hasPipeline ? createEventBus() : undefined;
+      const pipelineEngine = hasPipeline && eventBus
+        ? createPipelineEngine({
+            sessionsDir: getSessionsDir(config.configPath, Object.values(config.projects)[0].path),
+            eventBus,
+          })
+        : undefined;
+
       lifecycleManager = createLifecycleManager({
         config,
         registry,
         sessionManager,
+        pipelineEngine,
+        eventBus,
         healthHooks: {
           onPollStarting: (message) =>
             integrationHealth.markStarting(REACTION_ENGINE_HEALTH, message),

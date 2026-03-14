@@ -18,6 +18,13 @@ export {
   findConfigFile,
 } from "./config.js";
 
+// Event bus — in-process pub/sub
+export { createEventBus } from "./event-bus.js";
+
+// Pipeline engine — step-based workflow execution
+export { createPipelineEngine } from "./pipeline.js";
+export type { PipelineEngineDeps } from "./pipeline.js";
+
 // Plugin registry
 export { createPluginRegistry } from "./plugin-registry.js";
 
@@ -54,7 +61,7 @@ export { createLifecycleManager } from "./lifecycle-manager.js";
 export type { LifecycleManagerDeps, LifecycleHealthHooks } from "./lifecycle-manager.js";
 
 // Prompt builder — layered prompt composition
-export { buildPrompt, BASE_AGENT_PROMPT } from "./prompt-builder.js";
+export { buildPrompt, buildPipelineStepContext, BASE_AGENT_PROMPT } from "./prompt-builder.js";
 export type { PromptBuildConfig } from "./prompt-builder.js";
 
 // Orchestrator prompt — generates orchestrator context for `ao start`

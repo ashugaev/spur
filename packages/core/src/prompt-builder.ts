@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ProjectConfig } from "./types.js";
+import type { ProjectConfig, PipelineStep, PipelineStepState } from "./types.js";
 
 // =============================================================================
 // LAYER 1: BASE AGENT PROMPT
@@ -67,6 +67,9 @@ export interface PromptBuildConfig {
 
   /** Explicit user prompt (appended last) */
   userPrompt?: string;
+
+  /** Pipeline step context (injected when session has an active pipeline) */
+  pipelineStep?: { step: PipelineStep; state: PipelineStepState };
 }
 
 // =============================================================================
@@ -158,6 +161,49 @@ function readUserRules(project: ProjectConfig): string | null {
 }
 
 // =============================================================================
+// PIPELINE STEP CONTEXT
+// =============================================================================
+
+export function buildPipelineStepContext(
+  step: PipelineStep,
+  stepState: PipelineStepState,
+): string {
+  const lines: string[] = [];
+  lines.push("## Current Pipeline Step");
+  lines.push(`**Step:** ${step.id} (state: ${stepState.state})`);
+
+  if (step.channel) {
+    lines.push(step.message ?? step.channel);
+    if (step.options && step.options.length > 0) {
+      lines.push("");
+      lines.push("### Options");
+      for (const opt of step.options) {
+        lines.push(`- ${opt}`);
+      }
+    }
+    if (step.allowText) {
+      lines.push("");
+      lines.push("You may also respond with free-form text.");
+    }
+    lines.push("");
+    lines.push("### How to Respond");
+    lines.push("- `ao done --output '{\"response\": \"<your-choice>\"}'` -- answer the question");
+  } else if (step.run) {
+    lines.push(`This step executes: \`${step.run}\``);
+  } else {
+    lines.push(step.prompt ?? step.message ?? "Waiting for conditions...");
+    lines.push("");
+    lines.push("### Available Actions");
+    lines.push("Use `ao` CLI or MCP tools to signal step completion:");
+    lines.push('- `ao done [--output \'{"key": "value"}\']` -- mark step as completed');
+    lines.push('- `ao fail [--reason "description"]` -- mark step as failed');
+    lines.push("- `ao goto <step-id>` -- jump to a specific step");
+  }
+
+  return lines.join("\n");
+}
+
+// =============================================================================
 // PUBLIC API
 // =============================================================================
 
@@ -174,9 +220,10 @@ export function buildPrompt(config: PromptBuildConfig): string | null {
   const userRules = readUserRules(config.project);
   const hasRules = Boolean(userRules);
   const hasUserPrompt = Boolean(config.userPrompt);
+  const hasPipeline = Boolean(config.pipelineStep);
 
   // Nothing to compose — return null for backward compatibility
-  if (!hasIssue && !hasPrContext && !hasRules && !hasUserPrompt) {
+  if (!hasIssue && !hasPrContext && !hasRules && !hasUserPrompt && !hasPipeline) {
     return null;
   }
 
@@ -191,6 +238,13 @@ export function buildPrompt(config: PromptBuildConfig): string | null {
   // Layer 3: User rules
   if (userRules) {
     sections.push(`## Project Rules\n${userRules}`);
+  }
+
+  // Pipeline step context (before user prompt so user prompt can override)
+  if (config.pipelineStep) {
+    sections.push(
+      buildPipelineStepContext(config.pipelineStep.step, config.pipelineStep.state),
+    );
   }
 
   // Explicit user prompt (appended last, highest priority)

@@ -15,8 +15,13 @@ import {
   loadConfig,
   createPluginRegistry,
   createSessionManager,
+  createEventBus,
+  createPipelineEngine,
+  getSessionsDir,
   type AudioTranscriber,
+  type EventBus,
   type OrchestratorConfig,
+  type PipelineEngine,
   type PluginModule,
   type PluginRegistry,
   type SessionManager,
@@ -39,6 +44,8 @@ export interface Services {
   registry: PluginRegistry;
   sessionManager: SessionManager;
   audioTranscriber: AudioTranscriber | null;
+  pipelineEngine: PipelineEngine | null;
+  eventBus: EventBus | null;
 }
 
 // Cache in globalThis for Next.js HMR stability
@@ -108,7 +115,18 @@ async function initServices(): Promise<Services> {
   registry.register(pluginTrackerJira);
   await registerOptionalLinearTracker(registry);
 
-  const sessionManager = createSessionManager({ config, registry });
+  const hasPipeline = Object.values(config.projects).some(
+    (p) => p.pipeline?.steps && p.pipeline.steps.length > 0,
+  );
+  const eventBus = hasPipeline ? createEventBus() : null;
+  const pipelineEngine = hasPipeline && eventBus
+    ? createPipelineEngine({
+        sessionsDir: getSessionsDir(config.configPath, Object.values(config.projects)[0].path),
+        eventBus,
+      })
+    : null;
+
+  const sessionManager = createSessionManager({ config, registry, pipelineEngine: pipelineEngine ?? undefined });
   let audioTranscriber: AudioTranscriber | null = null;
   try {
     audioTranscriber = createAudioTranscriber(config);
@@ -117,7 +135,7 @@ async function initServices(): Promise<Services> {
     console.warn(`[services] Audio transcriber disabled due to configuration error: ${message}`);
   }
 
-  const services = { config, registry, sessionManager, audioTranscriber };
+  const services = { config, registry, sessionManager, audioTranscriber, pipelineEngine, eventBus };
   globalForServices._aoServices = services;
   return services;
 }

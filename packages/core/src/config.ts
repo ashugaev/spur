@@ -132,6 +132,38 @@ const RemoteConfigSchema = z.object({
   tailscaleHost: z.string().optional(),
 });
 
+const OnHandlerSchema = z.union([
+  z.string(),
+  z.object({
+    send: z.string().optional(),
+    retries: z.number().optional(),
+    goto: z.string().optional(),
+  }),
+]);
+
+const PipelineStepSchema = z.object({
+  id: z.string(),
+  prompt: z.string().optional(),
+  run: z.string().optional(),
+  channel: z.string().optional(),
+  message: z.string().optional(),
+  options: z.array(z.string()).optional(),
+  allowText: z.boolean().optional(),
+  on: z.record(OnHandlerSchema).optional(),
+  all: z.array(z.string()).optional(),
+  timeout: z.string().optional(),
+  when: z.string().optional(),
+  goto: z.string().optional(),
+  maxIterations: z.number().optional(),
+  recovery: z.enum(["skip", "pause", "fail"]).optional(),
+});
+
+const PipelineConfigSchema = z.object({
+  maxIterations: z.number().optional(),
+  recovery: z.enum(["skip", "pause", "fail"]).optional(),
+  steps: z.array(PipelineStepSchema),
+});
+
 const ProjectConfigSchema = z.object({
   name: z.string().optional(),
   repo: z.string(),
@@ -153,6 +185,7 @@ const ProjectConfigSchema = z.object({
   agentRules: z.string().optional(),
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
+  pipeline: PipelineConfigSchema.optional(),
   listeners: z.record(ProjectListenerConfigSchema).optional(),
 });
 

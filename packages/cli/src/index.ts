@@ -11,6 +11,10 @@ import { registerDashboard } from "./commands/dashboard.js";
 import { registerOpen } from "./commands/open.js";
 import { registerStart, registerStop, registerRestart } from "./commands/start.js";
 import { registerSourceReply } from "./commands/source-reply.js";
+import { registerDone } from "./commands/done.js";
+import { registerFail } from "./commands/fail.js";
+import { registerGoto } from "./commands/goto.js";
+import { registerAsk } from "./commands/ask.js";
 
 const program = new Command();
 
@@ -32,5 +36,9 @@ registerSourceReply(program);
 registerReviewCheck(program);
 registerDashboard(program);
 registerOpen(program);
+registerDone(program);
+registerFail(program);
+registerGoto(program);
+registerAsk(program);
 
 program.parse();

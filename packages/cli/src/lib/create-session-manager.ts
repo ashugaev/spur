@@ -10,6 +10,9 @@
 import {
   createPluginRegistry,
   createSessionManager,
+  createEventBus,
+  createPipelineEngine,
+  getSessionsDir,
   type OrchestratorConfig,
   type SessionManager,
   type PluginRegistry,
@@ -46,6 +49,16 @@ async function getRegistry(config: OrchestratorConfig): Promise<PluginRegistry> 
  */
 export async function getSessionManager(config: OrchestratorConfig): Promise<SessionManager> {
   const registry = await getRegistry(config);
+  const hasPipeline = Object.values(config.projects).some(
+    (p) => p.pipeline?.steps && p.pipeline.steps.length > 0,
+  );
+  if (hasPipeline) {
+    const firstProject = Object.values(config.projects)[0];
+    const sessionsDir = getSessionsDir(config.configPath, firstProject.path);
+    const eventBus = createEventBus();
+    const pipelineEngine = createPipelineEngine({ sessionsDir, eventBus });
+    return createSessionManager({ config, registry, pipelineEngine });
+  }
   return createSessionManager({ config, registry });
 }
 

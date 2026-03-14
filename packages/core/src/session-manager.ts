@@ -39,6 +39,9 @@ import {
   type PluginRegistry,
   type RuntimeHandle,
   type Issue,
+  type PipelineEngine,
+  type PipelineStep,
+  type PipelineStepState,
   PR_STATE,
 } from "./types.js";
 import {
@@ -500,11 +503,13 @@ function metadataToSession(
 export interface SessionManagerDeps {
   config: OrchestratorConfig;
   registry: PluginRegistry;
+  pipelineEngine?: PipelineEngine;
 }
 
 /** Create a SessionManager instance. */
 export function createSessionManager(deps: SessionManagerDeps): SessionManager {
   const { config, registry } = deps;
+  const { pipelineEngine } = deps;
 
   /**
    * Get the sessions directory for a project.
@@ -861,6 +866,23 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
     }
 
+    // Initialize pipeline early so we can use actual state for prompt context.
+    if (pipelineEngine && project.pipeline?.steps && project.pipeline.steps.length > 0) {
+      pipelineEngine.initialize(sessionId, project.pipeline);
+    }
+
+    let pipelineStepContext: { step: PipelineStep; state: PipelineStepState } | undefined;
+    if (pipelineEngine && project.pipeline?.steps) {
+      const pState = pipelineEngine.getState(sessionId);
+      if (pState) {
+        const stepState = pState.steps[pState.currentStepIndex];
+        const stepCfg = project.pipeline.steps[pState.currentStepIndex];
+        if (stepState && stepCfg) {
+          pipelineStepContext = { step: stepCfg, state: stepState };
+        }
+      }
+    }
+
     const composedPrompt = buildPrompt({
       project,
       projectId: spawnConfig.projectId,
@@ -870,6 +892,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       issueContext,
       prContext,
       userPrompt: spawnConfig.prompt,
+      pipelineStep: pipelineStepContext,
     });
 
     // Get agent launch config and create runtime — clean up workspace on failure
@@ -887,6 +910,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
       const environment = plugins.agent.getEnvironment(agentLaunchConfig);
 
+      const pipelineEnv: Record<string, string> = {};
+      if (pipelineStepContext) {
+        pipelineEnv["AO_PIPELINE_STEP"] = pipelineStepContext.step.id;
+      }
+      if (config.port) {
+        pipelineEnv["AO_DASHBOARD_URL"] = `http://localhost:${config.port}`;
+      }
+
       handle = await plugins.runtime.create({
         sessionId: tmuxName ?? sessionId, // Use tmux name for runtime if available
         workspacePath,
@@ -898,6 +929,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           AO_DATA_DIR: sessionsDir, // Pass sessions directory (not root dataDir)
           AO_SESSION_NAME: sessionId, // User-facing session name
           ...(tmuxName && { AO_TMUX_NAME: tmuxName }), // Tmux session name if using new arch
+          ...pipelineEnv,
         },
       });
     } catch (err) {

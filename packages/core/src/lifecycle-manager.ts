@@ -10,7 +10,9 @@
  * Replaces the legacy scripts/claude-session-status and scripts/claude-review-check
  */
 
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import {
   SESSION_STATUS,
   PR_STATE,
@@ -34,9 +36,14 @@ import {
   type ProjectConfig as _ProjectConfig,
   type MergeReadiness,
   type ReviewComment,
+  type PipelineEngine,
+  type EventBus,
+  type PipelineStep,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
 function parseDuration(str: string): number {
@@ -170,6 +177,8 @@ export interface LifecycleManagerDeps {
   registry: PluginRegistry;
   sessionManager: SessionManager;
   healthHooks?: LifecycleHealthHooks;
+  pipelineEngine?: PipelineEngine;
+  eventBus?: EventBus;
 }
 
 export interface LifecycleHealthHooks {
@@ -962,6 +971,78 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       reactionTrackers.delete(`${session.id}:merge-conflicts`);
     }
     mergeConflictStates.set(session.id, hasMergeConflicts);
+
+    // Pipeline evaluation — tick the pipeline engine with already-computed session events.
+    // Uses local variables from checkSession to avoid duplicate SCM polling.
+    if (deps.pipelineEngine) {
+      const pipelineState = deps.pipelineEngine.getState(session.id);
+      if (pipelineState && pipelineState.state === "running") {
+        const events: Record<string, unknown> = {};
+        events["session.status"] = newStatus;
+        if (newStatus === "killed" || newStatus === "merged") events["session.finished"] = true;
+
+        if (session.pr) {
+          events["pr.created"] = true;
+          events["pr.state"] = newStatus === "merged" ? "merged" : "open";
+          if (
+            newStatus !== "ci_failed" &&
+            newStatus !== "review_pending" &&
+            newStatus !== "changes_requested" &&
+            newStatus !== "pr_open"
+          ) {
+            if (newStatus === "approved" || newStatus === "mergeable") {
+              events["ci.passing"] = true;
+              events["review.approved"] = true;
+            }
+          }
+          if (newStatus === "ci_failed") {
+            events["ci.status"] = "failing";
+          } else if (newStatus === "approved" || newStatus === "mergeable" || newStatus === "merged") {
+            events["ci.status"] = "passing";
+            events["ci.passing"] = true;
+          }
+          if (newStatus === "approved" || newStatus === "mergeable") {
+            events["review.approved"] = true;
+          }
+          if (newStatus === "mergeable") {
+            events["merge.ready"] = true;
+          }
+        }
+
+        deps.pipelineEngine.tick(session.id, events);
+
+        await executePipelineRunStep(session);
+      }
+    }
+  }
+
+  async function executePipelineRunStep(session: Session): Promise<void> {
+    if (!deps.pipelineEngine) return;
+    const pipelineState = deps.pipelineEngine.getState(session.id);
+    if (!pipelineState || pipelineState.state !== "running") return;
+
+    const stepState = pipelineState.steps[pipelineState.currentStepIndex];
+    if (!stepState || stepState.state !== "running") return;
+
+    const project = config.projects[session.projectId];
+    if (!project?.pipeline?.steps) return;
+
+    const stepCfg: PipelineStep | undefined = project.pipeline.steps[pipelineState.currentStepIndex];
+    if (!stepCfg?.run) return;
+
+    const cwd = session.workspacePath ?? project.path;
+    try {
+      // run: values come from admin-authored YAML config (same trust level as
+      // postCreate hooks). Shell execution via sh -c is intentional here.
+      const { stdout } = await execFileAsync("sh", ["-c", stepCfg.run], {
+        timeout: 30_000,
+        cwd,
+      });
+      deps.pipelineEngine.done(session.id, { stdout, exitCode: 0 });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "run step failed";
+      deps.pipelineEngine.fail(session.id, message);
+    }
   }
 
   /** Run one polling cycle across all sessions. */
@@ -982,6 +1063,16 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const metaStatus = s.metadata?.["status"] as string | undefined;
         if (metaStatus && TERMINAL_SEED.has(metaStatus)) {
           states.set(s.id, metaStatus as SessionStatus);
+        }
+      }
+
+      // Load persisted pipeline state for sessions on cold restart
+      if (deps.pipelineEngine) {
+        for (const s of sessions) {
+          if (!deps.pipelineEngine.getState(s.id)) {
+            const project = config.projects[s.projectId];
+            deps.pipelineEngine.load(s.id, project?.pipeline);
+          }
         }
       }
 
@@ -1049,6 +1140,36 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     }
   }
 
+  const pipelineCleanups: Array<() => void> = [];
+  if (deps.eventBus && deps.pipelineEngine) {
+    pipelineCleanups.push(
+      deps.eventBus.on("pipeline.send", (data: unknown) => {
+        if (data && typeof data === "object" && "sessionId" in data && "message" in data) {
+          const { sessionId, message } = data as { sessionId: string; message: string };
+          if (sessionId && message) {
+            void sessionManager.send(sessionId, message);
+          }
+        }
+      }),
+    );
+    pipelineCleanups.push(
+      deps.eventBus.on("pipeline.ask", (data: unknown) => {
+        if (data && typeof data === "object" && "sessionId" in data && "question" in data) {
+          const { sessionId, question } = data as { sessionId: string; question: string };
+          if (sessionId && question) {
+            const event = createEvent("session.needs_input", {
+              sessionId,
+              projectId: "pipeline",
+              message: `Pipeline asks: ${question}`,
+              data: { question },
+            });
+            void notifyHuman(event, "action");
+          }
+        }
+      }),
+    );
+  }
+
   return {
     start(intervalMs = 30_000): void {
       if (pollTimer) return; // Already running
@@ -1063,6 +1184,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         clearInterval(pollTimer);
         pollTimer = null;
       }
+      for (const cleanup of pipelineCleanups) {
+        cleanup();
+      }
+      pipelineCleanups.length = 0;
       healthHooks?.onPollInactive?.("Lifecycle polling stopped");
     },
 
