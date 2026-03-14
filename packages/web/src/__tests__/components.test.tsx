@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { CIBadge, CICheckList } from "@/components/CIBadge";
-import { PRStatus } from "@/components/PRStatus";
+import { PRStatus, PRTableRow } from "@/components/PRStatus";
 import { SessionCard } from "@/components/SessionCard";
 import { AttentionZone } from "@/components/AttentionZone";
 import { ActivityDot } from "@/components/ActivityDot";
@@ -162,6 +162,12 @@ describe("PRStatus", () => {
     expect(screen.getByText("draft")).toBeInTheDocument();
   });
 
+  it("shows open badge for ready PRs", () => {
+    const pr = makePR({ isDraft: false, state: "open" });
+    render(<PRStatus pr={pr} />);
+    expect(screen.getByText("open")).toBeInTheDocument();
+  });
+
   it("shows approved badge", () => {
     const pr = makePR({ reviewDecision: "approved", state: "open" });
     render(<PRStatus pr={pr} />);
@@ -178,6 +184,32 @@ describe("PRStatus", () => {
     const pr = makePR({ state: "merged", ciStatus: "passing" });
     render(<PRStatus pr={pr} />);
     expect(screen.queryByText("CI passing")).not.toBeInTheDocument();
+  });
+});
+
+describe("PRTableRow", () => {
+  it("shows draft status badge in the PR table", () => {
+    const pr = makePR({ isDraft: true, state: "open" });
+    render(
+      <table>
+        <tbody>
+          <PRTableRow pr={pr} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.getAllByText("draft")).toHaveLength(2);
+  });
+
+  it("shows open status badge in the PR table", () => {
+    const pr = makePR({ isDraft: false, state: "open" });
+    render(
+      <table>
+        <tbody>
+          <PRTableRow pr={pr} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.getByText("open")).toBeInTheDocument();
   });
 });
 

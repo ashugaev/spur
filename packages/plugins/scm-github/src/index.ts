@@ -168,7 +168,7 @@ function createGitHubSCM(): SCM {
       };
     },
 
-    async mergePR(pr: PRInfo, method: MergeMethod = "squash"): Promise<void> {
+    async mergePR(pr: PRInfo, method: MergeMethod = "merge"): Promise<void> {
       const flag = method === "rebase" ? "--rebase" : method === "merge" ? "--merge" : "--squash";
 
       await gh(["pr", "merge", String(pr.number), "--repo", repoFlag(pr), flag, "--delete-branch"]);
@@ -539,6 +539,7 @@ function createGitHubSCM(): SCM {
           approved: true,
           noConflicts: true,
           blockers: [],
+          isDraft: false,
         };
       }
 
@@ -604,6 +605,7 @@ function createGitHubSCM(): SCM {
         approved,
         noConflicts,
         blockers,
+        isDraft: data.isDraft,
       };
     },
   };

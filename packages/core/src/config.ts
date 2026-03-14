@@ -24,7 +24,7 @@ import { generateSessionPrefix } from "./paths.js";
 
 const ReactionConfigSchema = z.object({
   auto: z.boolean().default(true),
-  action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
+  action: z.enum(["send-to-agent", "notify", "auto-merge", "restore"]).default("notify"),
   mergeMethod: z.enum(["merge", "squash", "rebase"]).optional(),
   message: z.string().optional(),
   kind: z.enum(["any", "tagged", "reply"]).optional(),
@@ -46,6 +46,7 @@ const TrackerConfigSchema = z
 const SCMConfigSchema = z
   .object({
     plugin: z.string(),
+    prDraft: z.boolean().default(false),
   })
   .passthrough();
 
@@ -326,7 +327,7 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     "merge-conflicts": {
       auto: true,
       action: "send-to-agent",
-      message: "Your branch has merge conflicts. Rebase on the default branch and resolve them.",
+      message: "Your branch has merge conflicts. Merge the default branch into your branch and resolve them. Do not rebase. Do not force push.",
       escalateAfter: "15m",
     },
     "tracker-comment": {
@@ -339,7 +340,7 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     "approved-and-green": {
       auto: false,
       action: "notify",
-      mergeMethod: "squash",
+      mergeMethod: "merge",
       priority: "action",
       message: "PR is ready to merge",
     },
@@ -356,7 +357,10 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     },
     "agent-exited": {
       auto: true,
-      action: "notify",
+      action: "restore",
+      message: "You were auto-restored after an unexpected exit. Check your task status: if the task is complete and PR is open, wait for review. If not complete, continue working on it.",
+      retries: 2,
+      escalateAfter: 3,
       priority: "urgent",
     },
     "all-complete": {

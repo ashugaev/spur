@@ -38,6 +38,11 @@ projects:
     defaultBranch: main
     sessionPrefix: app
 
+    # SCM configuration
+    # scm:
+    #   plugin: github
+    #   prDraft: true        # true = draft PRs, false = ready PRs (default)
+
     # Issue tracker (defaults to github issues)
     # tracker:
     #   plugin: linear
@@ -137,7 +142,7 @@ projects:
     #   approved-and-green:
     #     auto: true         # enable auto-merge for this project
     #     action: auto-merge
-    #     mergeMethod: squash # optional: merge | squash | rebase
+    #     mergeMethod: merge  # optional: merge | squash | rebase (default: merge)
     #   tracker-comment:
     #     auto: true
     #     action: send-to-agent
@@ -212,7 +217,7 @@ projects:
 #   merge-conflicts:
 #     auto: true
 #     action: send-to-agent
-#     message: "Your branch has merge conflicts. Rebase on the default branch, resolve conflicts, run tests, and push."
+#     message: "Your branch has merge conflicts. Merge the default branch into your branch, resolve conflicts, run tests, and push. Do not rebase. Do not force push."
 #     escalateAfter: 15m
 #
 #   tracker-comment:
@@ -224,7 +229,7 @@ projects:
 #   approved-and-green:
 #     auto: false              # set to true for auto-merge
 #     action: notify           # use auto-merge to merge automatically
-#     mergeMethod: squash      # optional for auto-merge: merge | squash | rebase
+#     mergeMethod: merge        # optional for auto-merge: merge | squash | rebase (default: merge)
 #     priority: action
 #
 #   agent-stuck:

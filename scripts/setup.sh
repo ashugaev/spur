@@ -1,6 +1,9 @@
 #!/bin/bash
 # Agent Orchestrator setup script
 # Validates prerequisites, installs dependencies, builds packages, and links the CLI globally
+#
+# STATUS: Active — referenced in README.md and CI workflow
+# PLAN: Keep; consider `ao setup` CLI command long-term
 
 set -e  # Exit on error
 

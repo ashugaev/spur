@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import chalk from "chalk";
 import type { Command } from "commander";
 import { loadConfig, getDashboardUrl } from "@composio/ao-core";
-import { findWebDir, buildDashboardEnv, waitForPortAndOpen, waitForPort } from "../lib/web-dir.js";
+import { findWebDir, buildDashboardEnv, waitForPortAndOpen, waitForPort, isPortAvailable } from "../lib/web-dir.js";
 import { cleanNextCache, findRunningDashboardPid, findProcessWebDir, waitForPortFree } from "../lib/dashboard-rebuild.js";
 import { notifyRemoteReady } from "../lib/remote-notify.js";
 
@@ -62,6 +62,7 @@ export function registerDashboard(program: Command): void {
       const webDir = localWebDir;
       const localUrl = `http://localhost:${port}`;
       const remoteUrlPromise = getDashboardUrl(port, config.remote?.tailscaleHost);
+      const portWasFree = await isPortAvailable(port);
 
       console.log(chalk.bold(`Starting dashboard on ${localUrl}`));
       console.log();
@@ -116,7 +117,7 @@ export function registerDashboard(program: Command): void {
         void notifyRemoteReady(config, remoteUrl ?? localUrl);
       })();
 
-      if (opts.open !== false) {
+      if (opts.open !== false && portWasFree) {
         void waitForPortAndOpen(port, localUrl, startupAbort.signal);
       }
 

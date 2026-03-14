@@ -8,7 +8,7 @@
  * - Cleanup completed sessions (PR merged / issue closed)
  * - Send messages to running sessions
  *
- * Reference: scripts/claude-ao-session, scripts/send-to-session
+ * Replaces the legacy scripts/claude-ao-session and scripts/send-to-session
  */
 
 import { execFile } from "node:child_process";
@@ -430,6 +430,7 @@ const VALID_STATUSES: ReadonlySet<string> = new Set([
   "stuck",
   "errored",
   "killed",
+  "stopped",
   "done",
   "terminated",
 ]);
@@ -593,7 +594,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
    * Enrich session with live runtime state (alive/exited) and activity detection.
    * Mutates the session object in place.
    */
-  const TERMINAL_SESSION_STATUSES = new Set(["killed", "done", "merged", "terminated", "cleanup"]);
+  const TERMINAL_SESSION_STATUSES = new Set(["killed", "stopped", "done", "merged", "terminated", "cleanup"]);
 
   async function enrichSessionWithRuntimeState(
     session: Session,
@@ -614,6 +615,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       try {
         const alive = await plugins.runtime.isAlive(session.runtimeHandle);
         if (!alive) {
+          // Check agent JSONL to distinguish clean exit from crash
+          if (plugins.agent) {
+            try {
+              const activity = await plugins.agent.getActivityState(session, config.readyThresholdMs);
+              if (activity === null) {
+                session.status = "done";
+                session.activity = "exited";
+                return;
+              }
+            } catch {
+              // Can't determine — treat as killed
+            }
+          }
           session.status = "killed";
           session.activity = "exited";
           return;
@@ -930,6 +944,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         pr: spawnConfig.prUrl, // Store PR URL if spawned from a PR
         project: spawnConfig.projectId,
         agent: plugins.agent.name, // Persist agent name for lifecycle manager
+        prompt: spawnConfig.prompt,
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
       });
@@ -1141,6 +1156,10 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
 
         const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
+        // Use config key as projectId — metadata may have stale value from
+        // a renamed config key, causing config.projects[projectId] lookups to
+        // fail in lifecycle-manager (breaks status updates and reactions).
+        session.projectId = sessionProjectId;
 
         const plugins = resolvePlugins(project, raw["agent"]);
         // Cap per-session enrichment at 2s — subprocess calls (tmux/ps) can be
@@ -1161,7 +1180,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
   async function get(sessionId: SessionId): Promise<Session | null> {
     // Try to find the session in any project's sessions directory
-    for (const project of Object.values(config.projects)) {
+    for (const [projectKey, project] of Object.entries(config.projects)) {
       const sessionsDir = getProjectSessionsDir(project);
       const raw = readMetadataRaw(sessionsDir, sessionId);
       if (!raw) continue;
@@ -1179,6 +1198,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
 
       const session = metadataToSession(sessionId, raw, createdAt, modifiedAt);
+      session.projectId = projectKey;
 
       const plugins = resolvePlugins(project, raw["agent"]);
       await ensureHandleAndEnrich(session, sessionId, project, plugins);
@@ -1256,6 +1276,47 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     // Archive metadata
     deleteMetadata(sessionsDir, sessionId, true);
+  }
+
+  async function stop(sessionId: SessionId): Promise<void> {
+    let raw: Record<string, string> | null = null;
+    let sessionsDir: string | null = null;
+    let project: ProjectConfig | undefined;
+
+    for (const proj of Object.values(config.projects)) {
+      const dir = getProjectSessionsDir(proj);
+      const metadata = readMetadataRaw(dir, sessionId);
+      if (metadata) {
+        raw = metadata;
+        sessionsDir = dir;
+        project = proj;
+        break;
+      }
+    }
+
+    if (!raw || !sessionsDir) {
+      throw new Error(`Session ${sessionId} not found`);
+    }
+
+    if (raw["runtimeHandle"]) {
+      const handle = safeJsonParse<RuntimeHandle>(raw["runtimeHandle"]);
+      if (handle) {
+        const runtimePlugin = registry.get<Runtime>(
+          "runtime",
+          handle.runtimeName ??
+            (project ? (project.runtime ?? config.defaults.runtime) : config.defaults.runtime),
+        );
+        if (runtimePlugin) {
+          try {
+            await runtimePlugin.destroy(handle);
+          } catch {
+            // Runtime might already be gone
+          }
+        }
+      }
+    }
+
+    updateMetadata(sessionsDir, sessionId, { status: "stopped" });
   }
 
   async function cleanup(
@@ -1564,8 +1625,19 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       }
     }
 
+    const restoreMessage = config.reactions?.["agent-exited"]?.message;
+    if (restoreMessage && plugins.runtime) {
+      setTimeout(async () => {
+        try {
+          await send(sessionId, restoreMessage);
+        } catch {
+          // Agent may not be ready yet — non-fatal
+        }
+      }, 5_000);
+    }
+
     return restoredSession;
   }
 
-  return { spawn, spawnOrchestrator, restore, list, get, kill, cleanup, send };
+  return { spawn, spawnOrchestrator, restore, list, get, kill, stop, cleanup, send };
 }

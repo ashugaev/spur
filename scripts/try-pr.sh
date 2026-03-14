@@ -5,6 +5,9 @@
 #   bash scripts/try-pr.sh <session-id>            # CLI/core/plugins only (~15s)
 #   bash scripts/try-pr.sh <session-id> --with-web # also builds + starts dashboard (~60s)
 #   bash scripts/try-pr.sh --restore               # switch back to main
+#
+# STATUS: Active dev utility — no TS equivalent exists
+# PLAN: Keep as-is; useful for testing PRs without switching the main checkout
 
 set -e
 

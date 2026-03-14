@@ -1,7 +1,9 @@
 "use client";
 
-import { type DashboardPR, isPRRateLimited } from "@/lib/types";
+import { type DashboardPR, type DashboardSession, isPRRateLimited } from "@/lib/types";
+import { buildSessionPath } from "@/lib/project-routes";
 import { CIBadge } from "./CIBadge";
+import { ActivityDot } from "./ActivityDot";
 
 function getSizeLabel(additions: number, deletions: number): string {
   const size = additions + deletions;
@@ -12,9 +14,49 @@ interface PRStatusProps {
   pr: DashboardPR;
 }
 
+function getPRLifecycleBadge(pr: Pick<DashboardPR, "state" | "isDraft">): {
+  label: "draft" | "open" | "merged" | "closed";
+  className: string;
+} | null {
+  if (pr.state === "merged") {
+    return {
+      label: "merged",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(163,113,247,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-violet)]",
+    };
+  }
+
+  if (pr.state === "closed") {
+    return {
+      label: "closed",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(248,81,73,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-red)]",
+    };
+  }
+
+  if (pr.isDraft) {
+    return {
+      label: "draft",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]",
+    };
+  }
+
+  if (pr.state === "open") {
+    return {
+      label: "open",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(88,166,255,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-status-working)]",
+    };
+  }
+
+  return null;
+}
+
 export function PRStatus({ pr }: PRStatusProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
+  const lifecycleBadge = getPRLifecycleBadge(pr);
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -36,17 +78,9 @@ export function PRStatus({ pr }: PRStatusProps) {
         </span>
       )}
 
-      {/* Merged badge */}
-      {pr.state === "merged" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(163,113,247,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-violet)]">
-          merged
-        </span>
-      )}
-
-      {/* Draft badge */}
-      {pr.isDraft && pr.state === "open" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]">
-          draft
+      {lifecycleBadge && (
+        <span className={lifecycleBadge.className}>
+          {lifecycleBadge.label}
         </span>
       )}
 
@@ -67,11 +101,14 @@ export function PRStatus({ pr }: PRStatusProps) {
 
 interface PRTableRowProps {
   pr: DashboardPR;
+  session?: DashboardSession;
+  onRestore?: (sessionId: string) => void;
 }
 
-export function PRTableRow({ pr }: PRTableRowProps) {
+export function PRTableRow({ pr, session, onRestore }: PRTableRowProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
+  const lifecycleBadge = getPRLifecycleBadge(pr);
 
   const reviewLabel = rateLimited
     ? "—"
@@ -101,6 +138,13 @@ export function PRTableRow({ pr }: PRTableRowProps) {
         </a>
       </td>
       <td className="max-w-[420px] truncate px-3 py-2.5 text-sm font-medium">{pr.title}</td>
+      <td className="px-3 py-2.5">
+        {lifecycleBadge ? (
+          <span className={lifecycleBadge.className}>{lifecycleBadge.label}</span>
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
       <td className="px-3 py-2.5 text-sm">
         {rateLimited ? (
           <span className="text-[var(--color-text-tertiary)]">—</span>
@@ -124,6 +168,42 @@ export function PRTableRow({ pr }: PRTableRowProps) {
         className={`px-3 py-2.5 text-center text-sm font-bold ${pr.unresolvedThreads > 0 ? "text-[var(--color-accent-red)]" : "text-[var(--color-border-default)]"}`}
       >
         {pr.unresolvedThreads}
+      </td>
+      <td className="px-3 py-2.5">
+        {session ? (
+          <a
+            href={buildSessionPath(session.id, session.projectId)}
+            className="inline-flex items-center gap-1 rounded border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:underline"
+          >
+            {session.id}
+          </a>
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        {session ? (
+          session.status === "killed" || session.status === "terminated" ? (
+            <span className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-[rgba(248,81,73,0.1)] text-[var(--color-accent-red)]">
+              {session.status}
+            </span>
+          ) : (
+            <ActivityDot activity={session.activity} />
+          )
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
+      <td className="px-3 py-2.5 text-right">
+        {(session?.status === "killed" || session?.status === "terminated") && onRestore && (
+          <button
+            type="button"
+            onClick={() => onRestore(session.id)}
+            className="rounded border border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.12)] px-2 py-1 text-[11px] font-medium text-[var(--color-status-attention)] hover:bg-[rgba(210,153,34,0.2)]"
+          >
+            Reactivate
+          </button>
+        )}
       </td>
     </tr>
   );

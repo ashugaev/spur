@@ -7,7 +7,7 @@
  * 3. Triggers reactions (auto-handle CI failures, review comments, etc.)
  * 4. Escalates to human notification when auto-handling fails
  *
- * Reference: scripts/claude-session-status, scripts/claude-review-check
+ * Replaces the legacy scripts/claude-session-status and scripts/claude-review-check
  */
 
 import { randomUUID } from "node:crypto";
@@ -183,6 +183,7 @@ export interface LifecycleHealthHooks {
 interface ReactionTracker {
   attempts: number;
   firstTriggered: Date;
+  escalated?: boolean;
 }
 
 interface DeterminedSessionStatus {
@@ -257,7 +258,20 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
       if (runtime) {
         const alive = await runtime.isAlive(session.runtimeHandle).catch(() => true);
-        if (!alive) return result("killed");
+        if (!alive) {
+          // Runtime dead — ask agent plugin to distinguish clean exit from crash.
+          // getActivityState returns null for clean completion (e.g. last JSONL
+          // entry is "result"), { state: "exited" } for crashes.
+          if (agent) {
+            try {
+              const activity = await agent.getActivityState(session, config.readyThresholdMs);
+              if (activity === null) return result("done");
+            } catch {
+              // Can't determine — treat as killed
+            }
+          }
+          return result("killed");
+        }
       }
     }
 
@@ -341,9 +355,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           mergeReadiness && hasMergeConflictBlockers(mergeReadiness.blockers)
         );
 
-        // Check CI
+        if (mergeReadiness) {
+          session.pr.isDraft = mergeReadiness.isDraft;
+        }
+
+        // Check CI — skip for draft PRs (CI jobs are expected to be inactive)
         const ciStatus = await scm.getCISummary(session.pr);
-        if (ciStatus === CI_STATUS.FAILING) return result("ci_failed", hasConflictBlockers);
+        if (ciStatus === CI_STATUS.FAILING && !session.pr.isDraft) {
+          return result("ci_failed", hasConflictBlockers);
+        }
 
         // Check reviews
         const reviewDecision = await scm.getReviewDecision(session.pr);
@@ -412,14 +432,16 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     }
 
     if (shouldEscalate) {
-      // Escalate to human
-      const event = createEvent("reaction.escalated", {
-        sessionId,
-        projectId,
-        message: `Reaction '${reactionKey}' escalated after ${tracker.attempts} attempts`,
-        data: { reactionKey, attempts: tracker.attempts },
-      });
-      await notifyHuman(event, reactionConfig.priority ?? "urgent");
+      if (!tracker.escalated) {
+        tracker.escalated = true;
+        const event = createEvent("reaction.escalated", {
+          sessionId,
+          projectId,
+          message: `Reaction '${reactionKey}' escalated after ${tracker.attempts} attempts`,
+          data: { reactionKey, attempts: tracker.attempts },
+        });
+        await notifyHuman(event, reactionConfig.priority ?? "urgent");
+      }
       return {
         reactionType: reactionKey,
         success: true,
@@ -471,6 +493,109 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           action: "notify",
           escalated: false,
         };
+      }
+
+      case "restore": {
+        try {
+          const session = await sessionManager.get(sessionId);
+          if (!session) {
+            const reason = `Session '${sessionId}' not found`;
+            const event = createEvent("reaction.triggered", {
+              sessionId,
+              projectId,
+              message: `Reaction '${reactionKey}' restore failed: ${reason}`,
+              data: { reactionKey, reason },
+            });
+            await notifyHuman(event, "warning");
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "restore",
+              message: reason,
+              escalated: false,
+            };
+          }
+
+          if (session.metadata["terminationReason"] === "restore-failed") {
+            return {
+              reactionType: reactionKey,
+              success: false,
+              action: "restore",
+              message: "Previously failed to restore, skipping",
+              escalated: false,
+            };
+          }
+
+          if (session.pr) {
+            const project = config.projects[session.projectId];
+            const scm = project?.scm
+              ? registry.get<SCM>("scm", project.scm.plugin)
+              : null;
+            if (scm) {
+              const prState = await scm.getPRState(session.pr).catch(() => null);
+              if (prState === PR_STATE.MERGED || prState === PR_STATE.CLOSED) {
+                const reason = `PR is ${prState}, restore skipped`;
+                const event = createEvent("reaction.triggered", {
+                  sessionId,
+                  projectId,
+                  message: `Reaction '${reactionKey}' restore skipped: ${reason}`,
+                  data: { reactionKey, reason },
+                });
+                await notifyHuman(event, "info");
+                return {
+                  reactionType: reactionKey,
+                  success: false,
+                  action: "restore",
+                  message: reason,
+                  escalated: false,
+                };
+              }
+            }
+          }
+
+          const restored = await sessionManager.restore(sessionId);
+
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' auto-restored session ${sessionId}`,
+            data: { reactionKey },
+          });
+          await notifyHuman(event, "action");
+
+          states.set(sessionId, restored.status);
+
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action: "restore",
+            message: `Restored session ${sessionId}`,
+            escalated: false,
+          };
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : "Restore failed";
+
+          const project = config.projects[projectId];
+          if (project) {
+            const sessionsDir = getSessionsDir(config.configPath, project.path);
+            updateMetadata(sessionsDir, sessionId, { terminationReason: "restore-failed" });
+          }
+
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' restore failed: ${reason}`,
+            data: { reactionKey, reason },
+          });
+          await notifyHuman(event, "warning");
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "restore",
+            message: reason,
+            escalated: false,
+          };
+        }
       }
 
       case "auto-merge": {
@@ -596,7 +721,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             };
           }
 
-          const mergeMethod = reactionConfig.mergeMethod ?? "squash";
+          const mergeMethod = reactionConfig.mergeMethod ?? "merge";
           await scm.mergePR(session.pr, mergeMethod);
 
           const event = createEvent("reaction.triggered", {
@@ -680,7 +805,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       const project = config.projects[session.projectId];
       if (project) {
         const sessionsDir = getSessionsDir(config.configPath, project.path);
-        updateMetadata(sessionsDir, session.id, { status: newStatus });
+        const metaUpdate: Record<string, string> = { status: newStatus };
+        if (newStatus === "killed") {
+          metaUpdate["terminationReason"] = "system";
+        }
+        updateMetadata(sessionsDir, session.id, metaUpdate);
       }
 
       // Reset allCompleteEmitted when any session becomes active again
@@ -844,11 +973,23 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     try {
       const sessions = await sessionManager.list();
 
+      // On first poll, seed tracked state from metadata so sessions already
+      // in a terminal state are never re-processed (prevents one-time spurious
+      // restore notifications on lifecycle manager restart).
+      const TERMINAL_SEED: ReadonlySet<string> = new Set(["killed", "stopped", "done", "merged", "terminated"]);
+      for (const s of sessions) {
+        if (states.has(s.id)) continue;
+        const metaStatus = s.metadata?.["status"] as string | undefined;
+        if (metaStatus && TERMINAL_SEED.has(metaStatus)) {
+          states.set(s.id, metaStatus as SessionStatus);
+        }
+      }
+
       // Include sessions that are active OR whose status changed from what we last saw
       // (e.g., list() detected a dead runtime and marked it "killed" — we need to
       // process that transition even though the new status is terminal)
       const sessionsToCheck = sessions.filter((s) => {
-        if (s.status !== "merged" && s.status !== "killed") return true;
+        if (s.status !== "merged" && s.status !== "killed" && s.status !== "stopped") return true;
         const tracked = states.get(s.id);
         return tracked !== undefined && tracked !== s.status;
       });
@@ -882,7 +1023,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       }
 
       // Check if all sessions are complete (trigger reaction only once)
-      const activeSessions = sessions.filter((s) => s.status !== "merged" && s.status !== "killed");
+      const activeSessions = sessions.filter((s) => s.status !== "merged" && s.status !== "killed" && s.status !== "stopped");
       if (sessions.length > 0 && activeSessions.length === 0 && !allCompleteEmitted) {
         allCompleteEmitted = true;
 

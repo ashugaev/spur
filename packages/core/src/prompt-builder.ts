@@ -24,13 +24,15 @@ export const BASE_AGENT_PROMPT = `You are an AI coding agent managed by the Agen
 ## Session Lifecycle
 - You are running inside a managed session. Focus on the assigned task.
 - Your session id is available in $AO_SESSION_ID. A ready-to-use Telegram marker is in $AO_SESSION_MARKER.
-- When you finish your work, create a DRAFT PR and push it. The orchestrator will handle CI monitoring and review routing.
+- When you finish your work, create a PR and push it. The orchestrator will handle CI monitoring and review routing.
 - If CI fails, the orchestrator will send you the failures — fix them and push again.
 - If reviewers request changes, the orchestrator will forward their comments — address each one, push fixes, and reply to the comments.
 
 ## Git Workflow
 - Worktree is already created. Don't create a new branch.
 - Never commit to the main branch master/dev
+- **NEVER force push.** Only regular \`git push\` is allowed.
+- To resolve merge conflicts, merge the default branch into your branch (\`git merge\`). Do NOT rebase.
 - Use conventional commit messages (feat:, fix:, chore:, etc.).
 - Push your branch and create a PR when the implementation is ready.
 - Keep PRs focused — one issue per PR.
@@ -40,7 +42,8 @@ export const BASE_AGENT_PROMPT = `You are an AI coding agent managed by the Agen
 - Link the issue in the PR description so it auto-closes when merged.
 - If the repo has CI checks, make sure they pass before requesting review.
 - Respond to every review comment, even if just to acknowledge it.
-- Do not add any attribution or footer lines to the PR description.`;
+- Do not add any attribution or footer lines to the PR description.
+- NEVER change PR status (merge, close, convert to ready, request reviewers) on your own. Only the orchestrator or an explicit human command can trigger status changes.`;
 
 // =============================================================================
 // TYPES
@@ -82,6 +85,15 @@ function buildConfigLayer(config: PromptBuildConfig): string {
   if (project.tracker) {
     lines.push(`- Tracker: ${project.tracker.plugin}`);
   }
+
+  const prDraft = project.scm?.prDraft ?? false;
+  const prType = prDraft ? "draft" : "ready (open)";
+  lines.push(`- PR mode: ${prType}`);
+  lines.push(
+    prDraft
+      ? "- When creating a PR, open it as a **draft** (use --draft flag). Don't change to ready without a clear command."
+      : "- When creating a PR, open it as **ready for review** (do NOT use --draft).",
+  );
 
   if (issueId) {
     lines.push(`\n## Task`);
