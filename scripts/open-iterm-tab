@@ -2,6 +2,9 @@
 # Usage: ~/open-iterm-tab <session-name>
 # Opens a tmux session in iTerm2 - reuses existing tab if found, otherwise opens new
 # Sets both the profile name (for detection) and tab title (for visual display)
+#
+# STATUS: Active — called by packages/cli/src/commands/open.ts and spawn.ts
+# PLAN: Move logic into packages/plugins/terminal-iterm2 and remove this script
 
 SESSION="$1"
 if [ -z "$SESSION" ]; then

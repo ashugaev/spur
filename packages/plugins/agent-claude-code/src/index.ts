@@ -696,32 +696,36 @@ function createClaudeCodeAgent(): Agent {
     ): Promise<ActivityDetection | null> {
       const threshold = readyThresholdMs ?? DEFAULT_READY_THRESHOLD_MS;
 
-      // Check if process is running first
       const exitedAt = new Date();
       if (!session.runtimeHandle) return { state: "exited", timestamp: exitedAt };
       const running = await this.isProcessRunning(session.runtimeHandle);
-      if (!running) return { state: "exited", timestamp: exitedAt };
 
-      // Process is running - check JSONL session file for activity
-      if (!session.workspacePath) {
-        // No workspace path — cannot determine activity without it
-        return null;
+      if (!running) {
+        // Process dead — check JSONL to distinguish clean completion from crash.
+        // "result" as last entry means the agent finished its task normally.
+        // Return null for clean exit so lifecycle marks session "done" not "killed".
+        if (session.workspacePath) {
+          const projectPath = toClaudeProjectPath(session.workspacePath);
+          const projectDir = join(homedir(), ".claude", "projects", projectPath);
+          const sessionFile = await findLatestSessionFile(projectDir);
+          if (sessionFile) {
+            const entry = await readLastJsonlEntry(sessionFile);
+            if (entry?.lastType === "result") return null;
+          }
+        }
+        return { state: "exited", timestamp: exitedAt };
       }
+
+      if (!session.workspacePath) return null;
 
       const projectPath = toClaudeProjectPath(session.workspacePath);
       const projectDir = join(homedir(), ".claude", "projects", projectPath);
 
       const sessionFile = await findLatestSessionFile(projectDir);
-      if (!sessionFile) {
-        // No session file found — cannot determine activity
-        return null;
-      }
+      if (!sessionFile) return null;
 
       const entry = await readLastJsonlEntry(sessionFile);
-      if (!entry) {
-        // Empty file or read error — cannot determine activity
-        return null;
-      }
+      if (!entry) return null;
 
       const ageMs = Date.now() - entry.modifiedAt.getTime();
       const timestamp = entry.modifiedAt;

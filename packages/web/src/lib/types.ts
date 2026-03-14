@@ -286,6 +286,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   if (
     session.status === "merged" ||
     session.status === "killed" ||
+    session.status === "stopped" ||
     session.status === "cleanup" ||
     session.status === "done" ||
     session.status === "terminated"

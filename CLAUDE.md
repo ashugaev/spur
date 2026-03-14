@@ -2,9 +2,9 @@
 
 ## What This Is
 
-Open-source system for orchestrating parallel AI coding agents. Agent-agnostic (Claude Code, Codex, Aider), runtime-agnostic (tmux, docker, k8s), tracker-agnostic (GitHub, Linear, Jira). Manages session lifecycle, tracks PR/CI/review state, auto-handles routine issues (CI failures, review comments), pushes notifications to humans only when needed.
-
 **Core principle: Push, not pull.** Spawn agents, walk away, get notified when your judgment is needed.
+
+Build as a minimalist ask yourself if this code is needed and this feature is important. Don't create overheads, fallback multiple ways to do the same stuff. Single solition for a single feature.
 
 ## Tech Stack
 
@@ -64,38 +64,6 @@ packages/
 - **No unsafe casts** — `as unknown as T` bypasses type safety, validate instead
 - **Prefer `const`** — `let` only when reassignment needed, never `var`
 - **Semicolons, double quotes, 2-space indent** — enforced by Prettier
-
-## Plugin Pattern (MUST follow)
-
-Every plugin exports a `PluginModule` with inline `satisfies` for compile-time type checking:
-
-```typescript
-import type { PluginModule, Runtime } from "@composio/ao-core";
-
-export const manifest = {
-  name: "tmux",
-  slot: "runtime" as const,
-  description: "Runtime plugin: tmux sessions",
-  version: "0.1.0",
-};
-
-export function create(): Runtime {
-  return {
-    name: "tmux",
-    async create(config) {
-      /* ... */
-    },
-    async destroy(handle) {
-      /* ... */
-    },
-    // ... implement interface methods
-  };
-}
-
-export default { manifest, create } satisfies PluginModule<Runtime>;
-```
-
-**Do NOT** use `const plugin = { ... }; export default plugin;` — always inline `satisfies`.
 
 ## Shell Command Execution (MUST follow — security critical)
 

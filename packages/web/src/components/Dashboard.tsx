@@ -174,8 +174,7 @@ export function Dashboard({
   const openPRs = useMemo(() => {
     return filteredSessions
       .filter((s): s is DashboardSession & { pr: DashboardPR } => s.pr?.state === "open")
-      .map((s) => s.pr)
-      .sort((a, b) => mergeScore(a) - mergeScore(b));
+      .sort((a, b) => mergeScore(a.pr) - mergeScore(b.pr));
   }, [filteredSessions]);
 
   const handleSend = async (sessionId: string, message: string) => {
@@ -199,6 +198,16 @@ export function Dashboard({
     }
   };
 
+  const handleStop = async (sessionId: string) => {
+    if (!confirm(`Stop session ${sessionId}? You can resume it later.`)) return;
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      console.error(`Failed to stop ${sessionId}:`, await res.text());
+    }
+  };
+
   const handleMerge = async (prNumber: number) => {
     const res = await fetch(`/api/prs/${prNumber}/merge`, { method: "POST" });
     if (!res.ok) {
@@ -213,6 +222,18 @@ export function Dashboard({
     });
     if (!res.ok) {
       console.error(`Failed to restore ${sessionId}:`, await res.text());
+    }
+  };
+
+  const handleRestart = async (sessionId: string, agent?: string) => {
+    if (!confirm(`Restart session ${sessionId}${agent ? ` with ${agent}` : ""}? This will reset to the default branch.`)) return;
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent }),
+    });
+    if (!res.ok) {
+      console.error(`Failed to restart ${sessionId}:`, await res.text());
     }
   };
 
@@ -502,8 +523,10 @@ export function Dashboard({
                       variant="column"
                       onSend={handleSend}
                       onKill={handleKill}
+                      onStop={handleStop}
                       onMerge={handleMerge}
                       onRestore={handleRestore}
+                      onRestart={handleRestart}
                     />
                   </div>
                 ) : null,
@@ -521,8 +544,10 @@ export function Dashboard({
                 variant="grid"
                 onSend={handleSend}
                 onKill={handleKill}
+                onStop={handleStop}
                 onMerge={handleMerge}
                 onRestore={handleRestore}
+                onRestart={handleRestart}
               />
             </div>
           )}
@@ -547,6 +572,9 @@ export function Dashboard({
                       Title
                     </th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Status
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
                       Size
                     </th>
                     <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
@@ -558,11 +586,23 @@ export function Dashboard({
                     <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
                       Unresolved
                     </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Session
+                    </th>
+                    <th className="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                      Agent
+                    </th>
+                    <th className="px-3 py-2" />
                   </tr>
                 </thead>
                 <tbody>
-                  {openPRs.map((pr) => (
-                    <PRTableRow key={pr.number} pr={pr} />
+                  {openPRs.map((session) => (
+                    <PRTableRow
+                      key={session.pr.number}
+                      pr={session.pr}
+                      session={session}
+                      onRestore={handleRestore}
+                    />
                   ))}
                 </tbody>
               </table>

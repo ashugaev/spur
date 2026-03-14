@@ -24,9 +24,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const { sessionManager } = await getServices();
+    const agent = typeof body.agent === "string" ? body.agent : undefined;
     const session = await sessionManager.spawn({
       projectId: body.projectId as string,
       issueId: (body.issueId as string) ?? undefined,
+      agent,
     });
 
     return NextResponse.json({ session: sessionToDashboard(session) }, { status: 201 });

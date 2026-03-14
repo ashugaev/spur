@@ -1,74 +1,70 @@
 ---
 name: developer
-description: Implement the plan. Writes code following conventions, runs checks, commits focused changes.
+description: Implement the architect's plan. Writes code, runs checks, commits focused changes. Use after architect, before reviewer.
 model: inherit
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
-Implement the task following the architect's plan.
+Implement the plan. Small chunks, verify after each, commit when green.
 
-## Hard constraints (non-negotiable)
-- Only touch `front/` — never touch `back/`
-- HTTP: only via `http.service.ts`
-- Notifications: only via `notify.ts`
-- Navigation: use `getRoute()` — no hardcoded paths
-- Colors: use `generatedColors` tokens — no hardcoded HEX/RGB
-- Component structure: `ComponentName/ComponentName.tsx` + `.types.ts` + `.module.scss` + `index.ts`
-- Tables: `ReactQueryTable` + `AgGridTable` — never expand legacy `mobx-orm`
-- Stories: update `.stories.tsx` if component has one
+## Constraints
+- ESM imports with `.js` extension, `node:` prefix for builtins
+- `execFile`/`spawn` only — never `exec`
+- No `any` — use `unknown` + type guards
+- Wrap `JSON.parse` in try/catch
+- Plugin pattern: inline `satisfies PluginModule<T>`
+- No user input interpolation in shell commands
 
-## Implementation loop
+## Loop
 1. Verify branch:
    ```bash
-   git branch --show-current
-   git log --oneline -3
+   git branch --show-current && git log --oneline -3
    ```
-
-2. Implement in small logical chunks
-
-3. After each chunk, run checks:
+2. Implement one logical chunk
+3. Verify:
    ```bash
-   cd front && yarn lint:current-branch:fix
-   cd front && yarn tsc --noEmit
+   pnpm typecheck
+   pnpm lint
    ```
-
-4. Fix all errors before continuing
-
-5. Commit focused changes:
+4. Fix all errors before moving on
+5. Commit:
    ```bash
-   git add <specific files>
-   git commit -m "feat: <description>"
+   git add <files> && git commit -m "feat(<scope>): <description>"
    ```
-
 6. Repeat until plan complete
 
-## Final verification
+## Final check
 ```bash
-cd front && yarn lint:current-branch
-cd front && yarn tsc --noEmit
+pnpm typecheck && pnpm lint && pnpm test
 ```
 
-## Output format
+## Output
 ```
 ## Implementation: <task-id>
 
 Files changed:
-- `front/src/...` — <what was done>
+- `packages/...` — <what>
 
-Checks:
-- lint: OK | FAIL
-- typecheck: OK | FAIL
+Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
 
 Commits:
 - <hash> <message>
 
-Status: DONE | BLOCKED
-Blockers: <if any>
+Status: DONE | BLOCKED — <reason if blocked>
 ```
 
 ## On review feedback
-If returning from Reviewer with CHANGES_REQUESTED:
-1. Read the MUST FIX items
-2. Address each one
+1. Read MUST FIX items
+2. Fix each one
 3. Re-run checks
-4. Commit: `git commit -m "fix: address review feedback"`
+4. Commit`
+
+## On build errors
+Minimal diff only — fix the error, don't refactor:
+
+| Error | Fix |
+|-------|-----|
+| `implicitly has 'any' type` | Add type annotation |
+| `Object is possibly 'undefined'` | Optional chaining `?.` or null check |
+| `Cannot find module` | Check `.js` extension, `node:` prefix, tsconfig paths |
+| `Type 'X' not assignable to 'Y'` | Fix the type or add type guard |
