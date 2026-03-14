@@ -14,17 +14,52 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
     for (const [projectId, project] of Object.entries(config.projects)) {
       if (filterProjectId && projectId !== filterProjectId) continue;
+
+      // v2 triggers (preferred)
+      const triggers = project.triggers ?? {};
+      for (const [triggerId, trigger] of Object.entries(triggers)) {
+        if (trigger.event !== "cron:tick") continue;
+        const spawn = trigger.spawn;
+        const skill =
+          typeof spawn?.skill === "string" && spawn.skill.length > 0
+            ? spawn.skill
+            : undefined;
+        const prompt = skill
+          ? `/${skill}`
+          : typeof spawn?.prompt === "string"
+            ? spawn.prompt
+            : "";
+        if (!prompt) continue;
+        jobs.push({
+          listenerId: triggerId,
+          projectId,
+          projectName: project.name ?? projectId,
+          schedule: trigger.schedule,
+          skill,
+          prompt,
+          agent: typeof spawn?.agent === "string" ? spawn.agent : undefined,
+          branch: typeof spawn?.branch === "string" ? spawn.branch : undefined,
+          runOnStart: trigger.runOnStart === true,
+          health: "unknown",
+          source: "trigger",
+        });
+      }
+
+      // v1 listeners (deprecated, still supported)
       const listeners = project.listeners ?? {};
       for (const [listenerId, listener] of Object.entries(listeners)) {
         if (listener.source !== "cron") continue;
         const trigger = listener.trigger as Record<string, unknown> | undefined;
-        const skill = typeof trigger?.skill === "string" && trigger.skill.length > 0
-          ? trigger.skill
-          : undefined;
+        const skill =
+          typeof trigger?.skill === "string" && trigger.skill.length > 0
+            ? trigger.skill
+            : undefined;
         const prompt = skill
           ? `/${skill}`
-          : typeof trigger?.prompt === "string" ? trigger.prompt : "";
-        if (!prompt) continue; // skip invalid cron listeners (no skill or prompt)
+          : typeof trigger?.prompt === "string"
+            ? trigger.prompt
+            : "";
+        if (!prompt) continue;
         jobs.push({
           listenerId,
           projectId,
@@ -37,6 +72,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           branch: typeof trigger?.branch === "string" ? trigger.branch : undefined,
           runOnStart: listener.runOnStart === true,
           health: "unknown",
+          source: "listener",
         });
       }
     }

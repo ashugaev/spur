@@ -60,9 +60,13 @@ export default async function Home({ searchParams }: HomePageProps) {
     for (const [id, project] of Object.entries(config.projects)) {
       const listeners = (project as { listeners?: Record<string, unknown> }).listeners;
       const hasTracker = Boolean(project.tracker?.plugin && listeners && Object.keys(listeners).length > 0);
-      const hasCron = Object.values(
+      const hasCronListener = Object.values(
         (project as { listeners?: Record<string, { source?: unknown }> }).listeners ?? {},
       ).some((l) => l.source === "cron");
+      const hasCronTrigger = Object.values(
+        (project as { triggers?: Record<string, { event?: unknown }> }).triggers ?? {},
+      ).some((t) => t.event === "cron:tick");
+      const hasCron = hasCronListener || hasCronTrigger;
       projectFilters.push({ id, label: project.name || id, hasTracker, hasCron });
     }
 

@@ -10,6 +10,10 @@ async function startCronListener(deps: ListenerStartDeps): Promise<ListenerContr
       ? listener.intervalMs
       : DEFAULT_INTERVAL_MS;
 
+  logger.warn(
+    `[listener:${listenerId}] "source: cron" in listeners is deprecated. Use "triggers" with "event: cron:tick" and a cron schedule expression instead.`,
+  );
+
   if (listener.intervalMs === undefined || listener.intervalMs === null) {
     logger.warn(
       `[listener:${listenerId}] No intervalMs configured — using default ${DEFAULT_INTERVAL_MS}ms`,

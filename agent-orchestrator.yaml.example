@@ -91,27 +91,41 @@ projects:
     #     trigger:
     #       type: spawn-session
     #
-    #   # Cron listener — spawn a session on a schedule (prompt variant)
+    #   # Cron listener (DEPRECATED — use "triggers" below instead)
+    #   # nightly-audit:
+    #   #   source: cron
+    #   #   intervalMs: 86400000
+    #   #   trigger:
+    #   #     prompt: "Run a security audit"
+
+    # v2 Triggers — event-driven session spawning with cron expressions
+    # triggers:
+    #   # Cron trigger — spawn a session on a schedule (cron expression)
     #   nightly-audit:
-    #     source: cron
-    #     intervalMs: 86400000   # every 24h
-    #     runOnStart: false       # run immediately on ao start (default: false)
-    #     trigger:
-    #       type: spawn-session
-    #       agent: claude-code    # optional: override default agent
+    #     event: cron:tick
+    #     schedule: "0 2 * * *"         # every day at 2am
+    #     runOnStart: false              # run immediately on ao start (default: false)
+    #     spawn:
+    #       agent: claude-code           # optional: override default agent
     #       prompt: |
     #         Run a full security audit of the codebase. Check for hardcoded
     #         secrets, SQL injection, XSS, OWASP top 10. Create a markdown
     #         report at docs/security-audit.md and open a PR.
-    #       # branch: main        # optional: branch to work on (default: project.defaultBranch)
+    #       # branch: main              # optional: branch to work on
     #
-    #   # Cron listener — invoke a skill from .claude/skills/ or .agents/skills/
+    #   # Cron trigger — invoke a skill on a schedule
     #   find-cars:
-    #     source: cron
-    #     intervalMs: 3600000    # every hour
-    #     trigger:
-    #       type: spawn-session
-    #       skill: find-cars     # agent receives "/find-cars" — activates the skill
+    #     event: cron:tick
+    #     schedule: "0 * * * *"         # every hour
+    #     spawn:
+    #       skill: find-cars            # agent receives "/find-cars"
+    #
+    #   # Weekday morning review
+    #   daily-review:
+    #     event: cron:tick
+    #     schedule: "0 9 * * 1-5"       # 9am Mon-Fri
+    #     spawn:
+    #       prompt: "Review all open PRs, add comments"
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]
@@ -156,18 +170,16 @@ projects:
 # my-automations:
 #   name: My Automations
 #   # No repo or path needed — omit them for non-coding tasks
-#   listeners:
+#   triggers:
 #     find-cars:
-#       source: cron
-#       intervalMs: 3600000    # every hour
-#       trigger:
-#         type: spawn-session
-#         skill: find-cars     # activates /find-cars skill from .claude/skills/
+#       event: cron:tick
+#       schedule: "0 * * * *"        # every hour
+#       spawn:
+#         skill: find-cars           # activates /find-cars skill
 #     daily-report:
-#       source: cron
-#       intervalMs: 86400000   # every 24h
-#       trigger:
-#         type: spawn-session
+#       event: cron:tick
+#       schedule: "0 9 * * *"        # daily at 9am
+#       spawn:
 #         prompt: |
 #           Check the latest stats and send a summary to Telegram.
 

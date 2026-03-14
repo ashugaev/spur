@@ -1817,7 +1817,7 @@ function CronJobsPanel({
           Cron Jobs
         </h2>
         <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
-          Scheduled listeners that spawn agent sessions at a fixed interval.
+          Scheduled triggers that spawn agent sessions on a cron schedule.
         </p>
       </div>
 
@@ -1842,7 +1842,7 @@ function CronJobsPanel({
                   Listener
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
-                  Interval
+                  Schedule
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
                   Prompt
@@ -1875,8 +1875,8 @@ function CronJobsPanel({
                     <td className="px-3 py-2.5 align-top text-[12px] font-mono font-medium text-[var(--color-text-primary)]">
                       {job.listenerId}
                     </td>
-                    <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
-                      {formatInterval(job.intervalMs)}
+                    <td className="px-3 py-2.5 align-top text-[12px] font-mono text-[var(--color-text-secondary)]">
+                      {job.schedule ?? (job.intervalMs !== undefined ? formatInterval(job.intervalMs) : "—")}
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-primary)]">
                       <span

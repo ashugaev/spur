@@ -121,6 +121,31 @@ const ProjectListenerConfigSchema = ListenerConfigBaseSchema.omit({ projectId: t
   validateLegacyListenerFields,
 );
 
+const TriggerSpawnConfigSchema = z.object({
+  prompt: z.string().optional(),
+  skill: z.string().optional(),
+  agent: z.string().optional(),
+  branch: z.string().optional(),
+});
+
+const TriggerConfigSchema = z
+  .object({
+    event: z.string(),
+    schedule: z.string().optional(),
+    filter: z.record(z.unknown()).optional(),
+    spawn: TriggerSpawnConfigSchema,
+    runOnStart: z.boolean().default(false),
+  })
+  .superRefine((val, ctx) => {
+    if (val.event === "cron:tick" && !val.schedule) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'triggers with event "cron:tick" require a "schedule" field (cron expression)',
+        path: ["schedule"],
+      });
+    }
+  });
+
 const AgentSpecificConfigSchema = z
   .object({
     permissions: z.enum(["skip", "default"]).default("skip"),
@@ -154,6 +179,7 @@ const ProjectConfigSchema = z.object({
   agentRulesFile: z.string().optional(),
   orchestratorRules: z.string().optional(),
   listeners: z.record(ProjectListenerConfigSchema).optional(),
+  triggers: z.record(TriggerConfigSchema).optional(),
 });
 
 const DefaultPluginsSchema = z.object({

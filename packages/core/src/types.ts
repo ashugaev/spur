@@ -965,6 +965,45 @@ export interface ProjectConfig {
 
   /** Per-project trigger listeners (projectId is implicit). */
   listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
+
+  /**
+   * v2 triggers — event-driven session spawning.
+   * Replaces `listeners` with `source: cron` for scheduled triggers.
+   */
+  triggers?: Record<string, TriggerConfig>;
+}
+
+// =============================================================================
+// TRIGGERS (v2)
+// =============================================================================
+
+/** What to do when a trigger fires */
+export interface TriggerSpawnConfig {
+  /** Prompt to send to the agent */
+  prompt?: string;
+  /**
+   * Skill name to invoke (e.g. "find-cars" → agent receives "/find-cars").
+   * Takes precedence over `prompt` when both are set.
+   */
+  skill?: string;
+  /** Optional agent override */
+  agent?: string;
+  /** Branch to work on (default: project.defaultBranch) */
+  branch?: string;
+}
+
+/** v2 trigger configuration */
+export interface TriggerConfig {
+  /** Event source name (e.g. "cron:tick", "sentry:error", "tracker:task-available") */
+  event: string;
+  /** Cron expression — required when event is "cron:tick" (e.g. "0 9 * * 1-5") */
+  schedule?: string;
+  /** Orchestrator-side filter for the event */
+  filter?: Record<string, unknown>;
+  /** Spawn config — what session to create when trigger fires */
+  spawn: TriggerSpawnConfig;
+  /** Run immediately on ao start (default: false) */
+  runOnStart?: boolean;
 }
 
 export interface TrackerConfig {
