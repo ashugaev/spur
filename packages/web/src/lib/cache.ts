@@ -95,6 +95,7 @@ export interface PREnrichmentData {
     approved: boolean;
     noConflicts: boolean;
     blockers: string[];
+    isDraft: boolean;
   };
   unresolvedThreads: number;
   unresolvedComments: Array<{

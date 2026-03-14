@@ -539,6 +539,7 @@ function createGitHubSCM(): SCM {
           approved: true,
           noConflicts: true,
           blockers: [],
+          isDraft: false,
         };
       }
 
@@ -604,6 +605,7 @@ function createGitHubSCM(): SCM {
         approved,
         noConflicts,
         blockers,
+        isDraft: data.isDraft,
       };
     },
   };

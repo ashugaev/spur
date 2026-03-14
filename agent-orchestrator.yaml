@@ -82,6 +82,9 @@ projects:
     scm:
       plugin: github
       prDraft: true
+    reactions:
+      approved-and-green:
+        auto: false
     tracker:
       plugin: jira
       projectKey: WEBDEV

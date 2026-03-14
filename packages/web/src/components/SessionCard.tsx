@@ -17,13 +17,20 @@ import { CICheckList } from "./CIBadge";
 import { ActivityDot } from "./ActivityDot";
 import { buildSessionPath } from "@/lib/project-routes";
 
+interface AgentOption {
+  name: string;
+  description: string;
+}
+
 interface SessionCardProps {
   session: DashboardSession;
   projectId?: string;
   onSend?: (sessionId: string, message: string) => void;
   onKill?: (sessionId: string) => void;
+  onStop?: (sessionId: string) => void;
   onMerge?: (prNumber: number) => void;
   onRestore?: (sessionId: string) => void;
+  onRestart?: (sessionId: string, agent?: string) => void;
 }
 
 const borderColorByLevel: Record<AttentionLevel, string> = {
@@ -40,11 +47,15 @@ export function SessionCard({
   projectId,
   onSend,
   onKill,
+  onStop,
   onMerge,
   onRestore,
+  onRestart,
 }: SessionCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [sendingAction, setSendingAction] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentOption[] | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<string>("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const level = getAttentionLevel(session);
   const pr = session.pr;
@@ -52,6 +63,19 @@ export function SessionCard({
   useEffect(() => {
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, []);
+
+  useEffect(() => {
+    if (!expanded || agents) return;
+    fetch("/api/agents")
+      .then((r) => r.json())
+      .then((data: { agents?: AgentOption[] }) => {
+        if (data.agents) {
+          setAgents(data.agents);
+          setSelectedAgent(session.metadata["agent"] || "");
+        }
+      })
+      .catch(() => {});
+  }, [expanded, agents, session.metadata]);
 
   const handleAction = async (action: string, message: string) => {
     setSendingAction(action);
@@ -107,6 +131,11 @@ export function SessionCard({
               : session.metadata["terminationReason"] === "cleanup"
                 ? "cleanup"
                 : "auto-killed"}
+          </span>
+        )}
+        {session.status === "stopped" && (
+          <span className="rounded border border-[rgba(245,158,11,0.25)] bg-[rgba(245,158,11,0.07)] px-1.5 py-0.5 text-[10px] text-[var(--color-status-attention)] opacity-70">
+            stopped
           </span>
         )}
         <div className="flex-1" />
@@ -279,7 +308,15 @@ export function SessionCard({
             <p className="text-[12px] text-[var(--color-text-tertiary)]">No PR associated with this session.</p>
           )}
 
-          <div className="mt-3 flex gap-2 border-t border-[var(--color-border-subtle)] pt-3">
+          {session.metadata["agent"] && (
+            <DetailSection label="Agent">
+              <span className="font-[var(--font-mono)] text-[12px] text-[var(--color-text-secondary)]">
+                {session.metadata["agent"]}
+              </span>
+            </DetailSection>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-[var(--color-border-subtle)] pt-3">
             {isRestorable && (
               <button
                 onClick={(e) => { e.stopPropagation(); onRestore?.(session.id); }}
@@ -289,13 +326,46 @@ export function SessionCard({
               </button>
             )}
             {!isTerminal && (
-              <button
-                onClick={(e) => { e.stopPropagation(); onKill?.(session.id); }}
-                className="rounded border border-[rgba(239,68,68,0.35)] px-2.5 py-1 text-[11px] text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.1)]"
-              >
-                terminate
-              </button>
+              <>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onStop?.(session.id); }}
+                  className="rounded border border-[rgba(245,158,11,0.35)] px-2.5 py-1 text-[11px] text-[var(--color-status-attention)] transition-colors hover:bg-[rgba(245,158,11,0.1)]"
+                >
+                  stop
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); onKill?.(session.id); }}
+                  className="rounded border border-[rgba(239,68,68,0.35)] px-2.5 py-1 text-[11px] text-[var(--color-status-error)] transition-colors hover:bg-[rgba(239,68,68,0.1)]"
+                >
+                  terminate
+                </button>
+              </>
             )}
+            <div className="flex-1" />
+            {agents && agents.length > 1 && (
+              <select
+                value={selectedAgent}
+                onChange={(e) => { e.stopPropagation(); setSelectedAgent(e.target.value); }}
+                onClick={(e) => e.stopPropagation()}
+                className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-subtle)] px-2 py-1 text-[11px] text-[var(--color-text-secondary)] outline-none"
+              >
+                {agents.map((a) => (
+                  <option key={a.name} value={a.name}>{a.name}</option>
+                ))}
+              </select>
+            )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const agent = selectedAgent && selectedAgent !== session.metadata["agent"]
+                  ? selectedAgent
+                  : undefined;
+                onRestart?.(session.id, agent);
+              }}
+              className="rounded border border-[rgba(245,158,11,0.35)] px-2.5 py-1 text-[11px] text-[var(--color-status-attention)] transition-colors hover:bg-[rgba(245,158,11,0.1)]"
+            >
+              restart
+            </button>
           </div>
         </div>
       )}

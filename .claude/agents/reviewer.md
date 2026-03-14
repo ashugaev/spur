@@ -25,6 +25,10 @@ Review the diff. Run build checks. Verify no regressions, no security holes, req
 ### Requirements (critical)
 - All acceptance criteria addressed in code
 - No missing edge cases from the plan
+- No overheads
+- No dead code left
+- No duplicates for the same logic
+- Can it be simpler?
 
 ### Regressions (critical)
 - Changed interfaces don't break call-sites

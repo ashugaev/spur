@@ -14,9 +14,49 @@ interface PRStatusProps {
   pr: DashboardPR;
 }
 
+function getPRLifecycleBadge(pr: Pick<DashboardPR, "state" | "isDraft">): {
+  label: "draft" | "open" | "merged" | "closed";
+  className: string;
+} | null {
+  if (pr.state === "merged") {
+    return {
+      label: "merged",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(163,113,247,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-violet)]",
+    };
+  }
+
+  if (pr.state === "closed") {
+    return {
+      label: "closed",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(248,81,73,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-red)]",
+    };
+  }
+
+  if (pr.isDraft) {
+    return {
+      label: "draft",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]",
+    };
+  }
+
+  if (pr.state === "open") {
+    return {
+      label: "open",
+      className:
+        "inline-flex items-center rounded-full bg-[rgba(88,166,255,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-status-working)]",
+    };
+  }
+
+  return null;
+}
+
 export function PRStatus({ pr }: PRStatusProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
+  const lifecycleBadge = getPRLifecycleBadge(pr);
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
@@ -38,17 +78,9 @@ export function PRStatus({ pr }: PRStatusProps) {
         </span>
       )}
 
-      {/* Merged badge */}
-      {pr.state === "merged" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(163,113,247,0.1)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-accent-violet)]">
-          merged
-        </span>
-      )}
-
-      {/* Draft badge */}
-      {pr.isDraft && pr.state === "open" && (
-        <span className="inline-flex items-center rounded-full bg-[rgba(125,133,144,0.08)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-muted)]">
-          draft
+      {lifecycleBadge && (
+        <span className={lifecycleBadge.className}>
+          {lifecycleBadge.label}
         </span>
       )}
 
@@ -76,6 +108,7 @@ interface PRTableRowProps {
 export function PRTableRow({ pr, session, onRestore }: PRTableRowProps) {
   const sizeLabel = getSizeLabel(pr.additions, pr.deletions);
   const rateLimited = isPRRateLimited(pr);
+  const lifecycleBadge = getPRLifecycleBadge(pr);
 
   const reviewLabel = rateLimited
     ? "—"
@@ -105,6 +138,13 @@ export function PRTableRow({ pr, session, onRestore }: PRTableRowProps) {
         </a>
       </td>
       <td className="max-w-[420px] truncate px-3 py-2.5 text-sm font-medium">{pr.title}</td>
+      <td className="px-3 py-2.5">
+        {lifecycleBadge ? (
+          <span className={lifecycleBadge.className}>{lifecycleBadge.label}</span>
+        ) : (
+          <span className="text-[var(--color-text-tertiary)]">—</span>
+        )}
+      </td>
       <td className="px-3 py-2.5 text-sm">
         {rateLimited ? (
           <span className="text-[var(--color-text-tertiary)]">—</span>

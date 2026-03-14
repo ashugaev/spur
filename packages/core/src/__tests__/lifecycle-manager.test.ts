@@ -121,6 +121,7 @@ beforeEach(() => {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
     kill: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
     cleanup: vi.fn(),
     send: vi.fn().mockResolvedValue(undefined),
   };

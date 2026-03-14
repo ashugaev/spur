@@ -1,6 +1,9 @@
 #!/bin/bash
 # Switch to the iTerm tab running a given tmux session
 # Usage: ~/open-tmux-session <session-name>
+#
+# STATUS: Legacy — only called by the deleted claude-dashboard script
+# PLAN: Delete once confirmed no personal workflows depend on it
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 

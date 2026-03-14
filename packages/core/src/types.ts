@@ -38,6 +38,7 @@ export type SessionStatus =
   | "stuck"
   | "errored"
   | "killed"
+  | "stopped"
   | "done"
   | "terminated";
 
@@ -86,6 +87,7 @@ export const SESSION_STATUS = {
   STUCK: "stuck" as const,
   ERRORED: "errored" as const,
   KILLED: "killed" as const,
+  STOPPED: "stopped" as const,
   DONE: "done" as const,
   TERMINATED: "terminated" as const,
 } satisfies Record<string, SessionStatus>;
@@ -93,6 +95,7 @@ export const SESSION_STATUS = {
 /** Statuses that indicate the session is in a terminal (dead) state. */
 export const TERMINAL_STATUSES: ReadonlySet<SessionStatus> = new Set([
   "killed",
+  "stopped",
   "terminated",
   "done",
   "cleanup",
@@ -651,6 +654,7 @@ export interface MergeReadiness {
   approved: boolean;
   noConflicts: boolean;
   blockers: string[];
+  isDraft: boolean;
 }
 
 // =============================================================================
@@ -1109,6 +1113,7 @@ export interface SessionMetadata {
   summary?: string;
   project?: string;
   agent?: string; // Agent plugin name (e.g. "codex", "claude-code") — persisted for lifecycle
+  prompt?: string;
   createdAt?: string;
   runtimeHandle?: string;
   restoredAt?: string;
@@ -1136,6 +1141,7 @@ export interface SessionManager {
   list(projectId?: string): Promise<Session[]>;
   get(sessionId: SessionId): Promise<Session | null>;
   kill(sessionId: SessionId, options?: KillSessionOptions): Promise<void>;
+  stop(sessionId: SessionId): Promise<void>;
   cleanup(projectId?: string, options?: { dryRun?: boolean }): Promise<CleanupResult>;
   send(sessionId: SessionId, message: string): Promise<void>;
 }
