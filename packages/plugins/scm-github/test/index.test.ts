@@ -803,6 +803,7 @@ describe("scm-github plugin", () => {
         ciPassing: true,
         approved: true,
         noConflicts: true,
+        isDraft: false,
         blockers: [],
       });
       // Should only call gh once (for getPRState), not for mergeable/CI
@@ -847,6 +848,7 @@ describe("scm-github plugin", () => {
         ciPassing: true,
         approved: true,
         noConflicts: true,
+        isDraft: false,
         blockers: [],
       });
     });
