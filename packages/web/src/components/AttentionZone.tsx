@@ -11,8 +11,10 @@ interface AttentionZoneProps {
   variant?: "column" | "grid";
   onSend?: (sessionId: string, message: string) => void;
   onKill?: (sessionId: string) => void;
+  onStop?: (sessionId: string) => void;
   onMerge?: (prNumber: number) => void;
   onRestore?: (sessionId: string) => void;
+  onRestart?: (sessionId: string, agent?: string) => void;
 }
 
 const zoneConfig: Record<
@@ -62,8 +64,10 @@ export function AttentionZone({
   variant = "grid",
   onSend,
   onKill,
+  onStop,
   onMerge,
   onRestore,
+  onRestart,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
   const [collapsed, setCollapsed] = useState(config.defaultCollapsed);
@@ -113,8 +117,10 @@ export function AttentionZone({
                 projectId={projectId}
                 onSend={onSend}
                 onKill={onKill}
+                onStop={onStop}
                 onMerge={onMerge}
                 onRestore={onRestore}
+                onRestart={onRestart}
               />
             ))}
           </div>
@@ -167,8 +173,10 @@ export function AttentionZone({
               projectId={projectId}
               onSend={onSend}
               onKill={onKill}
+              onStop={onStop}
               onMerge={onMerge}
               onRestore={onRestore}
+              onRestart={onRestart}
             />
           ))}
         </div>

@@ -5,6 +5,9 @@
 #
 # If the session is busy (Claude is thinking), waits for it to become idle
 # before sending. Retries Enter if the message wasn't picked up.
+#
+# STATUS: Legacy — `ao send` provides the same functionality via runtime plugin
+# PLAN: Delete once all personal aliases/workflows migrate to `ao send`
 
 SESSION="$1"
 shift

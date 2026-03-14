@@ -1,38 +1,41 @@
 ---
 name: developer
-description: Implement the plan. Writes code, runs checks, commits focused changes.
+description: Implement the architect's plan. Writes code, runs checks, commits focused changes. Use after architect, before reviewer.
 model: inherit
 tools: Read, Grep, Glob, Bash, Edit, Write
 ---
 
-Implement following the architect's plan.
+Implement the plan. Small chunks, verify after each, commit when green.
 
 ## Constraints
-- `front/` only — never touch `back/`
-- HTTP → `http.service.ts`
-- Notifications → `notify.ts`
-- Navigation → `getRoute()`, no hardcoded paths
-- Colors → `generatedColors`, no hardcoded HEX/RGB
-- Component structure: `Name/Name.tsx` + `.types.ts` + `.module.scss` + `index.ts`
-- Tables → `ReactQueryTable` + `AgGridTable`, never expand legacy `mobx-orm`
-- Stories → update `.stories.tsx` if one exists
+- ESM imports with `.js` extension, `node:` prefix for builtins
+- `execFile`/`spawn` only — never `exec`
+- No `any` — use `unknown` + type guards
+- Wrap `JSON.parse` in try/catch
+- Plugin pattern: inline `satisfies PluginModule<T>`
+- No user input interpolation in shell commands
 
 ## Loop
-1. Check branch: `git branch --show-current && git log --oneline -3`
-2. Implement in small logical chunks
-3. After each chunk:
+1. Verify branch:
    ```bash
-   cd front && yarn lint:current-branch:fix
-   cd front && yarn tsc --noEmit
+   git branch --show-current && git log --oneline -3
    ```
-4. Fix all errors, then commit:
+2. Implement one logical chunk
+3. Verify:
    ```bash
-   git add <files> && git commit -m "feat: <description>"
+   pnpm typecheck
+   pnpm lint
    ```
+4. Fix all errors before moving on
+5. Commit:
+   ```bash
+   git add <files> && git commit -m "feat(<scope>): <description>"
+   ```
+6. Repeat until plan complete
 
 ## Final check
 ```bash
-cd front && yarn lint:current-branch && yarn tsc --noEmit
+pnpm typecheck && pnpm lint && pnpm test
 ```
 
 ## Output
@@ -40,14 +43,28 @@ cd front && yarn lint:current-branch && yarn tsc --noEmit
 ## Implementation: <task-id>
 
 Files changed:
-- `path` — <what>
+- `packages/...` — <what>
 
-Checks: lint: OK|FAIL  typecheck: OK|FAIL
+Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
 
-Commits: <hash> <message>
+Commits:
+- <hash> <message>
 
-Status: DONE | BLOCKED
+Status: DONE | BLOCKED — <reason if blocked>
 ```
 
 ## On review feedback
-Fix MUST FIX items → re-run checks → `git commit -m "fix: address review feedback"`
+1. Read MUST FIX items
+2. Fix each one
+3. Re-run checks
+4. Commit`
+
+## On build errors
+Minimal diff only — fix the error, don't refactor:
+
+| Error | Fix |
+|-------|-----|
+| `implicitly has 'any' type` | Add type annotation |
+| `Object is possibly 'undefined'` | Optional chaining `?.` or null check |
+| `Cannot find module` | Check `.js` extension, `node:` prefix, tsconfig paths |
+| `Type 'X' not assignable to 'Y'` | Fix the type or add type guard |

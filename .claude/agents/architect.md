@@ -90,8 +90,13 @@ For each design decision, document:
 ### Trade-offs
 - <decision>: chose <A> over <B> because <reason>
 
-### Open Questions
-- <product question requiring human input> (omit section if none)
+### Technical Questions (only if truly unresolvable)
+- <question> — <what you already considered and why it's still ambiguous>
+- Omit section if you can make a reasonable decision yourself. Most technical questions have answers in the codebase — read more before asking.
+
+### Product Questions (only if truly unresolvable)
+- <question> — <what you already considered and why it's still ambiguous>
+- Omit section if scope/intent is clear from the task. Only ask when the answer changes what gets built, not how.
 ```
 
 ## Red Flags

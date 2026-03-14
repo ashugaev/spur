@@ -190,6 +190,17 @@ export function SessionDetail({
   activeProjectId,
 }: SessionDetailProps) {
   const searchParams = useSearchParams();
+  const [restoring, setRestoring] = useState(false);
+
+  const handleRestore = async () => {
+    if (!confirm(`Restore session ${session.id}?`)) return;
+    setRestoring(true);
+    try {
+      await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, { method: "POST" });
+    } finally {
+      setRestoring(false);
+    }
+  };
   const startFullscreen = searchParams.get("fullscreen") === "true";
   const pr = session.pr;
   const activity = (session.activity && activityMeta[session.activity]) ?? {
@@ -358,6 +369,17 @@ export function SessionDetail({
                 lastActivityAt={session.lastActivityAt}
               />
             </div>
+
+            {(session.status === "killed" || session.status === "terminated") && (
+              <button
+                type="button"
+                onClick={() => void handleRestore()}
+                disabled={restoring}
+                className="shrink-0 rounded border border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.12)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-status-attention)] hover:bg-[rgba(210,153,34,0.2)] disabled:opacity-50"
+              >
+                {restoring ? "Restoring…" : "Reactivate"}
+              </button>
+            )}
           </div>
         </div>
 

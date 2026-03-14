@@ -121,6 +121,7 @@ beforeEach(() => {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
     kill: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn().mockResolvedValue(undefined),
     cleanup: vi.fn(),
     send: vi.fn().mockResolvedValue(undefined),
   };
@@ -1152,7 +1153,7 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mergePR).toHaveBeenCalledTimes(1);
-    expect(mergePR).toHaveBeenCalledWith(session.pr, "squash");
+    expect(mergePR).toHaveBeenCalledWith(session.pr, "merge");
   });
 
   it("uses configured mergeMethod for auto-merge reaction", async () => {
@@ -1160,7 +1161,7 @@ describe("reactions", () => {
       "approved-and-green": {
         auto: true,
         action: "auto-merge",
-        mergeMethod: "rebase",
+        mergeMethod: "squash",
       },
     };
 
@@ -1215,7 +1216,7 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mergePR).toHaveBeenCalledTimes(1);
-    expect(mergePR).toHaveBeenCalledWith(session.pr, "rebase");
+    expect(mergePR).toHaveBeenCalledWith(session.pr, "squash");
   });
 
   it("does not attempt auto-merge when PR is not mergeable", async () => {

@@ -3,6 +3,9 @@ set -euo pipefail
 
 # ao start with automatic git pull and rebuild every 5 minutes.
 # Usage: bash scripts/start-autoupdate.sh
+#
+# STATUS: Active — referenced in package.json "start:auto-pull"
+# PLAN: Keep; wraps ao start with auto-pull, no TS equivalent needed
 
 POLL_INTERVAL=300 # seconds (5 minutes)
 START_PID=""

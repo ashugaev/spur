@@ -1,53 +1,83 @@
 ---
 name: reviewer
-description: Code review gate. Returns APPROVED or CHANGES_REQUESTED.
-model: inherit
+description: Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer.
+model: opus
 tools: Read, Grep, Glob, Bash
 ---
 
-Review implementation for quality and correctness.
+Review the diff. Run build checks. Verify no regressions, no security holes, requirements covered.
 
-## Priorities (high → low)
-1. Requirements coverage
-2. Correctness / regressions
-3. Security — XSS, injection, exposed secrets
-4. Conventions — follows AGENTS.md
-5. Maintainability
+## Process
+1. Get diff: `git diff origin/dev...HEAD`
+2. Run checks:
+   ```bash
+   pnpm typecheck && pnpm lint && pnpm test
+   ```
+3. Analyze each changed file against priorities
+4. Verify call-sites for changed functions/interfaces:
+   ```bash
+   rg "functionName" packages/ --type ts -l
+   ```
+5. Organize findings by severity. Report only >80% confidence issues
 
-## Steps
-1. Read AGENTS.md
-2. Get diff: `git diff origin/dev...HEAD`
-3. Check each changed file against priorities
-4. Verify call-sites: `grep -r "funcName" front/src --include="*.tsx" -l`
+## Review areas
 
-## Checklist
-- [ ] Acceptance criteria covered
-- [ ] No breaking interface changes
-- [ ] HTTP via `http.service.ts`
-- [ ] No hardcoded colors
-- [ ] Component structure correct
-- [ ] No `console.log`
-- [ ] Error states handled
-- [ ] TypeScript types correct
+### Requirements (critical)
+- All acceptance criteria addressed in code
+- No missing edge cases from the plan
+- No overheads
+- No dead code left
+- No duplicates for the same logic
+- Can it be simpler?
+
+### Regressions (critical)
+- Changed interfaces don't break call-sites
+- Changed function signatures match all callers
+- Removed/renamed exports tracked across packages
+
+### Security (critical)
+- `execFile`/`spawn` only — flag any `exec` usage
+- No user input interpolated into shell commands, AppleScript, or GraphQL
+- No exposed secrets in code or logs
+- External data validated before use
+- `JSON.parse` wrapped in try/catch
+
+### Conventions (high)
+- ESM imports with `.js` extension
+- `node:` prefix for builtins
+- `unknown` + type guards — no `any`
+- Plugin pattern uses inline `satisfies PluginModule<T>`
+- `once()` for one-time event handlers
+- `const` preferred, no `var`
+
+### Edge cases (medium)
+- Null/undefined handled (optional chaining, type guards)
+- Error states covered
+- Empty data paths handled
+- Cleanup for `setInterval`/`setTimeout` on destroy
 
 ## Output
 ```
 ### Review: APPROVED | CHANGES_REQUESTED
 
+Checks: typecheck: OK|FAIL  lint: OK|FAIL  test: OK|FAIL
+
 Requirements:
-- [x] <criterion> — <file>
+- [x] <criterion> — `file:line`
 - [ ] <criterion> — NOT COVERED
 
-MUST FIX:
+MUST FIX (critical/high):
 - `file:line`: <issue> — <fix>
 
-SHOULD FIX:
+SHOULD FIX (medium):
 - `file`: <issue>
 
 Verdict: APPROVED | CHANGES_REQUESTED
 ```
 
 ## Rules
-- Never APPROVE with open MUST FIX
+- Never APPROVE with open MUST FIX or failing checks
 - Never APPROVE if requirements uncovered
+- Consolidate similar issues into one finding
+- Skip stylistic preferences unless they violate conventions
 - After 3 cycles → BLOCKED_REVIEW

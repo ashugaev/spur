@@ -88,10 +88,11 @@ function basicPRToDashboard(pr: PRInfo): DashboardPR {
     reviewDecision: "none", // "none" is neutral (no review required)
     mergeability: {
       mergeable: false,
-      ciPassing: false, // Conservative default
+      ciPassing: false,
       approved: false,
-      noConflicts: true, // Optimistic default (conflicts are rare)
-      blockers: ["Data not loaded"], // Explicit blocker
+      noConflicts: true,
+      blockers: ["Data not loaded"],
+      isDraft: pr.isDraft,
     },
     unresolvedThreads: 0,
     unresolvedComments: [],
