@@ -74,11 +74,9 @@ projects:
     #     - "On Hold"
     #     - "Cancelled"
 
-    # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
-    # Listeners are only supported under project config.
-    # Canonical source is `tracker-task`.
-    # `jql` is intentionally not supported here: it is Jira-specific and would break tracker portability.
-    # Jira-specific query semantics belong inside the Jira tracker plugin, not the shared listener schema.
+    # Listeners — poll-based integrations that watch external sources and spawn sessions.
+    # Used for tracker integrations (Jira, Linear, GitHub Issues).
+    # `jql` is intentionally not supported: Jira-specific query semantics belong in the plugin.
     # listeners:
     #   tracker-task:
     #     source: tracker-task
@@ -88,17 +86,8 @@ projects:
     #       assignee: "you@yourorg.com"
     #       labels: ["ao"]
     #       limit: 100
-    #     trigger:
-    #       type: spawn-session
-    #
-    #   # Cron listener (DEPRECATED — use "triggers" below instead)
-    #   # nightly-audit:
-    #   #   source: cron
-    #   #   intervalMs: 86400000
-    #   #   trigger:
-    #   #     prompt: "Run a security audit"
 
-    # v2 Triggers — event-driven session spawning with cron expressions
+    # Triggers — event-driven session spawning (cron schedules, webhooks, etc.)
     # triggers:
     #   # Cron trigger — spawn a session on a schedule (cron expression)
     #   nightly-audit:
