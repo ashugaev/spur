@@ -89,32 +89,40 @@ projects:
 
     # Triggers — event-driven session spawning (cron schedules, webhooks, etc.)
     # triggers:
-    #   # Cron trigger — spawn a session on a schedule (cron expression)
+    #
+    #   # ── Variant 1: prompt on a cron schedule ──
     #   nightly-audit:
     #     event: cron:tick
-    #     schedule: "0 2 * * *"         # every day at 2am
-    #     runOnStart: false              # run immediately on ao start (default: false)
+    #     schedule: "0 2 * * *"           # every day at 2am (standard 5-field cron)
     #     spawn:
-    #       agent: claude-code           # optional: override default agent
     #       prompt: |
     #         Run a full security audit of the codebase. Check for hardcoded
     #         secrets, SQL injection, XSS, OWASP top 10. Create a markdown
     #         report at docs/security-audit.md and open a PR.
-    #       # branch: main              # optional: branch to work on
     #
-    #   # Cron trigger — invoke a skill on a schedule
+    #   # ── Variant 2: skill on a cron schedule ──
     #   find-cars:
     #     event: cron:tick
-    #     schedule: "0 * * * *"         # every hour
+    #     schedule: "0 * * * *"           # every hour
     #     spawn:
-    #       skill: find-cars            # agent receives "/find-cars"
+    #       skill: find-cars              # agent receives "/find-cars" as prompt
     #
-    #   # Weekday morning review
-    #   daily-review:
+    #   # ── Variant 3: with agent/branch overrides ──
+    #   codex-review:
     #     event: cron:tick
-    #     schedule: "0 9 * * 1-5"       # 9am Mon-Fri
+    #     schedule: "0 9 * * 1-5"         # 9am weekdays
     #     spawn:
     #       prompt: "Review all open PRs, add comments"
+    #       agent: codex                  # override default agent
+    #       branch: main                  # override default branch
+    #
+    #   # ── Variant 4: run immediately + on schedule ──
+    #   health-check:
+    #     event: cron:tick
+    #     schedule: "*/30 * * * *"        # every 30 min
+    #     runOnStart: true                # also run immediately on ao start
+    #     spawn:
+    #       prompt: "Check system health and report status"
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]

@@ -814,6 +814,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
     // Create workspace (if workspace plugin is available and project has a git repo)
     let workspacePath = project.path;
+
+    // Ensure workspace path exists (scratch dir for cron-only projects)
+    if (workspacePath && !existsSync(workspacePath)) {
+      mkdirSync(workspacePath, { recursive: true });
+    }
+
     if (plugins.workspace && project.repo) {
       try {
         const wsInfo = await plugins.workspace.create({

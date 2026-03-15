@@ -239,9 +239,7 @@ export interface CronListenerView {
   listenerId: string;
   projectId: string;
   projectName: string;
-  /** Interval in ms (v1 listeners). Absent for v2 triggers. */
-  intervalMs?: number;
-  /** Cron expression (v2 triggers). Absent for v1 listeners. */
+  /** Cron expression (e.g. "0 9 * * 1-5") */
   schedule?: string;
   /** Skill name if set (e.g. "find-cars" → agent receives "/find-cars") */
   skill?: string;
@@ -250,8 +248,7 @@ export interface CronListenerView {
   branch?: string;
   runOnStart: boolean;
   health: "healthy" | "degraded" | "inactive" | "starting" | "unknown";
-  /** "trigger" for v2, "listener" for v1 */
-  source: "trigger" | "listener";
+  source: "trigger";
 }
 
 export interface CronListenersSnapshot {

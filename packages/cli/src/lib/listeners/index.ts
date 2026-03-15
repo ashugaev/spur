@@ -4,7 +4,6 @@ import type {
   PluginRegistry,
   SessionManager,
 } from "@composio/ao-core";
-import { cronSource } from "./cron-source.js";
 import { trackerTaskSource } from "./jira-task-source.js";
 import type { ListenerController, ListenerLogger, ListenerSource } from "./types.js";
 import type {
@@ -43,7 +42,6 @@ export function unregisterListenerSource(sourceName: string): void {
 
 // Built-in sources
 registerListenerSource(trackerTaskSource);
-registerListenerSource(cronSource);
 
 function resolveListenerService(listener: ListenerConfig): IntegrationService {
   const source = listener.source.toLowerCase();

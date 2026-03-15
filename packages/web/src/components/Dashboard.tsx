@@ -1753,13 +1753,6 @@ function mergeScore(
   return score;
 }
 
-function formatInterval(ms: number): string {
-  if (ms >= 86_400_000) return `every ${Math.round(ms / 86_400_000)}d`;
-  if (ms >= 3_600_000) return `every ${Math.round(ms / 3_600_000)}h`;
-  if (ms >= 60_000) return `every ${Math.round(ms / 60_000)}m`;
-  return `every ${Math.round(ms / 1000)}s`;
-}
-
 function CronHealthBadge({ health }: { health: CronListenerView["health"] }) {
   const colorMap: Record<string, string> = {
     healthy:
@@ -1876,7 +1869,7 @@ function CronJobsPanel({
                       {job.listenerId}
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] font-mono text-[var(--color-text-secondary)]">
-                      {job.schedule ?? (job.intervalMs !== undefined ? formatInterval(job.intervalMs) : "—")}
+                      {job.schedule ?? "—"}
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-primary)]">
                       <span
