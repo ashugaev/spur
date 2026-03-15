@@ -897,6 +897,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       prContext,
       userPrompt: spawnConfig.prompt,
       pipelineStep: pipelineStepContext,
+      pipelineConfig: project.pipeline,
     });
 
     // Get agent launch config and create runtime — clean up workspace on failure

@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ProjectConfig, PipelineStep } from "./types.js";
+import type { ProjectConfig, PipelineConfig, PipelineStep } from "./types.js";
 
 // =============================================================================
 // LAYER 1: BASE AGENT PROMPT
@@ -69,6 +69,9 @@ export interface PromptBuildConfig {
 
   /** Pipeline step context (injected when session has an active pipeline) */
   pipelineStep?: PipelineStep;
+
+  /** Pipeline config (used to build dynamic context: available steps, limits) */
+  pipelineConfig?: PipelineConfig;
 }
 
 // =============================================================================
@@ -166,6 +169,7 @@ function readUserRules(project: ProjectConfig): string | null {
 
 export function buildPipelineStepContext(
   step: PipelineStep,
+  config?: PipelineConfig,
 ): string {
   const lines: string[] = [];
   lines.push("## Current Pipeline Step");
@@ -200,6 +204,54 @@ export function buildPipelineStepContext(
     lines.push(
       '- `ao ask "<question>" [--options "opt1,opt2"]` -- ask the user a question and wait for response',
     );
+  }
+
+  // Dynamic context from config — auto-generated, not hardcoded in prompts
+  const contextSections: string[] = [];
+
+  if (step.on && Object.keys(step.on).length > 0) {
+    const handlerLines: string[] = [];
+    for (const [event, handler] of Object.entries(step.on)) {
+      if (typeof handler === "string") {
+        handlerLines.push(`- **${event}** → ${handler}`);
+      } else if (typeof handler === "object" && handler !== null) {
+        const parts: string[] = [];
+        if (handler.send) parts.push(`send "${handler.send}"`);
+        if (handler.retries !== undefined) parts.push(`retries: ${handler.retries}`);
+        if (handler.goto) parts.push(`then goto ${handler.goto}`);
+        handlerLines.push(`- **${event}** → ${parts.join(", ")}`);
+      }
+    }
+    if (handlerLines.length > 0) {
+      contextSections.push("### Automatic Event Handlers");
+      contextSections.push("These fire automatically — you do NOT need to handle them manually:");
+      contextSections.push(...handlerLines);
+    }
+  }
+
+  if (config?.steps && config.steps.length > 1) {
+    const otherSteps = config.steps
+      .filter((s) => s.id !== step.id)
+      .map((s) => `\`${s.id}\``);
+    if (otherSteps.length > 0) {
+      contextSections.push(`### Pipeline Steps`);
+      contextSections.push(`Available goto targets: ${otherSteps.join(", ")}`);
+    }
+  }
+
+  const stepMaxIter = step.maxIterations ?? config?.maxIterations;
+  const recovery = step.recovery ?? config?.recovery ?? "fail";
+  if (stepMaxIter || recovery !== "fail") {
+    const limits: string[] = [];
+    if (stepMaxIter) limits.push(`max iterations: ${stepMaxIter}`);
+    if (recovery !== "fail") limits.push(`on failure: ${recovery}`);
+    contextSections.push(`### Step Limits`);
+    contextSections.push(limits.join(" | "));
+  }
+
+  if (contextSections.length > 0) {
+    lines.push("");
+    lines.push(...contextSections);
   }
 
   return lines.join("\n");
@@ -250,7 +302,7 @@ export function buildPrompt(config: PromptBuildConfig): string | null {
 
   // Pipeline step context (before user prompt so user prompt can override)
   if (config.pipelineStep) {
-    sections.push(buildPipelineStepContext(config.pipelineStep));
+    sections.push(buildPipelineStepContext(config.pipelineStep, config.pipelineConfig));
   }
 
   // Explicit user prompt (appended last, highest priority)

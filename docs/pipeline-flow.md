@@ -2,11 +2,14 @@
 
 ## How Steps Work
 
-Each pipeline step sends a **context message** to the agent. The agent receives it as a regular chat message in its terminal session. The message includes:
+Each pipeline step sends a **dynamically composed context message** to the agent. The message is built from the YAML config — no logic is hardcoded in step prompts. The message includes:
 
 1. Step ID
 2. The step's `prompt:` (instructions)
 3. Available `ao` commands
+4. **Automatic event handlers** — `on:` config rendered so the agent knows what fires automatically
+5. **Available goto targets** — all pipeline step IDs, so the agent knows where it can jump
+6. **Step limits** — `maxIterations` and `recovery` strategy
 
 The agent reads the instructions, does the work, then signals completion via `ao done`, `ao fail`, or `ao goto`.
 
@@ -28,7 +31,20 @@ Use `ao` CLI to signal step completion or ask for help:
 - `ao fail [--reason "description"]` -- mark step as failed
 - `ao goto <step-id>` -- jump to a specific step
 - `ao ask "<question>" [--options "opt1,opt2"]` -- ask the user a question
+
+### Automatic Event Handlers           <-- from on: config
+These fire automatically — you do NOT need to handle them manually:
+- **ci:failed** → goto fix-pr-issues
+- **review:changes-requested** → goto fix-pr-issues
+
+### Pipeline Steps                     <-- from pipeline.steps
+Available goto targets: `notify-start`, `implementation`, `review`, ...
+
+### Step Limits                        <-- from maxIterations/recovery
+max iterations: 10 | on failure: pause
 ```
+
+All sections after "Available Actions" are **auto-generated from the YAML config**. Step prompts should contain only task instructions — conditions, goto targets, and limits are injected by the pipeline engine.
 
 ---
 
