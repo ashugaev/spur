@@ -39,7 +39,6 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           agent: typeof spawn?.agent === "string" ? spawn.agent : undefined,
           branch: typeof spawn?.branch === "string" ? spawn.branch : undefined,
           runOnStart: trigger.runOnStart === true,
-          health: "unknown",
           source: "trigger",
         });
       }

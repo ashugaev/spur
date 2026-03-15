@@ -1753,31 +1753,6 @@ function mergeScore(
   return score;
 }
 
-function CronHealthBadge({ health }: { health: CronListenerView["health"] }) {
-  const colorMap: Record<string, string> = {
-    healthy:
-      "border-[rgba(63,185,80,0.45)] bg-[rgba(63,185,80,0.14)] text-[var(--color-status-ready)]",
-    degraded:
-      "border-[rgba(210,153,34,0.45)] bg-[rgba(210,153,34,0.14)] text-[var(--color-status-attention)]",
-    inactive:
-      "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)]",
-    starting:
-      "border-[rgba(88,166,255,0.45)] bg-[rgba(88,166,255,0.14)] text-[var(--color-status-working)]",
-    unknown:
-      "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-muted)]",
-  };
-  const cls =
-    colorMap[health] ??
-    "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-muted)]";
-  return (
-    <span
-      className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${cls}`}
-    >
-      {health}
-    </span>
-  );
-}
-
 interface CronJobsPanelProps {
   snapshot: CronListenersSnapshot | null;
   loading: boolean;
@@ -1846,9 +1821,6 @@ function CronJobsPanel({
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
                   Run on start
                 </th>
-                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
-                  Health
-                </th>
                 <th className="px-3 py-2.5 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
                   Trigger
                 </th>
@@ -1859,7 +1831,7 @@ function CronJobsPanel({
                 const isTriggering = Boolean(triggeringIds[job.listenerId]);
                 return (
                   <tr
-                    key={job.listenerId}
+                    key={`${job.projectId}:${job.listenerId}`}
                     className={[
                       "border-b border-[var(--color-border-subtle)] last:border-0 hover:bg-[rgba(255,255,255,0.02)]",
                       index % 2 === 0 ? "bg-[rgba(255,255,255,0.01)]" : "bg-transparent",
@@ -1884,9 +1856,6 @@ function CronJobsPanel({
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
                       {job.runOnStart ? "yes" : "no"}
-                    </td>
-                    <td className="px-3 py-2.5 align-top">
-                      <CronHealthBadge health={job.health} />
                     </td>
                     <td className="px-3 py-2.5 text-right align-top">
                       <button

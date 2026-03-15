@@ -36,7 +36,7 @@ function buildHealthIdentity(triggerId: string, trigger: TriggerConfig): Integra
   return {
     id: `trigger:${triggerId}`,
     label: `Trigger ${triggerId} (${trigger.event})`,
-    service: "trigger" as "tracker",
+    service: "trigger",
     kind: "trigger",
   };
 }

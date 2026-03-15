@@ -247,7 +247,6 @@ export interface CronListenerView {
   agent?: string;
   branch?: string;
   runOnStart: boolean;
-  health: "healthy" | "degraded" | "inactive" | "starting" | "unknown";
   source: "trigger";
 }
 
