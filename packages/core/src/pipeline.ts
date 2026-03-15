@@ -197,6 +197,8 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
     stepState: PipelineStepState,
     stepCfg: PipelineStep,
   ): void {
+    const context = buildContext(sessionId, {});
+
     if (handler === "done") {
       engine.done(sessionId);
       return;
@@ -211,7 +213,8 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       return;
     }
     if (handler === "send") {
-      eventBus.emit("pipeline.send", { sessionId, message: stepCfg.message });
+      const msg = stepCfg.message ? interpolate(stepCfg.message, context) : stepCfg.message;
+      eventBus.emit("pipeline.send", { sessionId, message: msg });
       return;
     }
     if (typeof handler === "string") {
@@ -220,12 +223,12 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
         engine.goto(sessionId, targetId);
         return;
       }
-      eventBus.emit("pipeline.send", { sessionId, message: handler });
+      eventBus.emit("pipeline.send", { sessionId, message: interpolate(handler, context) });
       return;
     }
     if (typeof handler === "object" && handler !== null) {
       if (handler.send) {
-        eventBus.emit("pipeline.send", { sessionId, message: handler.send });
+        eventBus.emit("pipeline.send", { sessionId, message: interpolate(handler.send, context) });
       }
       if (handler.retries !== undefined) {
         if (stepState.iterations >= handler.retries && handler.goto) {
@@ -420,7 +423,13 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       if (step.startedAt) {
         const elapsed = Date.now() - new Date(step.startedAt).getTime();
         if (elapsed >= parseDuration(stepTimeout)) {
-          engine.fail(sessionId, "timeout");
+          // If step has an on: timeout handler, fire it instead of failing
+          const timeoutHandler = stepCfg.on?.["timeout"];
+          if (timeoutHandler) {
+            handleOnAction(sessionId, timeoutHandler, internal, step, stepCfg);
+          } else {
+            engine.fail(sessionId, "timeout");
+          }
           return;
         }
       }

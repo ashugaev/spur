@@ -497,9 +497,12 @@ A step is classified by which field is set (checked in order):
 | `"pause"` | Pause the pipeline (human must resume) |
 | `"send"` | Send the step's `message:` field to the agent |
 | `"goto <step-id>"` | Jump to the named step (restarts it, increments iterations) |
-| `"<any other string>"` | Send this text as a message to the agent |
-| `{ send: "msg" }` | Send a message to the agent |
+| `"<any other string>"` | Send this text as a message to the agent (supports `{{...}}` templates) |
+| `{ send: "msg" }` | Send a message to the agent (supports `{{...}}` templates) |
 | `{ send: "msg", retries: N, goto: "id" }` | Send message; after N iterations of this step, jump to target instead |
+
+**Special event keys:**
+- `timeout` — if a step has `on: { timeout: "goto fix" }`, the handler fires instead of the default fail behavior when the step times out.
 
 ### Available Events for `on:` and `all:`
 
@@ -549,3 +552,27 @@ Step transitions:
   pending  → skipped    (when: condition is falsy)
   failed   → running    (goto restarts a failed step)
 ```
+
+---
+
+## v2 Architecture Gaps
+
+Features described in `docs/architecture-v2.md` but not yet implemented. Tracked here for future work.
+
+| Feature | v2 Spec | Current Implementation | Priority |
+|---|---|---|---|
+| `options:` as map | `{ approve: "Ship it" }` — keys become `on:` event keys | `string[]` — flat list shown to human | medium |
+| `recovery` as object | `{ retries: 2, delay: 5s, exhausted: pause }` — automatic retry with delay | `"fail" \| "skip" \| "pause"` — immediate, no retry/delay | medium |
+| `goto:` as allowed-targets array | `goto: [implement]` — restricts which steps agent can jump to | `goto: "step-id"` — jump destination after step completion | low |
+| `timeout` as `on:` key | `on: { timeout: fail }` — timeout handled as an event | ✅ Implemented — if `on.timeout` handler exists, it fires instead of default fail | done |
+| `all:` namespace tracking | Events overwrite per namespace (ci:passed → ci=passed) | Checks event presence in single tick, no namespace accumulation | medium |
+| MCP tools | `pipeline_done`, `pipeline_fail`, `pipeline_goto`, `pipeline_ask` | CLI only (`ao done/fail/goto/ask`) | medium |
+| Plugin event sources | `Source = (scope) => AsyncIterable<Record>` | Built-in lifecycle polling only, no async generator sources | future |
+| Channel integration | `channel:` steps with thread tracking and `onMessage()` | Channel field parsed but no actual channel plugin wiring | future |
+| Agent step-level override | Step-specific agent/model config | Always uses project-level agent config | low |
+| `when:` extended references | `steps.<id>.status`, `env.<VAR>`, `session.pr` | Only `steps.<id>.output` and `event.<key>` | low |
+
+**Design decisions that intentionally differ from v2:**
+
+- `pipeline.maxIterations` is a per-step default (not a global tick counter). Removed `totalIterations` because a global tick counter conflates step complexity with actual problems.
+- `goto` on PipelineStep is a completion redirect (jump to X after done), not an allowed-targets restriction. The `on:` handler `"goto <step>"` is what agents use for jumping.
