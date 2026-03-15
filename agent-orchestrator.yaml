@@ -66,12 +66,138 @@ projects:
       plugin: github
     tracker:
       plugin: github
-    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents,  node_modules]
-    agentRulesFile: .ao-agent-rules.md
+    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
+    # agentRulesFile: .ao-agent-rules.md  # migrated to pipeline.steps
     postCreate:
       - "pnpm install"
     agentConfig:
       permissions: skip
+    pipeline:
+      maxIterations: 50
+      recovery: pause
+      steps:
+        # Phase 0: Start notification — notify task started, wait for approval
+        - id: notify-start
+          prompt: |
+            You are the orchestrator. Coordinate work by running subagents. Do NOT write code — delegate to agents.
+            Rules:
+            - All messages to messager/tracker must include `AO_SESSION:$AO_SESSION_ID`
+            - GitHub comments → handle with `github` skill
+            - Reply only to the same source as the incoming message
+
+            Run `ao-telegram` skill to notify that the task has started.
+            Include the task description and session ID.
+            Wait for the human response via `ao-telegram` get_updates.
+            If APPROVE → run `ao done`.
+            If REJECT → run `ao fail --reason "rejected by human"`.
+          timeout: 30m
+
+        # Phase 1: Shallow scoring — assess task complexity
+        - id: shallow-scoring
+          prompt: |
+            Run the `ao-shallow-scoring` skill to assess task complexity (1-5).
+            If score > 1, set needsResearch to true.
+            Run `ao done --output '{"score": <N>, "needsResearch": <true|false>}'`.
+
+        # Phase 2: Research — deep research for complex tasks (score > 1)
+        - id: research
+          prompt: |
+            Run agents team: `researcher` + `critic` in parallel.
+            The researcher generates 2-3 implementation approaches with codebase evidence.
+            The critic evaluates options, verifies claims, challenges assumptions, scores each, selects the best.
+            Run `ao done --output '{"approach": "<selected approach summary>"}'` when done.
+          when: "{{steps.shallow-scoring.output.needsResearch}}"
+          maxIterations: 3
+
+        # Phase 3: Planning — create implementation plan
+        - id: planning
+          prompt: |
+            Run `architect` agent to create a detailed implementation plan with steps and acceptance criteria.
+            If research was done, use the selected approach from the research step.
+            Run `ao done` when the plan is ready.
+          maxIterations: 2
+
+        # Phase 4: Questions — ask human if clarification needed
+        - id: questions
+          prompt: |
+            Evaluate if you need human input before starting implementation.
+            If you have questions: run `ao-telegram` skill to ask them, wait for reply via get_updates, then run `ao done`.
+            If no questions needed: run `ao done` immediately to skip this step.
+          timeout: 30m
+
+        # Phase 5: Implementation — write the code
+        - id: implementation
+          prompt: |
+            Run 1-10 `developer` agents depending on task complexity.
+            Input: the plan from the planning step.
+            Each developer should focus on a specific part of the plan.
+            Coordinate parallel work to avoid conflicts.
+            After implementation, set touchesUI to true if any web dashboard, component, or style files were changed.
+            Run `ao done --output '{"touchesUI": <true|false>}'` when all implementation is complete.
+          maxIterations: 10
+
+        # Phase 6: Code review — verify implementation quality
+        - id: review
+          prompt: |
+            Run `reviewer` agent to review the implementation.
+            The reviewer performs static diff analysis and build checks.
+            If CHANGES_REQUESTED and attempt < 3: fix with `developer` agent, then re-review.
+            If CHANGES_REQUESTED and attempt >= 3: run `ao done` to continue.
+            If APPROVED: run `ao done`.
+          maxIterations: 3
+          recovery: skip
+
+        # Phase 7: Design review — UI changes only
+        - id: design-review
+          prompt: |
+            Run `designer` agent to review UI changes.
+            Verify layout, visual consistency, and UI states.
+            If CHANGES_REQUESTED and attempt < 2: fix with `developer`, re-run `designer`.
+            If CHANGES_REQUESTED and attempt >= 2: run `ao done` to continue.
+            If APPROVED: run `ao done`.
+          when: "{{steps.implementation.output.touchesUI}}"
+          maxIterations: 2
+          recovery: skip
+
+        # Phase 8: UI testing — visual verification
+        - id: ui-testing
+          prompt: |
+            Run `tester` agent to visually verify UI changes in the web dashboard.
+            If FAIL and attempt < 2: fix with `developer`, re-test.
+            If FAIL and attempt >= 2: run `ao done` to continue.
+            If PASS: run `ao done`.
+          when: "{{steps.implementation.output.touchesUI}}"
+          maxIterations: 2
+          recovery: skip
+
+        # Phase 9: Open PR
+        - id: open-pr
+          prompt: |
+            Run `github` skill to open a Pull Request.
+            Include a clear title, summary of changes, and test plan.
+            Run `ao done --output '{"pr_url": "<url>"}'` with the PR URL.
+
+        # Phase 10: Notify completion — send PR link and summary
+        - id: notify-completion
+          prompt: |
+            Run `ao-telegram` skill to send the PR URL and implementation summary.
+            Include: PR link from {{steps.open-pr.output.pr_url}}, what was changed, and key decisions made.
+            Run `ao done` after sending.
+
+        # Phase 11: Fix PR issues — triggered by PR monitoring reactions
+        - id: fix-pr-issues
+          prompt: |
+            Fix all review comments and CI issues on the PR.
+            Use `developer` + `reviewer` + `tester` agents after every update.
+            For PR comments, use `github` skill to respond.
+            Repeat until PR is green and all comments resolved.
+            Run `ao done` when everything is resolved.
+          on:
+            ci-failed: "goto fix-pr-issues"
+            changes-requested: "goto fix-pr-issues"
+            review-comments: "goto fix-pr-issues"
+          maxIterations: 10
+          recovery: pause
 
   int:
     name: Intelas Web
