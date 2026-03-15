@@ -55,6 +55,7 @@
     "@composio/ao-plugin-workspace-worktree": "workspace:*",
     "chalk": "^5.4.0",
     "commander": "^13.0.0",
+    "croner": "^10.0.1",
     "ora": "^8.1.0",
     "yaml": "^2.7.0"
   },

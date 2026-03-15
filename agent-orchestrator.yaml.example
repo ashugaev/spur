@@ -29,7 +29,7 @@ defaults:
   workspace: worktree # worktree | clone | copy
   notifiers: [desktop] # desktop | slack | telegram | discord | webhook | email
 
-# Projects — at minimum, specify repo and path
+# Projects — repo and path are optional for cron-only (non-coding) projects
 projects:
   my-app:
     name: My App
@@ -74,11 +74,9 @@ projects:
     #     - "On Hold"
     #     - "Cancelled"
 
-    # Per-project trigger listeners — tracker filters and auto-spawn config lives here.
-    # Listeners are only supported under project config.
-    # Canonical source is `tracker-task`.
-    # `jql` is intentionally not supported here: it is Jira-specific and would break tracker portability.
-    # Jira-specific query semantics belong inside the Jira tracker plugin, not the shared listener schema.
+    # Listeners — poll-based integrations that watch external sources and spawn sessions.
+    # Used for tracker integrations (Jira, Linear, GitHub Issues).
+    # `jql` is intentionally not supported: Jira-specific query semantics belong in the plugin.
     # listeners:
     #   tracker-task:
     #     source: tracker-task
@@ -88,8 +86,51 @@ projects:
     #       assignee: "you@yourorg.com"
     #       labels: ["ao"]
     #       limit: 100
-    #     trigger:
-    #       type: spawn-session
+
+    # Triggers — event-driven session spawning (cron schedules, webhooks, etc.)
+    # triggers:
+    #
+    #   # ── Variant 1: prompt on a cron schedule ──
+    #   nightly-audit:
+    #     event: cron:tick
+    #     schedule: "0 2 * * *"           # every day at 2am (standard 5-field cron)
+    #     spawn:
+    #       prompt: |
+    #         Run a full security audit of the codebase. Check for hardcoded
+    #         secrets, SQL injection, XSS, OWASP top 10. Create a markdown
+    #         report at docs/security-audit.md and open a PR.
+    #
+    #   # ── Variant 2: skill on a cron schedule ──
+    #   find-cars:
+    #     event: cron:tick
+    #     schedule: "0 * * * *"           # every hour
+    #     spawn:
+    #       skill: find-cars              # agent receives "/find-cars" as prompt
+    #
+    #   # ── Variant 3: with named agent ──
+    #   nightly-architect:
+    #     event: cron:tick
+    #     schedule: "0 9 * * 1-5"         # 9am weekdays
+    #     spawn:
+    #       prompt: "Review architecture and suggest improvements"
+    #       agent: architect              # .claude/agents/architect.md
+    #
+    #   # ── Variant 4: with CLI tool and branch overrides ──
+    #   codex-review:
+    #     event: cron:tick
+    #     schedule: "30 9 * * 1-5"        # 9:30am weekdays
+    #     spawn:
+    #       prompt: "Review all open PRs, add comments"
+    #       cli: codex                    # use codex instead of default
+    #       branch: main                  # override default branch
+    #
+    #   # ── Variant 5: run immediately + on schedule ──
+    #   health-check:
+    #     event: cron:tick
+    #     schedule: "*/30 * * * *"        # every 30 min
+    #     runOnStart: true                # also run immediately on ao start
+    #     spawn:
+    #       prompt: "Check system health and report status"
 
     # Files to symlink into workspaces
     # symlinks: [.env, .claude]
@@ -126,6 +167,26 @@ projects:
     #     action: send-to-agent
     #     kind: reply         # any | tagged | reply
     #     # message: "New tracker comment received. Check context and update implementation."
+
+# Cron-only project — no repo, no GitHub, no git worktree.
+# The agent runs a skill (or prompt) on a schedule, completely unrelated to coding.
+# Use this for: reports, monitoring, scraping, notifications, etc.
+# A scratch directory is created automatically under ~/.agent-orchestrator/scratch/<id>
+# my-automations:
+#   name: My Automations
+#   # No repo or path needed — omit them for non-coding tasks
+#   triggers:
+#     find-cars:
+#       event: cron:tick
+#       schedule: "0 * * * *"        # every hour
+#       spawn:
+#         skill: find-cars           # activates /find-cars skill
+#     daily-report:
+#       event: cron:tick
+#       schedule: "0 9 * * *"        # daily at 9am
+#       spawn:
+#         prompt: |
+#           Check the latest stats and send a summary to Telegram.
 
 # Notification channels
 # notifiers:

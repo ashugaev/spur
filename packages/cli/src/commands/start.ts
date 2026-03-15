@@ -37,6 +37,10 @@ import {
   maybeStartConfiguredListeners,
   type ListenerGroupController,
 } from "../lib/listeners/index.js";
+import {
+  maybeStartConfiguredTriggers,
+  type TriggerGroupController,
+} from "../lib/triggers/index.js";
 import { createIntegrationHealthReporter, type IntegrationIdentity } from "../lib/integration-health.js";
 import { findWebDir, buildDashboardEnv, waitForPortAndOpen, isPortAvailable, findFreePort, MAX_PORT_SCAN } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
@@ -477,6 +481,7 @@ async function runStartup(
   let telegramPolling: TelegramPollingController | null = null;
   let jiraPolling: JiraCommentPollingController | null = null;
   let configuredListeners: ListenerGroupController | null = null;
+  let configuredTriggers: TriggerGroupController | null = null;
   let sharedSessionManager: Awaited<ReturnType<typeof getSessionManager>> | null = null;
   let attachedToExistingRuntime = false;
   let attachedRuntimeDashboardReachable = false;
@@ -634,6 +639,19 @@ async function runStartup(
         );
       }
 
+      configuredTriggers = await maybeStartConfiguredTriggers({
+        config,
+        sessionManager,
+        healthReporter: integrationHealth,
+      });
+      if (configuredTriggers && configuredTriggers.activeTriggers.length > 0) {
+        console.log(
+          chalk.dim(
+            `  Triggers: ${configuredTriggers.activeTriggers.join(", ")} (active)`,
+          ),
+        );
+      }
+
       writeStartRuntimeState(config.configPath, port);
     } else {
       if (attachCandidate && attachCandidate.port !== (config.port ?? DEFAULT_PORT)) {
@@ -761,6 +779,7 @@ async function runStartup(
       if (telegramPolling) telegramPolling.stop();
       if (jiraPolling) jiraPolling.stop();
       if (configuredListeners) configuredListeners.stop();
+      if (configuredTriggers) configuredTriggers.stop();
       if (code !== 0 && code !== null) {
         console.error(chalk.red(`Dashboard exited with code ${code}`));
       }

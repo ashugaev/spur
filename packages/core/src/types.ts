@@ -909,10 +909,16 @@ export interface ProjectConfig {
   /** Display name */
   name: string;
 
-  /** GitHub repo in "owner/repo" format */
+  /**
+   * GitHub repo in "owner/repo" format.
+   * Optional — omit for projects that don't need Git/GitHub (defaults to "").
+   */
   repo: string;
 
-  /** Local path to the repo */
+  /**
+   * Local path to the repo (working directory for the agent).
+   * Optional — when omitted, a scratch directory is created automatically.
+   */
   path: string;
 
   /** Default branch (main, master, next, develop, etc.) */
@@ -959,6 +965,51 @@ export interface ProjectConfig {
 
   /** Per-project trigger listeners (projectId is implicit). */
   listeners?: Record<string, Omit<ListenerConfig, "projectId">>;
+
+  /**
+   * v2 triggers — event-driven session spawning.
+   * Replaces `listeners` with `source: cron` for scheduled triggers.
+   */
+  triggers?: Record<string, TriggerConfig>;
+}
+
+// =============================================================================
+// TRIGGERS (v2)
+// =============================================================================
+
+/** What to do when a trigger fires */
+export interface TriggerSpawnConfig {
+  /** Prompt to send to the agent */
+  prompt?: string;
+  /**
+   * Skill name to invoke (e.g. "find-cars" → agent receives "/find-cars").
+   * Takes precedence over `prompt` when both are set.
+   */
+  skill?: string;
+  /**
+   * Named agent to run (e.g. "architect", "developer").
+   * Agent definitions live in .claude/agents/ or .agents/.
+   * The agent name is passed as a prompt instruction.
+   */
+  agent?: string;
+  /** CLI tool override (e.g. "claude-code", "codex", "aider"). Overrides project default. */
+  cli?: string;
+  /** Branch to work on (default: project.defaultBranch) */
+  branch?: string;
+}
+
+/** v2 trigger configuration */
+export interface TriggerConfig {
+  /** Event source name (e.g. "cron:tick", "sentry:error", "tracker:task-available") */
+  event: string;
+  /** Cron expression — required when event is "cron:tick" (e.g. "0 9 * * 1-5") */
+  schedule?: string;
+  /** Orchestrator-side filter for the event */
+  filter?: Record<string, unknown>;
+  /** Spawn config — what session to create when trigger fires */
+  spawn: TriggerSpawnConfig;
+  /** Run immediately on ao start (default: false) */
+  runOnStart?: boolean;
 }
 
 export interface TrackerConfig {
@@ -1021,6 +1072,16 @@ export interface ListenerTriggerConfig {
   type: "spawn-session" | string;
   /** Optional agent override for spawned sessions */
   agent?: string;
+  /**
+   * Skill name to invoke (e.g. "find-cars" → agent receives "/find-cars").
+   * Skill files live in .claude/skills/ or .agents/skills/.
+   * Takes precedence over `prompt` when both are set.
+   */
+  skill?: string;
+  /** Prompt to send to the agent when spawning a session */
+  prompt?: string;
+  /** Branch to work on (default: project.defaultBranch) */
+  branch?: string;
   [key: string]: unknown;
 }
 

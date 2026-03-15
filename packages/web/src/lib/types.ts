@@ -235,6 +235,30 @@ export interface JiraSprintTasksSnapshot {
   tasks: JiraSprintTask[];
 }
 
+export interface CronListenerView {
+  listenerId: string;
+  projectId: string;
+  projectName: string;
+  /** Cron expression (e.g. "0 9 * * 1-5") */
+  schedule?: string;
+  /** Skill name if set (e.g. "find-cars" → agent receives "/find-cars") */
+  skill?: string;
+  prompt: string;
+  /** Named agent (e.g. "architect") */
+  agent?: string;
+  /** CLI tool override (e.g. "codex") */
+  cli?: string;
+  branch?: string;
+  runOnStart: boolean;
+  source: "trigger";
+}
+
+export interface CronListenersSnapshot {
+  projectId: string | null;
+  jobs: CronListenerView[];
+  fetchedAt: string; // ISO timestamp
+}
+
 /** SSE snapshot event from /api/events */
 export interface SSESnapshotEvent {
   type: "snapshot";
