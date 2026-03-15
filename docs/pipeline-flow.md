@@ -4,7 +4,7 @@
 
 Each pipeline step sends a **context message** to the agent. The agent receives it as a regular chat message in its terminal session. The message includes:
 
-1. Step ID and current state
+1. Step ID
 2. The step's `prompt:` (instructions)
 3. Available `ao` commands
 
@@ -18,7 +18,7 @@ When a step starts, the agent receives:
 
 ```
 ## Current Pipeline Step
-**Step:** <step-id> (state: running)
+**Step:** <step-id>
 
 <prompt text from config>
 
@@ -39,7 +39,7 @@ Use `ao` CLI to signal step completion or ask for help:
 Agent receives:
 ```
 ## Current Pipeline Step
-**Step:** notify-start (state: running)
+**Step:** notify-start
 
 You are the orchestrator. Coordinate work by running subagents...
 Run `ao-telegram` skill to notify that the task has started.
@@ -240,7 +240,7 @@ Channel steps pause the pipeline and wait for external input.
 Agent receives:
 ```
 ## Current Pipeline Step
-**Step:** approval (state: running)
+**Step:** approval
 
 Ready for review. Approve or reject?
 

@@ -170,7 +170,7 @@ export function buildPipelineStepContext(
 ): string {
   const lines: string[] = [];
   lines.push("## Current Pipeline Step");
-  lines.push(`**Step:** ${step.id} (state: ${stepState.state})`);
+  lines.push(`**Step:** ${step.id}`);
 
   if (step.channel) {
     lines.push(step.message ?? step.channel);
