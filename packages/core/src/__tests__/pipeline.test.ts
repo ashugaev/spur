@@ -476,6 +476,40 @@ describe("PipelineEngine", () => {
       expect(updated.steps[1].state).toBe("running");
     });
 
+    it("timeout on: handler does not re-fire on subsequent ticks", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        steps: [
+          {
+            id: "a",
+            timeout: "1s",
+            on: { timeout: "Fix timeout" },
+          },
+        ],
+      });
+      const state = engine.getState(sid)!;
+      state.steps[0].startedAt = new Date(Date.now() - 2000).toISOString();
+      eventBus.events.length = 0;
+      engine.tick(sid, {}); // first tick — fires timeout handler
+      const sends1 = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends1).toHaveLength(1);
+
+      engine.tick(sid, {}); // second tick — should NOT re-fire
+      const sends2 = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends2).toHaveLength(1); // still 1
+    });
+
+    it("send handler is no-op when step has no message", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        steps: [{ id: "a", on: { "ci:failed": "send" } }], // no message field
+      });
+      eventBus.events.length = 0;
+      engine.tick(sid, { "ci:failed": true });
+      const sends = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends).toHaveLength(0);
+    });
+
     it("timeout defaults to fail when no on: timeout handler", () => {
       const sid = makeSessionId();
       engine.initialize(sid, {

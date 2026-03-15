@@ -213,8 +213,9 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       return;
     }
     if (handler === "send") {
-      const msg = stepCfg.message ? interpolate(stepCfg.message, context) : stepCfg.message;
-      eventBus.emit("pipeline.send", { sessionId, message: msg });
+      if (stepCfg.message) {
+        eventBus.emit("pipeline.send", { sessionId, message: interpolate(stepCfg.message, context) });
+      }
       return;
     }
     if (typeof handler === "string") {
@@ -443,9 +444,12 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
         if (elapsed >= parseDuration(stepTimeout)) {
           // If step has an on: timeout handler, fire it instead of failing
           const timeoutHandler = stepCfg.on?.["timeout"];
-          if (timeoutHandler) {
+          const alreadyFiredTimeout = (step.firedOn ?? []).includes("timeout");
+          if (timeoutHandler && !alreadyFiredTimeout) {
+            step.firedOn = [...(step.firedOn ?? []), "timeout"];
+            persist(sessionId);
             handleOnAction(sessionId, timeoutHandler, internal, step, stepCfg);
-          } else {
+          } else if (!timeoutHandler) {
             engine.fail(sessionId, "timeout");
           }
           return;
