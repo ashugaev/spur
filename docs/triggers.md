@@ -28,7 +28,8 @@ projects:
 | `spawn` | yes | What session to create |
 | `spawn.prompt` | one of prompt/skill | Prompt text sent to the agent |
 | `spawn.skill` | one of prompt/skill | Skill name — agent receives `/<skill>` as prompt |
-| `spawn.agent` | no | Override the project's default agent |
+| `spawn.agent` | no | Named agent to run (e.g. "architect" from `.claude/agents/`) |
+| `spawn.cli` | no | CLI tool override (e.g. "codex", "claude-code", "aider") |
 | `spawn.branch` | no | Override the project's default branch |
 | `runOnStart` | no | Run immediately on `ao start` (default: `false`) |
 
@@ -83,7 +84,21 @@ triggers:
 
 Skills are loaded from `.claude/skills/` or `.agents/skills/`. The `skill` field takes precedence over `prompt` when both are set.
 
-### With agent and branch overrides
+### With named agent
+
+```yaml
+triggers:
+  nightly-architect:
+    event: cron:tick
+    schedule: "0 9 * * 1-5"
+    spawn:
+      prompt: "Review architecture and suggest improvements"
+      agent: architect    # uses .claude/agents/architect.md
+```
+
+Agent definitions live in `.claude/agents/` or `.agents/`. The agent name is passed as a prompt instruction.
+
+### With CLI tool and branch overrides
 
 ```yaml
 triggers:
@@ -92,7 +107,7 @@ triggers:
     schedule: "0 9 * * 1-5"
     spawn:
       prompt: "Review all open PRs"
-      agent: codex
+      cli: codex            # use codex instead of default claude-code
       branch: main
 ```
 

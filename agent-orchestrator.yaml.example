@@ -107,16 +107,24 @@ projects:
     #     spawn:
     #       skill: find-cars              # agent receives "/find-cars" as prompt
     #
-    #   # ── Variant 3: with agent/branch overrides ──
-    #   codex-review:
+    #   # ── Variant 3: with named agent ──
+    #   nightly-architect:
     #     event: cron:tick
     #     schedule: "0 9 * * 1-5"         # 9am weekdays
     #     spawn:
+    #       prompt: "Review architecture and suggest improvements"
+    #       agent: architect              # .claude/agents/architect.md
+    #
+    #   # ── Variant 4: with CLI tool and branch overrides ──
+    #   codex-review:
+    #     event: cron:tick
+    #     schedule: "30 9 * * 1-5"        # 9:30am weekdays
+    #     spawn:
     #       prompt: "Review all open PRs, add comments"
-    #       agent: codex                  # override default agent
+    #       cli: codex                    # use codex instead of default
     #       branch: main                  # override default branch
     #
-    #   # ── Variant 4: run immediately + on schedule ──
+    #   # ── Variant 5: run immediately + on schedule ──
     #   health-check:
     #     event: cron:tick
     #     schedule: "*/30 * * * *"        # every 30 min

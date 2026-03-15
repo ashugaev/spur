@@ -125,6 +125,7 @@ const TriggerSpawnConfigSchema = z.object({
   prompt: z.string().optional(),
   skill: z.string().optional(),
   agent: z.string().optional(),
+  cli: z.string().optional(),
   branch: z.string().optional(),
 });
 

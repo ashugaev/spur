@@ -1816,7 +1816,7 @@ function CronJobsPanel({
                   Prompt
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
-                  Agent
+                  CLI
                 </th>
                 <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
                   Run on start
@@ -1852,7 +1852,7 @@ function CronJobsPanel({
                       </span>
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
-                      {job.agent ?? "default"}
+                      {job.cli ?? "default"}
                     </td>
                     <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
                       {job.runOnStart ? "yes" : "no"}

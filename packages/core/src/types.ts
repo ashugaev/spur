@@ -986,8 +986,14 @@ export interface TriggerSpawnConfig {
    * Takes precedence over `prompt` when both are set.
    */
   skill?: string;
-  /** Optional agent override */
+  /**
+   * Named agent to run (e.g. "architect", "developer").
+   * Agent definitions live in .claude/agents/ or .agents/.
+   * The agent name is passed as a prompt instruction.
+   */
   agent?: string;
+  /** CLI tool override (e.g. "claude-code", "codex", "aider"). Overrides project default. */
+  cli?: string;
   /** Branch to work on (default: project.defaultBranch) */
   branch?: string;
 }

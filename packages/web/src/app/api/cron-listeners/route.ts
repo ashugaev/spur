@@ -37,6 +37,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           skill,
           prompt,
           agent: typeof spawn?.agent === "string" ? spawn.agent : undefined,
+          cli: typeof spawn?.cli === "string" ? spawn.cli : undefined,
           branch: typeof spawn?.branch === "string" ? spawn.branch : undefined,
           runOnStart: trigger.runOnStart === true,
           source: "trigger",

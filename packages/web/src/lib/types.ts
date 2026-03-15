@@ -244,7 +244,10 @@ export interface CronListenerView {
   /** Skill name if set (e.g. "find-cars" → agent receives "/find-cars") */
   skill?: string;
   prompt: string;
+  /** Named agent (e.g. "architect") */
   agent?: string;
+  /** CLI tool override (e.g. "codex") */
+  cli?: string;
   branch?: string;
   runOnStart: boolean;
   source: "trigger";

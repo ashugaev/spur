@@ -14,19 +14,26 @@ async function startCronTrigger(deps: TriggerStartDeps): Promise<TriggerControll
   // skill takes precedence: "find-cars" → "/find-cars"
   const skillName =
     typeof spawn.skill === "string" && spawn.skill.length > 0 ? spawn.skill : undefined;
-  const prompt = skillName
+  const namedAgent =
+    typeof spawn.agent === "string" && spawn.agent.length > 0 ? spawn.agent : undefined;
+  const basePrompt = skillName
     ? `/${skillName}`
     : typeof spawn.prompt === "string" && spawn.prompt.length > 0
       ? spawn.prompt
       : undefined;
 
-  if (!prompt) {
+  if (!basePrompt) {
     throw new Error(
       `[trigger:${triggerId}] cron:tick requires spawn.skill or spawn.prompt to be set`,
     );
   }
 
-  const agentOverride = typeof spawn.agent === "string" ? spawn.agent : undefined;
+  // If a named agent is specified, prepend instruction to use it
+  const prompt = namedAgent
+    ? `Use the "${namedAgent}" agent. ${basePrompt}`
+    : basePrompt;
+
+  const cliOverride = typeof spawn.cli === "string" ? spawn.cli : undefined;
   const branchOverride = typeof spawn.branch === "string" ? spawn.branch : undefined;
 
   let stopped = false;
@@ -40,7 +47,7 @@ async function startCronTrigger(deps: TriggerStartDeps): Promise<TriggerControll
       await sessionManager.spawn({
         projectId,
         prompt,
-        ...(agentOverride !== undefined ? { agent: agentOverride } : {}),
+        ...(cliOverride !== undefined ? { agent: cliOverride } : {}),
         ...(branchOverride !== undefined
           ? { branch: branchOverride }
           : project.defaultBranch !== undefined
