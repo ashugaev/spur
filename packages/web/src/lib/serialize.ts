@@ -14,6 +14,8 @@ import type {
   ProjectConfig,
   OrchestratorConfig,
   PluginRegistry,
+  PipelineEngine,
+  SessionId,
 } from "@composio/ao-core";
 import type { DashboardSession, DashboardPR, DashboardStats } from "./types.js";
 import { TTLCache, prCache, prCacheKey, type PREnrichmentData } from "./cache";
@@ -62,6 +64,7 @@ export function sessionToDashboard(session: Session): DashboardSession {
     lastActivityAt: session.lastActivityAt.toISOString(),
     pr: session.pr ? basicPRToDashboard(session.pr) : null,
     metadata: session.metadata,
+    pipelineStep: null, // Enriched by enrichSessionPipeline()
   };
 }
 
@@ -251,6 +254,27 @@ export async function enrichSessionPR(
   };
   prCache.set(cacheKey, cacheData);
   return true;
+}
+
+/** Enrich dashboard sessions with pipeline step info. */
+export function enrichSessionsPipeline(
+  sessions: DashboardSession[],
+  pipelineEngine: PipelineEngine | null,
+): void {
+  if (!pipelineEngine) return;
+  for (const ds of sessions) {
+    const pState = pipelineEngine.getState(ds.id as SessionId);
+    if (!pState) continue;
+    const stepState = pState.steps[pState.currentStepIndex];
+    if (!stepState) continue;
+    ds.pipelineStep = {
+      stepId: stepState.id,
+      stepIndex: pState.currentStepIndex,
+      totalSteps: pState.steps.length,
+      state: stepState.state,
+      pipelineState: pState.state,
+    };
+  }
 }
 
 /** Enrich a DashboardSession's issue label using the tracker plugin. */

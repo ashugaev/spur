@@ -170,6 +170,21 @@ export function SessionCard({
         </p>
       </div>
 
+      {/* Pipeline step indicator */}
+      {session.pipelineStep && (
+        <div className="flex items-center gap-1.5 px-4 pb-2">
+          <span className="inline-flex items-center gap-1 rounded border border-[rgba(136,110,223,0.3)] bg-[rgba(136,110,223,0.08)] px-2 py-0.5 text-[10px] font-medium text-[rgba(170,145,255,0.9)]">
+            <span className="font-bold">{session.pipelineStep.stepIndex + 1}/{session.pipelineStep.totalSteps}</span>
+            {session.pipelineStep.stepId}
+          </span>
+          {session.pipelineStep.state !== "running" && (
+            <span className="text-[10px] text-[var(--color-text-tertiary)]">
+              {session.pipelineStep.state}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Meta row: branch + PR pills */}
       <div className="flex flex-wrap items-center gap-1.5 px-4 pb-2.5">
         {session.branch && (

@@ -5,6 +5,7 @@ import {
   resolveProject,
   enrichSessionPR,
   enrichSessionsMetadata,
+  enrichSessionsPipeline,
 } from "@/lib/serialize";
 
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -13,7 +14,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     const url = new URL(_request.url);
     const requestedProjectIdRaw = url.searchParams.get("projectId");
     const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
-    const { config, registry, sessionManager } = await getServices();
+    const { config, registry, sessionManager, pipelineEngine } = await getServices();
 
     const coreSession = await sessionManager.get(id);
     if (!coreSession) {
@@ -40,6 +41,9 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
         }
       }
     }
+
+    // Enrich pipeline step info (sync — reads from in-memory state)
+    enrichSessionsPipeline([dashboardSession], pipelineEngine);
 
     return NextResponse.json(dashboardSession);
   } catch (error) {

@@ -6,6 +6,7 @@ import {
   resolveProject,
   enrichSessionPR,
   enrichSessionsMetadata,
+  enrichSessionsPipeline,
   computeStats,
 } from "@/lib/serialize";
 
@@ -21,7 +22,7 @@ export async function GET(request: Request) {
     const requestedProjectIdRaw = searchParams.get("projectId");
     const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
 
-    const { config, registry, sessionManager } = await getServices();
+    const { config, registry, sessionManager, pipelineEngine } = await getServices();
     if (requestedProjectId && !config.projects[requestedProjectId]) {
       return NextResponse.json(
         { error: `Unknown projectId: ${requestedProjectId}` },
@@ -64,6 +65,9 @@ export async function GET(request: Request) {
     });
     const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 4_000));
     await Promise.race([Promise.allSettled(enrichPromises), enrichTimeout]);
+
+    // Enrich pipeline step info (sync — reads from in-memory state)
+    enrichSessionsPipeline(dashboardSessions, pipelineEngine);
 
     return NextResponse.json({
       sessions: dashboardSessions,

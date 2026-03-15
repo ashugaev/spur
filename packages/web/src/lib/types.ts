@@ -56,6 +56,14 @@ export type AttentionLevel = "merge" | "respond" | "review" | "pending" | "worki
  * TODO: When wiring to real data, add a serialization layer that converts
  * core Session (Date objects) → DashboardSession (string dates).
  */
+export interface DashboardPipelineStep {
+  stepId: string;
+  stepIndex: number;
+  totalSteps: number;
+  state: string; // "running" | "completed" | "failed" | "paused" etc.
+  pipelineState: string; // overall pipeline state
+}
+
 export interface DashboardSession {
   id: string;
   projectId: string;
@@ -73,6 +81,8 @@ export interface DashboardSession {
   lastActivityAt: string;
   pr: DashboardPR | null;
   metadata: Record<string, string>;
+  /** Current pipeline step (null if no pipeline or pipeline not started) */
+  pipelineStep: DashboardPipelineStep | null;
 }
 
 /**
