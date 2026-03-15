@@ -227,13 +227,13 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       return;
     }
     if (typeof handler === "object" && handler !== null) {
+      // If retries exhausted, goto takes priority over send
+      if (handler.retries !== undefined && stepState.iterations >= handler.retries && handler.goto) {
+        engine.goto(sessionId, handler.goto);
+        return;
+      }
       if (handler.send) {
         eventBus.emit("pipeline.send", { sessionId, message: interpolate(handler.send, context) });
-      }
-      if (handler.retries !== undefined) {
-        if (stepState.iterations >= handler.retries && handler.goto) {
-          engine.goto(sessionId, handler.goto);
-        }
       }
     }
   }
@@ -241,6 +241,21 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
   const engine: PipelineEngine = {
     initialize(sessionId: SessionId, config: PipelineConfig): void {
       const timestamp = now();
+
+      if (config.steps.length === 0) {
+        const session: PipelineSessionState = {
+          state: "completed",
+          currentStepIndex: 0,
+          steps: [],
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        states.set(sessionId, { config, session });
+        persist(sessionId);
+        eventBus.emit("pipeline.completed", { sessionId });
+        return;
+      }
+
       const steps: PipelineStepState[] = config.steps.map((s) => ({
         id: s.id,
         state: "pending" as StepState,
@@ -364,7 +379,10 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       if (!internal) return;
 
       const targetIdx = internal.config.steps.findIndex((s) => s.id === stepId);
-      if (targetIdx < 0) return;
+      if (targetIdx < 0) {
+        engine.fail(sessionId, `goto target "${stepId}" not found`);
+        return;
+      }
 
       const curIdx = internal.session.currentStepIndex;
       const start = Math.min(curIdx, targetIdx);
