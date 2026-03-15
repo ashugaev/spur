@@ -166,7 +166,7 @@ function readUserRules(project: ProjectConfig): string | null {
 
 export function buildPipelineStepContext(
   step: PipelineStep,
-  stepState: PipelineStepState,
+  _stepState: PipelineStepState,
 ): string {
   const lines: string[] = [];
   lines.push("## Current Pipeline Step");
