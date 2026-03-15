@@ -461,7 +461,7 @@ export function Dashboard({
     return () => {
       clearInterval(timer);
     };
-  }, [activeTab, cronSnapshot, refreshCronJobs]);
+  }, [activeTab, refreshCronJobs]);
 
   return (
     <div className="px-4 py-5 sm:px-8 sm:py-7">
