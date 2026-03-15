@@ -317,17 +317,25 @@ pipeline:
 
 ## Iteration Limits
 
-**Per-step:** `maxIterations` limits how many times a step can restart (via `goto` or retry). Each `goto` back to the same step increments the counter. Useful for preventing infinite fix loops.
+`maxIterations` limits how many times a step can restart (via `goto` or retry). Each time a step transitions to "running" state, its `iterations` counter increments. When `iterations >= maxIterations`, the step fails with "max iterations exceeded".
 
-**Pipeline-wide:** `maxIterations` on the pipeline counts every `tick()` call across all steps. Safety net against runaway pipelines.
+Set per-step or use pipeline-level as default for all steps:
 
 ```yaml
 pipeline:
-  maxIterations: 50          # total ticks before force-fail
+  maxIterations: 10          # default for steps without their own limit
   steps:
     - id: fix-pr-issues
-      maxIterations: 10      # max 10 restarts of this step
+      maxIterations: 5       # overrides pipeline default for this step
+    - id: implementation
+      maxIterations: 10      # this step gets more retries
 ```
+
+**Where it's checked:**
+- `advanceToNext()` — before entering a new step
+- `goto()` — before jumping to a target step
+
+If no `maxIterations` is set (neither step nor pipeline level), a step can restart indefinitely. The `timeout` field is the other safety net.
 
 ---
 
@@ -419,3 +427,125 @@ Timeline:
 ### Events only affect current step
 
 `on:` handlers are evaluated **only on the current step**. If `review:comments` arrives while the agent is on step `implementation`, no handler fires — the event will be caught when `fix-pr-issues` eventually starts (via catch-up).
+
+---
+
+## Complete Config Reference
+
+### Pipeline-Level Fields
+
+```yaml
+pipeline:
+  maxIterations: 10    # default per-step iteration limit (optional)
+  recovery: fail       # default recovery strategy (optional)
+  steps: [...]         # list of step definitions (required)
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `maxIterations` | number | none | Default iteration limit for steps that don't set their own. No limit if omitted. |
+| `recovery` | `"fail"` \| `"skip"` \| `"pause"` | `"fail"` | Default recovery strategy when a step fails. Steps can override. |
+| `steps` | array | required | Ordered list of pipeline step definitions. |
+
+### Step Fields
+
+```yaml
+- id: fix-pr-issues
+  prompt: |
+    Fix CI failures and review comments.
+    Run `ao done` when resolved.
+  on:
+    ci:failed: "goto fix-pr-issues"
+    review:changes-requested: "goto fix-pr-issues"
+  timeout: 1h
+  maxIterations: 10
+  recovery: pause
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | string | required | Unique step identifier. Used in `goto`, `when` references, and UI display. |
+| `prompt` | string | — | Instructions sent to the agent when this step starts. The agent sees this as a chat message with available `ao` commands listed below it. |
+| `run` | string | — | Shell command to execute automatically (no agent). Step auto-completes on success, auto-fails on error. Mutually exclusive with `prompt` and `channel`. |
+| `channel` | string | — | Human-in-the-loop step. Pauses pipeline until `ao respond` is called. Value is the channel name (e.g. `"telegram"`). Mutually exclusive with `prompt` and `run`. |
+| `message` | string | — | Display text for channel steps, or message body for `send` actions in `on:` handlers. |
+| `options` | string[] | — | Valid response choices for channel steps (e.g. `["APPROVE", "REJECT"]`). Shown to the human. |
+| `allowText` | boolean | `false` | Allow free-form text responses on channel steps (in addition to options). |
+| `on` | Record<string, OnHandler> | — | Event handlers evaluated each poll tick. Keys are event names, values are actions. Only fires on the current step. Each event fires at most once per step iteration. |
+| `all` | string[] | — | List of event names. Step auto-completes when ALL listed events are true simultaneously in a single tick. |
+| `when` | string | — | Condition template. Step is skipped if the interpolated value is falsy. Uses `{{steps.<id>.output.<field>}}` syntax. Unresolved templates = falsy. |
+| `goto` | string | — | After this step completes, jump to the named step instead of advancing to the next one. |
+| `timeout` | string | `"1h"` | Max wall time for the step. Format: `"30s"`, `"5m"`, `"1h"`. Step fails with "timeout" when exceeded. |
+| `maxIterations` | number | pipeline default | Max times this step can restart (via `goto` or retry). Each restart increments the counter. Fails with "max iterations exceeded" when reached. |
+| `recovery` | `"fail"` \| `"skip"` \| `"pause"` | pipeline default | What happens when this step fails. |
+
+### Step Type Priority
+
+A step is classified by which field is set (checked in order):
+
+1. **`channel`** → human-in-the-loop step (waits for `ao respond`)
+2. **`run`** → shell command step (auto-executes, no agent)
+3. **`prompt`** → agent step (sends instructions, waits for `ao done`/`fail`/`goto`)
+4. **none of the above** → agent step with default "Waiting for conditions..." message
+
+### `on:` Handler Values
+
+| Value | Effect |
+|---|---|
+| `"done"` | Complete the current step, advance to next |
+| `"fail"` | Fail the current step (triggers recovery) |
+| `"pause"` | Pause the pipeline (human must resume) |
+| `"send"` | Send the step's `message:` field to the agent |
+| `"goto <step-id>"` | Jump to the named step (restarts it, increments iterations) |
+| `"<any other string>"` | Send this text as a message to the agent |
+| `{ send: "msg" }` | Send a message to the agent |
+| `{ send: "msg", retries: N, goto: "id" }` | Send message; after N iterations of this step, jump to target instead |
+
+### Available Events for `on:` and `all:`
+
+Events are derived from the lifecycle poll loop. Available event keys:
+
+| Event | Fires when |
+|---|---|
+| `ci:failed` | CI checks are failing |
+| `ci:passed` | CI checks pass (status = approved/mergeable/merged) |
+| `review:changes-requested` | Reviewer requested changes |
+| `review:approved` | PR is approved |
+| `review:comments` | New unresolved review comments detected |
+| `merge:conflict` | Merge conflicts detected |
+| `merge:ready` | PR is mergeable (all criteria met) |
+| `session.status` | Always present — value is the current session status string |
+| `session.finished` | Session is killed or merged |
+
+### `when:` Template Syntax
+
+Templates use `{{path.to.value}}` syntax, interpolated from step outputs:
+
+```yaml
+when: "{{steps.shallow-scoring.output.needsResearch}}"
+when: "{{steps.implementation.output.touchesUI}}"
+```
+
+**Available context:**
+- `steps.<step-id>.output.<field>` — output from a completed step's `ao done --output`
+- `event.<key>` / `session.<key>` — current tick events (same as `on:` keys)
+
+**Truthiness rules:**
+- Unresolved `{{...}}` (step not completed, field missing) → falsy → step skipped
+- `""`, `"false"`, `"0"`, `"null"`, `"undefined"` → falsy
+- Everything else → truthy
+
+### Pipeline State Machine
+
+```
+Pipeline states: running → completed | failed | paused
+Step states:     pending → running → completed | failed | skipped | rewound
+
+Step transitions:
+  pending  → running    (pipeline advances to this step)
+  running  → completed  (ao done)
+  running  → failed     (ao fail / timeout / maxIterations)
+  running  → rewound    (goto jumped past this step)
+  pending  → skipped    (when: condition is falsy)
+  failed   → running    (goto restarts a failed step)
+```

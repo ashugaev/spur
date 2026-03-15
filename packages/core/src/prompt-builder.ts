@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ProjectConfig, PipelineStep, PipelineStepState } from "./types.js";
+import type { ProjectConfig, PipelineStep } from "./types.js";
 
 // =============================================================================
 // LAYER 1: BASE AGENT PROMPT
@@ -68,7 +68,7 @@ export interface PromptBuildConfig {
   userPrompt?: string;
 
   /** Pipeline step context (injected when session has an active pipeline) */
-  pipelineStep?: { step: PipelineStep; state: PipelineStepState };
+  pipelineStep?: PipelineStep;
 }
 
 // =============================================================================
@@ -166,7 +166,6 @@ function readUserRules(project: ProjectConfig): string | null {
 
 export function buildPipelineStepContext(
   step: PipelineStep,
-  _stepState: PipelineStepState,
 ): string {
   const lines: string[] = [];
   lines.push("## Current Pipeline Step");
@@ -251,9 +250,7 @@ export function buildPrompt(config: PromptBuildConfig): string | null {
 
   // Pipeline step context (before user prompt so user prompt can override)
   if (config.pipelineStep) {
-    sections.push(
-      buildPipelineStepContext(config.pipelineStep.step, config.pipelineStep.state),
-    );
+    sections.push(buildPipelineStepContext(config.pipelineStep));
   }
 
   // Explicit user prompt (appended last, highest priority)

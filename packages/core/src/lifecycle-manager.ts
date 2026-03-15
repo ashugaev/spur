@@ -1171,7 +1171,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           const stepState = pState.steps[pState.currentStepIndex];
           if (!stepCfg || !stepState) return;
 
-          const contextMessage = buildPipelineStepContext(stepCfg, stepState);
+          const contextMessage = buildPipelineStepContext(stepCfg);
           void sessionManager.send(sessionId as SessionId, contextMessage);
         }
       }),

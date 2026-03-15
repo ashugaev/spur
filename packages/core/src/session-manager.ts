@@ -41,7 +41,6 @@ import {
   type Issue,
   type PipelineEngine,
   type PipelineStep,
-  type PipelineStepState,
   PR_STATE,
 } from "./types.js";
 import {
@@ -877,14 +876,13 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       pipelineEngine.initialize(sessionId, project.pipeline);
     }
 
-    let pipelineStepContext: { step: PipelineStep; state: PipelineStepState } | undefined;
+    let pipelineStepContext: PipelineStep | undefined;
     if (pipelineEngine && project.pipeline?.steps) {
       const pState = pipelineEngine.getState(sessionId);
       if (pState) {
-        const stepState = pState.steps[pState.currentStepIndex];
         const stepCfg = project.pipeline.steps[pState.currentStepIndex];
-        if (stepState && stepCfg) {
-          pipelineStepContext = { step: stepCfg, state: stepState };
+        if (stepCfg) {
+          pipelineStepContext = stepCfg;
         }
       }
     }
@@ -918,7 +916,7 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
 
       const pipelineEnv: Record<string, string> = {};
       if (pipelineStepContext) {
-        pipelineEnv["AO_PIPELINE_STEP"] = pipelineStepContext.step.id;
+        pipelineEnv["AO_PIPELINE_STEP"] = pipelineStepContext.id;
       }
       if (config.port) {
         pipelineEnv["AO_DASHBOARD_URL"] = `http://localhost:${config.port}`;

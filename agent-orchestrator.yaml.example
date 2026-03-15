@@ -161,9 +161,10 @@ projects:
     # The agent sees current step context and uses `ao done/fail/goto` to advance.
     #
     # pipeline:
-    #   # Max total iterations across ALL steps before pipeline fails (default: none).
-    #   # An "iteration" is one pipeline.tick() call — happens each poll cycle (~10s).
-    #   maxIterations: 50
+    #   # Default maxIterations for steps that don't specify their own (default: none).
+    #   # An "iteration" = one restart of a specific step (via goto or retry).
+    #   # When a step's iterations >= maxIterations, the step fails.
+    #   maxIterations: 10
     #
     #   # What happens when a step fails: "fail" (default) | "skip" | "pause"
     #   #   fail  — pipeline stops, session marked failed

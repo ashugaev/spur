@@ -248,7 +248,6 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
         state: "running",
         currentStepIndex: 0,
         steps,
-        totalIterations: 0,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -415,7 +414,6 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       const stepCfg = currentStepConfig(internal);
       if (!step || !stepCfg || step.state !== "running") return;
 
-      internal.session.totalIterations++;
       let changed = false;
 
       const stepTimeout = stepCfg.timeout ?? "1h";

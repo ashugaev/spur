@@ -1356,7 +1356,6 @@ export interface PipelineSessionState {
   state: PipelineState;
   currentStepIndex: number;
   steps: PipelineStepState[];
-  totalIterations: number;
   createdAt: string;
   updatedAt: string;
 }
