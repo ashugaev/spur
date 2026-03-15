@@ -192,9 +192,9 @@ projects:
             Repeat until PR is green and all comments resolved.
             Run `ao done` when everything is resolved.
           on:
-            ci-failed: "goto fix-pr-issues"
-            changes-requested: "goto fix-pr-issues"
-            review-comments: "goto fix-pr-issues"
+            ci:failed: "goto fix-pr-issues"
+            review:changes-requested: "goto fix-pr-issues"
+            review:comments: "goto fix-pr-issues"
           maxIterations: 10
           recovery: pause
 

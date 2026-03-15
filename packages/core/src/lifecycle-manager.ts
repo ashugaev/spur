@@ -42,6 +42,7 @@ import {
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
+import { buildPipelineStepContext } from "./prompt-builder.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -229,6 +230,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const { config, registry, sessionManager, healthHooks } = deps;
 
   const states = new Map<SessionId, SessionStatus>();
+  const sessionProjects = new Map<SessionId, string>(); // sessionId → projectId
   const mergeConflictStates = new Map<SessionId, boolean>();
   const reviewCommentFingerprints = new Map<SessionId, string>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
@@ -797,6 +799,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     // Use tracked state if available; otherwise use the persisted metadata status
     // (not session.status, which list() may have already overwritten for dead runtimes).
     // This ensures transitions are detected after a lifecycle manager restart.
+    sessionProjects.set(session.id, session.projectId);
     const tracked = states.get(session.id);
     const oldStatus =
       tracked ?? ((session.metadata?.["status"] as SessionStatus | undefined) || session.status);
@@ -806,6 +809,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const hasMergeConflicts = determined.hasMergeConflictBlockers;
     let changesRequestedHandledBySendToAgent = false;
     let hasNewReviewComments = false;
+    const hasPipeline = deps.pipelineEngine?.getState(session.id)?.state === "running";
 
     if (newStatus !== oldStatus) {
       // State transition detected
@@ -836,13 +840,14 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
       }
 
-      // Handle transition: notify humans and/or trigger reactions
+      // Handle transition: notify humans and/or trigger reactions.
+      // Pipeline sessions skip reactions — pipeline on: handlers take over.
       const eventType = statusToEventType(oldStatus, newStatus);
       if (eventType) {
         let reactionHandledNotify = false;
         const reactionKey = eventToReactionKey(eventType);
 
-        if (reactionKey) {
+        if (reactionKey && !hasPipeline) {
           const reactionConfig = resolveReactionConfig(session, reactionKey);
           if (reactionConfig) {
             // auto: false skips automated agent actions but still allows notifications
@@ -860,10 +865,6 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
               ) {
                 changesRequestedHandledBySendToAgent = true;
               }
-              // Reaction is handling this event — suppress immediate human notification.
-              // "send-to-agent" retries + escalates on its own; "notify"/"auto-merge"
-              // already call notifyHuman internally. Notifying here would bypass the
-              // delayed escalation behaviour configured via retries/escalateAfter.
               reactionHandledNotify = true;
             }
           }
@@ -910,28 +911,32 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
         if (hasPendingComments && commentsChanged && !changesRequestedHandledBySendToAgent) {
           hasNewReviewComments = true;
-          const eventType: EventType = "review.comments_unresolved";
-          let reactionHandledNotify = false;
-          const reactionKey = eventToReactionKey(eventType);
 
-          if (reactionKey) {
-            const reactionConfig = resolveReactionConfig(session, reactionKey);
-            if (reactionConfig) {
-              if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-                await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
-                reactionHandledNotify = true;
+          // Pipeline sessions: skip reactions, pipeline on: handles review:comments
+          if (!hasPipeline) {
+            const eventType: EventType = "review.comments_unresolved";
+            let reactionHandledNotify = false;
+            const reactionKey = eventToReactionKey(eventType);
+
+            if (reactionKey) {
+              const reactionConfig = resolveReactionConfig(session, reactionKey);
+              if (reactionConfig) {
+                if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
+                  await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+                  reactionHandledNotify = true;
+                }
               }
             }
-          }
 
-          if (!reactionHandledNotify) {
-            const event = createEvent(eventType, {
-              sessionId: session.id,
-              projectId: session.projectId,
-              message: `${session.id}: ${pendingComments.length} unresolved review comment(s)`,
-              data: { pendingComments: pendingComments.length },
-            });
-            await notifyHuman(event, inferPriority(eventType));
+            if (!reactionHandledNotify) {
+              const event = createEvent("review.comments_unresolved", {
+                sessionId: session.id,
+                projectId: session.projectId,
+                message: `${session.id}: ${pendingComments.length} unresolved review comment(s)`,
+                data: { pendingComments: pendingComments.length },
+              });
+              await notifyHuman(event, inferPriority("review.comments_unresolved"));
+            }
           }
         }
       } catch {
@@ -943,7 +948,8 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     }
 
     // Trigger merge-conflicts reaction once per conflict period, independent of status transitions.
-    if (hasMergeConflicts && !hadMergeConflicts) {
+    // Pipeline sessions: skip reactions, pipeline on: handles merge:conflict
+    if (hasMergeConflicts && !hadMergeConflicts && !hasPipeline) {
       const eventType: EventType = "merge.conflicts";
       let reactionHandledNotify = false;
       const reactionKey = eventToReactionKey(eventType);
@@ -983,26 +989,22 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         events["session.status"] = newStatus;
         if (newStatus === "killed" || newStatus === "merged") events["session.finished"] = true;
 
-        // Reaction-style event names (match pipeline on: handler keys)
-        if (newStatus === "ci_failed") events["ci-failed"] = true;
-        if (newStatus === "changes_requested") events["changes-requested"] = true;
-        if (hasMergeConflicts) events["merge-conflicts"] = true;
-        if (hasNewReviewComments) events["review-comments"] = true;
+        // v2 event names (colon format — match pipeline on:/all: keys)
+        if (newStatus === "ci_failed") events["ci:failed"] = true;
+        if (newStatus === "changes_requested") events["review:changes-requested"] = true;
+        if (hasMergeConflicts) events["merge:conflict"] = true;
+        if (hasNewReviewComments) events["review:comments"] = true;
 
+        // PR-derived events (only when PR exists)
         if (session.pr) {
-          events["pr.created"] = true;
-          events["pr.state"] = newStatus === "merged" ? "merged" : "open";
-          if (newStatus === "ci_failed") {
-            events["ci.status"] = "failing";
-          } else if (newStatus === "approved" || newStatus === "mergeable" || newStatus === "merged") {
-            events["ci.status"] = "passing";
-            events["ci.passing"] = true;
+          if (newStatus === "approved" || newStatus === "mergeable" || newStatus === "merged") {
+            events["ci:passed"] = true;
           }
           if (newStatus === "approved" || newStatus === "mergeable") {
-            events["review.approved"] = true;
+            events["review:approved"] = true;
           }
           if (newStatus === "mergeable") {
-            events["merge.ready"] = true;
+            events["merge:ready"] = true;
           }
         }
 
@@ -1139,16 +1141,41 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
   const pipelineCleanups: Array<() => void> = [];
   if (deps.eventBus && deps.pipelineEngine) {
+    // When pipeline advances to a new step, send the step context to the agent.
+    pipelineCleanups.push(
+      deps.eventBus.on("pipeline.step.started", (data: unknown) => {
+        if (data && typeof data === "object" && "sessionId" in data && "stepId" in data) {
+          const { sessionId } = data as { sessionId: string; stepId: string };
+          if (!sessionId) return;
+
+          const pState = deps.pipelineEngine!.getState(sessionId as SessionId);
+          if (!pState) return;
+
+          const projectId = sessionProjects.get(sessionId as SessionId);
+          const project = projectId ? config.projects[projectId] : undefined;
+          const stepCfg = project?.pipeline?.steps?.[pState.currentStepIndex];
+          const stepState = pState.steps[pState.currentStepIndex];
+          if (!stepCfg || !stepState) return;
+
+          const contextMessage = buildPipelineStepContext(stepCfg, stepState);
+          void sessionManager.send(sessionId as SessionId, contextMessage);
+        }
+      }),
+    );
+
+    // When pipeline on: handler sends a message, forward to the agent.
     pipelineCleanups.push(
       deps.eventBus.on("pipeline.send", (data: unknown) => {
         if (data && typeof data === "object" && "sessionId" in data && "message" in data) {
           const { sessionId, message } = data as { sessionId: string; message: string };
           if (sessionId && message) {
-            void sessionManager.send(sessionId, message);
+            void sessionManager.send(sessionId as SessionId, message);
           }
         }
       }),
     );
+
+    // When agent asks a question via ao ask, notify human.
     pipelineCleanups.push(
       deps.eventBus.on("pipeline.ask", (data: unknown) => {
         if (data && typeof data === "object" && "sessionId" in data && "question" in data) {
