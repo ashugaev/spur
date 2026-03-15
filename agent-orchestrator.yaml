@@ -67,7 +67,6 @@ projects:
     tracker:
       plugin: github
     symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
-    # agentRulesFile: .ao-agent-rules.md  # migrated to pipeline.steps
     postCreate:
       - "pnpm install"
     agentConfig:

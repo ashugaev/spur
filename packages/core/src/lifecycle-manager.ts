@@ -805,6 +805,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const hadMergeConflicts = mergeConflictStates.get(session.id) ?? false;
     const hasMergeConflicts = determined.hasMergeConflictBlockers;
     let changesRequestedHandledBySendToAgent = false;
+    let hasNewReviewComments = false;
 
     if (newStatus !== oldStatus) {
       // State transition detected
@@ -908,6 +909,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
 
         if (hasPendingComments && commentsChanged && !changesRequestedHandledBySendToAgent) {
+          hasNewReviewComments = true;
           const eventType: EventType = "review.comments_unresolved";
           let reactionHandledNotify = false;
           const reactionKey = eventToReactionKey(eventType);
@@ -973,7 +975,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     mergeConflictStates.set(session.id, hasMergeConflicts);
 
     // Pipeline evaluation — tick the pipeline engine with already-computed session events.
-    // Uses local variables from checkSession to avoid duplicate SCM polling.
+    // Runs AFTER reactions so review-comments flag is available.
     if (deps.pipelineEngine) {
       const pipelineState = deps.pipelineEngine.getState(session.id);
       if (pipelineState && pipelineState.state === "running") {
@@ -981,20 +983,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         events["session.status"] = newStatus;
         if (newStatus === "killed" || newStatus === "merged") events["session.finished"] = true;
 
+        // Reaction-style event names (match pipeline on: handler keys)
+        if (newStatus === "ci_failed") events["ci-failed"] = true;
+        if (newStatus === "changes_requested") events["changes-requested"] = true;
+        if (hasMergeConflicts) events["merge-conflicts"] = true;
+        if (hasNewReviewComments) events["review-comments"] = true;
+
         if (session.pr) {
           events["pr.created"] = true;
           events["pr.state"] = newStatus === "merged" ? "merged" : "open";
-          if (
-            newStatus !== "ci_failed" &&
-            newStatus !== "review_pending" &&
-            newStatus !== "changes_requested" &&
-            newStatus !== "pr_open"
-          ) {
-            if (newStatus === "approved" || newStatus === "mergeable") {
-              events["ci.passing"] = true;
-              events["review.approved"] = true;
-            }
-          }
           if (newStatus === "ci_failed") {
             events["ci.status"] = "failing";
           } else if (newStatus === "approved" || newStatus === "mergeable" || newStatus === "merged") {

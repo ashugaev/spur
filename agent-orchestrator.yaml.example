@@ -115,6 +115,83 @@ projects:
     # orchestratorRules: |
     #   Prefer to batch-spawn related issues together.
 
+    # Pipeline — structured step-based workflow for agent sessions.
+    # Each spawned session follows these steps sequentially.
+    # The agent sees current step context and uses `ao done/fail/goto` to advance.
+    #
+    # pipeline:
+    #   # Max total iterations across ALL steps before pipeline fails (default: none).
+    #   # An "iteration" is one pipeline.tick() call — happens each poll cycle (~10s).
+    #   maxIterations: 50
+    #
+    #   # What happens when a step fails: "fail" (default) | "skip" | "pause"
+    #   #   fail  — pipeline stops, session marked failed
+    #   #   skip  — skip the failed step, advance to next
+    #   #   pause — pause pipeline, wait for human intervention (ao goto / ao done)
+    #   recovery: fail
+    #
+    #   steps:
+    #     # --- Step fields ---
+    #
+    #     # id (required) — unique step identifier, used in goto/when/output references
+    #     # prompt        — instructions shown to the agent for this step
+    #     # run           — shell command to execute (no agent involved, auto-completes)
+    #     # channel       — human-in-the-loop step (e.g. "telegram"), waits for respond()
+    #     # message       — display message for channel steps or send actions
+    #     # options       — valid response choices for channel steps (e.g. ["APPROVE", "REJECT"])
+    #     # allowText     — allow free-form text responses on channel steps (default: false)
+    #     # when          — condition template; step is skipped if falsy
+    #     #                 e.g. "{{steps.scoring.output.needsResearch}}"
+    #     #                 Unresolved {{...}} = falsy (fail-closed)
+    #     # goto          — after completion, jump to this step id instead of next
+    #     # timeout       — max time for step before auto-fail (default: "1h")
+    #     #                 Format: "30s", "5m", "1h"
+    #     # maxIterations — max retries for this step before failing (overrides pipeline-level)
+    #     #                 An "iteration" = one goto/restart of this specific step
+    #     # recovery      — per-step override: "fail" | "skip" | "pause"
+    #     # on            — event handlers (evaluated each tick):
+    #     #                 Values: "done" | "fail" | "pause" | "send" | "goto <step-id>"
+    #     #                 Or object: { send: "message", retries: N, goto: "step-id" }
+    #     # all           — list of event names; step completes when ALL are true in same tick
+    #
+    #     - id: notify
+    #       prompt: |
+    #         Notify that the task has started.
+    #         Run `ao done` when notification is sent.
+    #       timeout: 5m
+    #
+    #     - id: implement
+    #       prompt: |
+    #         Implement the task. Run `ao done` when complete.
+    #       maxIterations: 10
+    #
+    #     - id: review
+    #       prompt: |
+    #         Review the implementation. Run `ao done` if approved.
+    #       maxIterations: 3
+    #       recovery: skip
+    #
+    #     - id: open-pr
+    #       prompt: |
+    #         Open a PR. Run `ao done --output '{"pr_url": "<url>"}'`.
+    #
+    #     # Conditional step — only runs if previous step set the flag
+    #     - id: design-review
+    #       prompt: Review UI changes.
+    #       when: "{{steps.implement.output.touchesUI}}"
+    #       recovery: skip
+    #
+    #     # Shell command step — runs automatically, no agent
+    #     - id: run-tests
+    #       run: "pnpm test"
+    #
+    #     # Human-in-the-loop step — waits for external response
+    #     - id: approval
+    #       channel: telegram
+    #       message: "Ready for review. Approve or reject?"
+    #       options: ["APPROVE", "REJECT"]
+    #       timeout: 30m
+
     # Per-project reaction overrides
     # reactions:
     #   approved-and-green:
