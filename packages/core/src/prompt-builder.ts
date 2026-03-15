@@ -194,10 +194,13 @@ export function buildPipelineStepContext(
     lines.push(step.prompt ?? step.message ?? "Waiting for conditions...");
     lines.push("");
     lines.push("### Available Actions");
-    lines.push("Use `ao` CLI or MCP tools to signal step completion:");
+    lines.push("Use `ao` CLI to signal step completion or ask for help:");
     lines.push('- `ao done [--output \'{"key": "value"}\']` -- mark step as completed');
     lines.push('- `ao fail [--reason "description"]` -- mark step as failed');
     lines.push("- `ao goto <step-id>` -- jump to a specific step");
+    lines.push(
+      '- `ao ask "<question>" [--options "opt1,opt2"]` -- ask the user a question and wait for response',
+    );
   }
 
   return lines.join("\n");
