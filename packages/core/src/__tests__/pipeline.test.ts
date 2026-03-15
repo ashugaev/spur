@@ -22,8 +22,8 @@ function makeEventBus(): EventBus & { events: Array<{ event: string; data: unkno
     emit(event: string, data?: unknown) {
       events.push({ event, data });
     },
-    on: vi.fn(),
-    off: vi.fn(),
+    on: vi.fn(() => vi.fn()),
+    once: vi.fn(() => vi.fn()),
   };
 }
 
