@@ -911,13 +911,13 @@ export interface ProjectConfig {
 
   /**
    * GitHub repo in "owner/repo" format.
-   * Omit for cron-only projects that don't need Git/GitHub (defaults to "").
+   * Optional — omit for projects that don't need Git/GitHub (defaults to "").
    */
   repo: string;
 
   /**
    * Local path to the repo (working directory for the agent).
-   * Omit for cron-only projects — a scratch directory is used automatically.
+   * Optional — when omitted, a scratch directory is created automatically.
    */
   path: string;
 

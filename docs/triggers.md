@@ -82,7 +82,7 @@ triggers:
       skill: find-cars    # agent receives "/find-cars"
 ```
 
-Skills are loaded from `.claude/skills/` or `.agents/skills/`. The `skill` field takes precedence over `prompt` when both are set.
+Skills are loaded from `.claude/skills/` or `.agents/skills/`. The agent receives: `Activate skill /find-cars`.
 
 ### With named agent
 
@@ -96,7 +96,7 @@ triggers:
       agent: architect    # uses .claude/agents/architect.md
 ```
 
-Agent definitions live in `.claude/agents/` or `.agents/`. The agent name is passed as a prompt instruction.
+Agent definitions live in `.claude/agents/` or `.agents/`. The agent receives: `Activate agent: architect` followed by the prompt.
 
 ### With CLI tool and branch overrides
 

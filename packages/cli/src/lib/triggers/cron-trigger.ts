@@ -11,27 +11,34 @@ async function startCronTrigger(deps: TriggerStartDeps): Promise<TriggerControll
 
   const spawn = trigger.spawn;
 
-  // skill takes precedence: "find-cars" → "/find-cars"
   const skillName =
     typeof spawn.skill === "string" && spawn.skill.length > 0 ? spawn.skill : undefined;
   const namedAgent =
     typeof spawn.agent === "string" && spawn.agent.length > 0 ? spawn.agent : undefined;
-  const basePrompt = skillName
-    ? `/${skillName}`
-    : typeof spawn.prompt === "string" && spawn.prompt.length > 0
-      ? spawn.prompt
-      : undefined;
+  const userPrompt =
+    typeof spawn.prompt === "string" && spawn.prompt.length > 0 ? spawn.prompt : undefined;
 
-  if (!basePrompt) {
+  if (!skillName && !userPrompt) {
     throw new Error(
       `[trigger:${triggerId}] cron:tick requires spawn.skill or spawn.prompt to be set`,
     );
   }
 
-  // If a named agent is specified, prepend instruction to use it
-  const prompt = namedAgent
-    ? `Use the "${namedAgent}" agent. ${basePrompt}`
-    : basePrompt;
+  // Build the full prompt:
+  // - skill: "Activate skill /find-cars" + optional user prompt
+  // - agent: "Activate agent: architect" + skill or user prompt
+  // - plain: just the user prompt
+  const parts: string[] = [];
+  if (namedAgent) {
+    parts.push(`Activate agent: ${namedAgent}`);
+  }
+  if (skillName) {
+    parts.push(`Activate skill /${skillName}`);
+  }
+  if (userPrompt) {
+    parts.push(userPrompt);
+  }
+  const prompt = parts.join("\n\n");
 
   const cliOverride = typeof spawn.cli === "string" ? spawn.cli : undefined;
   const branchOverride = typeof spawn.branch === "string" ? spawn.branch : undefined;
