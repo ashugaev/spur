@@ -134,6 +134,7 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
     delete stepState.completedAt;
     delete stepState.failReason;
     delete stepState.satisfiedConditions;
+    delete stepState.firedOn;
   }
 
   function advanceToNext(
@@ -427,8 +428,11 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       }
 
       if (stepCfg.on) {
+        const alreadyFired = new Set(step.firedOn ?? []);
         for (const [key, handler] of Object.entries(stepCfg.on)) {
-          if (events[key]) {
+          if (events[key] && !alreadyFired.has(key)) {
+            step.firedOn = [...alreadyFired, key];
+            persist(sessionId);
             handleOnAction(sessionId, handler, internal, step, stepCfg);
             return;
           }

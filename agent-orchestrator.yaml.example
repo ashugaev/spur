@@ -206,6 +206,13 @@ projects:
     #         Implement the task. Run `ao done` when complete.
     #       maxIterations: 10
     #
+    #     - id: simplify
+    #       prompt: |
+    #         Run `code-simplifier` agent on modified files. Cut overheads, reduce
+    #         complexity, eliminate redundant abstractions. Run `ao done` when done.
+    #       maxIterations: 2
+    #       recovery: skip
+    #
     #     - id: review
     #       prompt: |
     #         Review the implementation. Run `ao done` if approved.

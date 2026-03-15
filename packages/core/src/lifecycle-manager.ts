@@ -1008,7 +1008,21 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           }
         }
 
+        let prevStepIndex = pipelineState.currentStepIndex;
         deps.pipelineEngine.tick(session.id, events);
+
+        // Catch-up loop: if tick advanced the step (e.g. on: handler called done),
+        // re-tick so the new step's on: handlers evaluate against current state.
+        // This handles pre-existing conditions (CI already failed before step started).
+        let catchup = 0;
+        while (catchup < 10) {
+          const ps = deps.pipelineEngine.getState(session.id);
+          if (!ps || ps.state !== "running") break;
+          if (ps.currentStepIndex === prevStepIndex) break;
+          prevStepIndex = ps.currentStepIndex;
+          deps.pipelineEngine.tick(session.id, events);
+          catchup++;
+        }
 
         await executePipelineRunStep(session);
       }

@@ -135,6 +135,20 @@ projects:
             Run `ao done --output '{"touchesUI": <true|false>}'` when all implementation is complete.
           maxIterations: 10
 
+        # Phase 5.5: Code simplification — reduce overheads, improve clarity
+        - id: simplify
+          prompt: |
+            Run `code-simplifier` agent on all recently modified files.
+            The simplifier preserves functionality while cutting overheads:
+            - Reduce unnecessary complexity and nesting
+            - Eliminate redundant abstractions and dead code
+            - Consolidate duplicated logic
+            - Prefer explicit, readable code over clever one-liners
+            Only modify files changed in this session — do not touch unrelated code.
+            Run `ao done` when simplification is complete.
+          maxIterations: 2
+          recovery: skip
+
         # Phase 6: Code review — verify implementation quality
         - id: review
           prompt: |

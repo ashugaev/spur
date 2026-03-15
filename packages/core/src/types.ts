@@ -1348,6 +1348,8 @@ export interface PipelineStepState {
   completedAt?: string;
   failReason?: string;
   satisfiedConditions?: string[];
+  /** on: events already fired on this step — prevents duplicate sends */
+  firedOn?: string[];
 }
 
 export interface PipelineSessionState {
