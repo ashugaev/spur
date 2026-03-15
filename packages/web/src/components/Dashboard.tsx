@@ -9,6 +9,8 @@ import {
   type AttentionLevel,
   type IntegrationStatusEntry,
   type IntegrationsStatusSnapshot,
+  type CronListenerView,
+  type CronListenersSnapshot,
   getAttentionLevel,
   isPRRateLimited,
   INTEGRATION_STATUS_KEYS,
@@ -29,11 +31,12 @@ interface DashboardProps {
   orchestratorByProject?: Record<string, string>;
 }
 
-type DashboardTab = "sessions" | "prs" | "tracker";
+type DashboardTab = "sessions" | "prs" | "tracker" | "cron";
 export interface DashboardProjectFilterOption {
   id: string;
   label: string;
   hasTracker?: boolean;
+  hasCron?: boolean;
 }
 interface JiraTaskSessionView {
   id: string;
@@ -76,7 +79,7 @@ export function Dashboard({
   const [rateLimitDismissed, setRateLimitDismissed] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>(() => {
     const tab = searchParams.get("tab");
-    if (tab === "prs" || tab === "tracker" || tab === "sessions") return tab;
+    if (tab === "prs" || tab === "tracker" || tab === "sessions" || tab === "cron") return tab;
     return "sessions";
   });
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
@@ -97,6 +100,10 @@ export function Dashboard({
   const [jiraError, setJiraError] = useState<string | null>(null);
   const [jiraCachedAt, setJiraCachedAt] = useState<string | null>(null);
   const [startingJiraTaskKeys, setStartingJiraTaskKeys] = useState<Record<string, boolean>>({});
+  const [cronSnapshot, setCronSnapshot] = useState<CronListenersSnapshot | null>(null);
+  const [cronLoading, setCronLoading] = useState(false);
+  const [cronError, setCronError] = useState<string | null>(null);
+  const [triggeringCronIds, setTriggeringCronIds] = useState<Record<string, boolean>>({});
 
   const updateUrl = useCallback(
     (tab: DashboardTab, projectId: string) => {
@@ -140,6 +147,7 @@ export function Dashboard({
   );
   const displayProjectName = selectedProjectOption?.label;
   const showTrackerTab = selectedProjectOption?.hasTracker === true;
+  const showCronTab = selectedProjectOption?.hasCron === true;
 
   const filteredSessions = useMemo(() => {
     if (!effectiveProjectId) {
@@ -310,6 +318,66 @@ export function Dashboard({
     [refreshJiraTasks],
   );
 
+  const refreshCronJobs = useCallback(
+    async (showLoading = false) => {
+      if (showLoading) {
+        setCronLoading(true);
+      }
+      try {
+        const endpoint = effectiveProjectId
+          ? `/api/cron-listeners?projectId=${encodeURIComponent(effectiveProjectId)}`
+          : "/api/cron-listeners";
+        const response = await fetch(endpoint, { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+        const payload = (await response.json()) as CronListenersSnapshot;
+        setCronSnapshot(payload);
+        setCronError(null);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unexpected error";
+        setCronError(`Failed to load cron jobs: ${detail}`);
+      } finally {
+        if (showLoading) {
+          setCronLoading(false);
+        }
+      }
+    },
+    [effectiveProjectId],
+  );
+
+  const handleTriggerCronJob = useCallback(
+    async (job: CronListenerView) => {
+      setTriggeringCronIds((prev) => ({ ...prev, [job.listenerId]: true }));
+      try {
+        const response = await fetch("/api/spawn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            projectId: job.projectId,
+            prompt: job.prompt,
+            ...(job.agent !== undefined ? { agent: job.agent } : {}),
+            ...(job.branch !== undefined ? { branch: job.branch } : {}),
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response));
+        }
+        setCronError(null);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unexpected error";
+        setCronError(`Failed to trigger ${job.listenerId}: ${detail}`);
+      } finally {
+        setTriggeringCronIds((prev) => {
+          const { [job.listenerId]: removed, ...next } = prev;
+          void removed;
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
   const hasKanbanSessions = KANBAN_LEVELS.some((l) => grouped[l].length > 0);
 
   const anyRateLimited = useMemo(
@@ -335,10 +403,16 @@ export function Dashboard({
     setJiraCachedAt(null);
     setJiraLoadedOnce(false);
     setStartingJiraTaskKeys({});
+    setCronSnapshot(null);
+    setCronError(null);
+    setTriggeringCronIds({});
     if (!showTrackerTab && activeTab === "tracker") {
       setActiveTab("sessions");
     }
-  }, [effectiveProjectId, showTrackerTab, activeTab]);
+    if (!showCronTab && activeTab === "cron") {
+      setActiveTab("sessions");
+    }
+  }, [effectiveProjectId, showTrackerTab, showCronTab, activeTab]);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,6 +451,17 @@ export function Dashboard({
       clearInterval(timer);
     };
   }, [activeTab, jiraLoadedOnce, refreshJiraTasks]);
+
+  useEffect(() => {
+    if (activeTab !== "cron") return;
+    void refreshCronJobs(!cronSnapshot);
+    const timer = setInterval(() => {
+      void refreshCronJobs(false);
+    }, 15000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [activeTab, cronSnapshot, refreshCronJobs]);
 
   return (
     <div className="px-4 py-5 sm:px-8 sm:py-7">
@@ -488,7 +573,14 @@ export function Dashboard({
       )}
 
       <div className="mb-6 flex items-center gap-1 rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-1">
-        {(["sessions", "prs", ...(showTrackerTab ? ["tracker"] : [])] as DashboardTab[]).map((tab) => (
+        {(
+          [
+            "sessions",
+            "prs",
+            ...(showTrackerTab ? ["tracker"] : []),
+            ...(showCronTab ? ["cron"] : []),
+          ] as DashboardTab[]
+        ).map((tab) => (
           <button
             key={tab}
             type="button"
@@ -501,7 +593,13 @@ export function Dashboard({
                 : "text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]",
             ].join(" ")}
           >
-            {tab === "sessions" ? "Sessions" : tab === "prs" ? "Pull Requests" : "Tracker Tasks"}
+            {tab === "sessions"
+              ? "Sessions"
+              : tab === "prs"
+                ? "Pull Requests"
+                : tab === "tracker"
+                  ? "Tracker Tasks"
+                  : "Cron Jobs"}
           </button>
         ))}
       </div>
@@ -623,6 +721,16 @@ export function Dashboard({
           onRefresh={() => void refreshJiraTasks(true)}
           onStartTask={(task) => void handleStartJiraTask(task)}
           onRestoreSession={(sessionId) => void handleRestore(sessionId)}
+        />
+      )}
+
+      {activeTab === "cron" && (
+        <CronJobsPanel
+          snapshot={cronSnapshot}
+          loading={cronLoading}
+          error={cronError}
+          onTrigger={(job) => void handleTriggerCronJob(job)}
+          triggeringIds={triggeringCronIds}
         />
       )}
     </div>
@@ -1643,4 +1751,134 @@ function mergeScore(
   else if (pr.reviewDecision !== "approved") score += 10;
   score += pr.unresolvedThreads * 5;
   return score;
+}
+
+interface CronJobsPanelProps {
+  snapshot: CronListenersSnapshot | null;
+  loading: boolean;
+  error: string | null;
+  onTrigger: (job: CronListenerView) => void;
+  triggeringIds: Record<string, boolean>;
+}
+
+function CronJobsPanel({
+  snapshot,
+  loading,
+  error,
+  onTrigger,
+  triggeringIds,
+}: CronJobsPanelProps) {
+  if (loading && !snapshot) {
+    return (
+      <section className="rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4">
+        <p className="text-[12px] text-[var(--color-text-secondary)]">Loading cron jobs…</p>
+      </section>
+    );
+  }
+
+  const jobs = snapshot?.jobs ?? [];
+
+  return (
+    <section className="rounded-[8px] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4">
+      <div className="mb-3 min-w-0">
+        <h2 className="text-[10px] font-bold uppercase tracking-[0.10em] text-[var(--color-text-secondary)]">
+          Cron Jobs
+        </h2>
+        <p className="mt-1 text-[11px] text-[var(--color-text-secondary)]">
+          Scheduled triggers that spawn agent sessions on a cron schedule.
+        </p>
+      </div>
+
+      {error && (
+        <p className="mb-3 rounded-[6px] border border-[rgba(248,81,73,0.45)] bg-[rgba(248,81,73,0.12)] px-2.5 py-2 text-[11px] text-[var(--color-status-error)]">
+          {error}
+        </p>
+      )}
+
+      {jobs.length === 0 ? (
+        <p className="rounded-[6px] border border-[var(--color-border-default)] px-3 py-2 text-[12px] text-[var(--color-text-secondary)]">
+          {error
+            ? "Unable to load cron jobs right now."
+            : "No cron listeners configured for this project."}
+        </p>
+      ) : (
+        <div className="overflow-x-auto rounded-[6px] border border-[var(--color-border-default)]">
+          <table className="min-w-[760px] w-full border-collapse">
+            <thead>
+              <tr className="border-b border-[var(--color-border-muted)]">
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Listener
+                </th>
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Schedule
+                </th>
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Prompt
+                </th>
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  CLI
+                </th>
+                <th className="px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Run on start
+                </th>
+                <th className="px-3 py-2.5 text-right text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--color-text-muted)]">
+                  Trigger
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job, index) => {
+                const isTriggering = Boolean(triggeringIds[job.listenerId]);
+                return (
+                  <tr
+                    key={`${job.projectId}:${job.listenerId}`}
+                    className={[
+                      "border-b border-[var(--color-border-subtle)] last:border-0 hover:bg-[rgba(255,255,255,0.02)]",
+                      index % 2 === 0 ? "bg-[rgba(255,255,255,0.01)]" : "bg-transparent",
+                    ].join(" ")}
+                  >
+                    <td className="px-3 py-2.5 align-top text-[12px] font-mono font-medium text-[var(--color-text-primary)]">
+                      {job.listenerId}
+                    </td>
+                    <td className="px-3 py-2.5 align-top text-[12px] font-mono text-[var(--color-text-secondary)]">
+                      {job.schedule ?? "—"}
+                    </td>
+                    <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-primary)]">
+                      <span
+                        className="block max-w-[320px] truncate"
+                        title={job.prompt}
+                      >
+                        {job.prompt}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
+                      {job.cli ?? "default"}
+                    </td>
+                    <td className="px-3 py-2.5 align-top text-[12px] text-[var(--color-text-secondary)]">
+                      {job.runOnStart ? "yes" : "no"}
+                    </td>
+                    <td className="px-3 py-2.5 text-right align-top">
+                      <button
+                        type="button"
+                        disabled={isTriggering}
+                        onClick={() => onTrigger(job)}
+                        className={[
+                          "rounded border px-2 py-1 text-[11px] font-medium",
+                          isTriggering
+                            ? "cursor-not-allowed border-[var(--color-border-default)] text-[var(--color-text-secondary)] opacity-60"
+                            : "border-[rgba(88,166,255,0.45)] bg-[rgba(88,166,255,0.12)] text-[var(--color-status-working)] hover:bg-[rgba(88,166,255,0.2)]",
+                        ].join(" ")}
+                      >
+                        {isTriggering ? "Triggering…" : "Trigger now"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }

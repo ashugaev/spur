@@ -22,13 +22,27 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  const prompt =
+    typeof body.prompt === "string" && body.prompt.trim().length > 0
+      ? body.prompt.trim()
+      : undefined;
+  const agent =
+    typeof body.agent === "string" && body.agent.trim().length > 0
+      ? body.agent.trim()
+      : undefined;
+  const branch =
+    typeof body.branch === "string" && body.branch.trim().length > 0
+      ? body.branch.trim()
+      : undefined;
+
   try {
     const { sessionManager } = await getServices();
-    const agent = typeof body.agent === "string" ? body.agent : undefined;
     const session = await sessionManager.spawn({
       projectId: body.projectId as string,
       issueId: (body.issueId as string) ?? undefined,
-      agent,
+      ...(prompt !== undefined ? { prompt } : {}),
+      ...(agent !== undefined ? { agent } : {}),
+      ...(branch !== undefined ? { branch } : {}),
     });
 
     return NextResponse.json({ session: sessionToDashboard(session) }, { status: 201 });
