@@ -1794,6 +1794,288 @@ describe("reactions", () => {
   });
 });
 
+describe("message buffering", () => {
+  function setupSCMForCIFail() {
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("failing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({ mergeable: false, blockers: [] }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    return { mockSCM, registryWithSCM };
+  }
+
+  it("buffers messages when session.activity is active", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI is failing. Fix it.",
+        retries: 3,
+      },
+    };
+
+    const { registryWithSCM } = setupSCMForCIFail();
+
+    // Session with activity "active" — agent is busy
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "active" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    // send should NOT have been called — message is buffered
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates buffered messages by reactionKey, keeping the latest", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI is failing. Fix it.",
+        retries: 5,
+      },
+    };
+
+    const { registryWithSCM } = setupSCMForCIFail();
+
+    // Session is active (busy) so messages get buffered
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "active" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    // First poll: buffers a ci-failed message
+    await lm.check("app-1");
+
+    // Second poll: should buffer another ci-failed message with same reactionKey
+    // Need to reset state so it triggers the reaction again (status stays ci_failed)
+    await lm.check("app-1");
+
+    // Now transition to ready so flush happens
+    session.activity = "ready";
+    await lm.check("app-1");
+
+    // Despite two buffered messages with same reactionKey, only one should be sent
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    // The message should be the single deduplicated one (not the batch format)
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "CI is failing. Fix it.");
+  });
+
+  it("flushes combined batch message on transition to ready", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI is failing. Fix it.",
+        retries: 5,
+      },
+      "merge-conflicts": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Merge conflicts detected.",
+        retries: 5,
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("failing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn(),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        blockers: ["Merge conflicts with base branch"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    // Session is active (busy) so messages get buffered
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "active" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    // First poll: buffers ci-failed and merge-conflicts messages
+    await lm.check("app-1");
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+
+    // Transition to ready so flush happens
+    session.activity = "ready";
+    await lm.check("app-1");
+
+    // Should have sent a combined batch message
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    const sentMessage = vi.mocked(mockSessionManager.send).mock.calls[0][1];
+    expect(sentMessage).toContain("The following events occurred while you were busy:");
+    expect(sentMessage).toContain("CI is failing. Fix it.");
+    expect(sentMessage).toContain("Merge conflicts detected.");
+  });
+
+  it("does not increment attempt counter for buffered messages", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI is failing. Fix it.",
+        retries: 2,
+        escalateAfter: 2,
+      },
+    };
+
+    const { registryWithSCM } = setupSCMForCIFail();
+
+    // Session is active (busy) so messages get buffered
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "active" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    // Multiple polls while agent is busy — all buffered, no attempt counted
+    await lm.check("app-1");
+    await lm.check("app-1");
+    await lm.check("app-1");
+
+    // Transition to ready — flush delivers the message
+    session.activity = "ready";
+    await lm.check("app-1");
+
+    // The message should have been sent (not escalated)
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "CI is failing. Fix it.");
+  });
+
+  it("cleans up pending messages on session pruning", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "CI is failing. Fix it.",
+        retries: 5,
+      },
+    };
+
+    const { registryWithSCM } = setupSCMForCIFail();
+
+    // Session is active so messages get buffered
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "active" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.list).mockResolvedValue([session]);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    // Buffer a message
+    await lm.check("app-1");
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+
+    // Now the session disappears from list (pruned/cleaned up)
+    vi.mocked(mockSessionManager.list).mockResolvedValue([]);
+
+    // Run a full poll cycle to trigger pruning
+    lm.start(999_999);
+    await vi.waitFor(() => {
+      // After poll, states should be empty since the session was pruned
+      expect(lm.getStates().size).toBe(0);
+    });
+    lm.stop();
+
+    // The buffered message should not be delivered after pruning
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
+  });
+});
+
 describe("getStates", () => {
   it("returns copy of states map", async () => {
     const session = makeSession({ status: "spawning" });

@@ -219,6 +219,9 @@ function pendingCommentsFingerprint(comments: ReviewComment[]): string {
 export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleManager {
   const { config, registry, sessionManager, healthHooks } = deps;
 
+  /** Activity states where the agent can accept buffered messages. */
+  const RECEPTIVE_STATES: ReadonlySet<string> = new Set(["ready", "idle", "waiting_input"]);
+
   const states = new Map<SessionId, SessionStatus>();
   const mergeConflictStates = new Map<SessionId, boolean>();
   const reviewCommentFingerprints = new Map<SessionId, string>();
@@ -1040,7 +1043,6 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     mergeConflictStates.set(session.id, hasMergeConflicts);
 
     // Flush buffered messages when the agent becomes receptive.
-    const RECEPTIVE_STATES = new Set(["ready", "idle", "waiting_input"]);
     if (session.activity && RECEPTIVE_STATES.has(session.activity) && pendingMessages.has(session.id)) {
       await flushPendingMessages(session.id);
     }
