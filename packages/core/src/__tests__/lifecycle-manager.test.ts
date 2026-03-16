@@ -668,7 +668,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -784,7 +784,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -847,7 +847,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -916,7 +916,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -993,7 +993,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -1064,7 +1064,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
     vi.mocked(mockSessionManager.send)
       .mockRejectedValueOnce(new Error("transient send failure"))
@@ -1442,7 +1442,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -1506,7 +1506,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -1570,7 +1570,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -1635,7 +1635,7 @@ describe("reactions", () => {
       }),
     };
 
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {
@@ -1694,7 +1694,7 @@ describe("reactions", () => {
     };
 
     // Session transitions from pr_open → ci_failed, which maps to ci-failed reaction
-    const session = makeSession({ status: "pr_open", pr: makePR() });
+    const session = makeSession({ status: "pr_open", pr: makePR(), activity: "ready" });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
     vi.mocked(mockSessionManager.send).mockResolvedValue(undefined);
 

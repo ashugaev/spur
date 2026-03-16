@@ -224,6 +224,43 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const reviewCommentFingerprints = new Map<SessionId, string>();
   const pinnedCommentIds = new Map<SessionId, Set<string>>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
+
+  /** Buffered messages for sessions whose agent is busy (activity === "active"). */
+  interface PendingMessage {
+    reactionKey: string;
+    message: string;
+    queuedAt: number;
+  }
+  const pendingMessages = new Map<SessionId, PendingMessage[]>();
+
+  /** Flush buffered messages for a session as a single batch. */
+  async function flushPendingMessages(sessionId: SessionId): Promise<void> {
+    const buffer = pendingMessages.get(sessionId);
+    if (!buffer || buffer.length === 0) return;
+
+    // Deduplicate by reactionKey — keep the latest entry for each key
+    const deduped = new Map<string, PendingMessage>();
+    for (const entry of buffer) {
+      deduped.set(entry.reactionKey, entry);
+    }
+
+    const messages = [...deduped.values()];
+    const combined =
+      messages.length === 1
+        ? messages[0].message
+        : "The following events occurred while you were busy:\n\n" +
+          messages.map((m, i) => `${i + 1}. ${m.message}`).join("\n");
+
+    pendingMessages.delete(sessionId);
+
+    try {
+      await sessionManager.send(sessionId, combined);
+    } catch {
+      // Send failed — messages are already cleared to avoid infinite retry loops.
+      // They will be re-queued if the same reactions fire again on the next poll.
+    }
+  }
+
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
   let allCompleteEmitted = false; // guard against repeated all_complete
@@ -400,6 +437,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     projectId: string,
     reactionKey: string,
     reactionConfig: ReactionConfig,
+    session?: Session,
   ): Promise<ReactionResult> {
     const trackerKey = `${sessionId}:${reactionKey}`;
     let tracker = reactionTrackers.get(trackerKey);
@@ -457,6 +495,32 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     switch (action) {
       case "send-to-agent": {
         if (reactionConfig.message) {
+          // Buffer the message if the agent is actively processing (busy).
+          // When activity is null/unknown, send immediately (conservative).
+          if (session?.activity === "active") {
+            // Undo the attempt increment — buffered messages haven't been delivered yet.
+            tracker.attempts--;
+            if (tracker.attempts <= 0) {
+              reactionTrackers.delete(trackerKey);
+            }
+
+            const buffer = pendingMessages.get(sessionId) ?? [];
+            buffer.push({
+              reactionKey,
+              message: reactionConfig.message,
+              queuedAt: Date.now(),
+            });
+            pendingMessages.set(sessionId, buffer);
+
+            return {
+              reactionType: reactionKey,
+              success: true,
+              action: "send-to-agent",
+              message: "queued (agent busy)",
+              escalated: false,
+            };
+          }
+
           try {
             await sessionManager.send(sessionId, reactionConfig.message);
 
@@ -843,6 +907,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
                 session.projectId,
                 reactionKey,
                 reactionConfig,
+                session,
               );
               if (
                 reactionKey === "changes-requested" &&
@@ -913,7 +978,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             const reactionConfig = resolveReactionConfig(session, reactionKey);
             if (reactionConfig) {
               if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-                await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+                await executeReaction(session.id, session.projectId, reactionKey, reactionConfig, session);
                 reactionHandledNotify = true;
               }
             }
@@ -952,7 +1017,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const reactionConfig = resolveReactionConfig(session, reactionKey);
         if (reactionConfig) {
           if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-            await executeReaction(session.id, session.projectId, reactionKey, reactionConfig);
+            await executeReaction(session.id, session.projectId, reactionKey, reactionConfig, session);
             reactionHandledNotify = true;
           }
         }
@@ -973,6 +1038,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       reactionTrackers.delete(`${session.id}:merge-conflicts`);
     }
     mergeConflictStates.set(session.id, hasMergeConflicts);
+
+    // Flush buffered messages when the agent becomes receptive.
+    const RECEPTIVE_STATES = new Set(["ready", "idle", "waiting_input"]);
+    if (session.activity && RECEPTIVE_STATES.has(session.activity) && pendingMessages.has(session.id)) {
+      await flushPendingMessages(session.id);
+    }
   }
 
   /** Run one polling cycle across all sessions. */
@@ -1031,6 +1102,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         const sessionId = trackerKey.split(":")[0];
         if (sessionId && !currentSessionIds.has(sessionId)) {
           reactionTrackers.delete(trackerKey);
+        }
+      }
+      for (const trackedId of pendingMessages.keys()) {
+        if (!currentSessionIds.has(trackedId)) {
+          pendingMessages.delete(trackedId);
         }
       }
 
