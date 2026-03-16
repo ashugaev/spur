@@ -19,11 +19,15 @@ import type { ProjectConfig, PipelineConfig, PipelineStep } from "./types.js";
 // LAYER 1: BASE AGENT PROMPT
 // =============================================================================
 
-const BASE_SESSION_PROMPT = `You are an AI agent managed by the Agent Orchestrator. Focus on the assigned task.
+const BASE_SESSION_PROMPT = `You are the orchestrator. Coordinate work by running subagents. Do NOT write code — delegate to agents.
+- GitHub comments → handle with \`github\` skill
+- Reply only to the same source as the incoming message
 
 ## Session Lifecycle
 - Your session id is available in $AO_SESSION_ID. A ready-to-use Telegram marker is in $AO_SESSION_MARKER.
-- When you finish your work, report the result. The orchestrator will handle routing and notifications.`;
+- All messages to messenger/tracker must include \`AO_SESSION:$AO_SESSION_ID\` with task description
+- When you finish your work, report the result. The orchestrator will handle routing and notifications.
+- When the current step is done, run \`ao done\`. If it failed, run \`ao fail --reason "..."\`.`;
 
 const GIT_WORKFLOW_PROMPT = `## Git Workflow
 - Worktree is already created. Don't create a new branch.
@@ -175,35 +179,14 @@ export function buildPipelineStepContext(
   lines.push("## Current Pipeline Step");
   lines.push(`**Step:** ${step.id}`);
 
-  if (step.channel) {
-    lines.push(step.message ?? step.channel);
-    if (step.options && step.options.length > 0) {
-      lines.push("");
-      lines.push("### Options");
-      for (const opt of step.options) {
-        lines.push(`- ${opt}`);
-      }
-    }
-    if (step.allowText) {
-      lines.push("");
-      lines.push("You may also respond with free-form text.");
-    }
-    lines.push("");
-    lines.push("### How to Respond");
-    lines.push("- `ao done --output '{\"response\": \"<your-choice>\"}'` -- answer the question");
+  const isListener = step.on && !step.prompt && !step.run;
+
+  if (isListener) {
+    lines.push(step.message ?? "Waiting for external events...");
   } else if (step.run) {
     lines.push(`This step executes: \`${step.run}\``);
   } else {
     lines.push(step.prompt ?? step.message ?? "Waiting for conditions...");
-    lines.push("");
-    lines.push("### Available Actions");
-    lines.push("Use `ao` CLI to signal step completion or ask for help:");
-    lines.push('- `ao done [--output \'{"key": "value"}\']` -- mark step as completed');
-    lines.push('- `ao fail [--reason "description"]` -- mark step as failed');
-    lines.push("- `ao goto <step-id>` -- jump to a specific step");
-    lines.push(
-      '- `ao ask "<question>" [--options "opt1,opt2"]` -- ask the user a question and wait for response',
-    );
   }
 
   // Dynamic context from config — auto-generated, not hardcoded in prompts
@@ -224,7 +207,7 @@ export function buildPipelineStepContext(
     }
     if (handlerLines.length > 0) {
       contextSections.push("### Automatic Event Handlers");
-      contextSections.push("These fire automatically — you do NOT need to handle them manually:");
+      contextSections.push("These fire between steps or when you are idle — never during active work:");
       contextSections.push(...handlerLines);
     }
   }
@@ -274,17 +257,14 @@ export function buildPrompt(config: PromptBuildConfig): string | null {
   const userRules = readUserRules(config.project);
   const hasRules = Boolean(userRules);
   const hasUserPrompt = Boolean(config.userPrompt);
-  const hasPipeline = Boolean(config.pipelineStep);
   const hasRepo = Boolean(config.project.repo);
 
-  // Nothing to compose — return null for backward compatibility
-  if (!hasIssue && !hasPrContext && !hasRules && !hasUserPrompt && !hasPipeline) {
+  if (!hasIssue && !hasPrContext && !hasRules && !hasUserPrompt && !config.pipelineStep) {
     return null;
   }
 
   const sections: string[] = [];
 
-  // Layer 1: Base session prompt (always)
   sections.push(BASE_SESSION_PROMPT);
 
   // Git/PR workflow — only for projects with a repo

@@ -528,11 +528,6 @@ Events in `on:` keys are subscribed automatically — no separate `events:` fiel
   options:
     approve: Ship it
     reject: Needs work
-  on:
-    approve: done
-    reject: goto implement
-    timeout: fail
-  timeout: 24h
 ```
 
 **Human free text:**
@@ -915,7 +910,7 @@ v2/src/lifecycle.ts          — polling loop (30s), status transitions, event e
 v2/src/plugins/github.ts     — SCM: detect PR, CI checks, reviews, merge readiness, merge (port)
 ```
 
-Polling loop checks each session: tmux alive → agent activity → PR status → CI → reviews. State changes emit to EventBus. Pipeline `on:` handlers react (`ci:failed → send`, `review:approved → done`). `all: [ci:passed, review:approved]` gates work.
+Polling loop checks each session: tmux alive → agent activity → PR status → CI → reviews. State changes emit to EventBus. Pipeline `on:` handlers react between steps or when agent is idle (`ci:failed → send`, `review:approved → done`). Events never interrupt the agent during active work. `all: [ci:passed, review:approved]` gates work.
 
 **Milestone:** full automation loop. Agent pushes code → CI runs → reviews come in → pipeline reacts → agent fixes → merge.
 
@@ -967,4 +962,4 @@ Port from v1 where logic exists. Build new where v2 diverges (pipeline, EventBus
 2. **Pipeline templates** — reusable step sequences across projects. `pipeline: template:ci-review-merge`?
 3. **`when:` expressions** — template interpolation + truthy check? Or expression engine (jexl)?
 4. **Channel auth** — who can `/spawn` via Telegram? Chat ID whitelist? Token per channel?
-5. **Project-level `on:`** — default event handlers that apply to all sessions regardless of pipeline step (v1 reactions, but in v2 syntax)?
+5. **Pipeline-level `on:`** — global event handlers that fire between steps or when agent is idle. Never interrupts active work. Replaces v1 reactions in v2 syntax.

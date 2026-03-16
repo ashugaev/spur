@@ -135,10 +135,38 @@ async function sendMessage(
   }
 }
 
+async function getLatestMessage(
+  botToken: string,
+  chatId: string,
+  lastUpdateId: number,
+): Promise<{ text: string; updateId: number } | null> {
+  const endpoint = `https://api.telegram.org/bot${botToken}/getUpdates?offset=${lastUpdateId + 1}&limit=1&timeout=0`;
+  const response = await fetch(endpoint);
+  if (!response.ok) return null;
+
+  const data = (await response.json()) as {
+    result?: Array<{
+      update_id: number;
+      message?: { chat: { id: number }; text?: string };
+    }>;
+  };
+  const updates = data.result ?? [];
+  for (const update of updates) {
+    if (
+      update.message?.text &&
+      String(update.message.chat.id) === chatId
+    ) {
+      return { text: update.message.text, updateId: update.update_id };
+    }
+  }
+  return null;
+}
+
 export function create(config?: Record<string, unknown>): Notifier {
   const botToken = resolveBotToken(config);
   const chatId = resolveChatId(config);
   const threadId = resolveThreadId(config);
+  let lastUpdateId = 0;
 
   if (!botToken || !chatId) {
     console.warn(
@@ -179,6 +207,14 @@ export function create(config?: Record<string, unknown>): Notifier {
 
       await sendMessage(botToken, targetChat, message, threadId);
       return null;
+    },
+
+    async poll(): Promise<string | null> {
+      if (!botToken || !chatId) return null;
+      const result = await getLatestMessage(botToken, chatId, lastUpdateId);
+      if (!result) return null;
+      lastUpdateId = result.updateId;
+      return result.text;
     },
   };
 }

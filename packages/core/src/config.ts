@@ -171,10 +171,7 @@ const PipelineStepSchema = z.object({
   id: z.string(),
   prompt: z.string().optional(),
   run: z.string().optional(),
-  channel: z.string().optional(),
   message: z.string().optional(),
-  options: z.array(z.string()).optional(),
-  allowText: z.boolean().optional(),
   on: z.record(OnHandlerSchema).optional(),
   all: z.array(z.string()).optional(),
   timeout: z.string().optional(),
@@ -187,6 +184,7 @@ const PipelineStepSchema = z.object({
 const PipelineConfigSchema = z.object({
   maxIterations: z.number().optional(),
   recovery: z.enum(["skip", "pause", "fail"]).optional(),
+  on: z.record(OnHandlerSchema).optional(),
   steps: z.array(PipelineStepSchema),
 });
 

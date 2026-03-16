@@ -414,21 +414,6 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       eventBus.emit("pipeline.step.started", { sessionId, stepId });
     },
 
-    respond(sessionId: SessionId, response: string): void {
-      const internal = states.get(sessionId);
-      if (!internal || internal.session.state !== "running") return;
-      const step = currentStep(internal);
-      const stepCfg = currentStepConfig(internal);
-      if (!step || !stepCfg?.channel) return;
-
-      step.state = "completed";
-      step.completedAt = now();
-      step.output = { response };
-
-      const context = buildContext(sessionId, {});
-      advanceToNext(sessionId, internal, context);
-    },
-
     tick(sessionId: SessionId, events: Record<string, unknown>): void {
       const internal = states.get(sessionId);
       if (!internal || internal.session.state !== "running") return;
@@ -437,6 +422,19 @@ export function createPipelineEngine(deps: PipelineEngineDeps): PipelineEngine {
       if (!step || !stepCfg || step.state !== "running") return;
 
       let changed = false;
+
+      // Global on: handlers — fire independently, don't affect step flow
+      if (internal.config.on) {
+        const globalFired = new Set(internal.session.firedGlobalOn ?? []);
+        for (const [key, handler] of Object.entries(internal.config.on)) {
+          if (events[key] && !globalFired.has(key)) {
+            globalFired.add(key);
+            internal.session.firedGlobalOn = [...globalFired];
+            persist(sessionId);
+            handleOnAction(sessionId, handler, internal, step, stepCfg);
+          }
+        }
+      }
 
       const stepTimeout = stepCfg.timeout ?? "1h";
       if (step.startedAt) {

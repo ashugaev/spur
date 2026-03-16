@@ -678,6 +678,9 @@ export interface Notifier {
 
   /** Post a message to a channel (for team-visible notifiers like Slack) */
   post?(message: string, context?: NotifyContext): Promise<string | null>;
+
+  /** Poll for inbound messages (used by channel steps to receive human responses) */
+  poll?(context?: NotifyContext): Promise<string | null>;
 }
 
 export interface NotifyAction {
@@ -1320,10 +1323,7 @@ export interface PipelineStep {
   id: string;
   prompt?: string;
   run?: string;
-  channel?: string;
   message?: string;
-  options?: string[];
-  allowText?: boolean;
   on?: Record<string, OnHandler>;
   all?: string[];
   timeout?: string;
@@ -1336,6 +1336,7 @@ export interface PipelineStep {
 export interface PipelineConfig {
   maxIterations?: number;
   recovery?: "skip" | "pause" | "fail";
+  on?: Record<string, OnHandler>;
   steps: PipelineStep[];
 }
 
@@ -1358,6 +1359,7 @@ export interface PipelineSessionState {
   steps: PipelineStepState[];
   createdAt: string;
   updatedAt: string;
+  firedGlobalOn?: string[];
 }
 
 export interface EventBus {
@@ -1373,7 +1375,6 @@ export interface PipelineEngine {
   done(sessionId: SessionId, output?: Record<string, unknown>): void;
   fail(sessionId: SessionId, reason: string): void;
   goto(sessionId: SessionId, stepId: string): void;
-  respond(sessionId: SessionId, response: string): void;
   tick(sessionId: SessionId, events: Record<string, unknown>): void;
 }
 

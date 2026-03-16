@@ -297,29 +297,87 @@ describe("PipelineEngine", () => {
     });
   });
 
-  // ── respond ──
+  // ── listener steps (on: without prompt/run) ──
 
-  describe("respond", () => {
-    it("completes channel step and advances", () => {
+  describe("listener steps", () => {
+    it("listener step completes via on: done handler", () => {
       const sid = makeSessionId();
       engine.initialize(sid, {
-        steps: [{ id: "a", channel: "telegram" }, { id: "b" }],
+        steps: [
+          { id: "a", on: { "telegram:APPROVE": "done", "telegram:REJECT": "fail" } },
+          { id: "b" },
+        ],
       });
-      engine.respond(sid, "APPROVE");
+      engine.tick(sid, { "telegram:APPROVE": true });
       const state = engine.getState(sid)!;
       expect(state.steps[0].state).toBe("completed");
-      expect(state.steps[0].output).toEqual({ response: "APPROVE" });
       expect(state.currentStepIndex).toBe(1);
     });
 
-    it("no-op without channel on current step", () => {
+    it("listener step fails via on: fail handler", () => {
       const sid = makeSessionId();
       engine.initialize(sid, {
-        steps: [{ id: "a", prompt: "do stuff" }],
+        steps: [
+          { id: "a", on: { "telegram:APPROVE": "done", "telegram:REJECT": "fail" } },
+        ],
       });
-      engine.respond(sid, "APPROVE");
+      engine.tick(sid, { "telegram:REJECT": true });
       const state = engine.getState(sid)!;
-      expect(state.steps[0].state).toBe("running"); // unchanged
+      expect(state.state).toBe("failed");
+    });
+
+    it("listener step stays running when no matching event", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        steps: [{ id: "a", on: { "telegram:APPROVE": "done" } }],
+      });
+      engine.tick(sid, { "ci:passed": true });
+      const state = engine.getState(sid)!;
+      expect(state.steps[0].state).toBe("running");
+    });
+  });
+
+  // ── global on: ──
+
+  describe("global on:", () => {
+    it("fires global on: handler on matching event", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        on: { "telegram:message": "Forward from user" },
+        steps: [{ id: "a" }],
+      });
+      eventBus.events.length = 0;
+      engine.tick(sid, { "telegram:message": true });
+      const sends = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends).toHaveLength(1);
+      expect((sends[0].data as Record<string, unknown>).message).toBe("Forward from user");
+    });
+
+    it("global on: does not re-fire on subsequent ticks", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        on: { "telegram:message": "Got message" },
+        steps: [{ id: "a" }],
+      });
+      eventBus.events.length = 0;
+      engine.tick(sid, { "telegram:message": true });
+      engine.tick(sid, { "telegram:message": true });
+      const sends = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends).toHaveLength(1);
+    });
+
+    it("global on: fires independently of step on:", () => {
+      const sid = makeSessionId();
+      engine.initialize(sid, {
+        on: { "ci:failed": "Global CI alert" },
+        steps: [{ id: "a", on: { "ci:failed": "fail" } }],
+      });
+      eventBus.events.length = 0;
+      engine.tick(sid, { "ci:failed": true });
+      const sends = eventBus.events.filter((e) => e.event === "pipeline.send");
+      expect(sends).toHaveLength(1);
+      const state = engine.getState(sid)!;
+      expect(state.state).toBe("failed");
     });
   });
 

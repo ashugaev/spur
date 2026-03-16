@@ -1008,6 +1008,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           }
         }
 
+        // Poll external sources (telegram, etc.) based on on: keys
+        const project = config.projects[session.projectId];
+        const stepCfg = project?.pipeline?.steps?.[pipelineState.currentStepIndex];
+        const allOnKeys = [
+          ...Object.keys(stepCfg?.on ?? {}),
+          ...Object.keys(project?.pipeline?.on ?? {}),
+        ];
+        await pollNotifierEvents(allOnKeys, events, session);
+
         let prevStepIndex = pipelineState.currentStepIndex;
         deps.pipelineEngine.tick(session.id, events);
 
@@ -1025,6 +1034,29 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
 
         await executePipelineRunStep(session);
+      }
+    }
+  }
+
+  async function pollNotifierEvents(
+    onKeys: string[],
+    events: Record<string, unknown>,
+    session: Session,
+  ): Promise<void> {
+    const sources = new Set<string>();
+    for (const key of onKeys) {
+      const colonIdx = key.indexOf(":");
+      if (colonIdx > 0) sources.add(key.slice(0, colonIdx));
+    }
+
+    for (const source of sources) {
+      const notifier = registry.get<Notifier>("notifier", source);
+      if (!notifier?.poll) continue;
+
+      const response = await notifier.poll({ sessionId: session.id, projectId: session.projectId });
+      if (response) {
+        events[`${source}:${response}`] = true;
+        events[`${source}:message`] = response;
       }
     }
   }

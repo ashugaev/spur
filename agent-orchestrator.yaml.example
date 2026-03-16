@@ -172,16 +172,19 @@ projects:
     #   #   pause — pause pipeline, wait for human intervention (ao goto / ao done)
     #   recovery: fail
     #
+    #   # Global on: handlers — fire between steps or when agent is idle/waiting.
+    #   # NEVER interrupts the agent during active work (prompt/run step).
+    #   # Useful for forwarding messages, cross-cutting reactions.
+    #   on:
+    #     "telegram:message": send       # forward all telegram messages to agent
+    #
     #   steps:
     #     # --- Step fields ---
     #
     #     # id (required) — unique step identifier, used in goto/when/output references
     #     # prompt        — instructions shown to the agent for this step
     #     # run           — shell command to execute (no agent involved, auto-completes)
-    #     # channel       — human-in-the-loop step (e.g. "telegram"), waits for respond()
-    #     # message       — display message for channel steps or send actions
-    #     # options       — valid response choices for channel steps (e.g. ["APPROVE", "REJECT"])
-    #     # allowText     — allow free-form text responses on channel steps (default: false)
+    #     # message       — display message for listener/send steps
     #     # when          — condition template; step is skipped if falsy
     #     #                 e.g. "{{steps.scoring.output.needsResearch}}"
     #     #                 Unresolved {{...}} = falsy (fail-closed)
@@ -192,8 +195,12 @@ projects:
     #     #                 An "iteration" = one goto/restart of this specific step
     #     # recovery      — per-step override: "fail" | "skip" | "pause"
     #     # on            — event handlers (evaluated each tick):
+    #     #                 Step with on: but no prompt/run = blocking listener (waits for events)
+    #     #                 IMPORTANT: events only fire between steps or when agent is idle.
+    #     #                 They never interrupt the agent during active work.
     #     #                 Values: "done" | "fail" | "pause" | "send" | "goto <step-id>"
     #     #                 Or object: { send: "message", retries: N, goto: "step-id" }
+    #     #                 Event names are namespaced: "telegram:APPROVE", "ci:failed", etc.
     #     # all           — list of event names; step completes when ALL are true in same tick
     #
     #     - id: notify
@@ -234,11 +241,11 @@ projects:
     #     - id: run-tests
     #       run: "pnpm test"
     #
-    #     # Human-in-the-loop step — waits for external response
+    #     # Listener step — waits for external events (no prompt/run = blocking)
     #     - id: approval
-    #       channel: telegram
-    #       message: "Ready for review. Approve or reject?"
-    #       options: ["APPROVE", "REJECT"]
+    #       on:
+    #         "telegram:APPROVE": done
+    #         "telegram:REJECT": fail
     #       timeout: 30m
 
     # Per-project reaction overrides

@@ -72,23 +72,16 @@ projects:
     agentConfig:
       permissions: skip
     pipeline:
-      maxIterations: 50
+      maxIterations: 10
       recovery: pause
       steps:
-        # Phase 0: Start notification — notify task started, wait for approval
         - id: notify-start
-          prompt: |
-            You are the orchestrator. Coordinate work by running subagents. Do NOT write code — delegate to agents.
-            Rules:
-            - All messages to messager/tracker must include `AO_SESSION:$AO_SESSION_ID`
-            - GitHub comments → handle with `github` skill
-            - Reply only to the same source as the incoming message
+          prompt: Run `ao-telegram` skill to notify that the task has started.
 
-            Run `ao-telegram` skill to notify that the task has started.
-            Include the task description and session ID.
-            Wait for the human response via `ao-telegram` get_updates.
-            If APPROVE → run `ao done`.
-            If REJECT → run `ao fail --reason "rejected by human"`.
+        - id: await-approval
+          on:
+            "telegram:APPROVE": done
+            "telegram:REJECT": fail
           timeout: 30m
 
         # Phase 1: Shallow scoring — assess task complexity

@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { validateIdentifier } from "@/lib/validation";
 import { getServices } from "@/lib/services";
 
-/** POST /api/sessions/:id/pipeline — Pipeline step actions (done, fail, goto, respond) */
+/** POST /api/sessions/:id/pipeline — Pipeline step actions (done, fail, goto) */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const idErr = validateIdentifier(id, "id");
@@ -40,13 +40,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           return NextResponse.json({ error: "stepId is required for goto" }, { status: 400 });
         }
         pipelineEngine.goto(id, body.stepId);
-        break;
-      }
-      case "respond": {
-        if (typeof body.response !== "string") {
-          return NextResponse.json({ error: "response is required for respond" }, { status: 400 });
-        }
-        pipelineEngine.respond(id, body.response);
         break;
       }
       default:
