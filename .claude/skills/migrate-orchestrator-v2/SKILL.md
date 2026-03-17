@@ -18,7 +18,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
 - `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent` and `branch`.
-- Milestone 1 session ops are only: `spawn`, `list`, `get`, `send`, `kill`, `health/info`.
+- Milestone 1 session ops are only: `info`, `spawn`, `list`, `get`, `send`, `kill`.
 - Workspace bootstrap is only: `git worktree` plus configured `symlinks`.
 - Supported agents for now: `claude` and `codex`.
 - Both supported agents start with full access by default:

@@ -1,6 +1,6 @@
 ---
 name: manager
-description: Lean manager loop based on `.ao-agent-rules.md`. Use when coordinating subagents for planning, implementation, review, and validation. Do not use for Telegram notifications, PR creation, or CI follow-up.
+description: Lean manager loop based on `.ao-agent-rules.md`. Default for complex or multi-step tasks that need planning, implementation, review, and validation. Do not use for Telegram notifications, PR creation, or CI follow-up.
 ---
 
 # Manager
@@ -11,6 +11,8 @@ Coordinate work through subagents. Delegate code changes to `developer`.
 
 ## Use this skill when
 
+- The task is complex, ambiguous, multi-file, or multi-step.
+- Default to this skill for complex tasks unless the user clearly wants direct one-shot work.
 - The user wants orchestrated development instead of direct coding.
 - The task needs planning, implementation, review, and validation by separate roles.
 - The work should stop at local completion and report.
@@ -47,25 +49,33 @@ Coordinate work through subagents. Delegate code changes to `developer`.
 
 6. Review
 - Run `reviewer`.
-- If `CHANGES_REQUESTED`, fix with `developer` and re-run `reviewer`.
-- Stop after 3 review cycles.
+- Reviewer focuses on correctness, regressions, and missing validation.
 
-7. Design review
+7. Simplification review
+- Run `code-simplifier`.
+- This step can run in parallel with `reviewer`.
+- Simplifier focuses on deletions, collapsed paths, narrower shapes, and smaller interfaces.
+- If either `reviewer` or `code-simplifier` requests changes, fix with `developer` and re-run the affected pass.
+- Stop after 3 review/simplify cycles.
+
+8. Design review
 - UI only.
 - Run `designer`.
 - Stop after 2 design-fix cycles.
 
-8. UI testing
-- UI only.
-- Run `tester`.
+9. Validation
+- Run `tester` when behavior changed or packages were touched.
+- UI changes: browser flow and console check.
+- `v2/` changes: targeted tests, builds, touched CLI command checks, impacted `v2/TEST_SCENARIOS.md` scenarios, lean V2 check.
 - Stop after 2 test-fix cycles.
 
-9. Report
+10. Report
 - Return scope, checks, and residual risks.
 - Stop. No Telegram, no PR, no CI loop.
 
 ## Rules
 
+- Default to this skill for complex tasks.
 - Use the smallest team that covers the task.
 - Prefer one phase, one owner, one output.
 - Do not keep optional phases when the task does not need them.
@@ -89,6 +99,7 @@ Execution:
 - architect: DONE
 - developer: DONE
 - reviewer: APPROVED | CHANGES_REQUESTED
+- simplifier: DONE | SKIPPED
 - designer: APPROVED | SKIPPED
 - tester: PASS | SKIPPED
 

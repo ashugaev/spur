@@ -15,7 +15,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - `v2/` is `Spur`.
 - Spur is separate from the current `ao`.
 - Spur is CLI plus local HTTP daemon. No UI layer in the current milestone.
-- Current command surface: `health`, `info`, `spawn`, `list`, `get`, `send`, `kill`.
+- Current command surface: `info`, `spawn`, `list`, `get`, `send`, `kill`.
 - `spawn` has one form only:
   `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>]`
 - Supported agents are only `claude` and `codex`.
@@ -94,6 +94,7 @@ cron source
 ## Validation
 
 - Always run `pnpm --dir v2 build` after changing Spur code.
+- If only `v2/` changed, exercise the touched `spur` CLI commands through positive and negative paths.
 - Run the impacted scenarios from `v2/TEST_SCENARIOS.md`.
 - If the change touches spawn or prompt delivery, test both `claude` and `codex`.
 - If the change touches cron, test `runOnStart` and scheduled tick behavior.

@@ -1,0 +1,27 @@
+server:
+  port: 4310
+
+dataDir: ~/.spur
+worktreeDir: ~/.spur-worktrees
+defaultAgent: claude
+
+projects:
+  backend-api:
+    path: ~/backend-api
+    defaultBranch: main
+    sessionPrefix: api
+    symlinks:
+      - .env
+      - .claude
+    sources:
+      weekday-review:
+        type: cron
+        schedule: "0 9 * * 1-5"
+        runOnStart: false
+    triggers:
+      weekday-review-spawn:
+        source: weekday-review
+        event: cron:tick
+        spawn:
+          agent: claude
+          prompt: "Review all open PRs and continue the highest-priority one."

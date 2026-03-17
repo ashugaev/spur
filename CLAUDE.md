@@ -17,16 +17,18 @@
 - Prefer narrow types and explicit config shapes. In TypeScript, use discriminated unions and validated objects instead of index-signature bags.
 - Apply defaults once at the boundary. Do not scatter re-defaulting and fallback branches through the runtime path.
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
+- Default to `$manager` for complex or multi-step tasks. Use direct execution for short one-shot work.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
 - For `v2/`, port behavior only when it reduces code. Do not port the old architecture by default.
 - If a feature is not needed for the current milestone, leave it out.
 - `AGENTS.md` and `CLAUDE.md` must stay in sync. If you add or change a durable instruction in one, mirror it in the other in the same change.
+- Mirrored agent and skill files under `.agents/` and `.claude/` must stay in sync. If you change one copy, mirror the other in the same change.
 
 ## Spur (`v2/`)
 
 - `Spur` is the lean `v2/` orchestrator. Treat its interface as fixed unless the user asks to change it.
 - `Spur` is CLI plus local HTTP daemon. There is no UI layer in the current milestone.
-- The current `Spur` command surface is: `health`, `info`, `spawn`, `list`, `get`, `send`, `kill`.
+- The current `Spur` command surface is: `info`, `spawn`, `list`, `get`, `send`, `kill`.
 - `spawn` is positional: `spur spawn <project> <prompt...>` with optional `--agent` and `--branch`.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
 - Supported agents in `Spur` are only `claude` and `codex`.
@@ -41,6 +43,8 @@
 - If the change touches daemon startup or client transport, test both direct daemon start and CLI auto-start.
 - If the change touches agent launch or prompt delivery, test both `claude` and `codex`.
 - If the change touches workspace or runtime behavior, test worktree creation, symlinks, `tmux` session creation, message delivery, and teardown.
+- If only `v2/` changed, `$tester` must exercise the touched `spur` CLI commands through positive and negative paths and rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`.
+- For touched `v2/` code, `$tester` also checks for hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes.
 - Spur test scenarios live in `v2/TEST_SCENARIOS.md`. When a new Spur feature is added, extend that file in the same change.
 - `$tester` must cover both: potentially affected existing Spur scenarios and the new scenarios introduced by the feature.
 

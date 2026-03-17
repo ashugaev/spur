@@ -1,0 +1,25 @@
+{
+  "name": "@composio/spur",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and git worktrees",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "spur": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "croner": "^10.0.1",
+    "yaml": "^2.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "typescript": "^5.7.0"
+  }
+}
