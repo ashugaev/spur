@@ -35,7 +35,7 @@ const GIT_WORKFLOW_PROMPT = `## Git Workflow
 - Keep PRs focused — one issue per PR.
 
 ## PR Best Practices
-- Write a clear PR title and description explaining what changed and why.
+- Use the task/issue title as the PR title. If no issue is assigned, write a concise title describing the change.
 - Link the issue in the PR description so it auto-closes when merged.
 - If the repo has CI checks, make sure they pass before requesting review.
 - Respond to every review comment, even if just to acknowledge it.
