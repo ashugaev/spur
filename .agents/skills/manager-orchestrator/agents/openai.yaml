@@ -1,7 +1,0 @@
-interface:
-  display_name: "Manager Orchestrator"
-  short_description: "Coordinates PR automation delivery loop"
-  default_prompt: "Use $manager-orchestrator to run the team directly from terminal text (no objective files)."
-
-policy:
-  allow_implicit_invocation: true

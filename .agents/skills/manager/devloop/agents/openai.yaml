@@ -1,7 +1,0 @@
-interface:
-  display_name: "Manager Devloop"
-  short_description: "Runs PR automation from terminal input"
-  default_prompt: "Use $manager/devloop to coordinate implementation directly from terminal text."
-
-policy:
-  allow_implicit_invocation: true

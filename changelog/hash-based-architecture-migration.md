@@ -70,7 +70,7 @@ The hash is the first 12 characters of `SHA256(realpath(dirname(configPath)))`:
 
 ```typescript
 // Config at: ~/projects/acme/agent-orchestrator.yaml
-// Hash of:   /Users/you/projects/acme
+// Hash of:   ./projects/acme
 // Result:    a3b4c5d6e7f8
 
 // Final path: ~/.agent-orchestrator/a3b4c5d6e7f8-my-app/
@@ -379,7 +379,7 @@ If you need to rollback to the old architecture:
 ```bash
 # For each project
 OLD_DIR=~/.ao-sessions
-NEW_DIR=~/.agent-orchestrator/$(python3 -c "import hashlib; print(hashlib.sha256(b'/Users/you/path/to/config/dir').hexdigest()[:12])")-integrator/sessions
+NEW_DIR=~/.agent-orchestrator/$(python3 -c "import hashlib; print(hashlib.sha256(b'./path/to/config/dir').hexdigest()[:12])")-integrator/sessions
 
 mkdir -p "$NEW_DIR"
 
@@ -431,8 +431,8 @@ ao status
 ```
 Hash collision detected!
 Directory: ~/.agent-orchestrator/a3b4c5d6e7f8-my-app
-Expected config: /Users/you/config1/agent-orchestrator.yaml
-Actual config: /Users/you/config2/agent-orchestrator.yaml
+Expected config: ./config1/agent-orchestrator.yaml
+Actual config: ./config2/agent-orchestrator.yaml
 This is a rare hash collision. Please move one of the configs to a different directory.
 ```
 

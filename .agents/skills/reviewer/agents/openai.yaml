@@ -1,7 +1,0 @@
-interface:
-  display_name: "Reviewer"
-  short_description: "Finds regressions and missing coverage in changes"
-  default_prompt: "Use $reviewer to run a risk-focused review of lifecycle and reaction changes."
-
-policy:
-  allow_implicit_invocation: true
