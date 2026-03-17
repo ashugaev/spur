@@ -15,6 +15,8 @@ No UI. No tracker flow. No plugin layer.
 
 CLI commands reuse an already running daemon on the same configured `host`/`port`.
 
+`list` and `get` return live `activity` and `lastActivityAt` fields derived from `tmux`, alongside persisted session data.
+
 `spawn` has one form:
 
 ```bash

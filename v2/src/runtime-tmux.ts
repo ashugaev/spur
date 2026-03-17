@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import type { AgentName } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +19,55 @@ export async function captureTmuxPane(sessionName: string, lines = 200): Promise
     return await tmux("capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`);
   } catch {
     return "";
+  }
+}
+
+export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
+  try {
+    const output = await tmux("display-message", "-t", sessionName, "-p", "#{session_activity}");
+    const seconds = Number.parseInt(output, 10);
+    if (Number.isNaN(seconds)) {
+      return null;
+    }
+    return new Date(seconds * 1000);
+  } catch {
+    return null;
+  }
+}
+
+export async function isProcessRunningInTmux(
+  sessionName: string,
+  processName: AgentName,
+): Promise<boolean> {
+  try {
+    const ttyOut = await tmux("list-panes", "-t", sessionName, "-F", "#{pane_tty}");
+    const ttys = ttyOut
+      .trim()
+      .split("\n")
+      .map((tty) => tty.trim())
+      .filter(Boolean);
+    if (ttys.length === 0) {
+      return false;
+    }
+
+    const { stdout: psOut } = await execFileAsync("ps", ["-eo", "pid,tty,args"], {
+      timeout: 5_000,
+    });
+    const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
+    const processRe = new RegExp(`(?:^|/)${processName}(?:\\s|$)`);
+    for (const line of psOut.split("\n")) {
+      const cols = line.trimStart().split(/\s+/);
+      if (cols.length < 3 || !ttySet.has(cols[1] ?? "")) {
+        continue;
+      }
+      const args = cols.slice(2).join(" ");
+      if (processRe.test(args)) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

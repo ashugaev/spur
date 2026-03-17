@@ -13,11 +13,18 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - `spawn`: creates session id, worktree, symlinks, tmux session, and launches the selected agent.
 - `spawn`: accepts the prompt only as the positional `<prompt...>` argument.
 - Default `spawn`: uses project default agent and `sessionId` as branch when flags are omitted.
-- `get`: returns persisted session plus live `runtimeAlive` and `workspaceExists`.
+- `get`: returns persisted session plus live `runtimeAlive`, `workspaceExists`, `activity`, and `lastActivityAt`.
 - `send`: reaches the running agent and updates session metadata.
 - `kill`: kills tmux, removes worktree, keeps terminal metadata with `killed` status.
 - `get` after `kill`: shows `runtimeAlive: false` and `workspaceExists: false`.
 - Repeated `kill` on an already cleaned session is idempotent and does not rewrite metadata again.
+- `get/list`: report `activity: active` while an agent is working inside the tmux pane.
+- `get/list`: report `activity: ready` when the agent is back at a prompt and recently active.
+- `get/list`: report `activity: idle` when the agent is still at a prompt after the 5 minute threshold.
+- `get/list`: report `activity: waiting_input` when the pane tail shows a permission or confirmation prompt.
+- `get/list`: prefer the current prompt over stale permission text still visible in recent pane history.
+- `get/list`: report `activity: exited` when the tmux session or agent process is gone.
+- `get/list` during `spawning`: report `activity: active` and keep `runtimeAlive` aligned with the actual tmux session state.
 
 ## Agents
 

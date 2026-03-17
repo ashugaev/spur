@@ -1,6 +1,7 @@
 export type AgentName = "claude" | "codex";
 
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
+export type SessionActivity = "active" | "ready" | "idle" | "waiting_input" | "exited";
 
 export type SourceType = "cron";
 
@@ -67,6 +68,8 @@ export interface SessionRecord {
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
+  activity: SessionActivity;
+  lastActivityAt: string;
 }
 
 export interface SpawnSessionRequest {

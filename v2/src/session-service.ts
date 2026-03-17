@@ -5,20 +5,33 @@ import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
 import {
   createTmuxSession,
+  getTmuxSessionActivity,
+  isProcessRunningInTmux,
   killTmuxSession,
   sendMessageToTmux,
+  captureTmuxPane,
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
 import type {
   AppConfig,
   RuntimeInfo,
+  SessionActivity,
   SendMessageRequest,
   SessionRecord,
   SessionView,
   SpawnSessionRequest,
 } from "./types.js";
 import { createWorktree, removeWorktree, workspaceExists } from "./workspace.js";
+
+const IDLE_THRESHOLD_MS = 300_000;
+const PROMPT_RE = /^[❯›>$#]\s*$/;
+const TRAILING_UI_RE = [/^[─━]+$/, /^⏵⏵ /, /^Claude in Chrome enabled\b/, /^Update available!\b/];
+const PERMISSION_PROMPTS = [
+  /approval required/i,
+  /Do you want to proceed\?/i,
+  /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
+];
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -35,6 +48,42 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
     configPath: config.configPath,
     startedAt,
   };
+}
+
+function resolveLastActivityAt(sessionUpdatedAt: string, activityAt: Date | null): Date {
+  const updatedAt = new Date(sessionUpdatedAt);
+  if (activityAt === null || activityAt < updatedAt) {
+    return updatedAt;
+  }
+  return activityAt;
+}
+
+function classifyActivity(
+  pane: string,
+  lastActivityAt: Date,
+): SessionActivity {
+  const lines = pane
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim().length > 0);
+  while (lines.length > 0) {
+    const trimmed = lines.at(-1)?.trim() ?? "";
+    if (!TRAILING_UI_RE.some((pattern) => pattern.test(trimmed))) {
+      break;
+    }
+    lines.pop();
+  }
+  const lastLine = lines.at(-1)?.trim() ?? "";
+  if (PROMPT_RE.test(lastLine)) {
+    return Date.now() - lastActivityAt.getTime() > IDLE_THRESHOLD_MS ? "idle" : "ready";
+  }
+
+  const tail = lines.slice(-5).join("\n");
+  if (PERMISSION_PROMPTS.some((pattern) => pattern.test(tail))) {
+    return "waiting_input";
+  }
+
+  return "active";
 }
 
 export class SessionService {
@@ -192,34 +241,69 @@ export class SessionService {
       await removeWorktree(project.path, session.worktreePath);
     }
 
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    const record: SessionRecord =
+      session.status === "killed"
+        ? session
+        : {
+            ...session,
+            status: "killed",
+            updatedAt: nowIso(),
+          };
+    if (record !== session) {
+      writeSession(this.config.dataDir, record);
+    }
+    return this.enrich(record);
+  }
+
+  private async enrich(session: SessionRecord): Promise<SessionView> {
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
-    if (session.status === "killed" && !runtimeAlive && !workspacePresent) {
+    const fallbackActivityAt = session.updatedAt;
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+
+    if (session.status === "spawning") {
+      const activityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
       return {
         ...session,
         runtimeAlive,
         workspaceExists: workspacePresent,
+        activity: "active",
+        lastActivityAt: resolveLastActivityAt(fallbackActivityAt, activityAt).toISOString(),
       };
     }
 
-    const updated: SessionRecord = {
-      ...session,
-      status: "killed",
-      updatedAt: nowIso(),
-    };
-    writeSession(this.config.dataDir, updated);
+    if (!runtimeAlive) {
+      return {
+        ...session,
+        runtimeAlive,
+        workspaceExists: workspacePresent,
+        activity: "exited",
+        lastActivityAt: fallbackActivityAt,
+      };
+    }
+
+    const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+    const activityAt = resolveLastActivityAt(
+      session.updatedAt,
+      await getTmuxSessionActivity(session.tmuxSession),
+    );
+    const lastActivityAt = activityAt.toISOString();
+    if (!processAlive) {
+      return {
+        ...session,
+        runtimeAlive,
+        workspaceExists: workspacePresent,
+        activity: "exited",
+        lastActivityAt,
+      };
+    }
+
+    const pane = await captureTmuxPane(session.tmuxSession, 80);
     return {
-      ...updated,
+      ...session,
       runtimeAlive,
       workspaceExists: workspacePresent,
-    };
-  }
-
-  private async enrich(session: SessionRecord): Promise<SessionView> {
-    return {
-      ...session,
-      runtimeAlive: await tmuxSessionExists(session.tmuxSession),
-      workspaceExists: session.worktreePath ? workspaceExists(session.worktreePath) : false,
+      activity: classifyActivity(pane, activityAt),
+      lastActivityAt,
     };
   }
 }
