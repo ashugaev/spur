@@ -78,16 +78,22 @@ export async function createTmuxSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const envArgs: string[] = [];
-  for (const [key, value] of Object.entries(input.env ?? {})) {
+  const sessionEnv = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
+      ),
+    ),
+    ...(input.env ?? {}),
+  };
+  for (const [key, value] of Object.entries(sessionEnv)) {
     envArgs.push("-e", `${key}=${value}`);
   }
 
   await tmux("new-session", "-d", "-s", input.sessionName, "-c", input.cwd, ...envArgs);
 
   try {
-    await sendLiteral(input.sessionName, input.launchCommand);
-    await sleep(300);
-    await tmux("send-keys", "-t", input.sessionName, "Enter");
+    await sendMessageToTmux(input.sessionName, input.launchCommand);
   } catch (error) {
     try {
       await tmux("kill-session", "-t", input.sessionName);
@@ -124,7 +130,15 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
   await tmux("send-keys", "-t", sessionName, "-l", message);
 }
 
-export async function sendMessageToTmux(sessionName: string, message: string): Promise<void> {
+export async function sendMessageToTmux(
+  sessionName: string,
+  message: string,
+  options?: { interrupt?: boolean },
+): Promise<void> {
+  if (options?.interrupt) {
+    await tmux("send-keys", "-t", sessionName, "C-c");
+    await sleep(500);
+  }
   await tmux("send-keys", "-t", sessionName, "C-u");
   await sendLiteral(sessionName, message);
   await sleep(300);

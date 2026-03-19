@@ -15,15 +15,6 @@ async function startCronSource(deps: SourceStartDeps<CronSourceConfig>): Promise
     emitTick();
   });
 
-  deps.signal.addEventListener(
-    "abort",
-    () => {
-      stopped = true;
-      cronJob.stop();
-    },
-    { once: true },
-  );
-
   deps.logger.info?.(
     `[source:${deps.projectId}/${deps.sourceId}] cron started: schedule="${schedule}", event="cron:tick", runOnStart=${runOnStart}`,
   );

@@ -103,7 +103,6 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
 }
 
 export function workspaceExists(worktreePath: string): boolean {
-  if (!existsSync(worktreePath)) return false;
   try {
     return lstatSync(worktreePath).isDirectory();
   } catch {

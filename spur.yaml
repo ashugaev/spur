@@ -18,6 +18,8 @@ projects:
         schedule: "0 0 1 1 *"
         # Intentionally omitted:
         # runOnStart defaults to false.
+      gh:
+        type: github
     triggers:
       local-cron-spawn:
         source: local-cron
@@ -25,3 +27,16 @@ projects:
         spawn:
           agent: claude
           prompt: "Review this repo and continue the highest-priority task."
+      gh-changes-requested:
+        source: gh
+        event: github:changes_requested
+        send: {}
+      gh-ci-failed:
+        source: gh
+        event: github:ci_failed
+        send:
+          interrupt: true
+      gh-comment:
+        source: gh
+        event: github:comment
+        send: {}

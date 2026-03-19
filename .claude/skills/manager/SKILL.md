@@ -1,21 +1,17 @@
 ---
 name: manager
-description: Lean manager loop based on `.ao-agent-rules.md`. Default for complex or multi-step tasks that need planning, implementation, review, and validation. Do not use for Telegram notifications, PR creation, or CI follow-up.
+description: Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, and recheck. Mandatory for every task in this repo. Don't use for Telegram notifications, PR-only follow-up, or CI-only monitoring.
 ---
 
 # Manager
 
-## Role
-
-Coordinate work through subagents. Delegate code changes to `developer`.
+Coordinate work through repo agents. Delegate code changes to `developer`.
 
 ## Use this skill when
 
-- The task is complex, ambiguous, multi-file, or multi-step.
-- Default to this skill for complex tasks unless the user clearly wants direct one-shot work.
-- The user wants orchestrated development instead of direct coding.
-- The task needs planning, implementation, review, and validation by separate roles.
-- The work should stop at local completion and report.
+- Every task in this repo.
+- Collapse phases for trivial work instead of skipping the skill.
+- Use the full loop for complex, ambiguous, multi-file, or multi-step work.
 
 ## Do not use
 
@@ -28,58 +24,86 @@ Coordinate work through subagents. Delegate code changes to `developer`.
 1. Intake
 - Parse the latest user message into concrete tasks.
 - State acceptance criteria in the first reply.
-- If blocked on missing requirements, ask one concise question.
+- Treat pasted logs, errors, diffs, PR links, and commands as source of truth.
+- Ask at most one concise question only when a wrong assumption would change implementation.
+- If the task touches `v2/`, load `migrate-orchestrator-v2`.
+- If the task changes `SKILL.md`, agent definitions, or orchestrator instructions, load `ao-skill-writer`.
+- If the task changes durable instructions, mirror `AGENTS.md` and `CLAUDE.md`.
+- If the task changes mirrored agent or skill files, mirror `.agents/` and `.claude/`.
 
 2. Shallow scoring
 - Run `ao-shallow-scoring`.
+- Score `<= 1`: skip research unless the codebase is unclear.
+- Score `>= 2`: run the full loop.
 
 3. Research
-- Skip when score `<= 1`.
-- Otherwise run `researcher` and `critic` in parallel.
+- Run `researcher` and `critic` in parallel when score `>= 2`.
 - Keep one selected approach.
+- Batch unresolved questions and defaults into one clarify pass.
+- Skip this step only when the change is obvious from local code.
 
-4. Planning
-- Run `architect`.
-- Require concrete steps, acceptance criteria, and risks.
+4. Clarify
+- Skip when there is no ambiguity that changes the implementation.
+- Ask one batched clarification round.
+- Continue with stated defaults if the user accepts them or does not answer.
 
-5. Implementation
+5. Planning
+- Run `architect` for every non-trivial task.
+- Require touched files, concrete steps, acceptance criteria, risks, and the cheapest validation tier that still crosses the changed boundary.
+- Reject vague plans.
+
+6. Implementation
 - Run one or more `developer` agents.
-- Split write scopes when parallel.
+- Split write scopes only when parallel work is clearly independent.
 - Keep one implementation path.
-
-6. Review
-- Run `reviewer`.
-- Reviewer focuses on correctness, regressions, and missing validation.
+- Require local self-checks before handoff.
 
 7. Simplification review
 - Run `code-simplifier`.
-- This step can run in parallel with `reviewer`.
-- Simplifier focuses on deletions, collapsed paths, narrower shapes, and smaller interfaces.
-- If either `reviewer` or `code-simplifier` requests changes, fix with `developer` and re-run the affected pass.
-- Stop after 3 review/simplify cycles.
+- This pass is mandatory when the skill exists.
+- Simplifier focuses on deletions, merged paths, narrower types, and shorter instructions.
+- If it requests changes, fix with `developer` and rerun it.
+- Stop after 3 simplify-fix cycles. Then report `BLOCKED_SIMPLIFY`.
 
-8. Design review
+8. Review
+- Run `reviewer`.
+- Reviewer focuses on correctness, regressions, uncovered acceptance criteria, and missing validation.
+- If it requests changes, fix with `developer` and rerun it.
+- Stop after 3 review-fix cycles. Then report `BLOCKED_REVIEW`.
+
+9. Design review
 - UI only.
 - Run `designer`.
-- Stop after 2 design-fix cycles.
+- Stop after 2 design-fix cycles. Then report `BLOCKED_DESIGN`.
 
-9. Validation
-- Run `tester` when behavior changed or packages were touched.
-- UI changes: browser flow and console check.
-- `v2/` changes: targeted tests, builds, touched CLI command checks, impacted `v2/TEST_SCENARIOS.md` scenarios, lean V2 check.
-- Stop after 2 test-fix cycles.
+10. Validation
+- Run `tester` for every code, config, CLI, workflow, or behavior change. Skip only for wording-only docs.
+- Always run the relevant package `build` command(s) before completion.
+- Require positive path, negative or error path, and cleanup verification at the cheapest tier that still crosses the changed boundary.
+- `v2/` changes: follow `AGENTS.md` and `CLAUDE.md` tier rules, rerun impacted `v2/TEST_SCENARIOS.md` scenarios, and include `pnpm --dir v2 build`.
+- Stop after 2 test-fix cycles. Then report `BLOCKED_VALIDATION`.
 
-10. Report
-- Return scope, checks, and residual risks.
+11. Recheck
+- After any code or config fix made after step 7, rerun every downstream gate touched by that fix.
+- Minimum:
+  - post-simplifier fix -> rerun `code-simplifier`, `reviewer`, and `tester` when validation was required
+  - post-review fix -> rerun `reviewer`, `code-simplifier`, and `tester`
+  - post-tester fix -> rerun the failed check, one adjacent impacted scenario, and the relevant build
+- Never report complete on stale review or stale test evidence.
+
+12. Final audit
+- Verify each acceptance criterion has evidence.
+- Verify required mirrors and prompt/skill sync updates landed when applicable.
 - Stop. No Telegram, no PR, no CI loop.
 
 ## Rules
 
-- Default to this skill for complex tasks.
+- This skill is mandatory for every task in this repo.
+- Keep the manager loop only here. `AGENTS.md`, `CLAUDE.md`, and agent configs must reference this skill instead of duplicating it.
 - Use the smallest team that covers the task.
 - Prefer one phase, one owner, one output.
-- Do not keep optional phases when the task does not need them.
 - Use local checks only. Never wait for remote CI.
+- No unbounded retry loops.
 - Reply only in the current thread.
 
 ## Output
@@ -94,17 +118,19 @@ Acceptance criteria:
 - <criterion>
 
 Execution:
-- scoring: DONE
+- scoring: <N>/5
 - research: DONE | SKIPPED
-- architect: DONE
+- clarify: DONE | SKIPPED
+- architect: DONE | SKIPPED
 - developer: DONE
+- simplifier: APPROVED | CHANGES_REQUESTED | UNAVAILABLE
 - reviewer: APPROVED | CHANGES_REQUESTED
-- simplifier: DONE | SKIPPED
 - designer: APPROVED | SKIPPED
-- tester: PASS | SKIPPED
+- tester: PASS | FAIL | SKIPPED
+- recheck: DONE | SKIPPED
 
 Checks:
-- <local check evidence>
+- <command or scenario> — OK|FAIL
 
 Risks:
 - <risk>

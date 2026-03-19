@@ -1,9 +1,18 @@
 export type AgentName = "claude" | "codex";
+export const SPUR_DAEMON_API_VERSION = 1;
 
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
 export type SessionActivity = "active" | "ready" | "idle" | "waiting_input" | "exited";
 
-export type SourceType = "cron";
+export type SourceType = "cron" | "github";
+
+export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+export const GITHUB_SIGNAL_KINDS = [
+  "changes_requested",
+  "ci_failed",
+  "comment",
+] as const;
+export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
 interface BaseSourceConfig {
   runOnStart: boolean;
@@ -14,7 +23,12 @@ export interface CronSourceConfig extends BaseSourceConfig {
   schedule: string;
 }
 
-export type SourceConfig = CronSourceConfig;
+export interface GitHubSourceConfig extends BaseSourceConfig {
+  type: "github";
+  intervalMs: number;
+}
+
+export type SourceConfig = CronSourceConfig | GitHubSourceConfig;
 
 export interface TriggerSpawnConfig {
   prompt: string;
@@ -22,10 +36,35 @@ export interface TriggerSpawnConfig {
   branch?: string;
 }
 
-export interface TriggerConfig {
+export interface TriggerSendConfig {
+  interrupt: boolean;
+}
+
+export interface SpawnTriggerConfig {
   source: string;
   event: string;
   spawn: TriggerSpawnConfig;
+}
+
+export interface SendTriggerConfig {
+  source: string;
+  event: string;
+  send: TriggerSendConfig;
+}
+
+export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
+
+export interface GitHubSignal {
+  key: string;
+  kind: GitHubSignalKind;
+  text: string;
+}
+
+export interface GitHubEventData {
+  sessionId: string;
+  prNumber: number;
+  prTitle: string;
+  signals: GitHubSignal[];
 }
 
 export interface ProjectConfig {
@@ -85,6 +124,7 @@ export interface SendMessageRequest {
 
 export interface RuntimeInfo {
   ok: true;
+  apiVersion: number;
   pid: number;
   host: string;
   port: number;

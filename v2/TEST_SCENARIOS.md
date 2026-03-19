@@ -1,62 +1,59 @@
 # Spur Test Scenarios
 
-Keep this file lean. Expand it every time Spur gets a new feature or a new failure mode that must stay covered.
+Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
-## Core
+## Tier Rules
 
-- `info`: returns runtime info for the running daemon.
-- `list`: empty on fresh state, includes stored sessions later.
-- CLI auto-start: if a daemon is already running on the configured `host`/`port`, later commands reuse it instead of treating config-path drift as an error.
+- Always run `pnpm --dir v2 build` after Spur code changes.
+- `fast` = `pnpm --dir v2 test`
+  Default mocked and in-process coverage. This is the `v2` part of the normal root `pnpm test` path.
+- `runtime integration` = `pnpm --dir v2 test:runtime`
+  Uses the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
+- `real-agent smoke` = `pnpm --dir v2 test:smoke`
+  Uses real `claude` and `codex`. It auto-skips when `tmux`, binaries, or API keys are missing.
+- Put each scenario in one tier only. If the boundary changes, move the scenario instead of duplicating it.
 
-## Spawn Lifecycle
+## Fast
 
-- `spawn`: creates session id, worktree, symlinks, tmux session, and launches the selected agent.
-- `spawn`: accepts the prompt only as the positional `<prompt...>` argument.
-- Default `spawn`: uses project default agent and `sessionId` as branch when flags are omitted.
-- `get`: returns persisted session plus live `runtimeAlive`, `workspaceExists`, `activity`, and `lastActivityAt`.
-- `send`: reaches the running agent and updates session metadata.
-- `kill`: kills tmux, removes worktree, keeps terminal metadata with `killed` status.
-- `get` after `kill`: shows `runtimeAlive: false` and `workspaceExists: false`.
-- Repeated `kill` on an already cleaned session is idempotent and does not rewrite metadata again.
-- `get/list`: report `activity: active` while an agent is working inside the tmux pane.
-- `get/list`: report `activity: ready` when the agent is back at a prompt and recently active.
-- `get/list`: report `activity: idle` when the agent is still at a prompt after the 5 minute threshold.
-- `get/list`: report `activity: waiting_input` when the pane tail shows a permission or confirmation prompt.
-- `get/list`: prefer the current prompt over stale permission text still visible in recent pane history.
-- `get/list`: report `activity: exited` when the tmux session or agent process is gone.
-- `get/list` during `spawning`: report `activity: active` and keep `runtimeAlive` aligned with the actual tmux session state.
+- Root help exposes only `spawn`, `list`, and `send`, keeps the branded help output, and hides the internal `daemon` command.
+- `list` subcommand help keeps the compact sections, inherited global options, and the TTY note.
+- In-process server returns runtime info and stops cleanly.
+- Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
+- Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project defaults, `runOnStart`, `intervalMs`, and `send.interrupt`.
+- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, and `github:comment`.
+- Config rejects duplicate `sessionPrefix` values across projects.
+- Session service spawn follows one path: reserve id, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
+- Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
+- Activity classification detects `active`, `ready`, `idle`, and `waiting_input`, including plan-mode menus, permission prompts, and Codex trailing UI.
+- TTY `list` surfaces `waiting_input` prominently with a top alert and `!` row indicator.
+- Session ordering keeps actionable sessions above quiet or terminal ones.
+- GitHub send triggers deliver immediately when the target session is ready.
+- Busy GitHub updates queue, dedupe, and flush once the session returns to `ready` or `idle`.
+- `send.interrupt: true` interrupts immediately while active but does not repeatedly interrupt the same busy interval.
 
-## Agents
+## Runtime Integration
 
-- `claude`: starts with `--dangerously-skip-permissions` and answers the initial prompt.
-- `codex`: starts with `--dangerously-bypass-approvals-and-sandbox` and answers the initial prompt.
-- Both agents: answer a follow-up `send` message in the same session.
+- `list --json` auto-starts the daemon and returns `[]` on a fresh config.
+- `spawn --json` creates a normal Spur session through the built CLI, with real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
+- `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- TTY `list` can kill the selected live session in place and leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`.
+- TTY `list` can restore an exited session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
+- TTY `list` surfaces a restore error in place and keeps the session exited when the agent's native resume state is missing.
+- `spawn` rejects an unknown project through the built CLI without creating session side effects.
+- `send` rejects an unknown session id through the built CLI.
+- `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
+- GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a matching PR branch.
 
-## Event Sources And Triggers
+## Real-Agent Smoke
 
-- `cron` source: validates `schedule`, starts on daemon boot, and emits its configured event.
-- `runOnStart: true`: emits immediately on boot and reaches the matching trigger without manual CLI input.
-- `runOnStart: false`: does not spawn early and creates the session only after the scheduled cron tick.
-- `runOnStart` startup path: emits only after the daemon is listening and all configured sources are up, so a failed boot does not leave trigger-created session artifacts behind.
-- `trigger -> spawn`: creates a normal Spur session, so `list/get/send/kill` work on triggered sessions too.
-- Triggered sessions: still launch the requested agent with full access and the agent answers in tmux.
-
-## Negative Paths
-
-- Unknown project.
-- Unsupported agent fails before session metadata, worktree, or tmux side effects.
-- Empty prompt.
-- Missing positional prompt for `spawn`.
-- Empty branch.
-- Missing session for `get`.
-- Missing session for `kill`.
-- Empty message for `send`.
-- `cron` source without `schedule`.
-- Trigger referencing an unknown source.
+- `claude` launches as a real agent, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- `codex` launches as a real agent, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
+- When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
 
 ## Regression Rule
 
-- When a new Spur feature is added, extend this file in the same change.
-- For `v2/`-only changes, `$tester` must exercise the touched `spur` CLI commands and rerun the impacted scenarios.
-- For touched `v2/` code, `$tester` also checks for hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes.
-- `$tester` must rerun potentially affected existing scenarios and the new scenarios for that feature.
+- When a new Spur feature or failure mode is added, extend this file in the same change.
+- For `v2/`-only changes, rerun the impacted tier scenarios and the touched CLI commands through positive and negative paths.
+- For touched `v2/` code, also check hanging logic, stray fallbacks outside boundary and cleanup paths, and loose or bloated type shapes.

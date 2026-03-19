@@ -1,7 +1,27 @@
 #!/usr/bin/env node
 
-import { Command } from "commander";
+import { execFileSync } from "node:child_process";
+import { emitKeypressEvents } from "node:readline";
+import { pathToFileURL } from "node:url";
+import { log } from "@clack/prompts";
+import { Command, type Help } from "commander";
 import { getJson, postJson } from "./client.js";
+import {
+  accent,
+  brandMark,
+  brandLine,
+  boldText,
+  dimText,
+  renderSessionDashboard,
+  renderRuntimeInfo,
+  renderSessionCard,
+  renderInteractiveSessionList,
+  renderWaitingInputAlert,
+  withSpinner,
+} from "./cli-view.js";
+import { writeStderr, writeStdout } from "./io.js";
+import { sortSessionsForList } from "./session-display.js";
+import { isRestorableSession } from "./session-service.js";
 import { startServer } from "./server.js";
 import type {
   RuntimeInfo,
@@ -10,8 +30,16 @@ import type {
   SpawnSessionRequest,
 } from "./types.js";
 
+const LIVE_LIST_REFRESH_MS = 2_000;
+const LIST_FIXED_ROWS = 9;
+const LIST_MIN_SESSION_ROWS = 4;
+const LIST_MAX_DETAIL_ROWS = 6;
+const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
+const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
+const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
+
 function printJson(value: unknown): void {
-  console.log(JSON.stringify(value, null, 2));
+  writeStdout(JSON.stringify(value, null, 2));
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -19,22 +47,462 @@ function getConfigPath(program: Command): string | undefined {
   return options.config;
 }
 
-async function run(): Promise<void> {
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function findSelectedIndex(
+  sessions: SessionView[],
+  selectedSessionId: string | null,
+): number | null {
+  if (!selectedSessionId) return null;
+  const index = sessions.findIndex((session) => session.id === selectedSessionId);
+  return index === -1 ? null : index;
+}
+
+function moveSelection(
+  sessions: SessionView[],
+  selectedSessionId: string | null,
+  delta: number,
+): string | null {
+  if (sessions.length === 0) return null;
+  const currentIndex = findSelectedIndex(sessions, selectedSessionId);
+  if (currentIndex === null) {
+    const fallback = delta < 0 ? sessions.at(-1) : sessions[0];
+    return fallback ? fallback.id : null;
+  }
+  const next = sessions[clamp(currentIndex + delta, 0, sessions.length - 1)];
+  return next ? next.id : null;
+}
+
+async function loadRawSessions(cliEntrypoint: string, configPath?: string): Promise<SessionView[]> {
+  return getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath);
+}
+
+async function loadHumanListData(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<{ info: RuntimeInfo; sessions: SessionView[] }> {
+  const [info, sessions] = await Promise.all([
+    getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath),
+    loadRawSessions(cliEntrypoint, configPath),
+  ]);
+  return { info, sessions: sortSessionsForList(sessions) };
+}
+
+function replaceListedSession(sessions: SessionView[], updated: SessionView): SessionView[] {
+  return sortSessionsForList(
+    sessions.map((entry) => (entry.id === updated.id ? updated : entry)),
+  );
+}
+
+function renderLiveSessionList(args: {
+  info: RuntimeInfo;
+  sessions: SessionView[];
+  selectedSessionId: string | null;
+  statusMessage?: string;
+}): string {
+  const rows = process.stdout.rows ?? 24;
+  const waitingInputAlert = renderWaitingInputAlert({
+    sessions: args.sessions,
+    selectedSessionId: args.selectedSessionId,
+  });
+  const available = Math.max(
+    1,
+    rows -
+      LIST_FIXED_ROWS -
+      (waitingInputAlert ? 2 : 0) -
+      (args.statusMessage ? 2 : 0),
+  );
+  const maxDetailLines = Math.max(
+    0,
+    Math.min(LIST_MAX_DETAIL_ROWS, available - LIST_MIN_SESSION_ROWS),
+  );
+  const maxVisible = Math.max(1, available - maxDetailLines);
+  const selectedIndex = findSelectedIndex(args.sessions, args.selectedSessionId) ?? 0;
+  const maxStart = Math.max(0, args.sessions.length - maxVisible);
+  const windowStart = clamp(selectedIndex - Math.floor(maxVisible / 2), 0, maxStart);
+  const visibleSessions = args.sessions.slice(windowStart, windowStart + maxVisible);
+  const renderArgs = {
+    info: args.info,
+    sessions: visibleSessions,
+    selectedSessionId: args.selectedSessionId,
+    totalSessions: args.sessions.length,
+    windowStart,
+    maxDetailLines,
+    ...(waitingInputAlert ? { waitingInputAlert } : {}),
+    ...(args.statusMessage ? { statusMessage: args.statusMessage } : {}),
+  };
+  return renderInteractiveSessionList(renderArgs);
+}
+
+interface HelpRow {
+  term: string;
+  description: string;
+}
+
+function renderHelpLines(
+  lines: string[],
+  format: (line: string) => string = (line) => line,
+): string {
+  return lines.map((line) => `  ${format(line)}`).join("\n");
+}
+
+function renderHelpRows(rows: HelpRow[]): string {
+  const width = Math.max(...rows.map((row) => row.term.length));
+  return rows
+    .map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`)
+    .join("\n");
+}
+
+function helpTitle(command: Command): string {
+  return command.parent ? command.name() : "Spur";
+}
+
+function helpNotes(command: Command): string[] {
+  if (!command.parent) {
+    return [
+      "Use `spur <command> --help` for per-command details.",
+      "Use `--json` on `spawn`, `list`, and `send` for scripts.",
+    ];
+  }
+  if (command.name() === "list") {
+    return ["On a TTY, this opens the live selector instead of printing a one-shot list."];
+  }
+  return [];
+}
+
+function formatHelp(command: Command, helper: Help): string {
+  const sections: string[] = [brandLine(helpTitle(command))];
+  const description = helper.commandDescription(command);
+  if (description) {
+    sections.push(dimText(description));
+  }
+
+  sections.push(`${boldText("Usage")}\n${renderHelpLines([helper.commandUsage(command)])}`);
+
+  const argumentsRows = helper.visibleArguments(command).map((argument) => ({
+    term: helper.argumentTerm(argument),
+    description: helper.argumentDescription(argument),
+  }));
+  if (argumentsRows.length > 0) {
+    sections.push(`${boldText("Arguments")}\n${renderHelpRows(argumentsRows)}`);
+  }
+
+  const commandRows = helper.visibleCommands(command).map((entry) => ({
+    term: helper.subcommandTerm(entry),
+    description: helper.subcommandDescription(entry),
+  }));
+  if (commandRows.length > 0) {
+    sections.push(`${boldText("Commands")}\n${renderHelpRows(commandRows)}`);
+  }
+
+  const optionRows = helper.visibleOptions(command).map((option) => ({
+    term: helper.optionTerm(option),
+    description: helper.optionDescription(option),
+  }));
+  if (optionRows.length > 0) {
+    sections.push(`${boldText("Options")}\n${renderHelpRows(optionRows)}`);
+  }
+
+  const globalOptionRows = helper.visibleGlobalOptions(command).map((option) => ({
+    term: helper.optionTerm(option),
+    description: helper.optionDescription(option),
+  }));
+  if (globalOptionRows.length > 0) {
+    sections.push(`${boldText("Global Options")}\n${renderHelpRows(globalOptionRows)}`);
+  }
+
+  const notes = helpNotes(command);
+  if (notes.length > 0) {
+    sections.push(`${boldText("Notes")}\n${renderHelpLines(notes, dimText)}`);
+  }
+
+  return sections.join("\n\n");
+}
+
+async function runInteractiveSessionList(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<void> {
+  const { info, sessions: initialSessions } = await withSpinner("loading sessions", () =>
+    loadHumanListData(cliEntrypoint, configPath),
+  );
+  let sessions = initialSessions;
+  let selectedSessionId: string | null = sessions[0]?.id ?? null;
+  let statusMessage: string | undefined;
+  let closed = false;
+  let busy = false;
+  let refreshing = false;
+  let terminalActive = false;
+  let refreshTimer: NodeJS.Timeout | undefined;
+
+  const render = (): void => {
+    if (closed) return;
+    process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList({
+      info,
+      sessions,
+      selectedSessionId,
+      statusMessage,
+    })}\n`);
+  };
+
+  const enableTerminal = (): void => {
+    if (terminalActive) return;
+    emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdout.write(ENTER_ALT_SCREEN);
+    terminalActive = true;
+  };
+
+  const disableTerminal = (): void => {
+    if (!terminalActive) return;
+    process.stdout.write(EXIT_ALT_SCREEN);
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+    terminalActive = false;
+  };
+
+  const refresh = async (): Promise<void> => {
+    if (closed || busy || refreshing) return;
+    refreshing = true;
+    try {
+      const nextSessions = sortSessionsForList(
+        await loadRawSessions(cliEntrypoint, configPath),
+      );
+      sessions = nextSessions;
+      if (
+        selectedSessionId &&
+        !nextSessions.some((session) => session.id === selectedSessionId)
+      ) {
+        const vanishedId = selectedSessionId;
+        selectedSessionId = null;
+        statusMessage = brandLine(
+          `${vanishedId} disappeared. Use ↑↓ to reselect before attach, restore, or kill.`,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      refreshing = false;
+      render();
+    }
+  };
+
+  const getSelectedSession = (): SessionView | null =>
+    sessions.find((session) => session.id === selectedSessionId) ?? null;
+
+  const getSelectedSessionOrWarn = (): SessionView | null => {
+    const session = getSelectedSession();
+    if (session) return session;
+    statusMessage = brandLine(RESELECT_MESSAGE);
+    render();
+    return null;
+  };
+
+  const restoreSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    if (!isRestorableSession(session)) {
+      statusMessage = brandLine(`Session ${session.id} cannot be restored.`);
+      render();
+      return;
+    }
+
+    busy = true;
+    statusMessage = brandLine(`Restoring ${session.id}...`);
+    render();
+
+    try {
+      const restored = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${session.id}/restore`,
+        {},
+        configPath,
+      );
+      sessions = replaceListedSession(sessions, restored);
+      selectedSessionId = restored.id;
+      statusMessage = brandLine(`Restored ${restored.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
+  const attachSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    if (!session.runtimeAlive) {
+      statusMessage = brandLine(`Session ${session.id} is not live.`);
+      render();
+      return;
+    }
+
+    busy = true;
+    statusMessage = brandLine(`Attaching to ${session.id}...`);
+    render();
+
+    disableTerminal();
+    try {
+      execFileSync("tmux", ["attach-session", "-t", session.tmuxSession], {
+        stdio: "inherit",
+      });
+      statusMessage = undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      if (!closed) {
+        enableTerminal();
+      }
+      busy = false;
+      await refresh();
+    }
+  };
+
+  const killSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+
+    busy = true;
+    statusMessage = brandLine(`Killing ${session.id}...`);
+    render();
+
+    try {
+      const killed = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${session.id}/kill`,
+        {},
+        configPath,
+      );
+      sessions = replaceListedSession(sessions, killed);
+      selectedSessionId = killed.id;
+      statusMessage = brandLine(`Killed ${killed.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    const finish = (): void => {
+      cleanup();
+      resolve();
+    };
+
+    const fail = (error: unknown): void => {
+      cleanup();
+      reject(error);
+    };
+
+    const onResize = (): void => {
+      render();
+    };
+
+    const onKeypress = (_input: string, key: { ctrl?: boolean; name?: string; sequence?: string }): void => {
+      if (busy) return;
+      if (key.ctrl && key.name === "c") {
+        process.exitCode = 130;
+        finish();
+        return;
+      }
+      if (key.name === "escape" || key.name === "q" || key.sequence === "q") {
+        finish();
+        return;
+      }
+      if (key.name === "up") {
+        selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
+        render();
+        return;
+      }
+      if (key.name === "down") {
+        selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
+        render();
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        void attachSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "r" || key.sequence === "r") {
+        void restoreSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "k" || key.sequence === "k") {
+        void killSelectedSession().catch(fail);
+      }
+    };
+
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+      }
+      process.stdin.off("keypress", onKeypress);
+      process.stdout.off("resize", onResize);
+      disableTerminal();
+    };
+
+    enableTerminal();
+    render();
+    refreshTimer = setInterval(() => {
+      void refresh();
+    }, LIVE_LIST_REFRESH_MS);
+    process.stdin.on("keypress", onKeypress);
+    process.stdout.on("resize", onResize);
+  });
+}
+
+async function outputResult<T>(args: {
+  json: boolean;
+  label: string;
+  action: () => Promise<T>;
+  render: (value: T) => string;
+  success?: (value: T) => string;
+}): Promise<void> {
+  const value = args.json ? await args.action() : await withSpinner(args.label, args.action);
+  if (args.json) {
+    printJson(value);
+    return;
+  }
+  if (args.success) {
+    writeStdout(brandLine(args.success(value)));
+  }
+  writeStdout(args.render(value));
+}
+
+export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
-  const cliEntrypoint = process.argv[1] ?? "";
 
   program
     .name("spur")
-    .description("Spur")
-    .version("0.1.0")
-    .option("--config <path>", "Path to spur.yaml");
+    .description("Lean v2 orchestrator.")
+    .usage("<command> [options]")
+    .helpCommand(false)
+    .helpOption("-h, --help", "Show help")
+    .configureHelp({ formatHelp, showGlobalOptions: true })
+    .option("--config <path>", "Path to spur.yaml")
+    .version("0.1.0", "-V, --version", "Show version");
 
   program
     .command("spawn")
+    .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("<prompt...>", "Initial agent prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--branch <name>", "Branch name to use")
+    .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[], options, command) => {
       const configPath = getConfigPath(command.parent as Command);
       const payload: SpawnSessionRequest = {
@@ -43,69 +511,102 @@ async function run(): Promise<void> {
         agent: options.agent,
         branch: options.branch,
       };
-      printJson(await postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath));
+      await outputResult({
+        json: Boolean(options.json),
+        label: "starting session",
+        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
+        render: renderSessionCard,
+      });
     });
 
   program
     .command("list")
-    .action(async (_options, command) => {
+    .description("Show sessions; on a TTY, open the live selector.")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
       const configPath = getConfigPath(command.parent as Command);
-      printJson(await getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath));
-    });
-
-  program
-    .command("get")
-    .argument("<sessionId>", "Session id")
-    .action(async (sessionId: string, _options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
-      printJson(await getJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}`, configPath));
+      if (options.json) {
+        await outputResult({
+          json: true,
+          label: "loading sessions",
+          action: () => loadRawSessions(cliEntrypoint, configPath),
+          render: () => "",
+        });
+        return;
+      }
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        await runInteractiveSessionList(cliEntrypoint, configPath);
+        return;
+      }
+      const data = await withSpinner("loading sessions", () =>
+        loadHumanListData(cliEntrypoint, configPath),
+      );
+      writeStdout(renderSessionDashboard(data));
     });
 
   program
     .command("send")
+    .description("Send a follow-up message to a session.")
     .argument("<sessionId>", "Session id")
     .argument("<message...>", "Message to send")
-    .action(async (sessionId: string, messageParts: string[], _options, command) => {
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, messageParts: string[], options, command) => {
       const configPath = getConfigPath(command.parent as Command);
       const payload: SendMessageRequest = { message: messageParts.join(" ") };
-      printJson(
-        await postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
-      );
+      await outputResult({
+        json: Boolean(options.json),
+        label: "sending message",
+        action: () =>
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
+        success: (session) => `Sent message to ${session.id}.`,
+        render: renderSessionCard,
+      });
     });
 
   program
-    .command("kill")
-    .argument("<sessionId>", "Session id")
-    .action(async (sessionId: string, _options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
-      printJson(await postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/kill`, {}, configPath));
-    });
-
-  program
-    .command("info")
-    .action(async (_options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
-      printJson(await getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath));
-    });
-
-  program
-    .command("daemon")
-    .description("Internal daemon commands")
+    .command("daemon", { hidden: true })
+    .description("Internal daemon commands.")
     .command("start")
-    .description("Start the local daemon")
-    .action(async (_options: unknown, command: Command) => {
+    .description("Start the local daemon.")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command: Command) => {
       const configPath = getConfigPath(command.parent?.parent as Command);
-      const service = await startServer(configPath);
-      printJson(service.info());
+      await outputResult({
+        json: Boolean(options.json),
+        label: "starting daemon",
+        action: async () => {
+          const service = await startServer(
+            configPath,
+            options.json
+              ? {
+                  info: writeStderr,
+                  warn: writeStderr,
+                }
+              : undefined,
+          );
+          return service.info();
+        },
+        success: () => "Daemon started.",
+        render: renderRuntimeInfo,
+      });
     });
+
+  return program;
+}
+
+export async function run(argv = process.argv): Promise<void> {
+  const cliEntrypoint = argv[1] ?? "";
+  const program = createProgram(cliEntrypoint);
 
   try {
-    await program.parseAsync(process.argv);
+    await program.parseAsync(argv);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(message);
+    log.error(message, { output: process.stderr, symbol: brandMark(), withGuide: false });
     process.exitCode = 1;
   }
 }
 
-void run();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void run();
+}

@@ -2,17 +2,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import type {
+import {
+  GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
+  type AgentName,
   AgentName,
   AppConfig,
   CronSourceConfig,
+  GitHubSourceConfig,
   ProjectConfig,
+  SendTriggerConfig,
   SourceConfig,
   TriggerConfig,
 } from "./types.js";
 
 const VALID_ID = /^[a-zA-Z0-9_-]+$/;
-const VALID_PREFIX = /^[a-zA-Z0-9_-]+$/;
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -77,6 +80,13 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude" or "codex"`);
 }
 
+function expectedEventsForSource(source: SourceConfig): string[] {
+  if (source.type === "cron") {
+    return ["cron:tick"];
+  }
+  return VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
+}
+
 function derivePrefix(projectId: string): string {
   const sanitized = projectId.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-");
   const trimmed = sanitized.replace(/^-+/, "").replace(/-+$/, "");
@@ -96,6 +106,19 @@ function parseCronSource(
   };
 }
 
+function parseGitHubSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): GitHubSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  return {
+    type: "github",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+  };
+}
+
 function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
   if (!VALID_ID.test(sourceId)) {
     throw new Error(
@@ -109,15 +132,30 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "cron") {
     return parseCronSource(projectId, sourceId, raw);
   }
+  if (type === "github") {
+    return parseGitHubSource(projectId, sourceId, raw);
+  }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
+}
+
+function parseSendConfig(
+  projectId: string,
+  triggerId: string,
+  raw: Record<string, unknown>,
+): SendTriggerConfig["send"] {
+  const label = `projects.${projectId}.triggers.${triggerId}.send`;
+  const sendRaw = asObject(raw["send"], label);
+  return {
+    interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
+  };
 }
 
 function parseTrigger(
   projectId: string,
   triggerId: string,
   value: unknown,
-  sourceIds: Set<string>,
+  sources: Record<string, SourceConfig>,
 ): TriggerConfig {
   if (!VALID_ID.test(triggerId)) {
     throw new Error(
@@ -130,8 +168,25 @@ function parseTrigger(
   const source = asString(raw["source"], `${label}.source`);
   const event = asString(raw["event"], `${label}.event`);
 
-  if (!sourceIds.has(source)) {
+  const sourceConfig = sources[source];
+  if (!sourceConfig) {
     throw new Error(`${label}.source references unknown source "${source}"`);
+  }
+  const expectedEvents = expectedEventsForSource(sourceConfig);
+  if (!expectedEvents.includes(event)) {
+    throw new Error(
+      `${label}.event uses unsupported event "${event}" for source "${source}"; expected one of ${expectedEvents.join(", ")}`,
+    );
+  }
+
+  const hasSpawn = raw["spawn"] !== undefined;
+  const hasSend = raw["send"] !== undefined;
+  if (hasSpawn === hasSend) {
+    throw new Error(`${label} must define exactly one of "spawn" or "send"`);
+  }
+
+  if (hasSend) {
+    return { source, event, send: parseSendConfig(projectId, triggerId, raw) };
   }
 
   const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
@@ -176,11 +231,9 @@ function parseProject(
   const sourcesRaw = raw["sources"]
     ? asObject(raw["sources"], `projects.${projectId}.sources`)
     : {};
-  const sourceIds = new Set<string>();
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
     const parsedSource = parseSource(projectId, sourceId, sourceValue);
-    sourceIds.add(sourceId);
     sources[sourceId] = parsedSource;
   }
   const triggersRaw = raw["triggers"]
@@ -188,12 +241,12 @@ function parseProject(
     : {};
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
-    triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sourceIds);
+    triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
   }
 
-  if (!VALID_PREFIX.test(sessionPrefix)) {
+  if (!VALID_ID.test(sessionPrefix)) {
     throw new Error(
-      `projects.${projectId}.sessionPrefix must match ${VALID_PREFIX.source}`,
+      `projects.${projectId}.sessionPrefix must match ${VALID_ID.source}`,
     );
   }
 
@@ -202,7 +255,7 @@ function parseProject(
     defaultBranch,
     sessionPrefix,
     symlinks,
-    defaultAgent,
+    ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
     triggers,
   };

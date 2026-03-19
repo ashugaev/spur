@@ -1,6 +1,7 @@
-import { EventBus } from "../event-bus.js";
+import type { EventBus } from "../event-bus.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
+import { githubSourceModule } from "./github.js";
 import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
 
 interface StartConfiguredSourcesDeps {
@@ -16,12 +17,24 @@ interface StartedSource {
 
 const SOURCE_MODULES = {
   cron: cronSourceModule,
+  github: githubSourceModule,
 } satisfies Record<SourceType, SourceModule>;
+
+function stopAll(sources: StartedSource[]): void {
+  for (const source of [...sources].reverse()) {
+    try {
+      source.abortController.abort();
+      source.handle.stop();
+    } catch {
+      // Best effort only.
+    }
+  }
+}
 
 export async function startConfiguredSources(
   deps: StartConfiguredSourcesDeps,
 ): Promise<SourceGroupController> {
-  const logger = deps.logger ?? console;
+  const logger = deps.logger ?? {};
   const startedSources: StartedSource[] = [];
 
   try {
@@ -32,12 +45,14 @@ export async function startConfiguredSources(
         const handle = await module.start({
           sourceId,
           projectId,
+          dataDir: deps.config.dataDir,
           config: source,
-          emit(name: string): void {
+          emit(name: string, data?: unknown): void {
             deps.bus.emit({
               name,
               projectId,
               sourceId,
+              ...(data === undefined ? {} : { data }),
             });
           },
           signal: abortController.signal,
@@ -52,27 +67,13 @@ export async function startConfiguredSources(
       source.handle.runOnStart?.();
     }
   } catch (error) {
-    for (const source of startedSources.reverse()) {
-      try {
-        source.abortController.abort();
-        source.handle.stop();
-      } catch {
-        // Best effort rollback during startup failure.
-      }
-    }
+    stopAll(startedSources);
     throw error;
   }
 
   return {
     stop(): void {
-      for (const source of startedSources.reverse()) {
-        try {
-          source.abortController.abort();
-          source.handle.stop();
-        } catch {
-          // Best effort shutdown.
-        }
-      }
+      stopAll(startedSources);
     },
   };
 }
