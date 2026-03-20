@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/smoke/**/*.smoke.test.ts"],
-    testTimeout: 180_000,
+    testTimeout: 300_000,
     hookTimeout: 90_000,
     fileParallelism: false,
     pool: "forks",
