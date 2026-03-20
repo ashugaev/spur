@@ -32,7 +32,6 @@ interface PendingBatch {
   batch: SendBatch;
 }
 
-type BusyState = "interruptible" | "already_interrupted";
 interface RetryState {
   attempts: number;
   nextAttemptAt: number | null;
@@ -111,7 +110,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
-  const busyStates = new Map<string, BusyState>();
+  const interruptedKeys = new Set<string>();
   const retryStates = new Map<string, RetryState>();
   const serialByKey = new Map<string, Promise<void>>();
   let flushTimer: NodeJS.Timeout | null = null;
@@ -119,11 +118,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
   const clearBatch = (
     queueKey: string,
-    options?: { keepBusyState?: boolean; keepRetryState?: boolean },
+    options?: { keepInterrupted?: boolean; keepRetryState?: boolean },
   ): void => {
     pendingBatches.delete(queueKey);
-    if (!options?.keepBusyState) {
-      busyStates.delete(queueKey);
+    if (!options?.keepInterrupted) {
+      interruptedKeys.delete(queueKey);
     }
     if (!options?.keepRetryState) {
       retryStates.delete(queueKey);
@@ -141,8 +140,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     options?: { clearAfter?: boolean; keepRetryState?: boolean },
   ): Promise<void> => {
     if (options?.clearAfter !== false) {
-      const clearOptions: { keepBusyState?: boolean; keepRetryState?: boolean } = {
-        keepBusyState: interrupt,
+      const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
+        keepInterrupted: interrupt,
       };
       if (options?.keepRetryState !== undefined) {
         clearOptions.keepRetryState = options.keepRetryState;
@@ -235,6 +234,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const retry = retryStates.get(queueKey);
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
+        clearBatch(queueKey);
         return;
       }
 
@@ -258,7 +258,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
 
     if (isDeliverableState(session)) {
-      busyStates.delete(queueKey);
+      interruptedKeys.delete(queueKey);
       await deliverBatch(queueKey, batch, false);
     }
   };
@@ -304,13 +304,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (!isWorking && !needsInput) return;
 
     if (needsInput || !trigger.send.interrupt) {
-      busyStates.set(queueKey, "interruptible");
       return;
     }
 
-    if (busyStates.get(queueKey) === "already_interrupted") return;
+    if (interruptedKeys.has(queueKey)) return;
 
-    busyStates.set(queueKey, "already_interrupted");
+    interruptedKeys.add(queueKey);
     await deliverBatch(queueKey, batch, true);
   };
 
