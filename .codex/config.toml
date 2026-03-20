@@ -1,0 +1,34 @@
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 8
+max_depth = 2
+
+[agents.architect]
+description = "Create detailed implementation plan with steps and acceptance criteria. Use before developer on any non-trivial task."
+config_file = "agents/architect.toml"
+
+[agents.critic]
+description = "Evaluate researcher's implementation options. Verify claims, challenge assumptions, score each, select the best. Use after researcher, before architect."
+config_file = "agents/critic.toml"
+
+[agents.designer]
+description = "UI review gate. Verify layout, visual consistency, and UI states for frontend changes. Use after UI implementation. Skip backend-only changes."
+config_file = "agents/designer.toml"
+
+[agents.developer]
+description = "Implement the architect's plan. Writes code, runs checks, commits focused changes. Use after architect, before reviewer."
+config_file = "agents/developer.toml"
+
+[agents.researcher]
+description = "Generate 2-3 implementation approaches with codebase evidence. Use before critic."
+config_file = "agents/researcher.toml"
+
+[agents.reviewer]
+description = "Code review gate. Static diff analysis + build checks. Returns APPROVED or CHANGES_REQUESTED. Use after developer."
+config_file = "agents/reviewer.toml"
+
+[agents.tester]
+description = "UI testing via browser. Visually verifies UI changes in the web dashboard. Returns PASS or FAIL."
+config_file = "agents/tester.toml"
