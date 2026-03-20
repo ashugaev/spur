@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  compareSessionsForList,
-  displayState,
-  sortSessionsForList,
-} from "../../src/session-display.js";
+import { compareSessionsForList, sortSessionsForList } from "../../src/session-display.js";
 import type { SessionView } from "../../src/types.js";
 
 function session(overrides: Partial<SessionView>): SessionView {
@@ -29,11 +25,6 @@ function session(overrides: Partial<SessionView>): SessionView {
 }
 
 describe("session-display", () => {
-  it("uses the derived public state directly", () => {
-    expect(displayState(session({ state: "needs_input" }))).toBe("needs_input");
-    expect(displayState(session({ state: "killed" }))).toBe("killed");
-  });
-
   it("keeps needs_input and error sessions above normal waiting sessions", () => {
     const ordered = sortSessionsForList([
       session({ id: "api-3", state: "waiting" }),

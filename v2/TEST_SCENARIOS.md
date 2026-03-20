@@ -23,7 +23,6 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, and `github:comment`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
-- Session context keeps one sidecar record per session, orders reserved `tracker` and `pr` links ahead of extras, injects the hidden `spur internal context ...` commands into launch and restore prompts, and enriches `SessionView` with `taskTitle` and `links`.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
@@ -42,7 +41,6 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
-- Hidden `internal context` commands stay out of `spur --help`, work in manual `--session <id>` mode and agent-side `spur ...` mode through the injected shim, update the session sidecar, and refresh the tmux status line plus `list --json` output.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, and returns to the selector after detach.
 - TTY `list` can kill the selected live session in place and leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.

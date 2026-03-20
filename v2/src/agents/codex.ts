@@ -177,17 +177,3 @@ export async function buildCodexRestorePlan(
     readyMarkers: ["›"],
   };
 }
-
-export async function getCodexActivityAt(worktreePath: string): Promise<Date | null> {
-  const sessionFile = await findSessionFile(worktreePath);
-  if (!sessionFile) {
-    return null;
-  }
-
-  try {
-    const fileStat = await stat(sessionFile);
-    return fileStat.mtime;
-  } catch {
-    return null;
-  }
-}

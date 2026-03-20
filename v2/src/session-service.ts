@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
-import { buildAgentLaunchPlan, buildAgentRestorePlan, getAgentActivityAt, parseAgentName } from "./agents/index.js";
+import { buildAgentLaunchPlan, buildAgentRestorePlan, parseAgentName } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
@@ -475,12 +475,7 @@ export class SessionService {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     const updatedAt = new Date(session.updatedAt);
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const agentActivityAt =
-      runtimeAlive && session.worktreePath
-        ? await getAgentActivityAt(session.agent, session.worktreePath).catch(() => null)
-        : null;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt, agentActivityAt) ?? updatedAt)
-      .toISOString();
+    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
 
     let state: SessionState;
     if (session.status === "killed") {
@@ -500,7 +495,7 @@ export class SessionService {
         state = classifyRunningState({
           pane,
           updatedAt,
-          signalAt: latestActivityAt(tmuxActivityAt, agentActivityAt),
+          signalAt: tmuxActivityAt,
         });
       }
     }

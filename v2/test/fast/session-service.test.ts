@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
-const getAgentActivityAtMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const loadConfigMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
@@ -25,7 +24,6 @@ const workspaceExistsMock = vi.fn();
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
   buildAgentRestorePlan: buildAgentRestorePlanMock,
-  getAgentActivityAt: getAgentActivityAtMock,
   parseAgentName: parseAgentNameMock,
 }));
 
@@ -103,7 +101,6 @@ describe("SessionService", () => {
         "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
       readyMarkers: ["❯"],
     });
-    getAgentActivityAtMock.mockReset().mockResolvedValue(null);
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
@@ -199,8 +196,6 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_SESSION_CONTEXT_PATH: "/tmp/spur-data/session-context/api/api-1.json",
-        PATH: "/tmp/spur-data/bin:/usr/bin:/bin",
       },
     });
     expect(result.branch).toBe("main");
@@ -456,7 +451,7 @@ describe("SessionService", () => {
     expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
       "claude",
       "/tmp/spur-worktrees/api/api-1",
-      "[context]\nThis session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith({
       sessionName: "api-1",
@@ -466,13 +461,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_SESSION_CONTEXT_PATH: "/tmp/spur-data/session-context/api/api-1.json",
-        PATH: "/tmp/spur-data/bin:/usr/bin:/bin",
       },
-    });
-    expect(syncTmuxSessionContextMock).toHaveBeenCalledWith("api-1", "api-1", {
-      taskTitle: null,
-      links: {},
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",

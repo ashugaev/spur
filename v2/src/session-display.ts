@@ -1,8 +1,6 @@
 import type { SessionState, SessionView } from "./types.js";
 
-export type SessionDisplayState = SessionState;
-
-const SESSION_DISPLAY_ORDER: SessionDisplayState[] = [
+const SESSION_DISPLAY_ORDER: SessionState[] = [
   "needs_input",
   "error",
   "working",
@@ -13,18 +11,12 @@ const SESSION_DISPLAY_ORDER: SessionDisplayState[] = [
 
 const SESSION_DISPLAY_RANK = new Map(
   SESSION_DISPLAY_ORDER.map(
-    (state, index) => [state, index] satisfies [SessionDisplayState, number],
+    (state, index) => [state, index] satisfies [SessionState, number],
   ),
 );
 
-export function displayState(
-  session: Pick<SessionView, "state">,
-): SessionDisplayState {
-  return session.state;
-}
-
 function displayRank(session: SessionView): number {
-  return SESSION_DISPLAY_RANK.get(displayState(session)) ?? SESSION_DISPLAY_ORDER.length;
+  return SESSION_DISPLAY_RANK.get(session.state) ?? SESSION_DISPLAY_ORDER.length;
 }
 
 export function compareSessionsForList(left: SessionView, right: SessionView): number {

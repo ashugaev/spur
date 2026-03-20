@@ -78,17 +78,3 @@ export async function buildClaudeRestorePlan(
     readyMarkers: ["❯"],
   };
 }
-
-export async function getClaudeActivityAt(worktreePath: string): Promise<Date | null> {
-  const sessionFile = await findLatestSessionFile(worktreePath);
-  if (!sessionFile) {
-    return null;
-  }
-
-  try {
-    const fileStat = await stat(sessionFile);
-    return fileStat.mtime;
-  } catch {
-    return null;
-  }
-}

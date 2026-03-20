@@ -1,5 +1,4 @@
 import { spinner } from "@clack/prompts";
-import { displayState } from "./session-display.js";
 import type { RuntimeInfo, SessionState, SessionView } from "./types.js";
 
 const THEME = {
@@ -103,7 +102,7 @@ function formatRelativeTime(input: string): string {
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
-    state: stateLabel(displayState(session)),
+    state: stateLabel(session.state),
     project: truncate(session.project, MAX_PROJECT_WIDTH),
     agent: session.agent,
     branch: truncate(session.branch, MAX_BRANCH_WIDTH),
@@ -128,7 +127,7 @@ function stateLabel(state: SessionState): string {
 }
 
 function statusColor(session: SessionView): string {
-  const state = displayState(session);
+  const state = session.state;
   if (state === "working") return SUCCESS;
   if (state === "waiting" || state === "needs_input") return WARNING;
   if (state === "error") return ACCENT;
