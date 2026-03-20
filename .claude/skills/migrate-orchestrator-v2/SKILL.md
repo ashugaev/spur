@@ -21,7 +21,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - Milestone 1 human session ops are only: `spawn`, `list`, `send`.
 - `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
+  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
   Non-TTY `list` stays a one-shot runtime summary plus session cards.
 - Workspace bootstrap is only: `git worktree` plus configured `symlinks`.
 - Supported agents for now: `claude` and `codex`.

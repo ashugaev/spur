@@ -1,17 +1,20 @@
 export type AgentName = "claude" | "codex";
-export const SPUR_DAEMON_API_VERSION = 1;
+export const SPUR_DAEMON_API_VERSION = 2;
 
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
-export type SessionActivity = "active" | "ready" | "idle" | "waiting_input" | "exited";
+export type SessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "stopped"
+  | "error"
+  | "killed";
+export type BranchSource = "explicit" | "shared_workspace";
 
 export type SourceType = "cron" | "github";
 
 export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
-export const GITHUB_SIGNAL_KINDS = [
-  "changes_requested",
-  "ci_failed",
-  "comment",
-] as const;
+export const GITHUB_SIGNAL_KINDS = ["changes_requested", "ci_failed", "comment"] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
 interface BaseSourceConfig {
@@ -30,10 +33,16 @@ export interface GitHubSourceConfig extends BaseSourceConfig {
 
 export type SourceConfig = CronSourceConfig | GitHubSourceConfig;
 
+export interface SpawnOverrides {
+  worktree?: boolean;
+  defaultBranch?: string;
+}
+
 export interface TriggerSpawnConfig {
   prompt: string;
   agent?: AgentName;
   branch?: string;
+  overrides?: SpawnOverrides;
 }
 
 export interface TriggerSendConfig {
@@ -71,6 +80,7 @@ export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
+  worktree: boolean;
   symlinks: string[];
   defaultAgent?: AgentName;
   sources: Record<string, SourceConfig>;
@@ -95,6 +105,8 @@ export interface SessionRecord {
   agent: AgentName;
   prompt: string;
   branch: string;
+  branchSource?: BranchSource;
+  worktree: boolean;
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
@@ -107,7 +119,7 @@ export interface SessionRecord {
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
-  activity: SessionActivity;
+  state: SessionState;
   lastActivityAt: string;
 }
 
@@ -116,6 +128,7 @@ export interface SpawnSessionRequest {
   prompt: string;
   agent?: AgentName;
   branch?: string;
+  overrides?: SpawnOverrides;
 }
 
 export interface SendMessageRequest {

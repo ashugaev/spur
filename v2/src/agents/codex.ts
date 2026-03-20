@@ -1,9 +1,10 @@
 import { createReadStream } from "node:fs";
-import { lstat, open, readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
+import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan } from "./types.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
@@ -15,8 +16,35 @@ function codexCommand(): string {
 
 interface CodexSessionLine {
   cwd?: string;
+  payload?: {
+    cwd?: string;
+    id?: string;
+  };
   threadId?: string;
   type?: string;
+}
+
+function sessionMetaCwd(line: CodexSessionLine): string | null {
+  if (line.type !== "session_meta") {
+    return null;
+  }
+  if (typeof line.cwd === "string" && line.cwd) {
+    return line.cwd;
+  }
+  if (typeof line.payload?.cwd === "string" && line.payload.cwd) {
+    return line.payload.cwd;
+  }
+  return null;
+}
+
+function sessionResumeId(line: CodexSessionLine): string | null {
+  if (typeof line.threadId === "string" && line.threadId) {
+    return line.threadId;
+  }
+  if (line.type === "session_meta" && typeof line.payload?.id === "string" && line.payload.id) {
+    return line.payload.id;
+  }
+  return null;
 }
 
 async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
@@ -53,22 +81,22 @@ async function sessionFileMatchesWorktree(
   filePath: string,
   worktreePath: string,
 ): Promise<boolean> {
-  let handle;
+  const candidates = new Set(await resolveWorktreePathCandidates(worktreePath));
   try {
-    handle = await open(filePath, "r");
-    const buffer = Buffer.allocUnsafe(4096);
-    const { bytesRead } = await handle.read(buffer, 0, 4096, 0);
-    const lines = buffer
-      .subarray(0, bytesRead)
-      .toString("utf-8")
-      .split("\n")
-      .slice(0, 10);
-    for (const line of lines) {
+    const input = createReadStream(filePath, { encoding: "utf-8" });
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    let linesRead = 0;
+    for await (const line of reader) {
+      if (linesRead >= 10) {
+        break;
+      }
+      linesRead += 1;
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as CodexSessionLine;
-        if (parsed.type === "session_meta" && parsed.cwd === worktreePath) {
+        const cwd = sessionMetaCwd(parsed);
+        if (cwd && candidates.has(cwd)) {
           return true;
         }
       } catch {
@@ -77,8 +105,6 @@ async function sessionFileMatchesWorktree(
     }
   } catch {
     return false;
-  } finally {
-    await handle?.close();
   }
   return false;
 }
@@ -113,8 +139,9 @@ async function readThreadId(filePath: string): Promise<string | null> {
       if (!trimmed) continue;
       try {
         const parsed = JSON.parse(trimmed) as CodexSessionLine;
-        if (typeof parsed.threadId === "string" && parsed.threadId) {
-          return parsed.threadId;
+        const resumeId = sessionResumeId(parsed);
+        if (resumeId) {
+          return resumeId;
         }
       } catch {
         // Ignore malformed lines.
@@ -149,4 +176,18 @@ export async function buildCodexRestorePlan(
     initialMessage: prompt,
     readyMarkers: ["›"],
   };
+}
+
+export async function getCodexActivityAt(worktreePath: string): Promise<Date | null> {
+  const sessionFile = await findSessionFile(worktreePath);
+  if (!sessionFile) {
+    return null;
+  }
+
+  try {
+    const fileStat = await stat(sessionFile);
+    return fileStat.mtime;
+  } catch {
+    return null;
+  }
 }

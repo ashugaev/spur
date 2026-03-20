@@ -1,26 +1,26 @@
-import type { SessionActivity, SessionStatus, SessionView } from "./types.js";
+import type { SessionState, SessionView } from "./types.js";
 
-export type SessionDisplayState = SessionActivity | Exclude<SessionStatus, "running">;
+export type SessionDisplayState = SessionState;
 
 const SESSION_DISPLAY_ORDER: SessionDisplayState[] = [
-  "waiting_input",
-  "errored",
-  "active",
-  "ready",
-  "idle",
-  "spawning",
-  "exited",
+  "needs_input",
+  "error",
+  "working",
+  "waiting",
+  "stopped",
   "killed",
 ];
 
 const SESSION_DISPLAY_RANK = new Map(
-  SESSION_DISPLAY_ORDER.map((state, index) => [state, index] satisfies [SessionDisplayState, number]),
+  SESSION_DISPLAY_ORDER.map(
+    (state, index) => [state, index] satisfies [SessionDisplayState, number],
+  ),
 );
 
 export function displayState(
-  session: Pick<SessionView, "status" | "activity">,
+  session: Pick<SessionView, "state">,
 ): SessionDisplayState {
-  return session.status === "running" ? session.activity : session.status;
+  return session.state;
 }
 
 function displayRank(session: SessionView): number {

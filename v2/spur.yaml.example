@@ -10,6 +10,7 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    worktree: true
     symlinks:
       - .env
       - .claude
@@ -29,6 +30,8 @@ projects:
         spawn:
           agent: claude
           prompt: "Review all open PRs and continue the highest-priority one."
+          overrides:
+            worktree: true
       pr-watch-changes-requested:
         source: pr-watch
         event: github:changes_requested
@@ -38,7 +41,7 @@ projects:
         source: pr-watch
         event: github:ci_failed
         send:
-          interrupt: true
+          interrupt: true # resend every 10m up to 3 while CI still fails
       pr-watch-comment:
         source: pr-watch
         event: github:comment

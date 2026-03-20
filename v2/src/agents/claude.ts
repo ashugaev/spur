@@ -2,6 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
+import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan } from "./types.js";
 
 function claudeCommand(): string {
@@ -12,9 +13,7 @@ function toClaudeProjectPath(worktreePath: string): string {
   return worktreePath.replaceAll("\\", "/").replaceAll(":", "").replace(/[/.]/g, "-");
 }
 
-async function findLatestSessionId(worktreePath: string): Promise<string | null> {
-  const projectDir = join(homedir(), ".claude", "projects", toClaudeProjectPath(worktreePath));
-
+async function findLatestSessionFileForProjectDir(projectDir: string): Promise<string | null> {
   let entries: string[];
   try {
     entries = await readdir(projectDir);
@@ -29,14 +28,31 @@ async function findLatestSessionId(worktreePath: string): Promise<string | null>
         const filePath = join(projectDir, entry);
         try {
           const fileStat = await stat(filePath);
-          return { entry, mtimeMs: fileStat.mtimeMs };
+          return { path: filePath, mtimeMs: fileStat.mtimeMs };
         } catch {
-          return { entry, mtimeMs: 0 };
+          return { path: filePath, mtimeMs: 0 };
         }
       }),
   );
   files.sort((left, right) => right.mtimeMs - left.mtimeMs);
-  return files[0] ? basename(files[0].entry, ".jsonl") : null;
+  return files[0]?.path ?? null;
+}
+
+async function findLatestSessionFile(worktreePath: string): Promise<string | null> {
+  for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
+    const sessionFile = await findLatestSessionFileForProjectDir(
+      join(homedir(), ".claude", "projects", toClaudeProjectPath(candidate)),
+    );
+    if (sessionFile) {
+      return sessionFile;
+    }
+  }
+  return null;
+}
+
+async function findLatestSessionId(worktreePath: string): Promise<string | null> {
+  const sessionFile = await findLatestSessionFile(worktreePath);
+  return sessionFile ? basename(sessionFile, ".jsonl") : null;
 }
 
 export function buildClaudePlan(prompt: string): AgentLaunchPlan {
@@ -61,4 +77,18 @@ export async function buildClaudeRestorePlan(
     initialMessage: prompt,
     readyMarkers: ["❯"],
   };
+}
+
+export async function getClaudeActivityAt(worktreePath: string): Promise<Date | null> {
+  const sessionFile = await findLatestSessionFile(worktreePath);
+  if (!sessionFile) {
+    return null;
+  }
+
+  try {
+    const fileStat = await stat(sessionFile);
+    return fileStat.mtime;
+  } catch {
+    return null;
+  }
 }

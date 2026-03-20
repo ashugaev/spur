@@ -55,7 +55,10 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
-  const server = createServer(async (request, response) => {
+  const handleRequest = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> => {
     try {
       if (!request.method) {
         sendError(response, 400, "Request method is required");
@@ -121,6 +124,9 @@ export async function startServer(
       const message = error instanceof Error ? error.message : String(error);
       sendError(response, 500, message);
     }
+  };
+  const server = createServer((request, response) => {
+    void handleRequest(request, response);
   });
 
   const closeServer = async (): Promise<void> => {

@@ -23,12 +23,7 @@ import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isRestorableSession } from "./session-service.js";
 import { startServer } from "./server.js";
-import type {
-  RuntimeInfo,
-  SendMessageRequest,
-  SessionView,
-  SpawnSessionRequest,
-} from "./types.js";
+import type { RuntimeInfo, SendMessageRequest, SessionView, SpawnSessionRequest } from "./types.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -37,6 +32,16 @@ const LIST_MAX_DETAIL_ROWS = 6;
 const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
 const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
 const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
+
+function enableTmuxMouse(sessionName: string): void {
+  try {
+    execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "on"], {
+      stdio: "ignore",
+    });
+  } catch {
+    // Best effort only.
+  }
+}
 
 function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
@@ -91,9 +96,7 @@ async function loadHumanListData(
 }
 
 function replaceListedSession(sessions: SessionView[], updated: SessionView): SessionView[] {
-  return sortSessionsForList(
-    sessions.map((entry) => (entry.id === updated.id ? updated : entry)),
-  );
+  return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
 function renderLiveSessionList(args: {
@@ -102,17 +105,14 @@ function renderLiveSessionList(args: {
   selectedSessionId: string | null;
   statusMessage?: string;
 }): string {
-  const rows = process.stdout.rows ?? 24;
+  const rows = process.stdout.rows > 0 ? process.stdout.rows : 24;
   const waitingInputAlert = renderWaitingInputAlert({
     sessions: args.sessions,
     selectedSessionId: args.selectedSessionId,
   });
   const available = Math.max(
     1,
-    rows -
-      LIST_FIXED_ROWS -
-      (waitingInputAlert ? 2 : 0) -
-      (args.statusMessage ? 2 : 0),
+    rows - LIST_FIXED_ROWS - (waitingInputAlert ? 2 : 0) - (args.statusMessage ? 2 : 0),
   );
   const maxDetailLines = Math.max(
     0,
@@ -150,13 +150,16 @@ function renderHelpLines(
 
 function renderHelpRows(rows: HelpRow[]): string {
   const width = Math.max(...rows.map((row) => row.term.length));
-  return rows
-    .map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`)
-    .join("\n");
+  return rows.map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`).join("\n");
 }
 
 function helpTitle(command: Command): string {
   return command.parent ? command.name() : "Spur";
+}
+
+function commandDisplayName(command: Command): string {
+  const aliases = command.aliases();
+  return aliases.length > 0 ? [command.name(), ...aliases].join("|") : command.name();
 }
 
 function helpNotes(command: Command): string[] {
@@ -166,20 +169,34 @@ function helpNotes(command: Command): string[] {
       "Use `--json` on `spawn`, `list`, and `send` for scripts.",
     ];
   }
+  if (command.name() === "spawn") {
+    return [
+      "Worktree spawns run agent branch preflight unless `--branch` is provided.",
+      "`--branch` skips preflight and uses the branch name directly.",
+      "`--shared` cannot be combined with `--worktree` or `--branch`.",
+    ];
+  }
   if (command.name() === "list") {
-    return ["On a TTY, this opens the live selector instead of printing a one-shot list."];
+    return [
+      "On a TTY, this opens the live selector instead of printing a one-shot list.",
+      "TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.",
+    ];
   }
   return [];
 }
 
 function formatHelp(command: Command, helper: Help): string {
   const sections: string[] = [brandLine(helpTitle(command))];
+  const commandUsage = (target: Command): string =>
+    target.parent
+      ? [commandDisplayName(target), target.usage()].filter(Boolean).join(" ")
+      : helper.commandUsage(target);
   const description = helper.commandDescription(command);
   if (description) {
     sections.push(dimText(description));
   }
 
-  sections.push(`${boldText("Usage")}\n${renderHelpLines([helper.commandUsage(command)])}`);
+  sections.push(`${boldText("Usage")}\n${renderHelpLines([commandUsage(command)])}`);
 
   const argumentsRows = helper.visibleArguments(command).map((argument) => ({
     term: helper.argumentTerm(argument),
@@ -190,7 +207,7 @@ function formatHelp(command: Command, helper: Help): string {
   }
 
   const commandRows = helper.visibleCommands(command).map((entry) => ({
-    term: helper.subcommandTerm(entry),
+    term: commandUsage(entry),
     description: helper.subcommandDescription(entry),
   }));
   if (commandRows.length > 0) {
@@ -239,12 +256,13 @@ async function runInteractiveSessionList(
 
   const render = (): void => {
     if (closed) return;
-    process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList({
+    const listArgs = {
       info,
       sessions,
       selectedSessionId,
-      statusMessage,
-    })}\n`);
+      ...(statusMessage ? { statusMessage } : {}),
+    };
+    process.stdout.write(`\u001b[2J\u001b[H${renderLiveSessionList(listArgs)}\n`);
   };
 
   const enableTerminal = (): void => {
@@ -268,14 +286,9 @@ async function runInteractiveSessionList(
     if (closed || busy || refreshing) return;
     refreshing = true;
     try {
-      const nextSessions = sortSessionsForList(
-        await loadRawSessions(cliEntrypoint, configPath),
-      );
+      const nextSessions = sortSessionsForList(await loadRawSessions(cliEntrypoint, configPath));
       sessions = nextSessions;
-      if (
-        selectedSessionId &&
-        !nextSessions.some((session) => session.id === selectedSessionId)
-      ) {
+      if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
         selectedSessionId = null;
         statusMessage = brandLine(
@@ -350,6 +363,7 @@ async function runInteractiveSessionList(
 
     disableTerminal();
     try {
+      enableTmuxMouse(session.tmuxSession);
       execFileSync("tmux", ["attach-session", "-t", session.tmuxSession], {
         stdio: "inherit",
       });
@@ -399,7 +413,6 @@ async function runInteractiveSessionList(
       cleanup();
       resolve();
     };
-
     const fail = (error: unknown): void => {
       cleanup();
       reject(error);
@@ -409,7 +422,10 @@ async function runInteractiveSessionList(
       render();
     };
 
-    const onKeypress = (_input: string, key: { ctrl?: boolean; name?: string; sequence?: string }): void => {
+    const onKeypress = (
+      _input: string,
+      key: { ctrl?: boolean; name?: string; sequence?: string },
+    ): void => {
       if (busy) return;
       if (key.ctrl && key.name === "c") {
         process.exitCode = 130;
@@ -482,6 +498,29 @@ async function outputResult<T>(args: {
   writeStdout(args.render(value));
 }
 
+function resolveCliSpawnOverrides(options: {
+  worktree?: boolean | string;
+  shared?: boolean;
+}): SpawnSessionRequest["overrides"] {
+  if (options.shared && options.worktree !== undefined) {
+    throw new Error("--shared cannot be combined with --worktree");
+  }
+  if (options.shared) {
+    return { worktree: false };
+  }
+  if (options.worktree === undefined || options.worktree === false) {
+    return undefined;
+  }
+  if (options.worktree === true) {
+    return { worktree: true };
+  }
+  const defaultBranch = options.worktree.trim();
+  if (!defaultBranch) {
+    throw new Error("--worktree base branch must be a non-empty string");
+  }
+  return { worktree: true, defaultBranch };
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
@@ -502,14 +541,21 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<prompt...>", "Initial agent prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--branch <name>", "Branch name to use")
+    .option(
+      "--worktree [defaultBranch]",
+      "Use an owned worktree; optionally override the base branch",
+    )
+    .option("--shared", "Use the project path directly for this session (no worktree)")
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[], options, command) => {
+      const overrides = resolveCliSpawnOverrides(options);
       const configPath = getConfigPath(command.parent as Command);
       const payload: SpawnSessionRequest = {
         project,
         prompt: promptParts.join(" "),
         agent: options.agent,
         branch: options.branch,
+        ...(overrides !== undefined ? { overrides } : {}),
       };
       await outputResult({
         json: Boolean(options.json),
@@ -521,6 +567,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
   program
     .command("list")
+    .alias("ls")
     .description("Show sessions; on a TTY, open the live selector.")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {

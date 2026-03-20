@@ -111,7 +111,7 @@ cron source
   primary line = `id`, colored status dot, state, project, agent, branch
   secondary line = `updated`, runtime/worktree facts, and at most one short exceptional hint
 - `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
+  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
   Non-TTY `list` stays a one-shot runtime summary plus session cards.
 - Never silently retarget `Enter`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
 - Empty states should be one sentence plus one dim next-step hint.

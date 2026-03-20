@@ -74,7 +74,7 @@ export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
       return incompatibleProbe(readDaemonPid(payload));
     }
 
-    return { state: "ready", info: payload as RuntimeInfo };
+    return { state: "ready", info: payload };
   } catch {
     return { state: "unreachable" };
   }
@@ -115,10 +115,7 @@ function spawnDaemon(cliEntrypoint: string, configPath: string): void {
   child.unref();
 }
 
-export async function ensureServer(
-  cliEntrypoint: string,
-  configPath?: string,
-): Promise<string> {
+export async function ensureServer(cliEntrypoint: string, configPath?: string): Promise<string> {
   const { baseUrl, configPath: resolvedConfigPath } = createBaseUrl(configPath);
   let probe = await probeDaemon(baseUrl);
   if (probe.state === "ready") {

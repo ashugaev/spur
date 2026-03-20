@@ -2,20 +2,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { VALID_ID_RE } from "./id-pattern.js";
 import {
   GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
   type AgentName,
-  AgentName,
-  AppConfig,
-  CronSourceConfig,
-  GitHubSourceConfig,
-  ProjectConfig,
-  SendTriggerConfig,
-  SourceConfig,
-  TriggerConfig,
+  type AppConfig,
+  type CronSourceConfig,
+  type GitHubSourceConfig,
+  type ProjectConfig,
+  type SendTriggerConfig,
+  type SourceConfig,
+  type TriggerConfig,
 } from "./types.js";
+import { parseSpawnOverrides } from "./spawn-overrides.js";
 
-const VALID_ID = /^[a-zA-Z0-9_-]+$/;
+const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -120,9 +121,9 @@ function parseGitHubSource(
 }
 
 function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
-  if (!VALID_ID.test(sourceId)) {
+  if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
-      `projects.${projectId}.sources.${sourceId} is invalid: source ids must match ${VALID_ID.source}`,
+      `projects.${projectId}.sources.${sourceId} is invalid: source ids must match ${VALID_ID_RE.source}`,
     );
   }
 
@@ -157,9 +158,9 @@ function parseTrigger(
   value: unknown,
   sources: Record<string, SourceConfig>,
 ): TriggerConfig {
-  if (!VALID_ID.test(triggerId)) {
+  if (!VALID_ID_RE.test(triggerId)) {
     throw new Error(
-      `projects.${projectId}.triggers.${triggerId} is invalid: trigger ids must match ${VALID_ID.source}`,
+      `projects.${projectId}.triggers.${triggerId} is invalid: trigger ids must match ${VALID_ID_RE.source}`,
     );
   }
 
@@ -193,6 +194,7 @@ function parseTrigger(
   const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
+  const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
 
   return {
     source,
@@ -201,18 +203,15 @@ function parseTrigger(
       prompt,
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
+      ...(overrides !== undefined ? { overrides } : {}),
     },
   };
 }
 
-function parseProject(
-  configDir: string,
-  projectId: string,
-  value: unknown,
-): ProjectConfig {
-  if (!VALID_ID.test(projectId)) {
+function parseProject(configDir: string, projectId: string, value: unknown): ProjectConfig {
+  if (!VALID_ID_RE.test(projectId)) {
     throw new Error(
-      `projects.${projectId} is invalid: project ids must match ${VALID_ID.source}`,
+      `projects.${projectId} is invalid: project ids must match ${VALID_ID_RE.source}`,
     );
   }
 
@@ -223,11 +222,9 @@ function parseProject(
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `projects.${projectId}.sessionPrefix`) ??
     derivePrefix(projectId);
+  const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
-  const defaultAgent = asOptionalAgent(
-    raw["defaultAgent"],
-    `projects.${projectId}.defaultAgent`,
-  );
+  const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
   const sourcesRaw = raw["sources"]
     ? asObject(raw["sources"], `projects.${projectId}.sources`)
     : {};
@@ -244,16 +241,15 @@ function parseProject(
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
   }
 
-  if (!VALID_ID.test(sessionPrefix)) {
-    throw new Error(
-      `projects.${projectId}.sessionPrefix must match ${VALID_ID.source}`,
-    );
+  if (!VALID_ID_RE.test(sessionPrefix)) {
+    throw new Error(`projects.${projectId}.sessionPrefix must match ${VALID_ID_RE.source}`);
   }
 
   return {
     path,
     defaultBranch,
     sessionPrefix,
+    worktree,
     symlinks,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
@@ -262,12 +258,23 @@ function parseProject(
 }
 
 export function resolveConfigPath(input?: string): string {
-  const candidate = input ?? process.env["SPUR_CONFIG"] ?? "spur.yaml";
-  const resolved = resolveFrom(process.cwd(), candidate);
-  if (!existsSync(resolved)) {
-    throw new Error(`Config file not found: ${resolved}`);
+  const candidate = input ?? process.env["SPUR_CONFIG"];
+  if (candidate) {
+    const resolved = resolveFrom(process.cwd(), candidate);
+    if (!existsSync(resolved)) {
+      throw new Error(`Config file not found: ${resolved}`);
+    }
+    return resolved;
   }
-  return resolved;
+
+  for (const filename of DEFAULT_CONFIG_FILES) {
+    const resolved = resolveFrom(process.cwd(), filename);
+    if (existsSync(resolved)) {
+      return resolved;
+    }
+  }
+
+  throw new Error(`Config file not found: ${resolveFrom(process.cwd(), DEFAULT_CONFIG_FILES[0])}`);
 }
 
 export function loadConfig(input?: string): AppConfig {
@@ -278,10 +285,7 @@ export function loadConfig(input?: string): AppConfig {
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const projects = asObject(root["projects"], "projects");
   const defaultAgent = asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? "claude";
-  const dataDir = resolveFrom(
-    configDir,
-    asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur",
-  );
+  const dataDir = resolveFrom(configDir, asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur");
   const worktreeDir = resolveFrom(
     configDir,
     asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur-worktrees",

@@ -121,10 +121,9 @@ export function writeGitHubSourceSnapshot(
   sessionId: string,
   snapshot: Map<string, GitHubSignal>,
 ): void {
-  writeJsonFile(
-    githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId),
-    [...snapshot.values()],
-  );
+  writeJsonFile(githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId), [
+    ...snapshot.values(),
+  ]);
 }
 
 export function deleteGitHubSourceSnapshot(

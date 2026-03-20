@@ -94,6 +94,10 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 12. Final audit
 - Verify each acceptance criterion has evidence.
 - Verify required mirrors and prompt/skill sync updates landed when applicable.
+- Prepare a short activity summary for the final report:
+  - activations: every skill and agent activated, with count
+  - loops: every looped gate run count
+  - edits: changed-file count for each implementation or fix pass
 - Stop. No Telegram, no PR, no CI loop.
 
 ## Rules
@@ -104,6 +108,7 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 - Prefer one phase, one owner, one output.
 - Use local checks only. Never wait for remote CI.
 - No unbounded retry loops.
+- Count `edits` as changed files in that pass. Keep the summary short.
 - Reply only in the current thread.
 
 ## Output
@@ -131,6 +136,11 @@ Execution:
 
 Checks:
 - <command or scenario> — OK|FAIL
+
+Activity:
+- activations: <role>x<count>, <role>x<count>
+- loops: research=<count>, review=<count>, simplify=<count>, validation=<count>, recheck=<count>
+- edits: impl#1=<files>, simplify-fix#1=<files>, review-fix#1=<files>, validate-fix#1=<files>
 
 Risks:
 - <risk>

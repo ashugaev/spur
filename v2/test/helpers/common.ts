@@ -46,11 +46,7 @@ export async function pollUntil<T>(
     accept?: (value: T) => boolean;
   },
 ): Promise<T> {
-  const {
-    timeoutMs,
-    intervalMs = 250,
-    accept = (value) => Boolean(value),
-  } = opts;
+  const { timeoutMs, intervalMs = 250, accept = (value) => Boolean(value) } = opts;
   const deadline = Date.now() + timeoutMs;
   let last = await fn();
   while (!accept(last)) {

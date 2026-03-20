@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
+import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -12,6 +13,23 @@ const execFileAsync = promisify(execFile);
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
   return stdout.trimEnd();
+}
+
+function buildLaunchCommand(command: string, env?: Record<string, string>): string {
+  const entries = Object.entries(env ?? {});
+  if (entries.length === 0) {
+    return command;
+  }
+  const exports = entries
+    .map(([key, value]) => {
+      if (key === "PATH") {
+        const firstSegment = value.split(":")[0] ?? value;
+        return `${key}=${shellEscape(firstSegment)}:$PATH`;
+      }
+      return `${key}=${shellEscape(value)}`;
+    })
+    .join(" ");
+  return `export ${exports} && ${command}`;
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
@@ -91,9 +109,10 @@ export async function createTmuxSession(input: {
   }
 
   await tmux("new-session", "-d", "-s", input.sessionName, "-c", input.cwd, ...envArgs);
+  await sleep(300);
 
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand);
+    await sendMessageToTmux(input.sessionName, buildLaunchCommand(input.launchCommand, input.env));
   } catch (error) {
     try {
       await tmux("kill-session", "-t", input.sessionName);
@@ -156,16 +175,21 @@ export async function waitForTmuxReady(
   }
 
   const deadline = Date.now() + timeoutMs;
+  let lastCapture = "";
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
+    lastCapture = capture;
     if (readyMarkers.every((marker) => capture.includes(marker))) {
       return;
     }
     await sleep(500);
   }
 
+  const detail = lastCapture.trim()
+    ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
+    : "";
   throw new Error(
-    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt`,
+    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt${detail}`,
   );
 }
 

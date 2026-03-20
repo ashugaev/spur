@@ -2,9 +2,9 @@ server:
   host: 127.0.0.1
   port: 4311
 
-dataDir: ~/.spur-local-test
-worktreeDir: ~/.spur-local-test-worktrees
-defaultAgent: claude
+dataDir: ~/.spur/spur-repo/local-test
+worktreeDir: ~/.spur/spur-repo/local-test-worktrees
+defaultAgent: codex
 
 projects:
   spur-local:

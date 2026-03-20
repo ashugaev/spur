@@ -20,6 +20,10 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+export async function readCurrentBranch(repoPath: string): Promise<string> {
+  return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
+}
+
 async function pruneWorktrees(repoPath: string): Promise<void> {
   try {
     await git(repoPath, "worktree", "prune", "--expire", "now");

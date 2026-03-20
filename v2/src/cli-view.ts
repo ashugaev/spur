@@ -1,6 +1,6 @@
 import { spinner } from "@clack/prompts";
 import { displayState } from "./session-display.js";
-import type { RuntimeInfo, SessionView } from "./types.js";
+import type { RuntimeInfo, SessionState, SessionView } from "./types.js";
 
 const THEME = {
   accent: "#f04c4c",
@@ -22,12 +22,7 @@ const MUTED = hexToAnsi(THEME.muted);
 const RESET = "\u001b[0m";
 const BOLD = "\u001b[1m";
 const DIM = "\u001b[2m";
-const SPINNER_FRAMES = [
-  `${BRAND_MARK}  `,
-  ` ${BRAND_MARK} `,
-  `  ${BRAND_MARK}`,
-  ` ${BRAND_MARK} `,
-];
+const SPINNER_FRAMES = [`${BRAND_MARK}  `, ` ${BRAND_MARK} `, `  ${BRAND_MARK}`, ` ${BRAND_MARK} `];
 const MAX_BRANCH_WIDTH = 28;
 const MAX_PROJECT_WIDTH = 20;
 const MIN_ID_WIDTH = 8;
@@ -35,7 +30,7 @@ const MIN_STATE_WIDTH = 13;
 const MIN_PROJECT_WIDTH = 12;
 const MIN_AGENT_WIDTH = 6;
 const DEFAULT_RENDER_WIDTH = 100;
-const MAX_DETAIL_FIELDS = 6;
+const MAX_DETAIL_FIELDS = 8;
 
 interface SessionRow {
   id: string;
@@ -88,7 +83,8 @@ function truncate(text: string, maxWidth: number): string {
 }
 
 function renderWidth(): number {
-  return process.stdout.columns ?? DEFAULT_RENDER_WIDTH;
+  const width = process.stdout.columns;
+  return width > 0 ? width : DEFAULT_RENDER_WIDTH;
 }
 
 function formatRelativeTime(input: string): string {
@@ -107,36 +103,61 @@ function formatRelativeTime(input: string): string {
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
-    state: displayState(session),
+    state: stateLabel(displayState(session)),
     project: truncate(session.project, MAX_PROJECT_WIDTH),
     agent: session.agent,
     branch: truncate(session.branch, MAX_BRANCH_WIDTH),
   };
 }
 
+function stateLabel(state: SessionState): string {
+  switch (state) {
+    case "working":
+      return "Working";
+    case "waiting":
+      return "Waiting";
+    case "needs_input":
+      return "Needs Input";
+    case "stopped":
+      return "Stopped";
+    case "error":
+      return "Error";
+    case "killed":
+      return "Killed";
+  }
+}
+
 function statusColor(session: SessionView): string {
   const state = displayState(session);
-  if (state === "active" || state === "ready") return SUCCESS;
-  if (state === "idle" || state === "spawning") return WARNING;
-  if (state === "errored") return ACCENT;
+  if (state === "working") return SUCCESS;
+  if (state === "waiting" || state === "needs_input") return WARNING;
+  if (state === "error") return ACCENT;
   return MUTED;
 }
 
 export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
 
-  if (session.activity === "waiting_input") {
-    facts.push("input prompt visible");
-  } else if (session.activity === "idle") {
-    facts.push("last activity stale");
-  } else if (session.activity === "exited" && session.status === "running") {
+  if (session.state === "working") {
+    facts.push("processing");
+  } else if (session.state === "waiting") {
+    facts.push("waiting for next message");
+  } else if (session.state === "needs_input") {
+    facts.push("waiting for reply or approval");
+  } else if (session.state === "stopped") {
     facts.push("agent exited");
+  } else if (session.state === "killed") {
+    facts.push("killed by user");
   }
 
   facts.push(session.runtimeAlive ? "tmux live" : "tmux dead");
-  facts.push(session.workspaceExists ? "worktree live" : "worktree missing");
+  if (session.worktree) {
+    facts.push(session.workspaceExists ? "worktree live" : "worktree missing");
+  } else {
+    facts.push(session.workspaceExists ? "shared workspace live" : "shared workspace missing");
+  }
 
-  if (session.status === "errored" && session.error) {
+  if (session.state === "error" && session.error) {
     facts.push(`error ${truncate(session.error, 48)}`);
   }
 
@@ -148,7 +169,11 @@ function measureSessionColumns(sessions: SessionView[]): SessionColumnWidths {
   return {
     id: Math.max(MIN_ID_WIDTH, "id".length, ...rows.map((row) => row.id.length)),
     state: Math.max(MIN_STATE_WIDTH, "state".length, ...rows.map((row) => row.state.length)),
-    project: Math.max(MIN_PROJECT_WIDTH, "project".length, ...rows.map((row) => row.project.length)),
+    project: Math.max(
+      MIN_PROJECT_WIDTH,
+      "project".length,
+      ...rows.map((row) => row.project.length),
+    ),
     agent: Math.max(MIN_AGENT_WIDTH, "agent".length, ...rows.map((row) => row.agent.length)),
   };
 }
@@ -177,7 +202,7 @@ function renderSessionHeader(widths: SessionColumnWidths): string {
 }
 
 function renderStatusIndicator(session: SessionView): string {
-  if (session.activity === "waiting_input") {
+  if (session.state === "needs_input") {
     return colorize("! ", `${BOLD}${WARNING}`);
   }
   return `${colorize("●", statusColor(session))} `;
@@ -191,7 +216,8 @@ export function renderSessionCard(
   session: SessionView,
   widths = measureSessionColumns([session]),
 ): string {
-  return `${renderSessionRow(session, widths)}\n  ${dimText(describeSession(session))}`;
+  const lines = [`${renderSessionRow(session, widths)}`, `  ${dimText(describeSession(session))}`];
+  return lines.join("\n");
 }
 
 export function renderSessionList(sessions: SessionView[]): string {
@@ -218,13 +244,13 @@ export function renderRuntimeSummary(info: RuntimeInfo): string {
   const width = renderWidth();
   const line1 = truncate(
     `daemon ${info.host}:${info.port}  pid ${info.pid}  started ${formatRelativeTime(info.startedAt)}`,
-    Math.max(1, width - 2),
+    width,
   );
   const line2 = truncate(
     `config ${info.configPath}  data ${info.dataDir}  worktrees ${info.worktreeDir}`,
     width,
   );
-  return `${brandMark()} ${line1}\n${dimText(line2)}`;
+  return `${line1}\n${dimText(line2)}`;
 }
 
 function renderSessionDetailsPane(args: {
@@ -232,10 +258,7 @@ function renderSessionDetailsPane(args: {
   maxDetailLines: number;
 }): string[] {
   if (!args.selected) {
-    return [
-      brandLine("Selected"),
-      dimText("Use ↑↓ to reselect before attach, restore, or kill."),
-    ];
+    return [brandLine("Selected"), dimText("Use ↑↓ to reselect before attach, restore, or kill.")];
   }
 
   const selected = args.selected;
@@ -251,9 +274,13 @@ function renderSessionDetailsPane(args: {
   };
 
   const fields = [
+    renderField(
+      "branch",
+      selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
+    ),
     renderField("prompt", selected.prompt),
     renderField("tmux", selected.tmuxSession),
-    renderField("worktree", selected.worktreePath),
+    renderField("workspace", selected.worktreePath),
     renderField("launch", selected.launchCommand),
     renderField("created", selected.createdAt),
     renderField("updated", selected.updatedAt),
@@ -275,7 +302,7 @@ export function renderWaitingInputAlert(args: {
   sessions: SessionView[];
   selectedSessionId: string | null;
 }): string | undefined {
-  const waiting = args.sessions.filter((session) => session.activity === "waiting_input");
+  const waiting = args.sessions.filter((session) => session.state === "needs_input");
   if (waiting.length === 0) {
     return undefined;
   }
@@ -285,8 +312,8 @@ export function renderWaitingInputAlert(args: {
   }
   const message =
     waiting.length === 1
-      ? `WAITING INPUT ${lead.id} needs a reply`
-      : `WAITING INPUT ${waiting.length} sessions need a reply (${lead.id})`;
+      ? `NEEDS INPUT ${lead.id} needs a reply`
+      : `NEEDS INPUT ${waiting.length} sessions need a reply (${lead.id})`;
   return colorize(`! ${message}`, `${BOLD}${ACCENT}`);
 }
 
@@ -314,7 +341,7 @@ export function renderInteractiveSessionList(args: {
       brandLine("Selected"),
       dimText("No session selected."),
       "",
-      dimText("q/Esc quit"),
+      dimText("Esc quit"),
     );
     if (args.statusMessage) {
       lines.push("", args.statusMessage);
@@ -339,22 +366,14 @@ export function renderInteractiveSessionList(args: {
     selected,
     maxDetailLines: args.maxDetailLines,
   });
-  lines.push(
-    "",
-    ...detailLines,
-    "",
-    dimText("↑↓ move  Enter attach  r restore  k kill  q/Esc quit"),
-  );
+  lines.push("", ...detailLines, "", dimText("↑↓ move  Enter attach  r restore  k kill  Esc quit"));
   if (args.statusMessage) {
     lines.push("", args.statusMessage);
   }
   return lines.join("\n");
 }
 
-export async function withSpinner<T>(
-  label: string,
-  action: () => Promise<T>,
-): Promise<T> {
+export async function withSpinner<T>(label: string, action: () => Promise<T>): Promise<T> {
   if (!process.stderr.isTTY) {
     return action();
   }

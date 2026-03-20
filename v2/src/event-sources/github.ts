@@ -78,7 +78,9 @@ function summarizeFailingCi(checks: GitHubCheck[]): string | null {
       check.state.toUpperCase(),
     ),
   );
-  return failing.length > 0 ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.` : null;
+  return failing.length > 0
+    ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
+    : null;
 }
 
 async function gh(cwd: string, ...args: string[]): Promise<string> {
@@ -156,7 +158,9 @@ async function fetchReviewSignals(
   const signals: GitHubSignal[] = [];
   for (const comment of comments) {
     const author = comment.user?.login ?? "unknown";
-    const location = comment.path ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}` : "";
+    const location = comment.path
+      ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
+      : "";
     signals.push({
       key: `review-comment:${String(comment.id)}`,
       kind: "comment",
@@ -196,7 +200,9 @@ async function collectSignals(
   const [checks, reviewSignals, commentSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
     pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
-    pr.repo ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo
+      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
+      : Promise.resolve([]),
   ]);
 
   const ciText = summarizeFailingCi(checks);
@@ -254,9 +260,7 @@ function emitSignalsByKind(
   }
 }
 
-async function startGitHubSource(
-  deps: SourceStartDeps<GitHubSourceConfig>,
-): Promise<SourceHandle> {
+async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
   const snapshots = readGitHubSourceSnapshots(deps.dataDir, deps.projectId, deps.sourceId);
   let stopped = false;
   let polling = false;
@@ -294,11 +298,7 @@ async function startGitHubSource(
           snapshots.set(session.id, next);
           writeGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id, next);
           if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
-            emitSignalsByKind(
-              deps,
-              collected.data,
-              previous ? changed : [...next.values()],
-            );
+            emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

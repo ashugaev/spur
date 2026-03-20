@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SPUR_DAEMON_API_VERSION } from "../../src/types.js";
 
 const spawnMock = vi.fn();
 const sleepMock = vi.fn().mockResolvedValue(undefined);
@@ -16,7 +17,7 @@ vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
 }));
 
-function runtimeInfo(apiVersion = 1, pid = 4242) {
+function runtimeInfo(apiVersion = SPUR_DAEMON_API_VERSION, pid = 4242) {
   return {
     ok: true,
     apiVersion,
@@ -86,10 +87,16 @@ describe("client.ensureServer", () => {
   it("replaces an incompatible daemon before retrying", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     vi.mocked(fetch)
-      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo(999, 7777)), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION - 1, 7777)), {
+          status: 200,
+        }),
+      )
       .mockRejectedValueOnce(new Error("daemon stopped"))
       .mockRejectedValueOnce(new Error("still starting"))
-      .mockResolvedValue(new Response(JSON.stringify(runtimeInfo(1, 8888)), { status: 200 }));
+      .mockResolvedValue(
+        new Response(JSON.stringify(runtimeInfo(SPUR_DAEMON_API_VERSION, 8888)), { status: 200 }),
+      );
 
     const { ensureServer } = await loadClientModule();
     const baseUrl = await ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml");
@@ -102,9 +109,7 @@ describe("client.ensureServer", () => {
   it("surfaces server error payloads from JSON requests", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: "bad send" }), { status: 500 }),
-      );
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "bad send" }), { status: 500 }));
 
     const { postJson } = await loadClientModule();
 

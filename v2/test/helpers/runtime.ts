@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +10,9 @@ import { createTempDir, execFileAsync, pollUntil } from "./common.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const V2_DIR = resolve(__dirname, "../..");
 export const CLI_PATH = join(V2_DIR, "dist/cli.js");
+const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
+let tmuxBootstrapReady = false;
+let tmuxBootstrapCleanupRegistered = false;
 
 export interface FakeGhState {
   prsByBranch?: Record<
@@ -55,11 +59,11 @@ export interface RuntimeTestContext {
     options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
   ): Promise<{ stdout: string; stderr: string }>;
   startDaemon(configPath: string): Promise<{
-    child: ChildProcessWithoutNullStreams;
+    child: ChildProcessByStdio<null, Readable, Readable>;
     stdout: string;
     info: RuntimeInfo;
   }>;
-  stopDaemon(child: ChildProcessWithoutNullStreams): Promise<void>;
+  stopDaemon(child: ChildProcessByStdio<null, Readable, Readable>): Promise<void>;
   fetchJson<T>(path: string, init?: RequestInit): Promise<T>;
   readAgentLog(sessionId: string): Promise<string>;
   writeGhState(state: FakeGhState): Promise<void>;
@@ -115,6 +119,16 @@ while IFS= read -r line; do
       printf '%s\n' "2. runtime"
       printf '%s\n' "Enter to select"
       printf '%s\n' "Esc to cancel"
+      ;;
+    run-shell:*)
+      shell_command="\${line#run-shell:}"
+      if ! bash -c "$shell_command" >>"$log_file" 2>&1; then
+        printf '%s\n' "shell failed: $shell_command" >> "$log_file"
+        printf '%s\n' "shell failed: $shell_command"
+        exit 1
+      fi
+      printf '%s\n' "shell ok: $shell_command" >> "$log_file"
+      printf '%s\n' "${prompt}"
       ;;
     simulate-work)
       printf '%s\n' "• Working (simulated)"
@@ -201,8 +215,38 @@ process.exit(1);
 `;
 
 async function startTmuxServer(): Promise<void> {
+  if (tmuxBootstrapReady) return;
+
+  if (!tmuxBootstrapCleanupRegistered) {
+    tmuxBootstrapCleanupRegistered = true;
+    process.once("exit", () => {
+      spawnSync("tmux", ["kill-session", "-t", TMUX_BOOTSTRAP_SESSION], {
+        stdio: "ignore",
+      });
+    });
+  }
+
   try {
-    await execFileAsync("tmux", ["start-server"]);
+    await execFileAsync("tmux", ["has-session", "-t", TMUX_BOOTSTRAP_SESSION]);
+    tmuxBootstrapReady = true;
+    return;
+  } catch {
+    // Fall through and create a bootstrap session when no server is live yet.
+  }
+
+  try {
+    await execFileAsync("tmux", [
+      "new-session",
+      "-d",
+      "-s",
+      TMUX_BOOTSTRAP_SESSION,
+      "-x",
+      "1",
+      "-y",
+      "1",
+      "sleep 3600",
+    ]);
+    tmuxBootstrapReady = true;
   } catch {
     // Best effort only.
   }
@@ -347,18 +391,14 @@ export async function createRuntimeTestContext(
     args: string[],
     options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv },
   ): Promise<{ stdout: string; stderr: string }> => {
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [CLI_PATH, ...args],
-      {
-        cwd: V2_DIR,
-        env: {
-          ...env,
-          ...(options?.env ?? {}),
-        },
-        timeout: options?.timeoutMs ?? 60_000,
+    const { stdout, stderr } = await execFileAsync(process.execPath, [CLI_PATH, ...args], {
+      cwd: V2_DIR,
+      env: {
+        ...env,
+        ...(options?.env ?? {}),
       },
-    );
+      timeout: options?.timeoutMs ?? 60_000,
+    });
     return { stdout, stderr };
   };
 
@@ -399,11 +439,16 @@ export async function createRuntimeTestContext(
         accept: (value): value is RuntimeInfo => value !== null,
       },
     );
+    if (!info) {
+      throw new Error("Timed out waiting for daemon info");
+    }
 
     return { child, stdout, info };
   };
 
-  const stopDaemon = async (child: ChildProcessWithoutNullStreams): Promise<void> => {
+  const stopDaemon = async (
+    child: ChildProcessByStdio<null, Readable, Readable>,
+  ): Promise<void> => {
     if (child.exitCode !== null || child.killed) return;
     child.kill("SIGTERM");
     await Promise.race([
