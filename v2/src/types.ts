@@ -2,13 +2,7 @@ export type AgentName = "claude" | "codex";
 export const SPUR_DAEMON_API_VERSION = 2;
 
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
-export type SessionState =
-  | "working"
-  | "waiting"
-  | "needs_input"
-  | "stopped"
-  | "error"
-  | "killed";
+export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type BranchSource = "explicit" | "shared_workspace";
 
 export type SourceType = "cron" | "github";

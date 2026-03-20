@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { VALID_ID_RE } from "./id-pattern.js";
 import {
   GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
   type AgentName,
@@ -17,6 +16,7 @@ import {
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
 const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {

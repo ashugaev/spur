@@ -239,7 +239,11 @@ describe("startConfiguredTriggers", () => {
       state: "waiting",
       workspaceExists: true,
     };
-    const getMock = vi.fn().mockResolvedValueOnce(working).mockResolvedValueOnce(working).mockResolvedValue(waiting);
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce(working)
+      .mockResolvedValueOnce(working)
+      .mockResolvedValue(waiting);
     const deliverMock = vi.fn().mockResolvedValue(undefined);
     readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
     const { startConfiguredTriggers } = await loadTriggersModule();

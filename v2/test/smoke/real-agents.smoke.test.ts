@@ -50,10 +50,20 @@ function errorText(error: unknown): string {
   if (!error || typeof error !== "object") {
     return String(error);
   }
-  const stdout = typeof (error as { stdout?: unknown }).stdout === "string" ? (error as { stdout: string }).stdout : "";
-  const stderr = typeof (error as { stderr?: unknown }).stderr === "string" ? (error as { stderr: string }).stderr : "";
+  const stdout =
+    typeof (error as { stdout?: unknown }).stdout === "string"
+      ? (error as { stdout: string }).stdout
+      : "";
+  const stderr =
+    typeof (error as { stderr?: unknown }).stderr === "string"
+      ? (error as { stderr: string }).stderr
+      : "";
   const message =
-    error instanceof Error ? error.message : typeof (error as { message?: unknown }).message === "string" ? (error as { message: string }).message : "";
+    error instanceof Error
+      ? error.message
+      : typeof (error as { message?: unknown }).message === "string"
+        ? (error as { message: string }).message
+        : "";
   return [stdout, stderr, message].filter(Boolean).join("\n").trim();
 }
 

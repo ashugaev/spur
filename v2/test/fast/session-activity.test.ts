@@ -30,9 +30,7 @@ describe("session state detection", () => {
   it("keeps working state when the pane is not sitting at a prompt", () => {
     expect(
       classifyRunningState({
-        pane: ["OpenAI Codex", "›", "• Working (reviewing changes)", "gpt-5.4 · footer"].join(
-          "\n",
-        ),
+        pane: ["OpenAI Codex", "›", "• Working (reviewing changes)", "gpt-5.4 · footer"].join("\n"),
         updatedAt: new Date("2026-03-18T10:04:00.000Z"),
         signalAt: null,
       }),

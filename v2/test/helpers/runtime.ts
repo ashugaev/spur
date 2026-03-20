@@ -120,16 +120,6 @@ while IFS= read -r line; do
       printf '%s\n' "Enter to select"
       printf '%s\n' "Esc to cancel"
       ;;
-    run-shell:*)
-      shell_command="\${line#run-shell:}"
-      if ! bash -c "$shell_command" >>"$log_file" 2>&1; then
-        printf '%s\n' "shell failed: $shell_command" >> "$log_file"
-        printf '%s\n' "shell failed: $shell_command"
-        exit 1
-      fi
-      printf '%s\n' "shell ok: $shell_command" >> "$log_file"
-      printf '%s\n' "${prompt}"
-      ;;
     simulate-work)
       printf '%s\n' "• Working (simulated)"
       sleep 1

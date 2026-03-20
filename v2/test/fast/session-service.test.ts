@@ -506,15 +506,13 @@ describe("SessionService", () => {
   });
 
   it("waits for native resume state to appear before restoring", async () => {
-    buildAgentRestorePlanMock
-      .mockResolvedValueOnce(null)
-      .mockResolvedValue({
-        agent: "claude",
-        launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
-        initialMessage:
-          "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
-        readyMarkers: ["❯"],
-      });
+    buildAgentRestorePlanMock.mockResolvedValueOnce(null).mockResolvedValue({
+      agent: "claude",
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      initialMessage:
+        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      readyMarkers: ["❯"],
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",

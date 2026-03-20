@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RuntimeInfo, SessionView } from "../../src/types.js";
@@ -42,10 +42,7 @@ function popActiveContext(): (typeof activeContexts)[number] {
   return current;
 }
 
-function baseConfig(
-  context: RuntimeTestContext,
-  sessionPrefix: string,
-): string {
+function baseConfig(context: RuntimeTestContext, sessionPrefix: string): string {
   return `server:
   host: 127.0.0.1
   port: ${context.port}
@@ -60,15 +57,6 @@ projects:
     symlinks:
       - .env
 `;
-}
-
-async function tmuxSessionExists(sessionName: string): Promise<boolean> {
-  try {
-    await execFileAsync("tmux", ["has-session", "-t", sessionName]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function runRestoreScenario(args: {
@@ -227,9 +215,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       baseConfig(context, sessionPrefix),
     );
 
-    await expect(
-      context.execCli(["--config", configPath, "ls", "--bogus"]),
-    ).rejects.toMatchObject({
+    await expect(context.execCli(["--config", configPath, "ls", "--bogus"])).rejects.toMatchObject({
       stderr: expect.stringContaining("unknown option '--bogus'"),
     });
   });

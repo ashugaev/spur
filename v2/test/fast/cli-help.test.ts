@@ -62,7 +62,9 @@ describe("spur help", () => {
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
     expect(help).toContain("Use the project path directly for this session (no worktree)");
-    expect(help).toContain("Worktree spawns run agent branch preflight unless `--branch` is provided.");
+    expect(help).toContain(
+      "Worktree spawns run agent branch preflight unless `--branch` is provided.",
+    );
     expect(help).toContain("`--branch` skips preflight and uses the branch name directly.");
     expect(help).toContain("`--shared` cannot be combined with `--worktree` or `--branch`.");
   });

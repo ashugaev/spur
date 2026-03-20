@@ -10,9 +10,7 @@ const SESSION_DISPLAY_ORDER: SessionState[] = [
 ];
 
 const SESSION_DISPLAY_RANK = new Map(
-  SESSION_DISPLAY_ORDER.map(
-    (state, index) => [state, index] satisfies [SessionState, number],
-  ),
+  SESSION_DISPLAY_ORDER.map((state, index) => [state, index] satisfies [SessionState, number]),
 );
 
 function displayRank(session: SessionView): number {
