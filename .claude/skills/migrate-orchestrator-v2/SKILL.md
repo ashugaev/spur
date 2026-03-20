@@ -18,21 +18,17 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
 - `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent` and `branch`.
-- Milestone 1 human session ops are only: `spawn`, `list`, `send`.
-- `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
-  Non-TTY `list` stays a one-shot runtime summary plus session cards.
+- Milestone 1 session ops are only: `info`, `spawn`, `list`, `get`, `send`, `kill`.
 - Workspace bootstrap is only: `git worktree` plus configured `symlinks`.
 - Supported agents for now: `claude` and `codex`.
 - Both supported agents start with full access by default:
   `claude --dangerously-skip-permissions` and
   `codex --dangerously-bypass-approvals-and-sandbox`.
-- Minimal automation is allowed only as project-local `sources -> events -> triggers -> spawn|send`.
-- Current built-in sources are `cron` and `github`.
+- Minimal automation is allowed only as project-local `sources -> events -> triggers -> spawn`.
+- The first built-in source is `cron`.
 - Do not write speculative code in `v2`. If a field, branch, or helper is not used by current Spur behavior, remove it.
 - No UI, dashboard, SSE, mobile, or terminal-web layer.
-- No generic tracker, SCM, notifier, reaction, or step/pipeline layer.
+- No tracker, PR, SCM, notifier, reaction, step/pipeline, or poll-loop automation yet.
 - No PluginRegistry, LifecycleManager, or current SessionManager carry-over.
 - No compatibility bridge to the current `agent-orchestrator.yaml`.
 - No `postCreate` hooks in milestone 1.
@@ -117,8 +113,7 @@ CLI -> ensure daemon -> POST /sessions
 - User-facing session id stays simple: `<prefix>-N`.
 - Store the real `tmux` target in metadata; it may stay equal to session id in `v2`.
 - Persist flat key-value metadata or one small JSON file per session. Keep the format direct and human-readable.
-- Human `list` reads only the stored session records plus minimal live checks when needed.
-- `list --json` stays the raw `SessionView[]` for scripts.
+- `list/get` read only the stored session records plus minimal live checks when needed.
 
 ### Kill flow
 
@@ -136,8 +131,8 @@ CLI -> ensure daemon -> POST /sessions
 ### Source and trigger flow
 
 - `sources.<id>` owns its module-specific config and emits named events onto a small in-process bus.
-- `triggers.<id>` subscribes by `source + event` and reacts with a normal Spur `spawn` or `send`.
-- `cron` and `github` are built-in source implementations, not special cases in session logic.
+- `triggers.<id>` subscribes by `source + event` and reacts with a normal Spur `spawn`.
+- `cron` is the first source implementation, not a special case in session logic.
 
 ## What to port from current AO
 
@@ -154,7 +149,7 @@ Port behavior, not architecture.
 ## What not to port yet
 
 - Any plugin registry or dynamic plugin loading.
-- JSONL parsing, cost estimation, and broad metadata hooks outside current built-in behavior.
+- Agent activity detection, JSONL parsing, cost estimation, PR metadata hooks, or restore semantics.
 - Tracker-aware branch naming.
 - Rich orchestrator sessions, templated reactions, or project step pipelines.
 - Next.js service singletons and dashboard API routes.
@@ -168,23 +163,12 @@ Port behavior, not architecture.
 - Prefer plain data structures and explicit modules over framework-like layers.
 - Keep docs and prompts lean too; remove explanation that does not constrain behavior.
 
-## Validation
-
-- Always run `pnpm --dir v2 build` after changing Spur code.
-- Spur test tiers are fixed:
-  `fast` -> `pnpm --dir v2 test`
-  `runtime integration` -> `pnpm --dir v2 test:runtime`
-  `real-agent smoke` -> `pnpm --dir v2 test:smoke`
-- Run `fast` for every Spur code change.
-- Run `runtime integration` for CLI, daemon, worktree, `tmux`, transport, and automation runtime boundaries.
-- Run `real-agent smoke` for agent launch or prompt delivery changes. Cover both `claude` and `codex`.
-- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Extend it in the same change.
-
 ## Acceptance checklist for milestone 1
 
 - `Spur` can start or auto-start a local daemon.
 - `spur spawn` creates a worktree, applies symlinks, starts `tmux`, and launches `claude` or `codex`.
-- `spur list` shows persisted sessions, runtime summary, and selected-session details, and TTY `list` can attach, restore, or kill in place.
+- `spur list` and `spur get` show persisted sessions.
 - `spur send` reaches the running agent through `tmux`.
-- `cron` and `github` sources can emit events and reach normal Spur `spawn` or `send` triggers.
+- `spur kill` tears down `tmux` and removes the worktree.
+- `cron` sources can emit events and spawn normal Spur sessions through triggers.
 - Current `ao` continues to work unchanged during migration.
