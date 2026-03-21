@@ -27,6 +27,7 @@
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
+- For Spur work, change only `v2/`. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - For `v2/`, port behavior only when it reduces code. Do not port the old architecture by default.
 - If a feature is not needed for the current milestone, leave it out.
 - `AGENTS.md` and `CLAUDE.md` must stay in sync. If you add or change a durable instruction in one, mirror it in the other in the same change.

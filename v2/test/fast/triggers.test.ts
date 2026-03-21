@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
+const logSpurEventMock = vi.fn();
+
+vi.mock("../../src/event-log.js", () => ({
+  logSpurEvent: logSpurEventMock,
+}));
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
@@ -131,6 +136,7 @@ describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
+    logSpurEventMock.mockReset();
   });
 
   afterEach(() => {
@@ -169,6 +175,12 @@ describe("startConfiguredTriggers", () => {
           { interrupt: false },
         );
       });
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.queued",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.delivered",
+      );
     } finally {
       await controller.stop();
     }
@@ -310,13 +322,16 @@ describe("startConfiguredTriggers", () => {
       snapshot = new Map();
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.send.dropped",
+      );
     } finally {
       await controller.stop();
     }
   });
 
   it("passes spawn overrides through to the session service", async () => {
-    const spawnMock = vi.fn().mockResolvedValue(undefined);
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-7" });
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -341,6 +356,12 @@ describe("startConfiguredTriggers", () => {
           },
         });
       });
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.spawn.matched",
+      );
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "trigger.spawn.completed",
+      );
     } finally {
       await controller.stop();
     }
