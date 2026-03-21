@@ -10,6 +10,7 @@ import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
+  readTmuxOption,
   syncTmuxEnvironment,
 } from "../helpers/runtime.js";
 
@@ -242,25 +243,63 @@ async function runSmoke(agent: AgentName): Promise<void> {
 
   await withPinnedAgentBinaries(async () => {
     const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+    const expectedTitle = `${agent} smoke slots`;
+    const expectedLinks = [
+      { label: "tracker", url: `https://tracker.example.com/${agent}-smoke` },
+      { label: "pr", url: `https://example.com/${agent}/pull/1` },
+    ] as const;
+    const expectedLinkPairs = expectedLinks.map((link) => `${link.label}=${link.url}`).sort();
     const session = await service.spawn({
       project: "api",
       agent,
-      prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".`,
+      prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
+This task title is "${expectedTitle}".
+The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
+After the file and the session metadata are set, wait for more instructions.`,
     });
     cleanupItem.branch = session.branch;
     cleanupItem.worktreePath = session.worktreePath;
 
     const initialFile = join(session.worktreePath, "smoke-initial.txt");
-    await pollUntil(async () => existsSync(initialFile), {
-      timeoutMs: 120_000,
-      accept: Boolean,
-    });
+    const liveSlots = await pollUntil(
+      async () => {
+        const current = await service.get(session.id);
+        if (!existsSync(initialFile)) {
+          return null;
+        }
+        if (current.slots?.title !== expectedTitle) {
+          return null;
+        }
+        const links = current.slots.links
+          .map((link) => `${link.label}=${link.url}`)
+          .sort();
+        return JSON.stringify(links) === JSON.stringify(expectedLinkPairs) ? current : null;
+      },
+      {
+        timeoutMs: 180_000,
+        accept: Boolean,
+      },
+    );
+    const statusLeft = await readTmuxOption(session.id, "status-left");
+    const statusRight = await readTmuxOption(session.id, "status-right");
+
+    expect(liveSlots.slots?.title).toBe(expectedTitle);
+    expect(liveSlots.slots?.links).toHaveLength(expectedLinks.length);
+    expect(liveSlots.slots?.links).toEqual(expect.arrayContaining(expectedLinks));
+    expect(statusLeft).toContain(expectedTitle);
+    for (const link of expectedLinks) {
+      expect(statusRight).toContain(
+        `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
+      );
+    }
     expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
     await killTmuxSession(session.id);
 
     const restored = await service.restore(session.id);
     expect(restored.id).toBe(session.id);
+    expect(restored.slots?.title).toBe(expectedTitle);
+    expect(restored.slots?.links).toEqual(expect.arrayContaining(expectedLinks));
 
     await service.send(session.id, {
       message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
