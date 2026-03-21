@@ -15,6 +15,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 
 - `v2/` is a clean rewrite in a separate folder, not an in-place evolution of current `ao`.
 - The `v2/` product name is `Spur`.
+- Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
 - `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent` and `branch`.

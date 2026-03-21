@@ -14,6 +14,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 
 - `v2/` is `Spur`.
 - Spur is separate from the current `ao`.
+- Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - Spur is CLI plus local HTTP daemon. No UI layer in the current milestone.
 - Current human-facing command surface: `spawn`, `list`, `send`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.

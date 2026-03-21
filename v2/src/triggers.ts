@@ -1,4 +1,5 @@
 import { writeStderr } from "./io.js";
+import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import type {
   AgentName,
@@ -29,6 +30,7 @@ interface StartConfiguredTriggersDeps {
 interface PendingBatch {
   projectId: string;
   triggerId: string;
+  sourceId: string;
   batch: SendBatch;
 }
 
@@ -45,6 +47,7 @@ const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 
 async function runSpawnTrigger(
+  dataDir: string,
   service: SessionService,
   projectId: string,
   triggerId: string,
@@ -56,20 +59,55 @@ async function runSpawnTrigger(
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
   logger: TriggerLogger,
 ): Promise<void> {
+  logTriggerEvent(dataDir, "trigger.spawn.matched", {
+    level: "info",
+    projectId,
+    sourceId,
+    triggerId,
+    message: `Matched ${eventName} for ${projectId}/${triggerId}`,
+    details: {
+      eventName,
+      agent: agent ?? null,
+      branch: branch ?? null,
+      worktree: overrides?.worktree ?? null,
+      defaultBranch: overrides?.defaultBranch ?? null,
+    },
+  });
   logger.info?.(
     `[trigger:${projectId}/${triggerId}] matched ${eventName} from ${projectId}/${sourceId}`,
   );
 
   try {
-    await service.spawn({
+    const session = await service.spawn({
       project: projectId,
       prompt: triggerPrompt,
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
     });
+    logTriggerEvent(dataDir, "trigger.spawn.completed", {
+      level: "info",
+      sessionId: session.id,
+      projectId,
+      sourceId,
+      triggerId,
+      message: `Spawn trigger ${projectId}/${triggerId} created ${session.id}`,
+      details: {
+        eventName,
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logTriggerEvent(dataDir, "trigger.spawn.failed", {
+      level: "error",
+      projectId,
+      sourceId,
+      triggerId,
+      message: `Spawn trigger ${projectId}/${triggerId} failed: ${message}`,
+      details: {
+        eventName,
+      },
+    });
     logger.warn(`[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`);
   }
 }
@@ -96,13 +134,22 @@ function mergeIntoBatch(
   existing: PendingBatch | undefined,
   projectId: string,
   triggerId: string,
+  sourceId: string,
   incoming: SendBatch,
 ): PendingBatch {
   if (existing) {
     existing.batch.merge(incoming);
     return existing;
   }
-  return { projectId, triggerId, batch: incoming };
+  return { projectId, triggerId, sourceId, batch: incoming };
+}
+
+function logTriggerEvent(
+  dataDir: string,
+  event: string,
+  entry: Omit<SpurLogEntry, "timestamp" | "event">,
+): void {
+  logSpurEvent(dataDir, { event, ...entry });
 }
 
 export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): TriggerGroupController {
@@ -137,7 +184,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     queueKey: string,
     batch: PendingBatch,
     interrupt: boolean,
-    options?: { clearAfter?: boolean; keepRetryState?: boolean },
+    options?: { attempt?: number; clearAfter?: boolean; keepRetryState?: boolean },
   ): Promise<void> => {
     if (options?.clearAfter !== false) {
       const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
@@ -150,8 +197,32 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
+      logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
+        level: "info",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Delivered queued trigger update to ${batch.batch.sessionId}`,
+        details: {
+          interrupt,
+          attempt: options?.attempt ?? null,
+        },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
+        level: "error",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Failed to deliver queued trigger update to ${batch.batch.sessionId}: ${message}`,
+        details: {
+          interrupt,
+          attempt: options?.attempt ?? null,
+        },
+      });
       logger.warn(
         `[trigger:${batch.projectId}/${batch.triggerId}] failed to deliver queued updates: ${message}`,
       );
@@ -196,6 +267,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     } catch (error) {
       clearBatch(queueKey);
       const message = error instanceof Error ? error.message : String(error);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for ${batch.batch.sessionId}: ${message}`,
+        details: {
+          reason: "session_lookup_failed",
+        },
+      });
       logger.warn(
         `[trigger:${batch.projectId}/${batch.triggerId}] failed to load ${batch.batch.sessionId}: ${message}`,
       );
@@ -219,6 +301,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     if (isClosedState(session)) {
       clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for closed session ${batch.batch.sessionId}`,
+        details: {
+          reason: "closed_session",
+          sessionState: session.state,
+        },
+      });
       logger.warn(
         `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued updates for ${session.state} session ${batch.batch.sessionId}`,
       );
@@ -228,6 +322,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     batch.batch.prune(deps.config.dataDir);
     if (batch.batch.isEmpty()) {
       clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "info",
+        sessionId: batch.batch.sessionId,
+        projectId: batch.projectId,
+        sourceId: batch.sourceId,
+        triggerId: batch.triggerId,
+        message: `Dropped queued trigger update for ${batch.batch.sessionId} after snapshot prune`,
+        details: {
+          reason: "snapshot_pruned",
+        },
+      });
       return;
     }
 
@@ -235,6 +340,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (retry) {
       if (retry.attempts >= CI_FAILED_MAX_ATTEMPTS) {
         clearBatch(queueKey);
+        logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+          level: "warn",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: `Dropped queued trigger update for ${batch.batch.sessionId} after max retries`,
+          details: {
+            reason: "retry_exhausted",
+            attempts: retry.attempts,
+          },
+        });
         return;
       }
 
@@ -251,6 +368,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       retry.nextAttemptAt =
         retry.attempts < CI_FAILED_MAX_ATTEMPTS ? now + CI_FAILED_RETRY_INTERVAL_MS : null;
       await deliverBatch(queueKey, batch, retry.interrupt && !isDeliverableState(session), {
+        attempt: retry.attempts,
         clearAfter: false,
         keepRetryState: true,
       });
@@ -271,8 +389,28 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     sendBatch: SendBatch,
   ): Promise<void> => {
     const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
-    const batch = mergeIntoBatch(pendingBatches.get(queueKey), projectId, triggerId, sendBatch);
+    const merged = pendingBatches.has(queueKey);
+    const batch = mergeIntoBatch(
+      pendingBatches.get(queueKey),
+      projectId,
+      triggerId,
+      trigger.source,
+      sendBatch,
+    );
     pendingBatches.set(queueKey, batch);
+    logTriggerEvent(deps.config.dataDir, "trigger.send.queued", {
+      level: "info",
+      sessionId: sendBatch.sessionId,
+      projectId,
+      sourceId: trigger.source,
+      triggerId,
+      message: `Queued ${eventName} for ${sendBatch.sessionId}`,
+      details: {
+        eventName,
+        interrupt: trigger.send.interrupt,
+        merged,
+      },
+    });
     if (eventName === "github:ci_failed") {
       ensureRetryState(queueKey, trigger.send.interrupt);
     }
@@ -283,6 +421,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
 
     if (isClosedState(session)) {
       clearBatch(queueKey);
+      logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
+        level: "warn",
+        sessionId: sendBatch.sessionId,
+        projectId,
+        sourceId: trigger.source,
+        triggerId,
+        message: `Dropped queued trigger update for closed session ${sendBatch.sessionId}`,
+        details: {
+          reason: "closed_session",
+          sessionState: session.state,
+        },
+      });
       logger.warn(
         `[trigger:${projectId}/${triggerId}] dropped queued update for ${session.state} session ${sendBatch.sessionId}`,
       );
@@ -329,6 +479,13 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           // formatting, and stale pruning live beside the source payload.
           const sendBatch = parseSendBatch(event.data);
           if (!sendBatch) {
+            logTriggerEvent(deps.config.dataDir, "trigger.send.ignored", {
+              level: "warn",
+              projectId,
+              sourceId: event.sourceId,
+              triggerId,
+              message: `Ignored ${event.name} for ${projectId}/${triggerId}: incompatible payload`,
+            });
             logger.warn(
               `[trigger:${projectId}/${triggerId}] ignored ${event.name} without compatible send payload`,
             );
@@ -342,6 +499,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         }
 
         const spawnPromise = runSpawnTrigger(
+          deps.config.dataDir,
           deps.sessionService,
           projectId,
           triggerId,

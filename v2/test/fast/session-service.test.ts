@@ -25,6 +25,7 @@ const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const logSpurEventMock = vi.fn();
 
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -34,6 +35,10 @@ vi.mock("../../src/agents/index.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
+}));
+
+vi.mock("../../src/event-log.js", () => ({
+  logSpurEvent: logSpurEventMock,
 }));
 
 vi.mock("../../src/ids.js", () => ({
@@ -134,6 +139,7 @@ describe("SessionService", () => {
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
+    logSpurEventMock.mockReset();
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
@@ -214,6 +220,14 @@ describe("SessionService", () => {
     expect(result.workspaceExists).toBe(true);
     expect(result.worktree).toBe(true);
     expect(result.branch).toBe("api-1");
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toEqual([
+      "session.spawn.started",
+      "session.spawn.worktree_created",
+      "session.spawn.tmux_created",
+      "session.spawn.ready",
+      "session.spawn.prompt_sent",
+      "session.spawn.completed",
+    ]);
   });
 
   it("spawns against the shared project path when worktree is disabled", async () => {
@@ -253,6 +267,48 @@ describe("SessionService", () => {
     expect(result.branchSource).toBe("shared_workspace");
     expect(result.worktree).toBe(false);
     expect(result.worktreePath).toBe("/repo/api");
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+      "session.spawn.shared_workspace",
+    );
+  });
+
+  it("logs message delivery after updating tmux and metadata", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.send("api-1", { message: "follow up" });
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { interrupt: false });
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        id: "api-1",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      }),
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.message.sent",
+        sessionId: "api-1",
+      }),
+    );
+    expect(result.id).toBe("api-1");
   });
 
   it("respects a per-spawn worktree override without changing the project default", async () => {
@@ -391,6 +447,12 @@ describe("SessionService", () => {
       status: "errored",
       error: "tmux boom",
     });
+    expect(logSpurEventMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      event: "session.spawn.failed",
+      details: expect.objectContaining({
+        stage: "tmux.create",
+      }),
+    });
   });
 
   it("rejects a branch override that would mutate the shared workspace", async () => {
@@ -417,6 +479,7 @@ describe("SessionService", () => {
 
     expect(createWorktreeMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("keeps repeated kill idempotent and does not rewrite terminal metadata", async () => {
@@ -448,6 +511,13 @@ describe("SessionService", () => {
     expect(result.state).toBe("killed");
     expect(result.runtimeAlive).toBe(false);
     expect(result.workspaceExists).toBe(false);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.kill.noop",
+        sessionId: "api-1",
+      }),
+    );
   });
 
   it("kills a shared workspace session without removing the project path", async () => {
@@ -537,6 +607,13 @@ describe("SessionService", () => {
       ],
     });
     expect(result.slots?.links).toHaveLength(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.slots.updated",
+        sessionId: "api-1",
+      }),
+    );
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
@@ -587,6 +664,12 @@ describe("SessionService", () => {
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);
     expect(restored.state).toBe("working");
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+      "session.restore.started",
+    );
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+      "session.restore.completed",
+    );
   });
 
   it("fails restore when native resume state is unavailable", async () => {
@@ -619,6 +702,10 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      event: "session.restore.failed",
+      sessionId: "api-1",
+    });
   });
 
   it("waits for native resume state to appear before restoring", async () => {

@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { setTimeout as sleep } from "node:timers/promises";
 import { buildAgentLaunchPlan, buildAgentRestorePlan, parseAgentName } from "./agents/index.js";
 import { loadConfig } from "./config.js";
+import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
@@ -251,6 +252,13 @@ export class SessionService {
     return createRuntimeInfo(this.config, this.startedAt);
   }
 
+  private logEvent(
+    event: string,
+    entry: Omit<SpurLogEntry, "timestamp" | "event"> = { level: "info" },
+  ): void {
+    logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
   private getProject(projectId: string): ProjectConfig {
     const project = this.config.projects[projectId];
     if (!project) {
@@ -273,60 +281,88 @@ export class SessionService {
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
-    const project = this.getProject(request.project);
-    if (typeof request.prompt !== "string" || !request.prompt.trim()) {
-      throw new Error("prompt must be a non-empty string");
-    }
-    if (
-      request.branch !== undefined &&
-      (typeof request.branch !== "string" || !request.branch.trim())
-    ) {
-      throw new Error("branch must be a non-empty string when provided");
-    }
+    let stage = "validating";
+    let sessionId: string | undefined;
+    let project: ProjectConfig | undefined;
+    let agent: SessionRecord["agent"] | undefined;
+    let worktree = false;
+    let workspacePath = "";
+    let resolvedBranch: ResolvedSpawnBranch | undefined;
+    let createdAt: string | undefined;
+    let placeholderWritten = false;
 
-    const overrides = parseSpawnOverrides(request.overrides, "overrides");
-    const worktree = resolveSpawnWorktree(project, overrides);
-    const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
-    const agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-    const sessionId = await reserveNextSessionId(
-      this.config.dataDir,
-      request.project,
-      project.sessionPrefix,
-    );
-    const resolvedBranch = await resolveSpawnBranch({
-      repoPath: project.path,
-      requestBranch: request.branch,
-      worktree,
-      fallbackBranch: sessionId,
-    });
-    const tmuxSession = sessionId;
-    const createdAt = nowIso();
-
-    const placeholder: SessionRecord = {
-      id: sessionId,
-      project: request.project,
-      agent,
-      prompt: request.prompt,
-      branch: resolvedBranch.branch,
-      ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
-      worktree,
-      worktreePath: worktree ? "" : project.path,
-      tmuxSession,
-      launchCommand: "",
-      status: "spawning",
-      createdAt,
-      updatedAt: createdAt,
-    };
-    writeSession(this.config.dataDir, placeholder);
-
-    let workspacePath = placeholder.worktreePath;
     try {
+      project = this.getProject(request.project);
+      if (typeof request.prompt !== "string" || !request.prompt.trim()) {
+        throw new Error("prompt must be a non-empty string");
+      }
+      if (
+        request.branch !== undefined &&
+        (typeof request.branch !== "string" || !request.branch.trim())
+      ) {
+        throw new Error("branch must be a non-empty string when provided");
+      }
+
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      worktree = resolveSpawnWorktree(project, overrides);
+      const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      sessionId = await reserveNextSessionId(
+        this.config.dataDir,
+        request.project,
+        project.sessionPrefix,
+      );
+      resolvedBranch = await resolveSpawnBranch({
+        repoPath: project.path,
+        requestBranch: request.branch,
+        worktree,
+        fallbackBranch: sessionId,
+      });
+      const tmuxSession = sessionId;
+      createdAt = nowIso();
+
+      this.logEvent("session.spawn.started", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawning ${sessionId}`,
+        details: {
+          agent,
+          branch: resolvedBranch.branch,
+          worktree,
+          defaultBranch,
+          branchSource: resolvedBranch.branchSource ?? null,
+        },
+      });
+
+      const placeholder: SessionRecord = {
+        id: sessionId,
+        project: request.project,
+        agent,
+        prompt: request.prompt,
+        branch: resolvedBranch.branch,
+        ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+        worktree,
+        worktreePath: worktree ? "" : project.path,
+        tmuxSession,
+        launchCommand: "",
+        status: "spawning",
+        createdAt,
+        updatedAt: createdAt,
+      };
+      writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
+      workspacePath = placeholder.worktreePath;
+
+      stage = "slot_tool";
       const sessionToolDir = ensureSessionSlotTool({
         dataDir: this.config.dataDir,
         sessionId,
         configPath: this.config.configPath,
       });
+
       if (worktree) {
+        stage = "worktree.create";
         workspacePath = await createWorktree({
           repoPath: project.path,
           worktreeBaseDir: this.config.worktreeDir,
@@ -335,6 +371,27 @@ export class SessionService {
           defaultBranch,
           branch: resolvedBranch.branch,
           symlinks: project.symlinks,
+        });
+        this.logEvent("session.spawn.worktree_created", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Created worktree for ${sessionId}`,
+          details: {
+            worktreePath: workspacePath,
+            symlinkCount: project.symlinks.length,
+          },
+        });
+      } else {
+        this.logEvent("session.spawn.shared_workspace", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Using shared workspace for ${sessionId}`,
+          details: {
+            workspacePath,
+            branch: resolvedBranch.branch,
+          },
         });
       }
 
@@ -347,6 +404,7 @@ export class SessionService {
         updatedAt: nowIso(),
       };
 
+      stage = "tmux.create";
       await createTmuxSession({
         sessionName: tmuxSession,
         cwd: workspacePath,
@@ -358,32 +416,112 @@ export class SessionService {
           sessionToolDir,
         }),
       });
+      this.logEvent("session.spawn.tmux_created", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Created tmux session for ${sessionId}`,
+        details: {
+          tmuxSession,
+        },
+      });
+
+      stage = "tmux.status";
       await syncTmuxStatus(tmuxSession, runningRecord.slots);
+      stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
+      this.logEvent("session.spawn.ready", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Agent prompt is ready for ${sessionId}`,
+      });
+
+      stage = "prompt.send";
       await sendMessageToTmux(
         tmuxSession,
         withSessionSlotInstructions(launchPlan.initialMessage),
       );
+      this.logEvent("session.spawn.prompt_sent", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Sent initial prompt to ${sessionId}`,
+        details: {
+          messageLength: launchPlan.initialMessage.length,
+        },
+      });
 
+      stage = "record.write";
       writeSession(this.config.dataDir, runningRecord);
+      this.logEvent("session.spawn.completed", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawned ${sessionId}`,
+        details: {
+          worktreePath: workspacePath,
+          tmuxSession,
+          agent,
+        },
+      });
+
       return await this.enrich(runningRecord);
     } catch (error) {
-      await killTmuxSession(tmuxSession);
-      removeSessionSlotTool(this.config.dataDir, sessionId);
-      if (worktree && workspacePath) {
-        await removeWorktree(project.path, workspacePath);
+      if (sessionId && project && placeholderWritten) {
+        await killTmuxSession(sessionId);
+        removeSessionSlotTool(this.config.dataDir, sessionId);
+        if (worktree && workspacePath) {
+          await removeWorktree(project.path, workspacePath);
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        const erroredRecord: SessionRecord = {
+          id: sessionId,
+          project: request.project,
+          agent: agent ?? parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          prompt: request.prompt,
+          branch: resolvedBranch?.branch ?? sessionId,
+          ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+          worktree,
+          worktreePath: workspacePath,
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "errored",
+          createdAt: createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          error: message,
+        };
+        writeSession(this.config.dataDir, erroredRecord);
+
+        this.logEvent("session.spawn.failed", {
+          level: "error",
+          sessionId,
+          projectId: request.project,
+          message: `Failed to spawn ${sessionId}: ${message}`,
+          details: {
+            stage,
+            worktree,
+            worktreePath: workspacePath || null,
+            agent: erroredRecord.agent,
+            branch: erroredRecord.branch,
+          },
+        });
+
+        throw new Error(`Failed to spawn ${sessionId}: ${message}`, { cause: error });
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      const erroredRecord: SessionRecord = {
-        ...placeholder,
-        worktreePath: workspacePath,
-        status: "errored",
-        updatedAt: nowIso(),
-        error: message,
-      };
-      writeSession(this.config.dataDir, erroredRecord);
-      throw new Error(`Failed to spawn ${sessionId}: ${message}`, { cause: error });
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        projectId: request.project,
+        message: `Failed to spawn session: ${message}`,
+        details: {
+          stage,
+          requestedAgent: request.agent ?? null,
+        },
+      });
+      throw error;
     }
   }
 
@@ -404,13 +542,37 @@ export class SessionService {
       throw new Error("message must be a non-empty string");
     }
 
-    await sendMessageToTmux(session.tmuxSession, message, options);
-    const updated: SessionRecord = {
-      ...session,
-      updatedAt: nowIso(),
-    };
-    writeSession(this.config.dataDir, updated);
-    return this.enrich(updated);
+    try {
+      await sendMessageToTmux(session.tmuxSession, message, options);
+      const updated: SessionRecord = {
+        ...session,
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, updated);
+      this.logEvent("session.message.sent", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Delivered message to ${sessionId}`,
+        details: {
+          interrupt: options?.interrupt === true,
+          messageLength: message.length,
+        },
+      });
+      return this.enrich(updated);
+    } catch (error) {
+      const failure = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.message.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to deliver message to ${sessionId}: ${failure}`,
+        details: {
+          interrupt: options?.interrupt === true,
+        },
+      });
+      throw error;
+    }
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -429,6 +591,16 @@ export class SessionService {
     }
     writeSession(this.config.dataDir, updated);
     await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    this.logEvent("session.slots.updated", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Updated session slots for ${sessionId}`,
+      details: {
+        title: updated.slots?.title ?? null,
+        linkCount: updated.slots?.links.length ?? 0,
+      },
+    });
     return this.enrich(updated);
   }
 
@@ -438,14 +610,31 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
-    await killTmuxSession(session.tmuxSession);
-    if (session.worktree && session.worktreePath) {
-      const project = this.getProject(session.project);
-      await removeWorktree(project.path, session.worktreePath);
+    try {
+      await killTmuxSession(session.tmuxSession);
+      if (session.worktree && session.worktreePath) {
+        const project = this.getProject(session.project);
+        await removeWorktree(project.path, session.worktreePath);
+      }
+      removeSessionSlotTool(this.config.dataDir, sessionId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.kill.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to kill ${sessionId}: ${message}`,
+      });
+      throw error;
     }
-    removeSessionSlotTool(this.config.dataDir, sessionId);
 
     if (session.status === "killed") {
+      this.logEvent("session.kill.noop", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Session ${sessionId} was already killed`,
+      });
       return this.enrich(session);
     }
 
@@ -455,6 +644,15 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, record);
+    this.logEvent("session.kill.completed", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Killed ${sessionId}`,
+      details: {
+        worktree: session.worktree,
+      },
+    });
     return this.enrich(record);
   }
 
@@ -472,9 +670,26 @@ export class SessionService {
       throw new Error(`Session is not restorable: ${sessionId}`);
     }
 
+    this.logEvent("session.restore.started", {
+      level: "info",
+      sessionId,
+      projectId: current.project,
+      message: `Restoring ${sessionId}`,
+      details: {
+        agent: current.agent,
+        worktreePath: current.worktreePath,
+      },
+    });
+
     const restorePrompt = buildRestorePrompt(current.prompt);
     const launchPlan = await waitForRestorePlan(current.agent, current.worktreePath, restorePrompt);
     if (!launchPlan) {
+      this.logEvent("session.restore.failed", {
+        level: "error",
+        sessionId,
+        projectId: current.project,
+        message: `Failed to restore ${sessionId}: no native resume state`,
+      });
       throw new Error(`No native resume state found for ${current.agent} session ${sessionId}`);
     }
 
@@ -509,6 +724,12 @@ export class SessionService {
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.restore.failed", {
+        level: "error",
+        sessionId,
+        projectId: current.project,
+        message: `Failed to restore ${sessionId}: ${message}`,
+      });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
 
@@ -520,6 +741,15 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, restored);
+    this.logEvent("session.restore.completed", {
+      level: "info",
+      sessionId,
+      projectId: current.project,
+      message: `Restored ${sessionId}`,
+      details: {
+        agent: current.agent,
+      },
+    });
     return this.enrich(restored);
   }
 
