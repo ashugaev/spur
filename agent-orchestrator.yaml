@@ -73,29 +73,29 @@ projects:
     agentConfig:
       permissions: skip
 
-  weather:
-    name: Weather Check
-    agentConfig:
-      permissions: skip
-    symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
-    triggers:
-      check-weather:
-        event: cron:tick
-        schedule: "0 9 * * *"
-        runOnStart: true
-        spawn:
-          prompt: |
-            Open https://wttr.in/?Moscow in the browser, get the current weather for Moscow.
-            Send the result via Telegram using the ao-telegram skill. Sign the message: "— Claude"
-      check-weather-codex:
-        event: cron:tick
-        schedule: "0 9 * * *"
-        runOnStart: true
-        spawn:
-          cli: codex
-          prompt: |
-            Open https://wttr.in/?Moscow in the browser, get the current weather for Moscow.
-            Send the result via Telegram using the ao-telegram skill. Sign the message: "— Codex"
+  # weather:
+  #   name: Weather Check
+  #   agentConfig:
+  #     permissions: skip
+  #   symlinks: [.claude, AGENTS.md, CLAUDE.md, .codex, .agents, node_modules]
+  #   triggers:
+  #     check-weather:
+  #       event: cron:tick
+  #       schedule: "0 9 * * *"
+  #       runOnStart: true
+  #       spawn:
+  #         prompt: |
+  #           Open https://wttr.in/?Moscow in the browser, get the current weather for Moscow.
+  #           Send the result via Telegram using the ao-telegram skill. Sign the message: "— Claude"
+  #     check-weather-codex:
+  #       event: cron:tick
+  #       schedule: "0 9 * * *"
+  #       runOnStart: true
+  #       spawn:
+  #         cli: codex
+  #         prompt: |
+  #           Open https://wttr.in/?Moscow in the browser, get the current weather for Moscow.
+  #           Send the result via Telegram using the ao-telegram skill. Sign the message: "— Codex"
 
   int:
     name: Intelas Web

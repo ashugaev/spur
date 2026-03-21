@@ -1,0 +1,49 @@
+server:
+  port: 4310
+
+dataDir: ~/.spur
+worktreeDir: ~/.spur-worktrees
+defaultAgent: claude
+
+projects:
+  backend-api:
+    path: ~/backend-api
+    defaultBranch: main
+    sessionPrefix: api
+    worktree: true
+    symlinks:
+      - .env
+      - .claude
+    sources:
+      weekday-review:
+        type: cron
+        schedule: "0 9 * * 1-5"
+        runOnStart: false
+      pr-watch:
+        type: github
+        intervalMs: 60000
+        runOnStart: false
+    triggers:
+      weekday-review-spawn:
+        source: weekday-review
+        event: cron:tick
+        spawn:
+          agent: claude
+          prompt: "Review all open PRs and continue the highest-priority one."
+          overrides:
+            worktree: true
+      pr-watch-changes-requested:
+        source: pr-watch
+        event: github:changes_requested
+        send:
+          interrupt: false
+      pr-watch-ci-failed:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: true # resend every 10m up to 3 while CI still fails
+      pr-watch-comment:
+        source: pr-watch
+        event: github:comment
+        send:
+          interrupt: false

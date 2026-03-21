@@ -1,7 +1,0 @@
-interface:
-  display_name: "Developer Conflict Resolver"
-  short_description: "Builds merge-conflict auto-resolution workflow"
-  default_prompt: "Use $developer-conflict-resolver to implement merge-conflict reaction automation."
-
-policy:
-  allow_implicit_invocation: true

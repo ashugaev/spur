@@ -94,8 +94,8 @@ async function findRealClaudeProject(): Promise<{
     );
     if (jsonlFiles.length === 0) continue;
 
-    // Try to reconstruct the workspace path from the encoded dir name
-    // Encoded format: /Users/dev/project → -Users-dev-project
+    // Try to reconstruct the workspace path from the encoded dir name.
+    // Encoded format: an absolute workspace path becomes a dash-delimited key.
     // We can't perfectly reverse this (dashes are ambiguous), but we can
     // verify the forward direction: encode known paths and check if they match
     const candidatePath = "/" + dir.slice(1).replace(/-/g, "/");

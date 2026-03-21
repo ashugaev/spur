@@ -187,7 +187,7 @@ export const manifest = {
  *
  * Verified against Claude Code's actual encoding (as of v1.x):
  * the path has its leading / stripped, then all / and . are replaced with -.
- * e.g. /Users/dev/.worktrees/ao → Users-dev--worktrees-ao
+ * e.g. a workspace path like ./repo/.worktrees/ao becomes a dash-delimited key
  *
  * If Claude Code changes its encoding scheme this will silently break
  * introspection. The path can be validated at runtime by checking whether

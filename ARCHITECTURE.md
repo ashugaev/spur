@@ -42,7 +42,7 @@ Runtime Data (not versioned):
 **Hash Derivation (from config location):**
 
 ```typescript
-const configDir = path.dirname(configPath); // /Users/alice/code/agent-orchestrator
+const configDir = path.dirname(configPath); // ./agent-orchestrator
 const hash = sha256(configDir).slice(0, 12); // a3b4c5d6e7f8
 
 // Each project managed by this config gets a directory
@@ -160,7 +160,7 @@ issue=INT-100
 branch=INT-100
 status=working
 tmuxName=a3b4c5d6e7f8-int-1
-worktree=/Users/alice/.agent-orchestrator/a3b4c5d6e7f8-integrator/worktrees/int-1
+worktree=~/.agent-orchestrator/a3b4c5d6e7f8-integrator/worktrees/int-1
 createdAt=2026-02-17T10:30:00Z
 pr=https://github.com/ComposioHQ/integrator/pull/123
 ```

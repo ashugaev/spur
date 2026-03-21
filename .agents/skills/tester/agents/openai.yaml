@@ -1,7 +1,0 @@
-interface:
-  display_name: "Tester"
-  short_description: "Runs tests/build and validates acceptance criteria"
-  default_prompt: "Use $tester to validate the implementation with tests and builds."
-
-policy:
-  allow_implicit_invocation: true

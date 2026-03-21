@@ -1,7 +1,0 @@
-interface:
-  display_name: "Architect"
-  short_description: "Designs minimal, safe architecture changes"
-  default_prompt: "Use $architect to design safe, minimal lifecycle changes with explicit edge cases."
-
-policy:
-  allow_implicit_invocation: true
