@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { readEventLog } from "../../src/event-log.js";
 import type { RuntimeInfo, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
@@ -392,6 +393,13 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
     expect(listed).toEqual([]);
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
+      expect.arrayContaining([
+        "daemon.started",
+        "session.spawn.failed",
+        "http.request.failed",
+      ]),
+    );
   });
 
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
@@ -751,6 +759,9 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
     );
     expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
+      "session.slots.updated",
+    );
   });
 
   it("rejects invalid or missing slot targets through the built CLI", async () => {
@@ -893,6 +904,14 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     );
 
     expect(killed[0]?.status).toBe("killed");
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
+      expect.arrayContaining([
+        "daemon.started",
+        "session.spawn.completed",
+        "session.message.sent",
+        "session.kill.completed",
+      ]),
+    );
 
     await sendKeysToTmux(controllerSessionName, "Enter");
 

@@ -2,6 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { readEventLog } from "../../src/event-log.js";
 import { startServer } from "../../src/server.js";
 import { findFreePort } from "../helpers/common.js";
 
@@ -41,10 +42,19 @@ describe("startServer", () => {
         ok: true,
         port,
       });
+
+      const missing = await fetch(`http://127.0.0.1:${port}/missing`);
+      expect(missing.status).toBe(404);
     } finally {
       await server.stop();
     }
 
+    expect(readEventLog(dataDir).map((entry) => entry.event)).toEqual([
+      "daemon.started",
+      "http.route.not_found",
+      "daemon.stopping",
+      "daemon.stopped",
+    ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 });

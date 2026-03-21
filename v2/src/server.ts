@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
+import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
@@ -59,25 +60,48 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
+  const logEvent = (
+    event: string,
+    entry: Omit<SpurLogEntry, "timestamp" | "event">,
+  ): void => {
+    logSpurEvent(service.config.dataDir, { event, ...entry });
+  };
   const handleRequest = async (
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
+    let method: string | undefined;
+    let path: string | undefined;
     try {
       if (!request.method) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          message: "Request method is required",
+        });
         sendError(response, 400, "Request method is required");
         return;
       }
       if (!request.url) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          method: request.method,
+          message: "Request URL is required",
+        });
         sendError(response, 400, "Request URL is required");
         return;
       }
 
-      const method = request.method;
+      method = request.method;
       const url = new URL(request.url, `http://${service.config.server.host}`);
-      const path = url.pathname;
+      path = url.pathname;
 
       if (!ready) {
+        logEvent("http.request.rejected", {
+          level: "warn",
+          method,
+          path,
+          message: "Daemon is starting",
+        });
         sendError(response, 503, "Daemon is starting");
         return;
       }
@@ -130,9 +154,21 @@ export async function startServer(
         return;
       }
 
+      logEvent("http.route.not_found", {
+        level: "warn",
+        method,
+        path,
+        message: `Route not found: ${method} ${path}`,
+      });
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      logEvent("http.request.failed", {
+        level: "error",
+        ...(method ? { method } : {}),
+        ...(path ? { path } : {}),
+        message,
+      });
       sendError(response, 500, message);
     }
   };
@@ -177,22 +213,43 @@ export async function startServer(
       },
     });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.failed", {
+      level: "error",
+      message: `Spur daemon failed during startup: ${message}`,
+    });
     await triggers.stop();
     await closeServer();
     throw error;
   }
 
   ready = true;
+  logEvent("daemon.started", {
+    level: "info",
+    message: `Spur daemon listening on ${service.config.server.host}:${service.config.server.port}`,
+    details: {
+      host: service.config.server.host,
+      port: service.config.server.port,
+    },
+  });
 
   let shuttingDown = false;
   const shutdown = async (exitProcess: boolean) => {
     if (shuttingDown) return;
     shuttingDown = true;
     ready = false;
+    logEvent("daemon.stopping", {
+      level: "info",
+      message: "Stopping Spur daemon",
+    });
     const closePromise = closeServer();
     sources.stop();
     await triggers.stop();
     await closePromise;
+    logEvent("daemon.stopped", {
+      level: "info",
+      message: "Stopped Spur daemon",
+    });
     if (exitProcess) {
       process.exit(0);
     }

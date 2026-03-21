@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { readEventLog } from "../../src/event-log.js";
 import { loadConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
@@ -136,6 +137,29 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     expect(sessions[0]?.project).toBe("api");
     expect(pane).toContain("cron runtime prompt");
+    const cronEvents = await pollUntil(
+      async () => readEventLog(context.dataDir).map((entry) => entry.event),
+      {
+        timeoutMs: 20_000,
+        accept: (value) =>
+          value.includes("source.started") &&
+          value.includes("source.run_on_start") &&
+          value.includes("source.event.emitted") &&
+          value.includes("trigger.spawn.matched") &&
+          value.includes("trigger.spawn.completed") &&
+          value.includes("session.spawn.completed"),
+      },
+    );
+    expect(cronEvents).toEqual(
+      expect.arrayContaining([
+        "source.started",
+        "source.run_on_start",
+        "source.event.emitted",
+        "trigger.spawn.matched",
+        "trigger.spawn.completed",
+        "session.spawn.completed",
+      ]),
+    );
   });
 
   it("applies trigger spawn overrides when automation starts a shared workspace session", async () => {
@@ -483,6 +507,23 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
         expect(pane).toContain("CI is failing: test suite.");
+        const ciEvents = await pollUntil(
+          async () => readEventLog(context.dataDir).map((entry) => entry.event),
+          {
+            timeoutMs: 20_000,
+            accept: (value) =>
+              value.includes("trigger.send.queued") &&
+              value.includes("trigger.send.delivered") &&
+              value.includes("session.message.sent"),
+          },
+        );
+        expect(ciEvents).toEqual(
+          expect.arrayContaining([
+            "trigger.send.queued",
+            "trigger.send.delivered",
+            "session.message.sent",
+          ]),
+        );
       } finally {
         abortController.abort();
         handle.stop();

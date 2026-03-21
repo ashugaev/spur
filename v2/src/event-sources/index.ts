@@ -1,4 +1,5 @@
 import type { EventBus } from "../event-bus.js";
+import { logSpurEvent } from "../event-log.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubSourceModule } from "./github.js";
@@ -13,6 +14,9 @@ interface StartConfiguredSourcesDeps {
 interface StartedSource {
   abortController: AbortController;
   handle: SourceHandle;
+  projectId: string;
+  sourceId: string;
+  type: SourceType;
 }
 
 const SOURCE_MODULES = {
@@ -29,6 +33,12 @@ function stopAll(sources: StartedSource[]): void {
       // Best effort only.
     }
   }
+}
+
+function extractSessionId(data: unknown): string | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const sessionId = (data as Record<string, unknown>)["sessionId"];
+  return typeof sessionId === "string" ? sessionId : undefined;
 }
 
 export async function startConfiguredSources(
@@ -48,6 +58,19 @@ export async function startConfiguredSources(
           dataDir: deps.config.dataDir,
           config: source,
           emit(name: string, data?: unknown): void {
+            const sessionId = extractSessionId(data);
+            logSpurEvent(deps.config.dataDir, {
+              event: "source.event.emitted",
+              level: "info",
+              projectId,
+              sourceId,
+              ...(sessionId ? { sessionId } : {}),
+              message: `Emitted ${name} from ${projectId}/${sourceId}`,
+              details: {
+                eventName: name,
+                type: source.type,
+              },
+            });
             deps.bus.emit({
               name,
               projectId,
@@ -59,11 +82,33 @@ export async function startConfiguredSources(
           logger,
         });
 
-        startedSources.push({ abortController, handle });
+        logSpurEvent(deps.config.dataDir, {
+          event: "source.started",
+          level: "info",
+          projectId,
+          sourceId,
+          message: `Started ${source.type} source ${projectId}/${sourceId}`,
+          details: {
+            type: source.type,
+          },
+        });
+        startedSources.push({ abortController, handle, projectId, sourceId, type: source.type });
       }
     }
 
     for (const source of startedSources) {
+      if (source.handle.runOnStart) {
+        logSpurEvent(deps.config.dataDir, {
+          event: "source.run_on_start",
+          level: "info",
+          projectId: source.projectId,
+          sourceId: source.sourceId,
+          message: `Running ${source.type} source on startup for ${source.projectId}/${source.sourceId}`,
+          details: {
+            type: source.type,
+          },
+        });
+      }
       source.handle.runOnStart?.();
     }
   } catch (error) {
