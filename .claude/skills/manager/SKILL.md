@@ -1,6 +1,6 @@
 ---
 name: manager
-description: Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, and recheck. Mandatory for every task in this repo. Don't use for Telegram notifications, PR-only follow-up, or CI-only monitoring.
+description: "Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, and recheck. Mandatory for every task in this repo. Don't use for Telegram notifications, PR-only follow-up, or CI-only monitoring."
 ---
 
 # Manager

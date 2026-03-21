@@ -3,7 +3,7 @@ export const SPUR_DAEMON_API_VERSION = 2;
 
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type BranchSource = "explicit" | "shared_workspace";
+export type BranchSource = "explicit" | "preflight" | "shared_workspace";
 export interface SessionLink {
   label: string;
   url: string;
@@ -39,6 +39,10 @@ export type SourceConfig = CronSourceConfig | GitHubSourceConfig;
 export interface SpawnOverrides {
   worktree?: boolean;
   defaultBranch?: string;
+}
+
+export interface ProjectPreflightConfig {
+  prompt: string;
 }
 
 export interface TriggerSpawnConfig {
@@ -85,6 +89,7 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;

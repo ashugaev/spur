@@ -25,6 +25,7 @@ const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const runSpawnPreflightMock = vi.fn();
 
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -34,6 +35,10 @@ vi.mock("../../src/agents/index.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
+}));
+
+vi.mock("../../src/preflight.js", () => ({
+  runSpawnPreflight: runSpawnPreflightMock,
 }));
 
 vi.mock("../../src/ids.js", () => ({
@@ -117,6 +122,7 @@ describe("SessionService", () => {
     });
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    runSpawnPreflightMock.mockReset().mockResolvedValue({});
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
     listSessionsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
@@ -195,16 +201,13 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_SLOT_COMMAND: "spur-slots",
+        SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello");
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      "slot-instructions\nhello",
-    );
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello");
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -214,6 +217,7 @@ describe("SessionService", () => {
     expect(result.workspaceExists).toBe(true);
     expect(result.worktree).toBe(true);
     expect(result.branch).toBe("api-1");
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
   });
 
   it("spawns against the shared project path when worktree is disabled", async () => {
@@ -245,7 +249,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_SLOT_COMMAND: "spur-slots",
+        SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -253,6 +257,7 @@ describe("SessionService", () => {
     expect(result.branchSource).toBe("shared_workspace");
     expect(result.worktree).toBe(false);
     expect(result.worktreePath).toBe("/repo/api");
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
   });
 
   it("respects a per-spawn worktree override without changing the project default", async () => {
@@ -324,6 +329,113 @@ describe("SessionService", () => {
       symlinks: [".env"],
     });
     expect(result.branchSource).toBe("explicit");
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+  });
+
+  it("uses a configured spawn preflight branch before creating the worktree", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockResolvedValue({ branch: "feature/runtime-preflight" });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "Fix runtime regression from PR #42",
+    });
+
+    expect(runSpawnPreflightMock).toHaveBeenCalledWith({
+      agent: "claude",
+      projectId: "api",
+      project: {
+        path: "/repo/api",
+        defaultBranch: "main",
+        sessionPrefix: "api",
+        worktree: true,
+        symlinks: [".env"],
+        preflight: {
+          prompt: "Suggest a branch name from the task context.",
+        },
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix runtime regression from PR #42",
+    });
+    expect(createWorktreeMock).toHaveBeenCalledWith({
+      repoPath: "/repo/api",
+      worktreeBaseDir: "/tmp/spur-worktrees",
+      projectId: "api",
+      sessionId: "api-1",
+      defaultBranch: "main",
+      branch: "feature/runtime-preflight",
+      symlinks: [".env"],
+    });
+    expect(result.branch).toBe("feature/runtime-preflight");
+    expect(result.branchSource).toBe("preflight");
+  });
+
+  it("skips spawn preflight when an explicit branch is provided", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "Fix runtime regression from PR #42",
+      branch: "feature/manual-branch",
+    });
+
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+  });
+
+  it("fails before reserving a session id when configured spawn preflight errors", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockRejectedValue(new Error("Spawn preflight returned invalid JSON"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
+      }),
+    ).rejects.toThrow("Spawn preflight returned invalid JSON");
+    expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
   it("rejects invalid spawn overrides before reserving a session id", async () => {
@@ -574,14 +686,16 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_SLOT_COMMAND: "spur-slots",
+        SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
-      expect.stringContaining("slot-instructions\nThis session was restored after the agent exited."),
+      expect.stringContaining(
+        "slot-instructions\nThis session was restored after the agent exited.",
+      ),
     );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");

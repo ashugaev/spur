@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -43,7 +44,11 @@ function popActiveContext(): (typeof activeContexts)[number] {
   return current;
 }
 
-function baseConfig(context: RuntimeTestContext, sessionPrefix: string): string {
+function baseConfig(
+  context: RuntimeTestContext,
+  sessionPrefix: string,
+  extraProjectYaml = "",
+): string {
   return `server:
   host: 127.0.0.1
   port: ${context.port}
@@ -57,6 +62,7 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
+${extraProjectYaml}
 `;
 }
 
@@ -206,6 +212,141 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     },
   );
 
+  it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-stop-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-stop.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const stopped = JSON.parse(
+      (await context.execCli(["--config", configPath, "daemon", "stop", "--json"])).stdout,
+    ) as { baseUrl: string; pid?: number; stopped: boolean };
+
+    expect(stopped.stopped).toBe(true);
+    expect(stopped.pid).toBe(daemon.info.pid);
+    delete currentActiveContext().daemonPid;
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+
+    const noop = JSON.parse(
+      (await context.execCli(["--config", configPath, "daemon", "stop", "--json"])).stdout,
+    ) as { baseUrl: string; pid?: number; stopped: boolean };
+
+    expect(noop).toEqual({
+      baseUrl: `http://127.0.0.1:${port}`,
+      stopped: false,
+    });
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("restarts the daemon through the built CLI and keeps restart as a no-op once it is down", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-restart-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-restart.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const restarted = JSON.parse(
+      (await context.execCli(["--config", configPath, "daemon", "restart", "--json"])).stdout,
+    ) as {
+      baseUrl: string;
+      previousPid?: number;
+      restarted: boolean;
+      runtime?: RuntimeInfo;
+    };
+
+    expect(restarted.restarted).toBe(true);
+    expect(restarted.previousPid).toBe(daemon.info.pid);
+    const restartedPid = restarted.runtime?.pid;
+    expect(restartedPid).toBeTypeOf("number");
+    if (typeof restartedPid !== "number") {
+      throw new Error("Expected daemon restart to return a runtime pid");
+    }
+    currentActiveContext().daemonPid = restartedPid;
+
+    const liveInfo = await context.fetchJson<RuntimeInfo>("/info");
+    expect(liveInfo.pid).toBe(restartedPid);
+
+    await context.execCli(["--config", configPath, "daemon", "stop", "--json"]);
+    delete currentActiveContext().daemonPid;
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+
+    const noop = JSON.parse(
+      (await context.execCli(["--config", configPath, "daemon", "restart", "--json"])).stdout,
+    ) as {
+      baseUrl: string;
+      previousPid?: number;
+      restarted: boolean;
+      runtime?: RuntimeInfo;
+    };
+
+    expect(noop).toEqual({
+      baseUrl: `http://127.0.0.1:${port}`,
+      restarted: false,
+    });
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("keeps build as a no-op when /info is incompatible and does not expose a Spur runtime pid", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-build-noop-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig("build-noop.yaml", baseConfig(context, sessionPrefix));
+    const repoRoot = join(import.meta.dirname, "..", "..", "..");
+    const incompatibleServer = createServer((request, response) => {
+      if (request.url === "/info") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ pid: 7777 }) + "\n");
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        incompatibleServer.once("error", reject);
+        incompatibleServer.listen(port, "127.0.0.1", () => {
+          incompatibleServer.off("error", reject);
+          resolve();
+        });
+      });
+
+      await execFileAsync("pnpm", ["--dir", "v2", "build"], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          SPUR_CONFIG: configPath,
+        },
+      });
+
+      const response = await fetch(`http://127.0.0.1:${port}/info`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ pid: 7777 });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        incompatibleServer.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    }
+  });
+
   it("rejects unknown options through the ls alias", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -296,6 +437,118 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     expect(spawned.branch).toBe(spawned.id);
     expect(stdout.trim()).toBe("release branch");
+  });
+
+  it.each(["claude", "codex"] as const)(
+    "uses %s spawn preflight to derive the worktree branch through the built CLI",
+    async (agent) => {
+      const port = await findFreePort();
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-preflight-${agent}-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      });
+      const expectedBranch = `feature/${agent}-runtime-preflight`;
+      const configPath = await context.writeConfig(
+        `${agent}-preflight.yaml`,
+        baseConfig(
+          context,
+          sessionPrefix,
+          `    preflight:
+      prompt: "Use branch hint: ${expectedBranch}"
+`,
+        ),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            `runtime preflight prompt for ${agent}`,
+            "--agent",
+            agent,
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      const branch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: spawned.worktreePath,
+      });
+
+      expect(spawned.branch).toBe(expectedBranch);
+      expect(spawned.branchSource).toBe("preflight");
+      expect(branch.stdout.trim()).toBe(expectedBranch);
+    },
+  );
+
+  it("fetches origin before spawn so the worktree and local base branch use the freshest main", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-fresh-main-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+
+    const remoteRepoDir = join(context.rootDir, "origin-main-clone");
+    await execFileAsync("git", ["clone", "--quiet", context.originDir, remoteRepoDir]);
+    try {
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+        cwd: remoteRepoDir,
+      });
+      await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: remoteRepoDir });
+      await writeFile(join(remoteRepoDir, "REMOTE.txt"), "fresh main\n", "utf8");
+      await execFileAsync("git", ["add", "REMOTE.txt"], { cwd: remoteRepoDir });
+      await execFileAsync("git", ["commit", "-m", "remote main update"], { cwd: remoteRepoDir });
+      await execFileAsync("git", ["push", "origin", "main"], { cwd: remoteRepoDir });
+    } finally {
+      await rm(remoteRepoDir, { recursive: true, force: true });
+    }
+
+    await expect(
+      execFileAsync("git", ["show", "main:REMOTE.txt"], { cwd: context.repoDir }),
+    ).rejects.toThrow();
+
+    const configPath = await context.writeConfig(
+      "fresh-main.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "fresh main prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const worktreeFile = await execFileAsync("git", ["show", "HEAD:REMOTE.txt"], {
+      cwd: spawned.worktreePath,
+    });
+    const localMainFile = await execFileAsync("git", ["show", "main:REMOTE.txt"], {
+      cwd: context.repoDir,
+    });
+
+    expect(worktreeFile.stdout.trim()).toBe("fresh main");
+    expect(localMainFile.stdout.trim()).toBe("fresh main");
   });
 
   it("spawns and kills a shared workspace session without removing the project path", async () => {
@@ -497,9 +750,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     expect(statusRight).toContain(
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
     );
-    expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]",
-    );
+    expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
   });
 
   it("rejects invalid or missing slot targets through the built CLI", async () => {

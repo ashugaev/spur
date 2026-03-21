@@ -11,6 +11,8 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    preflight:
+      prompt: "Suggest a git branch name from the task and repo rules. Prefer tracker or PR identifiers when present."
     symlinks:
       - .env
       - .claude
