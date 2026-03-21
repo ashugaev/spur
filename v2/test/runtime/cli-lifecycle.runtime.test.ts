@@ -12,6 +12,7 @@ import {
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
+  readTmuxOption,
   sendKeysToTmux,
   syncTmuxEnvironment,
   type RuntimeTestContext,
@@ -369,8 +370,6 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     await sendKeysToTmux(controllerSessionName, "k");
-    await sleep(1_000);
-    await sendKeysToTmux(controllerSessionName, "q");
 
     const killed = await pollUntil(
       async () =>
@@ -428,6 +427,125 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
     expect(listed).toEqual([]);
+  });
+
+  it("updates live session slots through the helper command and refreshes tmux status", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-slots-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("slots.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "slot runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
+    expect(existsSync(helperPath)).toBe(true);
+
+    await execFileAsync(helperPath, [
+      "--title",
+      "Investigate status bar links",
+      "--link",
+      "tracker=https://tracker.example.com/TASK-9",
+      "--link",
+      "pr=https://github.com/org/repo/pull/9",
+    ]);
+
+    const listed = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value[0]?.slots?.title === "Investigate status bar links" &&
+          value[0]?.slots?.links?.length === 2,
+      },
+    );
+
+    const statusLeft = await readTmuxOption(spawned.id, "status-left");
+    const statusRight = await readTmuxOption(spawned.id, "status-right");
+
+    expect(listed[0]?.slots).toEqual({
+      title: "Investigate status bar links",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+      ],
+    });
+    expect(statusLeft).toContain("Investigate status bar links");
+    expect(statusRight).toContain("tracker");
+    expect(statusRight).toContain("pr");
+    expect(statusRight).toContain(
+      "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
+    );
+    expect(statusRight).toContain(
+      "#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]",
+    );
+  });
+
+  it("rejects invalid or missing slot targets through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-slots-error-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "slots-error.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--title",
+        "missing session",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "slots",
+        "--session",
+        "api-999",
+        "--link",
+        "broken",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("--link must use label=url"),
+    });
   });
 
   it("spawns, sends, and kills a session through the interactive list", async () => {
@@ -503,8 +621,11 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     await sendKeysToTmux(controllerSessionName, "k");
-    await sleep(1_000);
-    await sendKeysToTmux(controllerSessionName, "q");
+
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(`Killed ${spawned.id}.`),
+    });
 
     const killed = await pollUntil(
       async () =>
@@ -521,6 +642,22 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     );
 
     expect(killed[0]?.status).toBe("killed");
+
+    await sendKeysToTmux(controllerSessionName, "Enter");
+
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(`Session ${spawned.id} was killed and cannot be restored.`),
+    });
+
+    await sendKeysToTmux(controllerSessionName, "r");
+
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(`Session ${spawned.id} cannot be restored.`),
+    });
+
+    await sendKeysToTmux(controllerSessionName, "q");
   });
 
   it("attaches in place from the TTY list and returns after detach", async () => {

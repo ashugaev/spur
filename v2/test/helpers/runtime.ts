@@ -290,6 +290,11 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
   }
 }
 
+export async function readTmuxOption(sessionName: string, option: string): Promise<string> {
+  const { stdout } = await execFileAsync("tmux", ["show-options", "-t", sessionName, option]);
+  return stdout.trim();
+}
+
 export async function sendKeysToTmux(sessionName: string, ...keys: string[]): Promise<void> {
   await execFileAsync("tmux", ["send-keys", "-t", sessionName, ...keys]);
 }

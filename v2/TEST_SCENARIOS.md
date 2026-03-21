@@ -24,6 +24,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
+- Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, including plan-mode menus, permission prompts, and Codex trailing UI.
@@ -41,12 +42,14 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path and refreshes `tmux` status hyperlinks without restarting the session.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, and returns to the selector after detach.
-- TTY `list` can kill the selected live session in place and leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`.
+- TTY `list` can kill the selected live session in place, leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`, and reports that the killed session is not restorable on `Enter` or `r`.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send` rejects an unknown session id through the built CLI.
+- `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.

@@ -13,6 +13,7 @@ const getTmuxSessionActivityMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const syncTmuxStatusMock = vi.fn();
 const captureTmuxPaneMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const waitForTmuxReadyMock = vi.fn();
@@ -20,6 +21,10 @@ const createWorktreeMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const removeWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
+const applySlotsUpdateMock = vi.fn();
+const ensureSessionSlotToolMock = vi.fn();
+const removeSessionSlotToolMock = vi.fn();
+const withSessionSlotInstructionsMock = vi.fn();
 
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -47,9 +52,18 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
   sendMessageToTmux: sendMessageToTmuxMock,
+  syncTmuxStatus: syncTmuxStatusMock,
   captureTmuxPane: captureTmuxPaneMock,
   tmuxSessionExists: tmuxSessionExistsMock,
   waitForTmuxReady: waitForTmuxReadyMock,
+}));
+
+vi.mock("../../src/session-slots.js", () => ({
+  SLOT_TOOL_NAME: "spur-slots",
+  applySlotsUpdate: applySlotsUpdateMock,
+  ensureSessionSlotTool: ensureSessionSlotToolMock,
+  removeSessionSlotTool: removeSessionSlotToolMock,
+  withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
 
 vi.mock("../../src/workspace.js", () => ({
@@ -119,6 +133,35 @@ describe("SessionService", () => {
     readCurrentBranchMock.mockReset().mockResolvedValue("main");
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
+    syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
+    ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
+    removeSessionSlotToolMock.mockReset();
+    withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
+      return `slot-instructions\n${prompt}`;
+    });
+    applySlotsUpdateMock.mockReset().mockImplementation((current, request) => {
+      const links = [...(current?.links ?? [])];
+      if (request.unlinkLabels) {
+        for (const label of request.unlinkLabels) {
+          const index = links.findIndex((link) => link.label === label);
+          if (index !== -1) {
+            links.splice(index, 1);
+          }
+        }
+      }
+      if (request.links) {
+        for (const link of request.links) {
+          const index = links.findIndex((entry) => entry.label === link.label);
+          if (index === -1) {
+            links.push(link);
+          } else {
+            links[index] = link;
+          }
+        }
+      }
+      const title = request.clearTitle ? undefined : (request.title ?? current?.title);
+      return title || links.length > 0 ? { ...(title ? { title } : {}), links } : undefined;
+    });
   });
 
   afterEach(() => {
@@ -152,10 +195,16 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_SLOT_COMMAND: "spur-slots",
+        PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello");
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "hello");
+    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "slot-instructions\nhello",
+    );
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -196,6 +245,8 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_SLOT_COMMAND: "spur-slots",
+        PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
     expect(result.branch).toBe("main");
@@ -333,6 +384,7 @@ describe("SessionService", () => {
     ).rejects.toThrow("Failed to spawn api-1: tmux boom");
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
@@ -391,6 +443,7 @@ describe("SessionService", () => {
     const result = await service.kill("api-1");
 
     expect(writeSessionMock).not.toHaveBeenCalled();
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.status).toBe("killed");
     expect(result.state).toBe("killed");
     expect(result.runtimeAlive).toBe(false);
@@ -419,11 +472,71 @@ describe("SessionService", () => {
     await service.kill("api-1");
 
     expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
       id: "api-1",
       worktree: false,
       status: "killed",
     });
+  });
+
+  it("updates slots without changing the session timestamp", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        title: "Existing title",
+        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
+    });
+
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(
+      {
+        title: "Existing title",
+        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+      },
+      {
+        links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
+      },
+    );
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        slots: {
+          title: "Existing title",
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "pr", url: "https://github.com/org/repo/pull/1" },
+          ],
+        },
+      }),
+    );
+    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", {
+      title: "Existing title",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/1" },
+        { label: "pr", url: "https://github.com/org/repo/pull/1" },
+      ],
+    });
+    expect(result.slots?.links).toHaveLength(2);
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
@@ -461,11 +574,14 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
+        SPUR_SLOT_COMMAND: "spur-slots",
+        PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
+    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
-      expect.stringContaining("This session was restored after the agent exited."),
+      expect.stringContaining("slot-instructions\nThis session was restored after the agent exited."),
     );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");

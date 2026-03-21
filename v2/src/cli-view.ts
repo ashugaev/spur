@@ -147,6 +147,7 @@ export function describeSession(session: SessionView): string {
     facts.push("agent exited");
   } else if (session.state === "killed") {
     facts.push("killed by user");
+    facts.push("not restorable");
   }
 
   facts.push(session.runtimeAlive ? "tmux live" : "tmux dead");

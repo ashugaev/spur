@@ -23,7 +23,14 @@ import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isRestorableSession } from "./session-service.js";
 import { startServer } from "./server.js";
-import type { RuntimeInfo, SendMessageRequest, SessionView, SpawnSessionRequest } from "./types.js";
+import type {
+  RuntimeInfo,
+  SendMessageRequest,
+  SessionLink,
+  SessionView,
+  SpawnSessionRequest,
+  UpdateSessionSlotsRequest,
+} from "./types.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -151,6 +158,21 @@ function renderHelpLines(
 function renderHelpRows(rows: HelpRow[]): string {
   const width = Math.max(...rows.map((row) => row.term.length));
   return rows.map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`).join("\n");
+}
+
+function collectOptionValue(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+function parseSlotLink(value: string): SessionLink {
+  const index = value.indexOf("=");
+  if (index <= 0 || index === value.length - 1) {
+    throw new Error("--link must use label=url");
+  }
+  return {
+    label: value.slice(0, index),
+    url: value.slice(index + 1),
+  };
 }
 
 function helpTitle(command: Command): string {
@@ -352,7 +374,11 @@ async function runInteractiveSessionList(
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     if (!session.runtimeAlive) {
-      statusMessage = brandLine(`Session ${session.id} is not live.`);
+      const message =
+        session.state === "killed"
+          ? `Session ${session.id} was killed and cannot be restored.`
+          : `Session ${session.id} is not live.`;
+      statusMessage = brandLine(message);
       render();
       return;
     }
@@ -606,6 +632,42 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => `Sent message to ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("slots", { hidden: true })
+    .description("Internal session slot updates.")
+    .requiredOption("--session <id>", "Session id")
+    .option("--title <text>", "Set task title")
+    .option("--clear-title", "Remove task title")
+    .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
+    .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      const payload: UpdateSessionSlotsRequest = {
+        ...(options.title !== undefined ? { title: options.title as string } : {}),
+        ...(options.clearTitle ? { clearTitle: true } : {}),
+        ...((options.link as string[]).length > 0
+          ? { links: (options.link as string[]).map(parseSlotLink) }
+          : {}),
+        ...((options.unlink as string[]).length > 0
+          ? { unlinkLabels: options.unlink as string[] }
+          : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: "updating slots",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${options.session as string}/slots`,
+            payload,
+            configPath,
+          ),
+        success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
     });

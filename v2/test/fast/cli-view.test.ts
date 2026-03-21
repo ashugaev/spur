@@ -54,6 +54,19 @@ describe("cli-view.describeSession", () => {
       ),
     ).toContain("shared workspace live");
   });
+
+  it("marks killed sessions as not restorable", () => {
+    expect(
+      describeSession(
+        session({
+          status: "killed",
+          state: "killed",
+          runtimeAlive: false,
+          workspaceExists: false,
+        }),
+      ),
+    ).toContain("not restorable");
+  });
 });
 
 describe("cli-view.renderRuntimeSummary", () => {

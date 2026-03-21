@@ -23,6 +23,15 @@ Agents run with full access:
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
 
+Each live session also gets a `spur-slots` helper command on its shell `PATH`.
+Use it inside the session to update the task title and any named links shown in the tmux status line:
+
+```bash
+spur-slots --title "Fix flaky auth test"
+spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
+spur-slots --link design=https://figma.com/...
+```
+
 ## Start
 
 ```bash

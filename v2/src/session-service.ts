@@ -11,10 +11,18 @@ import {
   isProcessRunningInTmux,
   killTmuxSession,
   sendMessageToTmux,
+  syncTmuxStatus,
   captureTmuxPane,
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
+import {
+  SLOT_TOOL_NAME,
+  applySlotsUpdate,
+  ensureSessionSlotTool,
+  removeSessionSlotTool,
+  withSessionSlotInstructions,
+} from "./session-slots.js";
 import {
   SPUR_DAEMON_API_VERSION,
   type AppConfig,
@@ -27,6 +35,7 @@ import {
   type SessionView,
   type SpawnOverrides,
   type SpawnSessionRequest,
+  type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { createWorktree, readCurrentBranch, removeWorktree, workspaceExists } from "./workspace.js";
 
@@ -156,11 +165,14 @@ function buildSessionEnv(args: {
   agent: SessionRecord["agent"];
   projectId: string;
   sessionId: string;
+  sessionToolDir: string;
 }): Record<string, string> {
   return {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
+    SPUR_SLOT_COMMAND: SLOT_TOOL_NAME,
+    PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
 }
 
@@ -309,6 +321,11 @@ export class SessionService {
 
     let workspacePath = placeholder.worktreePath;
     try {
+      const sessionToolDir = ensureSessionSlotTool({
+        dataDir: this.config.dataDir,
+        sessionId,
+        configPath: this.config.configPath,
+      });
       if (worktree) {
         workspacePath = await createWorktree({
           repoPath: project.path,
@@ -338,15 +355,21 @@ export class SessionService {
           agent,
           projectId: request.project,
           sessionId,
+          sessionToolDir,
         }),
       });
+      await syncTmuxStatus(tmuxSession, runningRecord.slots);
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
-      await sendMessageToTmux(tmuxSession, launchPlan.initialMessage);
+      await sendMessageToTmux(
+        tmuxSession,
+        withSessionSlotInstructions(launchPlan.initialMessage),
+      );
 
       writeSession(this.config.dataDir, runningRecord);
       return await this.enrich(runningRecord);
     } catch (error) {
       await killTmuxSession(tmuxSession);
+      removeSessionSlotTool(this.config.dataDir, sessionId);
       if (worktree && workspacePath) {
         await removeWorktree(project.path, workspacePath);
       }
@@ -390,6 +413,25 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const slots = applySlotsUpdate(session.slots, request);
+    const updated: SessionRecord = {
+      ...session,
+      ...(slots ? { slots } : {}),
+    };
+    if (!slots) {
+      delete updated.slots;
+    }
+    writeSession(this.config.dataDir, updated);
+    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    return this.enrich(updated);
+  }
+
   async kill(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -401,6 +443,7 @@ export class SessionService {
       const project = this.getProject(session.project);
       await removeWorktree(project.path, session.worktreePath);
     }
+    removeSessionSlotTool(this.config.dataDir, sessionId);
 
     if (session.status === "killed") {
       return this.enrich(session);
@@ -438,6 +481,11 @@ export class SessionService {
     await killTmuxSession(current.tmuxSession);
 
     try {
+      const sessionToolDir = ensureSessionSlotTool({
+        dataDir: this.config.dataDir,
+        sessionId: current.id,
+        configPath: this.config.configPath,
+      });
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
@@ -446,13 +494,18 @@ export class SessionService {
           agent: current.agent,
           projectId: current.project,
           sessionId: current.id,
+          sessionToolDir,
         }),
       });
+      await syncTmuxStatus(current.tmuxSession, current.slots);
       await waitForTmuxReady(current.tmuxSession, launchPlan.readyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      await sendMessageToTmux(current.tmuxSession, launchPlan.initialMessage);
+      await sendMessageToTmux(
+        current.tmuxSession,
+        withSessionSlotInstructions(launchPlan.initialMessage),
+      );
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);

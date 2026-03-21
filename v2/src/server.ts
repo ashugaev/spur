@@ -5,7 +5,11 @@ import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers } from "./triggers.js";
-import type { SendMessageRequest, SpawnSessionRequest } from "./types.js";
+import type {
+  SendMessageRequest,
+  SpawnSessionRequest,
+  UpdateSessionSlotsRequest,
+} from "./types.js";
 
 interface JsonError {
   error: string;
@@ -116,6 +120,13 @@ export async function startServer(
       const restoreSessionId = path.match(/^\/sessions\/([^/]+)\/restore$/)?.[1];
       if (method === "POST" && restoreSessionId) {
         sendJson(response, 200, await service.restore(restoreSessionId));
+        return;
+      }
+
+      const slotsSessionId = path.match(/^\/sessions\/([^/]+)\/slots$/)?.[1];
+      if (method === "POST" && slotsSessionId) {
+        const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
+        sendJson(response, 200, await service.updateSlots(slotsSessionId, body));
         return;
       }
 

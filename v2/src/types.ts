@@ -4,6 +4,15 @@ export const SPUR_DAEMON_API_VERSION = 2;
 export type SessionStatus = "spawning" | "running" | "errored" | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type BranchSource = "explicit" | "shared_workspace";
+export interface SessionLink {
+  label: string;
+  url: string;
+}
+
+export interface SessionSlots {
+  title?: string;
+  links: SessionLink[];
+}
 
 export type SourceType = "cron" | "github";
 
@@ -107,6 +116,7 @@ export interface SessionRecord {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  slots?: SessionSlots;
   error?: string;
 }
 
@@ -127,6 +137,13 @@ export interface SpawnSessionRequest {
 
 export interface SendMessageRequest {
   message: string;
+}
+
+export interface UpdateSessionSlotsRequest {
+  title?: string;
+  clearTitle?: boolean;
+  links?: SessionLink[];
+  unlinkLabels?: string[];
 }
 
 export interface RuntimeInfo {
