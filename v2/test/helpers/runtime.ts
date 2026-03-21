@@ -46,6 +46,7 @@ export interface FakeGhState {
 export interface RuntimeTestContext {
   rootDir: string;
   repoDir: string;
+  originDir: string;
   dataDir: string;
   worktreeDir: string;
   fakeBinDir: string;
@@ -75,7 +76,16 @@ function fakeAgentScript(agentName: "claude" | "codex"): string {
   const prompt = agentName === "claude" ? "❯" : "›";
   const startup =
     agentName === "claude"
-      ? `mode="launch"
+      ? `if [[ "\${1:-}" == "--print" ]]; then
+  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if [[ -n "$branch_hint" ]]; then
+    printf '{"branch":"%s"}\n' "$branch_hint"
+  else
+    printf '{"branch":null}\n'
+  fi
+  exit 0
+fi
+mode="launch"
 resume_id=""
 if [[ "\${1:-}" == "--resume" ]]; then
   mode="resume"
@@ -87,7 +97,29 @@ else
   mkdir -p "$session_dir"
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi`
-      : `mode="launch"
+      : `if [[ "\${1:-}" == "exec" ]]; then
+  output_file=""
+  args=("$@")
+  for ((index = 0; index < \${#args[@]}; index++)); do
+    if [[ "\${args[$index]}" == "--output-last-message" || "\${args[$index]}" == "-o" ]]; then
+      next_index=$((index + 1))
+      output_file="\${args[$next_index]:-}"
+      break
+    fi
+  done
+  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  payload='{"branch":null}'
+  if [[ -n "$branch_hint" ]]; then
+    payload="$(printf '{"branch":"%s"}' "$branch_hint")"
+  fi
+  if [[ -n "$output_file" ]]; then
+    printf '%s\n' "$payload" > "$output_file"
+  else
+    printf '%s\n' "$payload"
+  fi
+  exit 0
+fi
+mode="launch"
 resume_id=""
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
@@ -323,17 +355,23 @@ export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
   }
 }
 
-export async function createGitRepo(): Promise<string> {
+export async function createGitRepo(): Promise<{ repoDir: string; originDir: string }> {
   const rawRepoDir = await createTempDir("spur-runtime-repo-");
   const repoDir = await realpath(rawRepoDir);
+  const rawOriginDir = await createTempDir("spur-runtime-origin-");
+  const originDir = await realpath(rawOriginDir);
+  await execFileAsync("git", ["init", "--bare"], { cwd: originDir });
+  await execFileAsync("git", ["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: originDir });
   await execFileAsync("git", ["init", "-b", "main"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoDir });
   await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
+  await execFileAsync("git", ["remote", "add", "origin", originDir], { cwd: repoDir });
   await writeFile(join(repoDir, "README.md"), "# Spur Runtime Test\n", "utf8");
   await writeFile(join(repoDir, ".env"), "TEST_ENV=1\n", "utf8");
   await execFileAsync("git", ["add", "."], { cwd: repoDir });
   await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoDir });
-  return repoDir;
+  await execFileAsync("git", ["push", "-u", "origin", "main"], { cwd: repoDir });
+  return { repoDir, originDir };
 }
 
 async function writeExecutable(path: string, content: string): Promise<void> {
@@ -346,7 +384,7 @@ export async function createRuntimeTestContext(
   options?: { useFakeTools?: boolean },
 ): Promise<RuntimeTestContext> {
   const rootDir = await createTempDir("spur-runtime-");
-  const repoDir = await createGitRepo();
+  const { repoDir, originDir } = await createGitRepo();
   const dataDir = join(rootDir, "data");
   const worktreeDir = join(rootDir, "worktrees");
   const fakeBinDir = join(rootDir, "bin");
@@ -469,13 +507,15 @@ export async function createRuntimeTestContext(
   };
 
   const cleanup = async (): Promise<void> => {
-    await rm(rootDir, { recursive: true, force: true });
-    await rm(repoDir, { recursive: true, force: true });
+    await rm(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await rm(originDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   };
 
   return {
     rootDir,
     repoDir,
+    originDir,
     dataDir,
     worktreeDir,
     fakeBinDir,

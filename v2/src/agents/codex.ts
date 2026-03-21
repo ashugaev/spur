@@ -10,7 +10,7 @@ import type { AgentLaunchPlan } from "./types.js";
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
 
-function codexCommand(): string {
+export function codexCommand(): string {
   return process.env["SPUR_CODEX_BIN"] || "codex";
 }
 

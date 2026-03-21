@@ -102,6 +102,22 @@ projects:
     });
   });
 
+  it("parses an optional project spawn preflight prompt", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    preflight:
+      prompt: "Suggest a branch from the task and repo rules."
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.preflight).toEqual({
+      prompt: "Suggest a branch from the task and repo rules.",
+    });
+  });
+
   it("rejects removed GitHub event names during config validation", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -147,6 +163,20 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow("projects.api.worktree must be a boolean");
+  });
+
+  it("rejects non-string project preflight prompts", async () => {
+    const configPath = await writeConfig(`
+projects:
+  api:
+    path: $REPO_PATH
+    preflight:
+      prompt: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.api.preflight.prompt must be a non-empty string",
+    );
   });
 
   it("finds spur.yml in the current directory when no config path is passed", async () => {

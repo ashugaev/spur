@@ -3,6 +3,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./config.js";
 import { SPUR_DAEMON_API_VERSION, type RuntimeInfo } from "./types.js";
 
+const DAEMON_STOP_ATTEMPTS = 20;
+const DAEMON_STOP_RETRY_DELAY_MS = 100;
+const DAEMON_START_ATTEMPTS = 20;
+const DAEMON_START_RETRY_DELAY_MS = 250;
+
 export function createBaseUrl(configPath?: string): { baseUrl: string; configPath: string } {
   const config = loadConfig(configPath);
   return {
@@ -41,10 +46,23 @@ export type DaemonProbe =
   | { state: "starting" }
   | { state: "unreachable" };
 
+function hasSpurRuntimeShape(payload: unknown): payload is RuntimeInfo {
+  if (!payload || typeof payload !== "object") return false;
+  const runtime = payload as Partial<RuntimeInfo>;
+  return (
+    runtime.ok === true &&
+    typeof runtime.pid === "number" &&
+    typeof runtime.host === "string" &&
+    typeof runtime.port === "number" &&
+    typeof runtime.dataDir === "string" &&
+    typeof runtime.worktreeDir === "string" &&
+    typeof runtime.configPath === "string" &&
+    typeof runtime.startedAt === "string"
+  );
+}
+
 export function readDaemonPid(payload: unknown): number | undefined {
-  if (!payload || typeof payload !== "object") return undefined;
-  const pid = (payload as { pid?: unknown }).pid;
-  return typeof pid === "number" ? pid : undefined;
+  return hasSpurRuntimeShape(payload) ? payload.pid : undefined;
 }
 
 export function isCompatibleRuntimeInfo(payload: unknown): payload is RuntimeInfo {
@@ -63,7 +81,16 @@ function incompatibleProbe(pid: number | undefined): DaemonProbe {
 
 export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
   try {
-    const { response, payload } = await fetchJson(baseUrl, "/info");
+    const response = await fetch(`${baseUrl}/info`);
+    const text = await response.text();
+    let payload: unknown = {};
+    if (text) {
+      try {
+        payload = JSON.parse(text) as unknown;
+      } catch {
+        payload = {};
+      }
+    }
     if (response.status === 503) {
       return { state: "starting" };
     }
@@ -80,26 +107,76 @@ export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
   }
 }
 
-async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<void> {
-  if (typeof pid !== "number") return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
+function daemonPidFromProbe(probe: DaemonProbe): number | undefined {
+  if (probe.state === "ready") {
+    return probe.info.pid;
   }
+  if (probe.state === "incompatible") {
+    return probe.pid;
+  }
+  return undefined;
+}
 
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await sleep(100);
+async function waitUntilDaemonPidChanges(baseUrl: string, pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < DAEMON_STOP_ATTEMPTS; attempt += 1) {
+    await sleep(DAEMON_STOP_RETRY_DELAY_MS);
     const probe = await probeDaemon(baseUrl);
     if (probe.state === "unreachable") {
-      return;
+      return true;
     }
-    if (probe.state === "ready" && probe.info.pid !== pid) {
-      return;
+    const currentPid = daemonPidFromProbe(probe);
+    if (typeof currentPid === "number" && currentPid !== pid) {
+      return true;
     }
-    if (probe.state === "incompatible" && probe.pid !== pid) {
-      return;
+  }
+
+  return false;
+}
+
+async function waitForStableDaemonProbe(baseUrl: string): Promise<DaemonProbe> {
+  let probe = await probeDaemon(baseUrl);
+  if (probe.state !== "starting") {
+    return probe;
+  }
+
+  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+    await sleep(DAEMON_START_RETRY_DELAY_MS);
+    probe = await probeDaemon(baseUrl);
+    if (probe.state !== "starting") {
+      return probe;
     }
+  }
+
+  throw new Error(`Timed out waiting for daemon at ${baseUrl} to finish starting`);
+}
+
+function isMissingProcessError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ESRCH"
+  );
+}
+
+async function stopDaemonPid(baseUrl: string, pid: number): Promise<boolean> {
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    if (isMissingProcessError(error)) {
+      return true;
+    }
+    throw error;
+  }
+
+  return waitUntilDaemonPidChanges(baseUrl, pid);
+}
+
+async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<void> {
+  if (typeof pid !== "number") return;
+  const stopped = await stopDaemonPid(baseUrl, pid);
+  if (!stopped) {
+    throw new Error(`Timed out waiting for incompatible daemon at ${baseUrl} to stop`);
   }
 }
 
@@ -113,6 +190,70 @@ function spawnDaemon(cliEntrypoint: string, configPath: string): void {
     },
   );
   child.unref();
+}
+
+async function waitForReadyDaemon(baseUrl: string): Promise<RuntimeInfo | undefined> {
+  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+    await sleep(DAEMON_START_RETRY_DELAY_MS);
+    const probe = await probeDaemon(baseUrl);
+    if (probe.state === "ready") {
+      return probe.info;
+    }
+  }
+
+  return undefined;
+}
+
+export interface StopDaemonResult {
+  baseUrl: string;
+  pid?: number;
+  stopped: boolean;
+}
+
+export interface RestartDaemonResult {
+  baseUrl: string;
+  previousPid?: number;
+  restarted: boolean;
+  runtime?: RuntimeInfo;
+}
+
+export async function stopDaemonIfRunning(configPath?: string): Promise<StopDaemonResult> {
+  const { baseUrl } = createBaseUrl(configPath);
+  const probe = await waitForStableDaemonProbe(baseUrl);
+  const pid = daemonPidFromProbe(probe);
+  if (typeof pid !== "number") {
+    return { baseUrl, stopped: false };
+  }
+
+  const stopped = await stopDaemonPid(baseUrl, pid);
+  if (!stopped) {
+    throw new Error(`Timed out waiting for daemon at ${baseUrl} to stop`);
+  }
+  return { baseUrl, pid, stopped: true };
+}
+
+export async function restartDaemonIfRunning(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<RestartDaemonResult> {
+  const { baseUrl, configPath: resolvedConfigPath } = createBaseUrl(configPath);
+  const stopped = await stopDaemonIfRunning(configPath);
+  if (!stopped.stopped || typeof stopped.pid !== "number") {
+    return { baseUrl, restarted: false };
+  }
+
+  spawnDaemon(cliEntrypoint, resolvedConfigPath);
+  const runtime = await waitForReadyDaemon(baseUrl);
+  if (!runtime) {
+    throw new Error(`Timed out waiting for daemon restart at ${baseUrl}`);
+  }
+
+  return {
+    baseUrl,
+    previousPid: stopped.pid,
+    restarted: true,
+    runtime,
+  };
 }
 
 export async function ensureServer(cliEntrypoint: string, configPath?: string): Promise<string> {
@@ -129,8 +270,8 @@ export async function ensureServer(cliEntrypoint: string, configPath?: string): 
     spawnDaemon(cliEntrypoint, resolvedConfigPath);
   }
 
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    await sleep(250);
+  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+    await sleep(DAEMON_START_RETRY_DELAY_MS);
     probe = await probeDaemon(baseUrl);
     if (probe.state === "ready") {
       return baseUrl;

@@ -10,7 +10,7 @@ No UI. No tracker flow. No plugin layer.
 
 ## Commands
 
-`spawn`, `list`, `send`. `daemon start` is internal — hidden from `--help`.
+`spawn`, `list`, `send`. `daemon start`, `daemon stop`, and `daemon restart` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
@@ -22,6 +22,8 @@ Agents run with full access:
 
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
+
+Project spawn preflight is opt-in. If `projects.<id>.preflight.prompt` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation and uses `branch` when the preflight returns it.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
 Use it inside the session to update the task title and any named links shown in the tmux status line:
@@ -37,6 +39,8 @@ spur-slots --link design=https://figma.com/...
 ```bash
 pnpm --dir v2 build
 ```
+
+`build` also restarts a running daemon when Spur config is discoverable.
 
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
@@ -85,6 +89,8 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    preflight:
+      prompt: "Suggest a git branch name from the task and repo rules. Prefer tracker or PR identifiers when present."
     symlinks:
       - .env
       - .claude
@@ -129,6 +135,8 @@ projects:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-When `spawn` creates a new worktree branch, it uses `projects.<id>.defaultBranch` as the base branch. Override that per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
+If `projects.<id>.preflight.prompt` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the initial spawn prompt. If the preflight returns `{"branch":"..."}`, Spur uses it. `--branch` bypasses preflight.
+
+When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 
 Shared workspace sessions keep the project path intact on `kill` and are not restorable from `list`.

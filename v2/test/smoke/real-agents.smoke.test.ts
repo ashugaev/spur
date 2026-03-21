@@ -143,6 +143,7 @@ function smokeConfig(args: {
   baseRef: string;
   sessionPrefix: string;
   agent: AgentName;
+  extraProjectYaml?: string;
 }): string {
   return `server:
   host: 127.0.0.1
@@ -155,6 +156,7 @@ projects:
     path: ${args.repoDir}
     defaultBranch: ${args.baseRef}
     sessionPrefix: ${args.sessionPrefix}
+${args.extraProjectYaml ?? ""}
 `;
 }
 
@@ -210,7 +212,10 @@ async function cleanupSmokeItem(item: CleanupItem): Promise<void> {
   await rm(item.rootDir, { recursive: true, force: true });
 }
 
-async function runSmoke(agent: AgentName): Promise<void> {
+async function runSmoke(
+  agent: AgentName,
+  options?: { expectedPreflightBranch?: string },
+): Promise<void> {
   const rootDir = await createTempDir(`spur-smoke-${agent}-`);
   const port = await findFreePort();
   const dataDir = join(rootDir, "data");
@@ -237,18 +242,29 @@ async function runSmoke(agent: AgentName): Promise<void> {
       baseRef: SMOKE_BASE_REF,
       sessionPrefix,
       agent,
+      ...(options?.expectedPreflightBranch
+        ? {
+            extraProjectYaml: `    preflight:
+      prompt: "Set branch exactly to ${options.expectedPreflightBranch}."
+`,
+          }
+        : {}),
     }),
     "utf8",
   );
 
   await withPinnedAgentBinaries(async () => {
     const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+    const initialSmokeTimeoutMs = agent === "codex" ? 240_000 : 180_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
       { label: "tracker", url: `https://tracker.example.com/${agent}-smoke` },
       { label: "pr", url: `https://example.com/${agent}/pull/1` },
     ] as const;
     const expectedLinkPairs = expectedLinks.map((link) => `${link.label}=${link.url}`).sort();
+    const expectedStatusLinks = expectedLinks.map(
+      (link) => `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
+    );
     const session = await service.spawn({
       project: "api",
       agent,
@@ -259,38 +275,50 @@ After the file and the session metadata are set, wait for more instructions.`,
     });
     cleanupItem.branch = session.branch;
     cleanupItem.worktreePath = session.worktreePath;
+    if (options?.expectedPreflightBranch) {
+      expect(session.branch).toBe(options.expectedPreflightBranch);
+      expect(session.branchSource).toBe("preflight");
+    }
 
     const initialFile = join(session.worktreePath, "smoke-initial.txt");
-    const liveSlots = await pollUntil(
+    const liveState = await pollUntil(
       async () => {
-        const current = await service.get(session.id);
         if (!existsSync(initialFile)) {
           return null;
         }
+        const current = await service.get(session.id);
         if (current.slots?.title !== expectedTitle) {
           return null;
         }
-        const links = current.slots.links
-          .map((link) => `${link.label}=${link.url}`)
-          .sort();
-        return JSON.stringify(links) === JSON.stringify(expectedLinkPairs) ? current : null;
+        const links = current.slots.links.map((link) => `${link.label}=${link.url}`).sort();
+        if (JSON.stringify(links) !== JSON.stringify(expectedLinkPairs)) {
+          return null;
+        }
+        const statusLeft = await readTmuxOption(session.id, "status-left");
+        const statusRight = await readTmuxOption(session.id, "status-right");
+        if (!statusLeft.includes(expectedTitle)) {
+          return null;
+        }
+        if (expectedStatusLinks.some((value) => !statusRight.includes(value))) {
+          return null;
+        }
+        return { current, statusLeft, statusRight };
       },
       {
-        timeoutMs: 180_000,
+        timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
       },
     );
-    const statusLeft = await readTmuxOption(session.id, "status-left");
-    const statusRight = await readTmuxOption(session.id, "status-right");
 
-    expect(liveSlots.slots?.title).toBe(expectedTitle);
-    expect(liveSlots.slots?.links).toHaveLength(expectedLinks.length);
-    expect(liveSlots.slots?.links).toEqual(expect.arrayContaining(expectedLinks));
-    expect(statusLeft).toContain(expectedTitle);
-    for (const link of expectedLinks) {
-      expect(statusRight).toContain(
-        `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
-      );
+    if (!liveState) {
+      throw new Error(`${agent} did not set the expected session slots before the smoke timeout`);
+    }
+    expect(liveState.current.slots?.title).toBe(expectedTitle);
+    expect(liveState.current.slots?.links).toHaveLength(expectedLinks.length);
+    expect(liveState.current.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
+    expect(liveState.statusLeft).toContain(expectedTitle);
+    for (const value of expectedStatusLinks) {
+      expect(liveState.statusRight).toContain(value);
     }
     expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
@@ -299,7 +327,7 @@ After the file and the session metadata are set, wait for more instructions.`,
     const restored = await service.restore(session.id);
     expect(restored.id).toBe(session.id);
     expect(restored.slots?.title).toBe(expectedTitle);
-    expect(restored.slots?.links).toEqual(expect.arrayContaining(expectedLinks));
+    expect(restored.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
 
     await service.send(session.id, {
       message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
@@ -335,6 +363,10 @@ if (claudeAuth.error) {
     it("launches claude, restores it, and accepts a follow-up send", async () => {
       await runSmoke("claude");
     });
+
+    it("uses claude spawn preflight before the normal session launch", async () => {
+      await runSmoke("claude", { expectedPreflightBranch: "smoke-claude-preflight" });
+    });
   });
 }
 
@@ -348,6 +380,10 @@ if (codexAuth.error) {
   describe.skipIf(!codexAuth.available)("Spur real-agent smoke (codex)", () => {
     it("launches codex, restores it, and accepts a follow-up send", async () => {
       await runSmoke("codex");
+    });
+
+    it("uses codex spawn preflight before the normal session launch", async () => {
+      await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });
     });
   });
 }

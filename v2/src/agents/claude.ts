@@ -5,7 +5,7 @@ import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan } from "./types.js";
 
-function claudeCommand(): string {
+export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 

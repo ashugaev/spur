@@ -1,10 +1,12 @@
 import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { buildAgentLaunchPlan, buildAgentRestorePlan, parseAgentName } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
+import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import {
   createTmuxSession,
@@ -172,7 +174,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
-    SPUR_SLOT_COMMAND: SLOT_TOOL_NAME,
+    SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
 }
@@ -217,13 +219,16 @@ interface ResolvedSpawnBranch {
 async function resolveSpawnBranch(args: {
   repoPath: string;
   requestBranch: string | undefined;
+  requestBranchSource?: Extract<BranchSource, "explicit" | "preflight">;
   worktree: boolean;
   fallbackBranch: string;
 }): Promise<ResolvedSpawnBranch> {
   if (args.worktree) {
     const requestedBranch = args.requestBranch?.trim();
     if (requestedBranch) {
-      return { branch: requestedBranch, branchSource: "explicit" };
+      return args.requestBranchSource
+        ? { branch: requestedBranch, branchSource: args.requestBranchSource }
+        : { branch: requestedBranch };
     }
     return { branch: args.fallbackBranch };
   }
@@ -307,6 +312,24 @@ export class SessionService {
       worktree = resolveSpawnWorktree(project, overrides);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      let effectiveBranch = request.branch;
+      let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
+        request.branch ? "explicit" : undefined;
+      if (!effectiveBranch && worktree && project.preflight) {
+        stage = "preflight";
+        const preflight = await runSpawnPreflight({
+          agent,
+          projectId: request.project,
+          project,
+          baseBranch: defaultBranch,
+          worktree,
+          prompt: request.prompt,
+        });
+        if (preflight.branch) {
+          effectiveBranch = preflight.branch;
+          effectiveBranchSource = "preflight";
+        }
+      }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
         request.project,
@@ -314,7 +337,8 @@ export class SessionService {
       );
       resolvedBranch = await resolveSpawnBranch({
         repoPath: project.path,
-        requestBranch: request.branch,
+        requestBranch: effectiveBranch,
+        ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
         worktree,
         fallbackBranch: sessionId,
       });

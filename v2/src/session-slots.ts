@@ -66,31 +66,32 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
     throw new Error("title and clearTitle cannot be used together");
   }
 
-  const linksRaw = request.links ?? [];
+  const linksRaw: unknown = request.links ?? [];
   if (!Array.isArray(linksRaw)) {
     throw new Error("links must be an array");
   }
-  const links = linksRaw.map((link, index) => {
+  const links = linksRaw.map((link: unknown, index) => {
     if (!link || typeof link !== "object") {
       throw new Error(`links[${index}] must be an object`);
     }
-    if (typeof link.label !== "string") {
+    const linkRecord = link as { label?: unknown; url?: unknown };
+    if (typeof linkRecord.label !== "string") {
       throw new Error(`links[${index}].label must be a string`);
     }
-    if (typeof link.url !== "string") {
+    if (typeof linkRecord.url !== "string") {
       throw new Error(`links[${index}].url must be a string`);
     }
     return {
-      label: normalizeSlotLabel(link.label),
-      url: normalizeSlotUrl(link.url),
+      label: normalizeSlotLabel(linkRecord.label),
+      url: normalizeSlotUrl(linkRecord.url),
     } satisfies SessionLink;
   });
 
-  const unlinkRaw = request.unlinkLabels ?? [];
+  const unlinkRaw: unknown = request.unlinkLabels ?? [];
   if (!Array.isArray(unlinkRaw)) {
     throw new Error("unlinkLabels must be an array");
   }
-  const unlinkLabels = unlinkRaw.map((label, index) => {
+  const unlinkLabels = unlinkRaw.map((label: unknown, index) => {
     if (typeof label !== "string") {
       throw new Error(`unlinkLabels[${index}] must be a string`);
     }
@@ -147,15 +148,15 @@ export function applySlotsUpdate(
 }
 
 export function withSessionSlotInstructions(prompt: string): string {
-  if (prompt.includes(SLOT_TOOL_NAME)) {
+  if (prompt.includes("SPUR_SLOT_COMMAND") || prompt.includes(SLOT_TOOL_NAME)) {
     return prompt;
   }
   return `${prompt}
 
 Session metadata:
-- As soon as you know the task title, run \`${SLOT_TOOL_NAME} --title "..."\`.
-- As soon as you know a related tracker or PR URL, run \`${SLOT_TOOL_NAME} --link tracker=https://... --link pr=https://...\`.
-- Use \`${SLOT_TOOL_NAME} --link label=https://...\` for any other useful links.`;
+- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
+- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
+- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {

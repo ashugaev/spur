@@ -106,6 +106,110 @@ describe("client.ensureServer", () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
   });
 
+  it("stops a running daemon without auto-starting it", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"));
+
+    const { stopDaemonIfRunning } = await loadClientModule();
+    const result = await stopDaemonIfRunning("/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      pid: 4242,
+      stopped: true,
+    });
+    expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps stop as a no-op when the daemon is already unreachable", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+    const { stopDaemonIfRunning } = await loadClientModule();
+    const result = await stopDaemonIfRunning("/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      stopped: false,
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps stop as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+
+    const { stopDaemonIfRunning } = await loadClientModule();
+    const result = await stopDaemonIfRunning("/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      stopped: false,
+    });
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("restarts a running daemon without using ensureServer as a stop path", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"))
+      .mockRejectedValueOnce(new Error("still starting"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+      );
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      previousPid: 4242,
+      restarted: true,
+      runtime: runtimeInfo(undefined, 8888),
+    });
+    expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledWith(
+      process.execPath,
+      ["/tmp/dist/cli.js", "--config", "/tmp/spur.yaml", "daemon", "start"],
+      {
+        detached: true,
+        stdio: "ignore",
+      },
+    );
+  });
+
+  it("keeps restart as a no-op when the daemon is not running", async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      restarted: false,
+    });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps restart as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      restarted: false,
+    });
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces server error payloads from JSON requests", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))

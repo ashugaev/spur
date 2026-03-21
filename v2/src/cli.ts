@@ -5,7 +5,14 @@ import { emitKeypressEvents } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { log } from "@clack/prompts";
 import { Command, type Help } from "commander";
-import { getJson, postJson } from "./client.js";
+import {
+  getJson,
+  postJson,
+  restartDaemonIfRunning,
+  stopDaemonIfRunning,
+  type RestartDaemonResult,
+  type StopDaemonResult,
+} from "./client.js";
 import {
   accent,
   brandMark,
@@ -52,6 +59,18 @@ function enableTmuxMouse(sessionName: string): void {
 
 function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
+}
+
+function renderStoppedDaemon(baseUrl: string): string {
+  return dimText(`daemon ${baseUrl} is stopped`);
+}
+
+function renderDaemonStopResult(result: StopDaemonResult): string {
+  return renderStoppedDaemon(result.baseUrl);
+}
+
+function renderDaemonRestartResult(result: RestartDaemonResult): string {
+  return result.runtime ? renderRuntimeInfo(result.runtime) : renderStoppedDaemon(result.baseUrl);
 }
 
 function getConfigPath(program: Command): string | undefined {
@@ -193,8 +212,8 @@ function helpNotes(command: Command): string[] {
   }
   if (command.name() === "spawn") {
     return [
-      "Worktree spawns run agent branch preflight unless `--branch` is provided.",
-      "`--branch` skips preflight and uses the branch name directly.",
+      "If the project enables spawn preflight, worktree spawns can derive a branch before worktree creation.",
+      "`--branch` bypasses any configured preflight branch suggestion.",
       "`--shared` cannot be combined with `--worktree` or `--branch`.",
     ];
   }
@@ -672,9 +691,11 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-  program
+  const daemon = program
     .command("daemon", { hidden: true })
-    .description("Internal daemon commands.")
+    .description("Internal daemon commands.");
+
+  daemon
     .command("start")
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
@@ -697,6 +718,36 @@ export function createProgram(cliEntrypoint: string): Command {
         },
         success: () => "Daemon started.",
         render: renderRuntimeInfo,
+      });
+    });
+
+  daemon
+    .command("stop")
+    .description("Stop the local daemon if it is running.")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command: Command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "stopping daemon",
+        action: () => stopDaemonIfRunning(configPath),
+        success: (result) => (result.stopped ? "Daemon stopped." : "Daemon already stopped."),
+        render: renderDaemonStopResult,
+      });
+    });
+
+  daemon
+    .command("restart")
+    .description("Restart the local daemon if it is already running.")
+    .option("--json", "Print raw JSON")
+    .action(async (options: { json?: boolean }, command: Command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "restarting daemon",
+        action: () => restartDaemonIfRunning(cliEntrypoint, configPath),
+        success: (result) => (result.restarted ? "Daemon restarted." : "Daemon already stopped."),
+        render: renderDaemonRestartResult,
       });
     });
 
