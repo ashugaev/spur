@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/code-simplifier.sh",
+            "statusMessage": "Running code-simplifier...",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
