@@ -613,7 +613,7 @@ export class SessionService {
           messageLength: message.length,
         },
       });
-      return this.enrich(updated);
+      return await this.enrich(updated);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
