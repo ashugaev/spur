@@ -213,6 +213,83 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     },
   );
 
+  it("spawns through the root shortcut when exactly one project is configured", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-root-shortcut-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "root-shortcut.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+
+    await context.execCli(["--config", configPath, "root shortcut prompt"]);
+    currentActiveContext().daemonPid = (await context.fetchJson<RuntimeInfo>("/info")).pid;
+
+    const spawned = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.length === 1 && value[0]?.prompt === "root shortcut prompt",
+      },
+    );
+    const session = spawned[0];
+    expect(session?.project).toBe("api");
+    expect(session?.runtimeAlive).toBe(true);
+
+    if (!session) {
+      throw new Error("Expected root shortcut to create one session");
+    }
+
+    const killed = await context.fetchJson<SessionView>(`/sessions/${session.id}/kill`, {
+      method: "POST",
+    });
+    expect(killed.runtimeAlive).toBe(false);
+    expect(killed.workspaceExists).toBe(false);
+  });
+
+  it("rejects the root shortcut without TTY when multiple projects are configured", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-root-shortcut-error-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "root-shortcut-error.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-api
+    symlinks: []
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks: []
+`,
+    );
+
+    await expect(context.execCli(["--config", configPath, "needs project selection"])).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        "Multiple projects configured; use `spur spawn <project> <prompt...>`.",
+      ),
+    });
+  });
+
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

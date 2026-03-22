@@ -13,8 +13,11 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`. `daemon start`, `daemon stop`, and `daemon restart` are internal and hidden from `--help`.
 
 ```bash
+spur <prompt...>
 spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
 ```
+
+With one configured project, `spur <prompt...>` uses it automatically. With multiple projects, Spur asks which project to use.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
 
@@ -43,6 +46,7 @@ pnpm --dir v2 build
 `build` also restarts a running daemon when Spur config is discoverable.
 
 ```bash
+node dist/cli.js "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml
 node dist/cli.js send api-1 "Run the focused test and report back." --config spur.yaml

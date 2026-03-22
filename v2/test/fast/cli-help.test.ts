@@ -11,10 +11,13 @@ describe("spur help", () => {
 
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
+    expect(help).toContain("spur [prompt...] | <command> [options]");
+    expect(help).toContain("[prompt...]");
     expect(help).toContain("Commands");
     expect(help).toContain("spawn [options] <project> <prompt...>");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
+    expect(help).toContain("Use `spur <prompt...>` to spawn directly.");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");

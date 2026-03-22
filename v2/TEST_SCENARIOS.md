@@ -15,7 +15,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Fast
 
-- Root help exposes only `spawn`, `list`, and `send`, keeps the branded help output, and hides the internal `daemon` command.
+- Root help exposes only `spawn`, `list`, and `send`, keeps the branded help output, documents the `spur <prompt...>` shortcut, and hides the internal `daemon` command.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note.
 - In-process server returns runtime info and stops cleanly.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
@@ -41,6 +41,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 ## Runtime Integration
 
 - `list --json` auto-starts the daemon and returns `[]` on a fresh config, and `ls --json` does the same.
+- `spur <prompt...>` with one configured project auto-selects it and creates the same session shape as `spawn`.
+- `spur <prompt...>` without a TTY rejects multi-project configs and points to `spur spawn <project> <prompt...>`.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
@@ -54,6 +56,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
+- A session created through `spur <prompt...>` still tears down cleanly through the normal session lifecycle and leaves `runtimeAlive: false` plus `workspaceExists: false`.
 - `send` rejects an unknown session id through the built CLI.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - Hidden `daemon stop --json` stops a running daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.

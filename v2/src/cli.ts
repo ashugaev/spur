@@ -2,6 +2,8 @@
 
 import { execFileSync } from "node:child_process";
 import { emitKeypressEvents } from "node:readline";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
 import { log } from "@clack/prompts";
 import { Command, type Help } from "commander";
@@ -26,6 +28,7 @@ import {
   renderWaitingInputAlert,
   withSpinner,
 } from "./cli-view.js";
+import { loadConfig } from "./config.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isRestorableSession } from "./session-service.js";
@@ -206,6 +209,7 @@ function commandDisplayName(command: Command): string {
 function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
+      "Use `spur <prompt...>` to spawn directly. With one project configured, Spur uses it automatically; with multiple projects, Spur asks you to choose.",
       "Use `spur <command> --help` for per-command details.",
       "Use `--json` on `spawn`, `list`, and `send` for scripts.",
     ];
@@ -566,18 +570,78 @@ function resolveCliSpawnOverrides(options: {
   return { worktree: true, defaultBranch };
 }
 
+async function selectShortcutProject(configPath?: string): Promise<string> {
+  const projectIds = Object.keys(loadConfig(configPath).projects);
+  if (projectIds.length === 0) {
+    throw new Error("No projects configured");
+  }
+  if (projectIds.length === 1) {
+    const onlyProject = projectIds[0];
+    if (!onlyProject) {
+      throw new Error("No projects configured");
+    }
+    return onlyProject;
+  }
+  if (!stdin.isTTY || !stdout.isTTY) {
+    throw new Error("Multiple projects configured; use `spur spawn <project> <prompt...>`.");
+  }
+
+  writeStdout("Select a project:");
+  for (const [index, projectId] of projectIds.entries()) {
+    writeStdout(`  ${index + 1}. ${projectId}`);
+  }
+
+  const rl = createInterface({ input: stdin, output: stdout });
+  try {
+    while (true) {
+      const answer = (await rl.question("Project> ")).trim();
+      const selectedIndex = Number.parseInt(answer, 10);
+      if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= projectIds.length) {
+        const selectedProject = projectIds[selectedIndex - 1];
+        if (selectedProject) {
+          return selectedProject;
+        }
+      }
+      if (projectIds.includes(answer)) {
+        return answer;
+      }
+      writeStdout("Enter a project number or id.");
+    }
+  } finally {
+    rl.close();
+  }
+}
+
 export function createProgram(cliEntrypoint: string): Command {
   const program = new Command();
 
   program
     .name("spur")
     .description("Lean v2 orchestrator.")
-    .usage("<command> [options]")
+    .usage("[prompt...] | <command> [options]")
     .helpCommand(false)
     .helpOption("-h, --help", "Show help")
     .configureHelp({ formatHelp, showGlobalOptions: true })
     .option("--config <path>", "Path to spur.yaml")
-    .version("0.1.0", "-V, --version", "Show version");
+    .version("0.1.0", "-V, --version", "Show version")
+    .argument("[prompt...]", "Initial agent prompt")
+    .action(async (promptParts: string[], _options, command: Command) => {
+      if (promptParts.length === 0) {
+        command.outputHelp();
+        return;
+      }
+      const configPath = getConfigPath(command);
+      const payload: SpawnSessionRequest = {
+        project: await selectShortcutProject(configPath),
+        prompt: promptParts.join(" "),
+      };
+      await outputResult({
+        json: false,
+        label: "starting session",
+        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
+        render: renderSessionCard,
+      });
+    });
 
   program
     .command("spawn")
