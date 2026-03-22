@@ -17,6 +17,13 @@ CLI commands reuse an already running daemon on the same configured `host`/`port
 
 `list` and `get` return live `activity` and `lastActivityAt` fields derived from `tmux`, alongside persisted session data.
 
+Agents can also set the session `status` themselves from inside the workspace:
+
+- `"$SPUR_STATUS_COMMAND" needs_input`
+- `"$SPUR_STATUS_COMMAND" done`
+
+`spur send` resets `needs_input` and `done` back to `running`.
+
 `spawn` has one form:
 
 ```bash

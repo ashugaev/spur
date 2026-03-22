@@ -15,6 +15,9 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - Default `spawn`: uses project default agent and `sessionId` as branch when flags are omitted.
 - `get`: returns persisted session plus live `runtimeAlive`, `workspaceExists`, `activity`, and `lastActivityAt`.
 - `send`: reaches the running agent and updates session metadata.
+- Agent status helper: `"$SPUR_STATUS_COMMAND" needs_input` persists `status: needs_input`.
+- Agent status helper: `"$SPUR_STATUS_COMMAND" done` persists `status: done`.
+- `send` after `needs_input` or `done`: resets session `status` back to `running`.
 - `kill`: kills tmux, removes worktree, keeps terminal metadata with `killed` status.
 - `get` after `kill`: shows `runtimeAlive: false` and `workspaceExists: false`.
 - Repeated `kill` on an already cleaned session is idempotent and does not rewrite metadata again.
@@ -22,6 +25,7 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - `get/list`: report `activity: ready` when the agent is back at a prompt and recently active.
 - `get/list`: report `activity: idle` when the agent is still at a prompt after the 5 minute threshold.
 - `get/list`: report `activity: waiting_input` when the pane tail shows a permission or confirmation prompt.
+- `get/list`: report `activity: waiting_input` when the agent explicitly sets `status: needs_input`, even if the pane tail does not match the heuristic prompt patterns.
 - `get/list`: prefer the current prompt over stale permission text still visible in recent pane history.
 - `get/list`: report `activity: exited` when the tmux session or agent process is gone.
 - `get/list` during `spawning`: report `activity: active` and keep `runtimeAlive` aligned with the actual tmux session state.
@@ -51,6 +55,7 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - Missing session for `get`.
 - Missing session for `kill`.
 - Empty message for `send`.
+- Agent status helper rejects unsupported status values.
 - `cron` source without `schedule`.
 - Trigger referencing an unknown source.
 

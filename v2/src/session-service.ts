@@ -1,4 +1,5 @@
 import { mkdirSync } from "node:fs";
+import { appendStatusInstructions, ensureStatusCommand } from "./agent-status.js";
 import { buildAgentLaunchPlan, parseAgentName } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -32,6 +33,10 @@ const PERMISSION_PROMPTS = [
   /Do you want to proceed\?/i,
   /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
 ];
+
+function isAgentManagedStatus(status: SessionRecord["status"]): boolean {
+  return status === "needs_input" || status === "done";
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -89,12 +94,14 @@ function classifyActivity(
 export class SessionService {
   readonly config: AppConfig;
   readonly startedAt: string;
+  readonly statusCommand: string;
 
   constructor(configPath?: string, startedAt = nowIso()) {
     this.config = loadConfig(configPath);
     this.startedAt = startedAt;
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
+    this.statusCommand = ensureStatusCommand(this.config.dataDir);
   }
 
   info(): RuntimeInfo {
@@ -168,15 +175,10 @@ export class SessionService {
         symlinks: project.symlinks,
       });
 
-      const launchPlan = buildAgentLaunchPlan(agent, request.prompt);
-      const runningRecord: SessionRecord = {
-        ...placeholder,
-        worktreePath,
-        launchCommand: launchPlan.launchCommand,
-        status: "running",
-        updatedAt: nowIso(),
-      };
-
+      const launchPlan = buildAgentLaunchPlan(
+        agent,
+        appendStatusInstructions(request.prompt),
+      );
       await createTmuxSession({
         sessionName: tmuxSession,
         cwd: worktreePath,
@@ -185,11 +187,27 @@ export class SessionService {
           SPUR_SESSION: sessionId,
           SPUR_PROJECT: request.project,
           SPUR_AGENT: agent,
+          SPUR_DATA_DIR: this.config.dataDir,
+          SPUR_STATUS_COMMAND: this.statusCommand,
         },
       });
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
       await sendMessageToTmux(tmuxSession, launchPlan.initialMessage);
 
+      const currentRecord = readSession(this.config.dataDir, sessionId);
+      const runningRecord: SessionRecord = {
+        ...placeholder,
+        worktreePath,
+        launchCommand: launchPlan.launchCommand,
+        status:
+          currentRecord && isAgentManagedStatus(currentRecord.status)
+            ? currentRecord.status
+            : "running",
+        updatedAt:
+          currentRecord && isAgentManagedStatus(currentRecord.status)
+            ? currentRecord.updatedAt
+            : nowIso(),
+      };
       writeSession(this.config.dataDir, runningRecord);
       return this.enrich(runningRecord);
     } catch (error) {
@@ -223,6 +241,10 @@ export class SessionService {
     await sendMessageToTmux(session.tmuxSession, request.message);
     const updated: SessionRecord = {
       ...session,
+      status:
+        session.status === "needs_input" || session.status === "done"
+          ? "running"
+          : session.status,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
@@ -267,6 +289,17 @@ export class SessionService {
         runtimeAlive,
         workspaceExists: workspacePresent,
         activity: "active",
+        lastActivityAt: resolveLastActivityAt(fallbackActivityAt, activityAt).toISOString(),
+      };
+    }
+
+    if (session.status === "needs_input") {
+      const activityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
+      return {
+        ...session,
+        runtimeAlive,
+        workspaceExists: workspacePresent,
+        activity: "waiting_input",
         lastActivityAt: resolveLastActivityAt(fallbackActivityAt, activityAt).toISOString(),
       };
     }
