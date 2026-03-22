@@ -7,6 +7,7 @@ import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers } from "./triggers.js";
 import type {
+  KillSessionRequest,
   SendMessageRequest,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
@@ -137,7 +138,8 @@ export async function startServer(
 
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        sendJson(response, 200, await service.kill(killSessionId));
+        const body = await readJsonBody<KillSessionRequest>(request);
+        sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
 

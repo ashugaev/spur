@@ -51,12 +51,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, and returns to the selector after detach.
 - TTY `list` can kill the selected live session in place, leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`, and reports that the killed session is not restorable on `Enter` or `r`.
-- TTY `list` blocks `k` for a dirty worktree session, keeps the session running, and explains that the worktree must be cleaned first.
+- TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send` rejects an unknown session id through the built CLI.
-- `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes.
+- `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes or unpushed commits unless `force: true`.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - Hidden `daemon stop --json` stops a running daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
 - Hidden `daemon restart --json` replaces a live daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.

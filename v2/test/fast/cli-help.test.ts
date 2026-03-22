@@ -45,6 +45,9 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain("TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.");
+    expect(help).toContain(
+      "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
+    );
     expect(help).not.toContain("help [command]");
   });
 
