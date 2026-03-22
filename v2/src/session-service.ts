@@ -40,7 +40,13 @@ import {
   type SpawnSessionRequest,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
-import { createWorktree, readCurrentBranch, removeWorktree, workspaceExists } from "./workspace.js";
+import {
+  createWorktree,
+  hasUncommittedChanges,
+  readCurrentBranch,
+  removeWorktree,
+  workspaceExists,
+} from "./workspace.js";
 
 const DELIVERY_GRACE_MS = 30_000;
 const WORKING_SIGNAL_WINDOW_MS = 90_000;
@@ -632,6 +638,14 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+      const project = this.getProject(session.project);
+      const dirty = await hasUncommittedChanges(session.worktreePath, project.symlinks);
+      if (dirty) {
+        throw new Error(`Session ${sessionId} has uncommitted changes in its worktree`);
+      }
     }
 
     try {

@@ -166,3 +166,18 @@ export function workspaceExists(worktreePath: string): boolean {
     return false;
   }
 }
+
+export async function hasUncommittedChanges(
+  worktreePath: string,
+  ignoredPaths: string[] = [],
+): Promise<boolean> {
+  const output = await git(
+    worktreePath,
+    "status",
+    "--short",
+    "--",
+    ".",
+    ...ignoredPaths.map((path) => `:(exclude)${path}`),
+  );
+  return output.trim().length > 0;
+}
