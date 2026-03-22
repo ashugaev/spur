@@ -226,12 +226,13 @@ describe("SessionService", () => {
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello");
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.stringContaining("hello"),
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", expect.stringContaining("hello"));
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(
+      expect.stringContaining("slot-instructions"),
     );
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(expect.stringContaining("slot-instructions"));
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(expect.stringContaining("status-instructions"));
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(
+      expect.stringContaining("status-instructions"),
+    );
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -873,8 +874,12 @@ describe("SessionService", () => {
       "api-1",
       expect.stringContaining("This session was restored after the agent exited."),
     );
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(expect.stringContaining("slot-instructions"));
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(expect.stringContaining("status-instructions"));
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(
+      expect.stringContaining("slot-instructions"),
+    );
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toEqual(
+      expect.stringContaining("status-instructions"),
+    );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
     expect(restored.runtimeAlive).toBe(true);

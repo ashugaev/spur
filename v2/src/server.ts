@@ -60,10 +60,7 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
-  const logEvent = (
-    event: string,
-    entry: Omit<SpurLogEntry, "timestamp" | "event">,
-  ): void => {
+  const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
   const handleRequest = async (

@@ -303,7 +303,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-build-noop-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    const configPath = await context.writeConfig("build-noop.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "build-noop.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const repoRoot = join(import.meta.dirname, "..", "..", "..");
     const incompatibleServer = createServer((request, response) => {
       if (request.url === "/info") {
@@ -394,11 +397,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     ) as SessionView[];
     expect(listed).toEqual([]);
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
-      expect.arrayContaining([
-        "daemon.started",
-        "session.spawn.failed",
-        "http.request.failed",
-      ]),
+      expect.arrayContaining(["daemon.started", "session.spawn.failed", "http.request.failed"]),
     );
   });
 
@@ -809,8 +808,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
         ) as SessionView[],
       {
         timeoutMs: 15_000,
-        accept: (value) =>
-          value[0]?.status === "needs_input" && value[0]?.state === "needs_input",
+        accept: (value) => value[0]?.status === "needs_input" && value[0]?.state === "needs_input",
       },
     );
     expect(waitingInput[0]?.status).toBe("needs_input");
@@ -831,16 +829,8 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     expect(done[0]?.state).toBe("done");
 
     const resumed = JSON.parse(
-      (
-        await context.execCli([
-          "--config",
-          configPath,
-          "send",
-          spawned.id,
-          "resume work",
-          "--json",
-        ])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "send", spawned.id, "resume work", "--json"]))
+        .stdout,
     ) as SessionView;
     expect(resumed.status).toBe("running");
 

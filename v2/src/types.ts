@@ -1,13 +1,7 @@
 export type AgentName = "claude" | "codex";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus =
-  | "spawning"
-  | "running"
-  | "needs_input"
-  | "done"
-  | "errored"
-  | "killed";
+export type SessionStatus = "spawning" | "running" | "needs_input" | "done" | "errored" | "killed";
 export type SessionState =
   | "working"
   | "waiting"

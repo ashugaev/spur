@@ -140,7 +140,13 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
     await tmux("set-option", "-t", sessionName, "status", "on");
     await tmux("set-option", "-t", sessionName, "status-left-length", "120");
     await tmux("set-option", "-t", sessionName, "status-right-length", "160");
-    await tmux("set-option", "-t", sessionName, "status-left", renderStatusLeft(sessionName, slots));
+    await tmux(
+      "set-option",
+      "-t",
+      sessionName,
+      "status-left",
+      renderStatusLeft(sessionName, slots),
+    );
     await tmux("set-option", "-t", sessionName, "status-right", renderStatusRight(slots));
   } catch {
     // Best effort only.

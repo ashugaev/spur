@@ -546,7 +546,9 @@ export class SessionService {
         const erroredRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
-          agent: agent ?? parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent:
+            agent ??
+            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
           prompt: request.prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -627,7 +629,7 @@ export class SessionService {
           messageLength: message.length,
         },
       });
-      return this.enrich(updated);
+      return await this.enrich(updated);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
@@ -813,7 +815,7 @@ export class SessionService {
           agent: current.agent,
         },
       });
-      return this.enrich(restored);
+      return await this.enrich(restored);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
