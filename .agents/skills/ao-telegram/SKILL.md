@@ -8,7 +8,7 @@ Append `[AO_SESSION:$AO_SESSION_ID]` to every outgoing message.
 ## Send
 
 ```bash
-bash ./.claude/skills/telegram/scripts/send_message.sh "$MESSAGE"
+bash ./.agents/skills/telegram/scripts/send_message.sh "$MESSAGE"
 ```
 
 Supports MarkdownV2. Falls back to plain text on parse error.
@@ -16,7 +16,7 @@ Supports MarkdownV2. Falls back to plain text on parse error.
 ## Receive
 
 ```bash
-bash ./.claude/skills/telegram/scripts/get_updates.sh [limit]
+bash ./.agents/skills/telegram/scripts/get_updates.sh [limit]
 ```
 
 Returns last N messages (default: 5). Format: `[timestamp] from_user: text`

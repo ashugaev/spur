@@ -1,4 +1,5 @@
 import type { SpurEvent } from "./event-sources/types.js";
+import { writeStderr } from "./io.js";
 
 type EventListener = (event: SpurEvent) => void;
 
@@ -18,7 +19,7 @@ export class EventBus {
         listener(event);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.warn(`[spur:event-bus] listener failed: ${message}`);
+        writeStderr(`[spur:event-bus] listener failed: ${message}`);
       }
     }
   }

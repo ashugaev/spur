@@ -1,6 +1,8 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+export const STATUS_TOOL_NAME = "spur-status";
+
 const STATUS_COMMAND_SOURCE = `#!/usr/bin/env node
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -42,7 +44,7 @@ process.stdout.write(\`\${nextStatus}\\n\`);
 
 export function ensureStatusCommand(dataDir: string): string {
   const binDir = join(dataDir, "bin");
-  const commandPath = join(binDir, "spur-status");
+  const commandPath = join(binDir, STATUS_TOOL_NAME);
   mkdirSync(binDir, { recursive: true });
 
   const tmpPath = `${commandPath}.tmp.${process.pid}.${Date.now()}`;
@@ -53,6 +55,9 @@ export function ensureStatusCommand(dataDir: string): string {
 }
 
 export function appendStatusInstructions(prompt: string): string {
+  if (prompt.includes("SPUR_STATUS_COMMAND") || prompt.includes(STATUS_TOOL_NAME)) {
+    return prompt;
+  }
   return `${prompt.trimEnd()}
 
 Spur session status:

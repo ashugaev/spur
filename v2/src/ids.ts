@@ -77,7 +77,7 @@ function reapDeadLock(lockPath: string, ownerPid: number): boolean {
 async function withCounterLock<T>(lockPath: string, run: () => T): Promise<T> {
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
 
-  while (true) {
+  for (;;) {
     try {
       createLockFile(lockPath);
       try {
@@ -103,7 +103,9 @@ async function withCounterLock<T>(lockPath: string, run: () => T): Promise<T> {
       }
 
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out reserving the next session id for ${lockPath}`);
+        throw new Error(`Timed out reserving the next session id for ${lockPath}`, {
+          cause: error,
+        });
       }
 
       await sleep(LOCK_RETRY_MS);

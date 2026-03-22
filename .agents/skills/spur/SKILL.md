@@ -14,8 +14,10 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 
 - `v2/` is `Spur`.
 - Spur is separate from the current `ao`.
+- Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - Spur is CLI plus local HTTP daemon. No UI layer in the current milestone.
-- Current command surface: `info`, `spawn`, `list`, `get`, `send`, `kill`.
+- Current human-facing command surface: `spawn`, `list`, `send`.
+  `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
   `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>]`
 - Supported agents are only `claude` and `codex`.
@@ -24,10 +26,14 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
   `codex --dangerously-bypass-approvals-and-sandbox`
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
+- Live Spur sessions expose two helper entrypoints to the agent shell:
+  `SPUR_SLOT_COMMAND` for title/links and `SPUR_STATUS_COMMAND` for `running|needs_input|done`.
 - Minimal automation is only:
-  `sources -> events -> triggers -> spawn`
-- Current built-in source type is only `cron`.
+  `sources -> events -> triggers -> spawn|send`
+- Current built-in source types are `cron` and `github`.
 - `cron` emits `cron:tick`.
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`.
+  `github:comment` covers top-level PR comments and review comments/replies.
 - `runOnStart` defaults to `false`.
 
 ## Current config shape
@@ -91,10 +97,39 @@ cron source
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
 
+## CLI Convention
+
+- Default to human-first output. Structured commands expose `--json` for scripts.
+- Use one theme object only in code.
+  brand accent = `#f04c4c` for ids and tiny loading frames
+  brand mark = `𖤓` for help headers, runtime summary lines, and spinner frames
+  status dot palette = green for `active|ready`, yellow for `idle|waiting_input|spawning`, red for `errored`, gray for `killed|exited`
+- Use only four visual primitives: accent, bold, dim, whitespace.
+- Do not use boxes, wide tables, rainbow status colors, or decorative aliases for states.
+- Use `@clack/prompts` only for transient UI:
+  spinner, select, log, note
+- Keep data rendering custom and flat.
+  `list` is the reference card renderer.
+- Prefer dense stacked cards:
+  primary line = `id`, colored status dot, state, project, agent, branch
+  secondary line = `updated`, runtime/worktree facts, and at most one short exceptional hint
+- `list` is the only session UI.
+  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
+  Non-TTY `list` stays a one-shot runtime summary plus session cards.
+- Never silently retarget `Enter`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
+- Empty states should be one sentence plus one dim next-step hint.
+- Optional animation is only a one-line transient spinner during wait states, cleared before final output.
+
 ## Validation
 
+- Spur uses three test tiers:
+  `fast` -> `pnpm --dir v2 test` for mocked and in-process coverage. This is the default root `pnpm test` path and must stay fast.
+  `runtime integration` -> `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
+  `real-agent smoke` -> `pnpm --dir v2 test:smoke` for narrow real-agent spawn and send checks. It auto-skips when `tmux`, binaries, or API keys are missing.
 - Always run `pnpm --dir v2 build` after changing Spur code.
-- If only `v2/` changed, exercise the touched `spur` CLI commands through positive and negative paths.
-- Run the impacted scenarios from `v2/TEST_SCENARIOS.md`.
-- If the change touches spawn or prompt delivery, test both `claude` and `codex`.
-- If the change touches cron, test `runOnStart` and scheduled tick behavior.
+- Run `fast` for every Spur code change.
+- Run `runtime integration` when touching CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, or automation runtime boundaries.
+- Run `real-agent smoke` when touching agent launch or prompt delivery. Cover both `claude` and `codex`.
+- Exercise the touched `spur` CLI commands through positive and negative paths at the cheapest tier that still crosses the changed boundary.
+- Keep queueing, dedupe, and validation logic in `fast`; keep source, process, and `tmux` boundaries in `runtime integration`.
+- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change and rerun the impacted ones.

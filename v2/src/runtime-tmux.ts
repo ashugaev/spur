@@ -5,13 +5,43 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
-import type { AgentName } from "./types.js";
+import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
   return stdout.trimEnd();
+}
+
+function escapeStatusText(text: string): string {
+  return text.replace(/\s+/g, " ").trim().replace(/#/g, "##");
+}
+
+function truncateStatusText(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
+function escapeHyperlinkUrl(url: string): string {
+  return encodeURI(url).replaceAll("#", "%23").replaceAll(",", "%2C").replaceAll("]", "%5D");
+}
+
+function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
+  const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
+  return title
+    ? `#[bold]${escapeStatusText(sessionName)}#[default] | ${title}`
+    : `#[bold]${escapeStatusText(sessionName)}#[default]`;
+}
+
+function renderStatusRight(slots: SessionSlots | undefined): string {
+  const links = slots?.links ?? [];
+  return links
+    .map((link) => {
+      const label = truncateStatusText(escapeStatusText(link.label), 18);
+      const url = escapeHyperlinkUrl(link.url);
+      return `#[fg=cyan]#[hyperlink=${url}]${label}#[hyperlink=]#[default]`;
+    })
+    .join(" | ");
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
@@ -78,16 +108,23 @@ export async function createTmuxSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const envArgs: string[] = [];
-  for (const [key, value] of Object.entries(input.env ?? {})) {
+  const sessionEnv = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
+      ),
+    ),
+    ...(input.env ?? {}),
+  };
+  for (const [key, value] of Object.entries(sessionEnv)) {
     envArgs.push("-e", `${key}=${value}`);
   }
 
   await tmux("new-session", "-d", "-s", input.sessionName, "-c", input.cwd, ...envArgs);
+  await sleep(300);
 
   try {
-    await sendLiteral(input.sessionName, input.launchCommand);
-    await sleep(300);
-    await tmux("send-keys", "-t", input.sessionName, "Enter");
+    await sendMessageToTmux(input.sessionName, input.launchCommand);
   } catch (error) {
     try {
       await tmux("kill-session", "-t", input.sessionName);
@@ -95,6 +132,18 @@ export async function createTmuxSession(input: {
       // Best effort only.
     }
     throw error;
+  }
+}
+
+export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
+  try {
+    await tmux("set-option", "-t", sessionName, "status", "on");
+    await tmux("set-option", "-t", sessionName, "status-left-length", "120");
+    await tmux("set-option", "-t", sessionName, "status-right-length", "160");
+    await tmux("set-option", "-t", sessionName, "status-left", renderStatusLeft(sessionName, slots));
+    await tmux("set-option", "-t", sessionName, "status-right", renderStatusRight(slots));
+  } catch {
+    // Best effort only.
   }
 }
 
@@ -124,7 +173,15 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
   await tmux("send-keys", "-t", sessionName, "-l", message);
 }
 
-export async function sendMessageToTmux(sessionName: string, message: string): Promise<void> {
+export async function sendMessageToTmux(
+  sessionName: string,
+  message: string,
+  options?: { interrupt?: boolean },
+): Promise<void> {
+  if (options?.interrupt) {
+    await tmux("send-keys", "-t", sessionName, "C-c");
+    await sleep(500);
+  }
   await tmux("send-keys", "-t", sessionName, "C-u");
   await sendLiteral(sessionName, message);
   await sleep(300);
@@ -142,16 +199,21 @@ export async function waitForTmuxReady(
   }
 
   const deadline = Date.now() + timeoutMs;
+  let lastCapture = "";
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
+    lastCapture = capture;
     if (readyMarkers.every((marker) => capture.includes(marker))) {
       return;
     }
     await sleep(500);
   }
 
+  const detail = lastCapture.trim()
+    ? `\nLast pane output:\n${lastCapture.trimEnd().split("\n").slice(-40).join("\n")}`
+    : "";
   throw new Error(
-    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt`,
+    `Timed out waiting for tmux session "${sessionName}" to reach the agent prompt${detail}`,
   );
 }
 

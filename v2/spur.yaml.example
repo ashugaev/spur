@@ -10,6 +10,9 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    worktree: true
+    preflight:
+      prompt: "Suggest a git branch name from the task and repo rules. Prefer tracker or PR identifiers when present."
     symlinks:
       - .env
       - .claude
@@ -18,6 +21,10 @@ projects:
         type: cron
         schedule: "0 9 * * 1-5"
         runOnStart: false
+      pr-watch:
+        type: github
+        intervalMs: 60000
+        runOnStart: false
     triggers:
       weekday-review-spawn:
         source: weekday-review
@@ -25,3 +32,20 @@ projects:
         spawn:
           agent: claude
           prompt: "Review all open PRs and continue the highest-priority one."
+          overrides:
+            worktree: true
+      pr-watch-changes-requested:
+        source: pr-watch
+        event: github:changes_requested
+        send:
+          interrupt: false
+      pr-watch-ci-failed:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: true # resend every 10m up to 3 while CI still fails
+      pr-watch-comment:
+        source: pr-watch
+        event: github:comment
+        send:
+          interrupt: false

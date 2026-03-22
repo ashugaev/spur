@@ -1,20 +1,23 @@
 import type { SourceConfig, SourceType } from "../types.js";
 
-export interface SpurEvent {
+export interface SpurEvent<T = unknown> {
   name: string;
   projectId: string;
   sourceId: string;
+  data?: T;
 }
 
 export interface SourceLogger {
   info?: (message: string) => void;
+  warn?: (message: string) => void;
 }
 
 export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   sourceId: string;
   projectId: string;
+  dataDir: string;
   config: TConfig;
-  emit(name: string): void;
+  emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;
 }

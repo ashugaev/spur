@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -11,6 +12,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  spur-quality:
+    name: Spur Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir v2 quality
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

@@ -19,6 +19,7 @@ V2 CLI scenarios: [v2/TEST_SCENARIOS.md](../../v2/TEST_SCENARIOS.md)
 - Run the relevant build command for each touched package
 - If only `v2/` changed, exercise the touched `spur` CLI commands through positive and negative paths
 - For `v2/`, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`
+- When impacted `v2/` scenarios include `real-agent smoke`, run `pnpm --dir v2 test:smoke` on the real `ao` repo with real `claude` and `codex`. Do not substitute fake repos or fake agents.
 
 ### 3. Lean V2 check
 - Flag hanging logic: branches, helpers, states, or config not needed by current behavior
@@ -56,6 +57,7 @@ Verdict: PASS | FAIL
 ## Rules
 - Never PASS with failing build, test, or scenario checks
 - Never PASS when a `v2/`-only change skipped required CLI validation
+- Never PASS when an impacted `real-agent smoke` scenario was not run and the suite did not explicitly skip it for missing `tmux`, binaries, or agent auth
 - Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched `v2/` or core paths
 - Browser only when UI changed
 - Accessibility tree as primary observation, not screenshots

@@ -40,7 +40,8 @@ const GIT_WORKFLOW_PROMPT = `## Git Workflow
 - If the repo has CI checks, make sure they pass before requesting review.
 - Respond to every review comment, even if just to acknowledge it.
 - Do not add any attribution or footer lines to the PR description.
-- NEVER change PR status (merge, close, convert to ready, request reviewers) on your own. Only the orchestrator or an explicit human command can trigger status changes.`;
+- NEVER change PR status (merge, close, convert to ready, request reviewers) on your own. Only the orchestrator or an explicit human command can trigger status changes.
+- When you update code, review the PR description and update it to reflect the actual changes.`;
 
 export const BASE_AGENT_PROMPT = `${BASE_SESSION_PROMPT}\n\n${GIT_WORKFLOW_PROMPT}`;
 

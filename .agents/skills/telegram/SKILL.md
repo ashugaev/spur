@@ -18,7 +18,7 @@ Environment variables in shell:
 ### Send Message
 
 ```bash
-bash ./.claude/skills/telegram/scripts/send_message.sh "Your message here"
+bash ./.agents/skills/telegram/scripts/send_message.sh "Your message here"
 ```
 
 Supports markdown formatting (MarkdownV2).
@@ -26,7 +26,7 @@ Supports markdown formatting (MarkdownV2).
 ### Get Updates
 
 ```bash
-bash ./.claude/skills/telegram/scripts/get_updates.sh [limit]
+bash ./.agents/skills/telegram/scripts/get_updates.sh [limit]
 ```
 
 Returns last N messages (default: 5). Output format:
@@ -38,17 +38,17 @@ Returns last N messages (default: 5). Output format:
 
 ### Notify human about completion
 ```bash
-bash ./.claude/skills/telegram/scripts/send_message.sh "Task completed: $TASK_NAME"
+bash ./.agents/skills/telegram/scripts/send_message.sh "Task completed: $TASK_NAME"
 ```
 
 ### Ask question and wait for response
 ```bash
-bash ./.claude/skills/telegram/scripts/send_message.sh "Need clarification: which approach to use?"
+bash ./.agents/skills/telegram/scripts/send_message.sh "Need clarification: which approach to use?"
 # Wait some time...
-bash ./.claude/skills/telegram/scripts/get_updates.sh 1
+bash ./.agents/skills/telegram/scripts/get_updates.sh 1
 ```
 
 ### Report error
 ```bash
-bash ./.claude/skills/telegram/scripts/send_message.sh "❌ Build failed: $ERROR_MSG"
+bash ./.agents/skills/telegram/scripts/send_message.sh "❌ Build failed: $ERROR_MSG"
 ```
