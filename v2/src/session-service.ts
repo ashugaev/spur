@@ -30,6 +30,7 @@ import {
   SPUR_DAEMON_API_VERSION,
   type AppConfig,
   type BranchSource,
+  type KillSessionRequest,
   type ProjectConfig,
   type RuntimeInfo,
   type SendMessageRequest,
@@ -40,11 +41,19 @@ import {
   type SpawnSessionRequest,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
-import { createWorktree, readCurrentBranch, removeWorktree, workspaceExists } from "./workspace.js";
+import {
+  createWorktree,
+  hasUncommittedChanges,
+  hasUnpushedCommits,
+  readCurrentBranch,
+  removeWorktree,
+  workspaceExists,
+} from "./workspace.js";
 
 const DELIVERY_GRACE_MS = 30_000;
 const WORKING_SIGNAL_WINDOW_MS = 90_000;
 const WAITING_INPUT_TAIL_LINES = 12;
+const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PROMPT_RE = /^[❯›>$#](?:\s.*)?$/;
 const TRAILING_UI_RE = [
   /^[─━]+$/,
@@ -162,6 +171,27 @@ export function isRestorableSession(
 
 function buildRestorePrompt(prompt: string): string {
   return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
+}
+
+function joinReasons(reasons: string[]): string {
+  if (reasons.length <= 1) {
+    return reasons[0] ?? "";
+  }
+  if (reasons.length === 2) {
+    return `${reasons[0]} and ${reasons[1]}`;
+  }
+  return `${reasons.slice(0, -1).join(", ")}, and ${reasons.at(-1)}`;
+}
+
+export function buildKillConfirmationRequiredMessage(
+  sessionId: string,
+  reasons: string[],
+): string {
+  return `${KILL_CONFIRMATION_REQUIRED_PREFIX} for ${sessionId}: ${joinReasons(reasons)}`;
+}
+
+export function isKillConfirmationRequiredMessage(message: string): boolean {
+  return message.startsWith(KILL_CONFIRMATION_REQUIRED_PREFIX);
 }
 
 function buildSessionEnv(args: {
@@ -583,7 +613,7 @@ export class SessionService {
           messageLength: message.length,
         },
       });
-      return this.enrich(updated);
+      return await this.enrich(updated);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
@@ -628,10 +658,24 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async kill(sessionId: string): Promise<SessionView> {
+  async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+      const project = this.getProject(session.project);
+      const reasons: string[] = [];
+      if (await hasUncommittedChanges(session.worktreePath, project.symlinks)) {
+        reasons.push("uncommitted changes in its worktree");
+      }
+      if (await hasUnpushedCommits(session.worktreePath)) {
+        reasons.push("unpushed commits");
+      }
+      if (reasons.length > 0 && request.force !== true) {
+        throw new Error(buildKillConfirmationRequiredMessage(sessionId, reasons));
+      }
     }
 
     try {

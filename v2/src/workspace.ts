@@ -20,6 +20,14 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+async function tryGit(cwd: string, ...args: string[]): Promise<string | undefined> {
+  try {
+    return await git(cwd, ...args);
+  } catch {
+    return undefined;
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -165,4 +173,35 @@ export function workspaceExists(worktreePath: string): boolean {
   } catch {
     return false;
   }
+}
+
+export async function hasUncommittedChanges(
+  worktreePath: string,
+  ignoredPaths: string[] = [],
+): Promise<boolean> {
+  const output = await git(
+    worktreePath,
+    "status",
+    "--short",
+    "--",
+    ".",
+    ...ignoredPaths.map((path) => `:(exclude)${path}`),
+  );
+  return output.trim().length > 0;
+}
+
+export async function hasUnpushedCommits(worktreePath: string): Promise<boolean> {
+  const upstream = await tryGit(
+    worktreePath,
+    "rev-parse",
+    "--abbrev-ref",
+    "--symbolic-full-name",
+    "@{upstream}",
+  );
+  if (upstream) {
+    return (await gitExitCode(worktreePath, "merge-base", "--is-ancestor", "HEAD", upstream)) !== 0;
+  }
+
+  const remoteContainingHead = await git(worktreePath, "branch", "-r", "--contains", "HEAD");
+  return remoteContainingHead.trim().length === 0;
 }

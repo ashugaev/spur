@@ -18,6 +18,8 @@ const captureTmuxPaneMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const waitForTmuxReadyMock = vi.fn();
 const createWorktreeMock = vi.fn();
+const hasUncommittedChangesMock = vi.fn();
+const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
 const removeWorktreeMock = vi.fn();
 const workspaceExistsMock = vi.fn();
@@ -78,6 +80,8 @@ vi.mock("../../src/session-slots.js", () => ({
 
 vi.mock("../../src/workspace.js", () => ({
   createWorktree: createWorktreeMock,
+  hasUncommittedChanges: hasUncommittedChangesMock,
+  hasUnpushedCommits: hasUnpushedCommitsMock,
   readCurrentBranch: readCurrentBranchMock,
   removeWorktree: removeWorktreeMock,
   workspaceExists: workspaceExistsMock,
@@ -141,6 +145,8 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
     createWorktreeMock.mockReset().mockResolvedValue("/tmp/spur-worktrees/api/api-1");
+    hasUncommittedChangesMock.mockReset().mockResolvedValue(false);
+    hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
     readCurrentBranchMock.mockReset().mockResolvedValue("main");
     removeWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
@@ -660,6 +666,92 @@ describe("SessionService", () => {
       worktree: false,
       status: "killed",
     });
+  });
+
+  it("refuses to kill a dirty worktree session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    hasUncommittedChangesMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.kill("api-1")).rejects.toThrow(
+      "Kill confirmation required for api-1: uncommitted changes in its worktree",
+    );
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to kill a worktree session with unpushed commits", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.kill("api-1")).rejects.toThrow(
+      "Kill confirmation required for api-1: unpushed commits",
+    );
+
+    expect(killTmuxSessionMock).not.toHaveBeenCalled();
+    expect(removeWorktreeMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("allows force killing a risky worktree session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    hasUncommittedChangesMock.mockResolvedValue(true);
+    hasUnpushedCommitsMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.kill("api-1", { force: true });
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    expect(result.status).toBe("killed");
   });
 
   it("updates slots without changing the session timestamp", async () => {

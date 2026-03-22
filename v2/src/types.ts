@@ -144,6 +144,10 @@ export interface SendMessageRequest {
   message: string;
 }
 
+export interface KillSessionRequest {
+  force?: boolean;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;

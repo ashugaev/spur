@@ -930,6 +930,145 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     await sendKeysToTmux(controllerSessionName, "q");
   });
 
+  it("blocks kill from the interactive list when the worktree is dirty", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-cli-dirty-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("cli-dirty.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dirty runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await writeFile(join(spawned.worktreePath, "DIRTY.txt"), "dirty change\n", "utf8");
+
+    const controllerSessionName = `${sessionPrefix}-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
+
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Sessions"),
+    });
+
+    await sendKeysToTmux(controllerSessionName, "k");
+
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) =>
+        value.includes(
+          `Kill confirmation required for ${spawned.id}: uncommitted changes in its worktree. Press k again to kill anyway.`,
+        ),
+    });
+
+    const sessionsAfterBlock = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    expect(sessionsAfterBlock[0]?.status).toBe("running");
+    expect(sessionsAfterBlock[0]?.runtimeAlive).toBe(true);
+    expect(sessionsAfterBlock[0]?.workspaceExists).toBe(true);
+
+    await expect(
+      context.fetchJson(`/sessions/${spawned.id}/kill`, {
+        method: "POST",
+      }),
+    ).rejects.toThrow(
+      `Kill confirmation required for ${spawned.id}: uncommitted changes in its worktree`,
+    );
+
+    await sendKeysToTmux(controllerSessionName, "k");
+
+    const killed = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value[0]?.status === "killed" &&
+          value[0]?.runtimeAlive === false &&
+          value[0]?.workspaceExists === false,
+      },
+    );
+    expect(killed[0]?.status).toBe("killed");
+
+    await sendKeysToTmux(controllerSessionName, "q");
+  });
+
+  it("requires confirmation before killing a session with unpushed commits", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-cli-unpushed-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("cli-unpushed.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "unpushed runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await writeFile(join(spawned.worktreePath, "UNPUSHED.txt"), "unpushed change\n", "utf8");
+    await execFileAsync("git", ["add", "UNPUSHED.txt"], { cwd: spawned.worktreePath });
+    await execFileAsync("git", ["commit", "-m", "unpushed change"], { cwd: spawned.worktreePath });
+
+    await expect(
+      context.fetchJson(`/sessions/${spawned.id}/kill`, {
+        method: "POST",
+      }),
+    ).rejects.toThrow(`Kill confirmation required for ${spawned.id}: unpushed commits`);
+
+    const forced = await context.fetchJson<SessionView>(`/sessions/${spawned.id}/kill`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(forced.status).toBe("killed");
+    expect(forced.workspaceExists).toBe(false);
+    expect(forced.runtimeAlive).toBe(false);
+  });
+
   it("attaches in place from the TTY list and returns after detach", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

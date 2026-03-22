@@ -28,7 +28,7 @@ import {
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
-import { isRestorableSession } from "./session-service.js";
+import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { startServer } from "./server.js";
 import type {
   RuntimeInfo,
@@ -221,6 +221,7 @@ function helpNotes(command: Command): string[] {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
       "TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.",
+      "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
   return [];
@@ -292,6 +293,7 @@ async function runInteractiveSessionList(
   let closed = false;
   let busy = false;
   let refreshing = false;
+  let pendingKillConfirmationSessionId: string | null = null;
   let terminalActive = false;
   let refreshTimer: NodeJS.Timeout | undefined;
 
@@ -332,6 +334,7 @@ async function runInteractiveSessionList(
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
         selectedSessionId = null;
+        pendingKillConfirmationSessionId = null;
         statusMessage = brandLine(
           `${vanishedId} disappeared. Use ↑↓ to reselect before attach, restore, or kill.`,
         );
@@ -378,6 +381,7 @@ async function runInteractiveSessionList(
       );
       sessions = replaceListedSession(sessions, restored);
       selectedSessionId = restored.id;
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Restored ${restored.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -412,6 +416,7 @@ async function runInteractiveSessionList(
       execFileSync("tmux", ["attach-session", "-t", session.tmuxSession], {
         stdio: "inherit",
       });
+      pendingKillConfirmationSessionId = null;
       statusMessage = undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -428,24 +433,32 @@ async function runInteractiveSessionList(
   const killSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
+    const force = pendingKillConfirmationSessionId === session.id;
 
     busy = true;
-    statusMessage = brandLine(`Killing ${session.id}...`);
+    statusMessage = brandLine(force ? `Killing ${session.id} anyway...` : `Killing ${session.id}...`);
     render();
 
     try {
       const killed = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/kill`,
-        {},
+        force ? { force: true } : {},
         configPath,
       );
       sessions = replaceListedSession(sessions, killed);
       selectedSessionId = killed.id;
+      pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
+      if (!force && isKillConfirmationRequiredMessage(message)) {
+        pendingKillConfirmationSessionId = session.id;
+        statusMessage = brandLine(`${message}. Press k again to kill anyway.`);
+      } else {
+        pendingKillConfirmationSessionId = null;
+        statusMessage = brandLine(message);
+      }
     } finally {
       busy = false;
       render();
@@ -482,20 +495,24 @@ async function runInteractiveSessionList(
         return;
       }
       if (key.name === "up") {
+        pendingKillConfirmationSessionId = null;
         selectedSessionId = moveSelection(sessions, selectedSessionId, -1);
         render();
         return;
       }
       if (key.name === "down") {
+        pendingKillConfirmationSessionId = null;
         selectedSessionId = moveSelection(sessions, selectedSessionId, 1);
         render();
         return;
       }
       if (key.name === "return" || key.name === "enter") {
+        pendingKillConfirmationSessionId = null;
         void attachSelectedSession().catch(fail);
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
+        pendingKillConfirmationSessionId = null;
         void restoreSelectedSession().catch(fail);
         return;
       }
