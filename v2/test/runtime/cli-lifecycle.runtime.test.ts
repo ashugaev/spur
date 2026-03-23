@@ -303,7 +303,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-build-noop-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    const configPath = await context.writeConfig("build-noop.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "build-noop.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const repoRoot = join(import.meta.dirname, "..", "..", "..");
     const incompatibleServer = createServer((request, response) => {
       if (request.url === "/info") {
@@ -389,7 +392,9 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
-    await expect(context.execCli(["--config", configPath, "pause", "api-999"])).rejects.toMatchObject({
+    await expect(
+      context.execCli(["--config", configPath, "pause", "api-999"]),
+    ).rejects.toMatchObject({
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
@@ -399,7 +404,9 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
-    await expect(context.execCli(["--config", configPath, "kill", "api-999"])).rejects.toMatchObject({
+    await expect(
+      context.execCli(["--config", configPath, "kill", "api-999"]),
+    ).rejects.toMatchObject({
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
@@ -408,11 +415,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     ) as SessionView[];
     expect(listed).toEqual([]);
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
-      expect.arrayContaining([
-        "daemon.started",
-        "session.spawn.failed",
-        "http.request.failed",
-      ]),
+      expect.arrayContaining(["daemon.started", "session.spawn.failed", "http.request.failed"]),
     );
   });
 
@@ -710,9 +713,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     const paused = JSON.parse(
-      (
-        await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
     expect(paused.status).toBe("paused");
     expect(paused.runtimeAlive).toBe(false);
@@ -751,9 +752,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     const completed = JSON.parse(
-      (
-        await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
     ) as SessionView;
     expect(completed.status).toBe("completed");
     expect(completed.runtimeAlive).toBe(false);
@@ -867,7 +866,8 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes(`Completed ${spawned.id}.`) && value.includes("No sessions."),
+      accept: (value) =>
+        value.includes(`Completed ${spawned.id}.`) && value.includes("No sessions."),
     });
 
     const listed = await pollUntil(
@@ -1187,7 +1187,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("cli-dirty.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "cli-dirty.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -1288,7 +1291,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("cli-unpushed.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "cli-unpushed.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -1380,7 +1386,9 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       accept: (value) => value.includes("Enter attach"),
     });
 
-    expect(detachedPane).toContain("Enter attach  p pause  c complete  r restore  k kill  Esc quit");
+    expect(detachedPane).toContain(
+      "Enter attach  p pause  c complete  r restore  k kill  Esc quit",
+    );
   });
 
   it("restores an exited session in place from the TTY list", async () => {

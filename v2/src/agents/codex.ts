@@ -166,10 +166,7 @@ export function buildCodexPlan(prompt: string): AgentLaunchPlan {
   };
 }
 
-export function buildCodexResumePlan(
-  threadId: string,
-  binary = codexCommand(),
-): AgentResumePlan {
+export function buildCodexResumePlan(threadId: string, binary = codexCommand()): AgentResumePlan {
   return {
     launchCommand: `${shellEscape(binary)} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
     readyMarkers: ["›"],

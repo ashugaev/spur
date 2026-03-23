@@ -211,10 +211,7 @@ function joinReasons(reasons: string[]): string {
   return `${reasons.slice(0, -1).join(", ")}, and ${reasons.at(-1)}`;
 }
 
-export function buildKillConfirmationRequiredMessage(
-  sessionId: string,
-  reasons: string[],
-): string {
+export function buildKillConfirmationRequiredMessage(sessionId: string, reasons: string[]): string {
   return `${KILL_CONFIRMATION_REQUIRED_PREFIX} for ${sessionId}: ${joinReasons(reasons)}`;
 }
 
@@ -522,10 +519,7 @@ export class SessionService {
       });
 
       stage = "prompt.send";
-      await sendMessageToTmux(
-        tmuxSession,
-        withSessionSlotInstructions(launchPlan.initialMessage),
-      );
+      await sendMessageToTmux(tmuxSession, withSessionSlotInstructions(launchPlan.initialMessage));
       this.logEvent("session.spawn.prompt_sent", {
         level: "info",
         sessionId,
@@ -568,7 +562,9 @@ export class SessionService {
         const erroredRecord: SessionRecord = {
           id: sessionId,
           project: request.project,
-          agent: agent ?? parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          agent:
+            agent ??
+            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
           prompt: request.prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -844,7 +840,7 @@ export class SessionService {
     }
 
     const deadline = Date.now() + Math.max(timeoutMs, 0);
-    while (true) {
+    while (Date.now() <= deadline) {
       const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
@@ -866,12 +862,10 @@ export class SessionService {
           agentSessionId,
         };
       }
-
-      if (Date.now() >= deadline) {
-        return session;
-      }
       await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
     }
+
+    return session;
   }
 
   private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
@@ -991,7 +985,9 @@ export class SessionService {
       await syncTmuxStatus(session.tmuxSession, session.slots);
       await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
       if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+        throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
+          cause: error,
+        });
       }
     }
 

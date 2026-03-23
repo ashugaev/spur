@@ -125,10 +125,10 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
-function removeListedSession(args: {
+function removeListedSession(args: { sessions: SessionView[]; removedSessionId: string }): {
   sessions: SessionView[];
-  removedSessionId: string;
-}): { sessions: SessionView[]; selectedSessionId: string | null } {
+  selectedSessionId: string | null;
+} {
   return {
     sessions: args.sessions.filter((session) => session.id !== args.removedSessionId),
     selectedSessionId: null,
@@ -509,7 +509,9 @@ async function runInteractiveSessionList(
     const force = pendingKillConfirmationSessionId === session.id;
 
     busy = true;
-    statusMessage = brandLine(force ? `Killing ${session.id} anyway...` : `Killing ${session.id}...`);
+    statusMessage = brandLine(
+      force ? `Killing ${session.id} anyway...` : `Killing ${session.id}...`,
+    );
     render();
 
     try {
@@ -769,7 +771,8 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "pausing session",
-        action: () => postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/pause`, {}, configPath),
+        action: () =>
+          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/pause`, {}, configPath),
         success: (session) => `Paused ${session.id}.`,
         render: renderSessionCard,
       });

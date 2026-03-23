@@ -133,15 +133,7 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
         baseRef = branchRef;
       }
     }
-    await git(
-      input.repoPath,
-      "worktree",
-      "add",
-      "-b",
-      input.branch,
-      worktreePath,
-      baseRef,
-    );
+    await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
   }
 
   try {

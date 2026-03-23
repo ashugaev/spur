@@ -139,7 +139,9 @@ describe("client.ensureServer", () => {
 
   it("keeps stop as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ pid: 7777 }), { status: 200 }),
+    );
 
     const { stopDaemonIfRunning } = await loadClientModule();
     const result = await stopDaemonIfRunning("/tmp/spur.yaml");
@@ -225,7 +227,9 @@ describe("client.ensureServer", () => {
 
   it("keeps restart as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ pid: 7777 }), { status: 200 }),
+    );
 
     const { restartDaemonIfRunning } = await loadClientModule();
     const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");

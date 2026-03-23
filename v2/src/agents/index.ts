@@ -51,8 +51,8 @@ function extractCommandBinary(launchCommand: string, fallbackBinary: string): st
       return trimmed.slice(1, closing);
     }
   }
-  if (trimmed.startsWith("\"")) {
-    const closing = trimmed.indexOf("\"", 1);
+  if (trimmed.startsWith('"')) {
+    const closing = trimmed.indexOf('"', 1);
     if (closing > 1) {
       return trimmed.slice(1, closing);
     }
