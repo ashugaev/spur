@@ -10,13 +10,20 @@ No UI. No tracker flow. No plugin layer.
 
 ## Commands
 
-`spawn`, `list`, `send`. `daemon start`, `daemon stop`, and `daemon restart` are internal and hidden from `--help`.
+`spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
 ```
 
-`list` on a TTY opens a live selector: `Enter` attaches in place, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
+`list` on a TTY opens a live selector: `Enter` attaches in place, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
+
+`list` hides `completed` and `killed` sessions by default.
+`pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
+
+`list` derives live `state` and `lastActivityAt` from `tmux`.
+When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
+Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, and fresh-launch fallbacks.
 
 Agents run with full access:
 
@@ -45,6 +52,8 @@ pnpm --dir v2 build
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml
+node dist/cli.js pause api-1 --config spur.yaml
+node dist/cli.js complete api-1 --config spur.yaml
 node dist/cli.js send api-1 "Run the focused test and report back." --config spur.yaml
 ```
 

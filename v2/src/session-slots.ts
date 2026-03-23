@@ -28,9 +28,7 @@ function collapseWhitespace(value: string): string {
 function normalizeSlotLabel(label: string): string {
   const normalized = collapseWhitespace(label).toLowerCase();
   if (!SLOT_LABEL_RE.test(normalized)) {
-    throw new Error(
-      "slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$",
-    );
+    throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
   }
   return normalized;
 }

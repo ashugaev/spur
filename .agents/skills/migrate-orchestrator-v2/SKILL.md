@@ -19,10 +19,10 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
 - `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent` and `branch`.
-- Milestone 1 human session ops are only: `spawn`, `list`, `send`.
+- Milestone 1 human session ops are: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
 - `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
+  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
   Non-TTY `list` stays a one-shot runtime summary plus session cards.
 - Workspace bootstrap is only: `git worktree` plus configured `symlinks`.
 - Supported agents for now: `claude` and `codex`.
@@ -126,6 +126,7 @@ CLI -> ensure daemon -> POST /sessions
 - Kill the `tmux` session.
 - Remove the worktree.
 - Mark the session terminal in metadata instead of trying to reconstruct richer state.
+- `pause` keeps the worktree and persists `paused`; `complete` removes owned artifacts and persists `completed`.
 
 ### Send flow
 
@@ -185,7 +186,7 @@ Port behavior, not architecture.
 
 - `Spur` can start or auto-start a local daemon.
 - `spur spawn` creates a worktree, applies symlinks, starts `tmux`, and launches `claude` or `codex`.
-- `spur list` shows persisted sessions, runtime summary, and selected-session details, and TTY `list` can attach, restore, or kill in place.
+- `spur list` shows persisted sessions, runtime summary, and selected-session details, hides `completed` and `killed` by default, and TTY `list` can attach, pause, complete, restore, or kill in place.
 - `spur send` reaches the running agent through `tmux`.
 - `cron` and `github` sources can emit events and reach normal Spur `spawn` or `send` triggers.
 - Current `ao` continues to work unchanged during migration.

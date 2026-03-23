@@ -7,6 +7,7 @@ import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers } from "./triggers.js";
 import type {
+  KillSessionRequest,
   SendMessageRequest,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
@@ -60,10 +61,7 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
-  const logEvent = (
-    event: string,
-    entry: Omit<SpurLogEntry, "timestamp" | "event">,
-  ): void => {
+  const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
   const handleRequest = async (
@@ -135,9 +133,22 @@ export async function startServer(
         return;
       }
 
+      const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
+      if (method === "POST" && pauseSessionId) {
+        sendJson(response, 200, await service.pause(pauseSessionId));
+        return;
+      }
+
+      const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
+      if (method === "POST" && completeSessionId) {
+        sendJson(response, 200, await service.complete(completeSessionId));
+        return;
+      }
+
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
-        sendJson(response, 200, await service.kill(killSessionId));
+        const body = await readJsonBody<KillSessionRequest>(request);
+        sendJson(response, 200, await service.kill(killSessionId, body));
         return;
       }
 

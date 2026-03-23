@@ -102,11 +102,21 @@ function formatRelativeTime(input: string): string {
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
-    state: stateLabel(session.state),
+    state: rowLabel(session),
     project: truncate(session.project, MAX_PROJECT_WIDTH),
     agent: session.agent,
     branch: truncate(session.branch, MAX_BRANCH_WIDTH),
   };
+}
+
+function rowLabel(session: SessionView): string {
+  if (session.status === "paused") {
+    return "Paused";
+  }
+  if (session.status === "completed") {
+    return "Completed";
+  }
+  return stateLabel(session.state);
 }
 
 function stateLabel(state: SessionState): string {
@@ -137,7 +147,12 @@ function statusColor(session: SessionView): string {
 export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
 
-  if (session.state === "working") {
+  if (session.status === "paused") {
+    facts.push("paused by user");
+  } else if (session.status === "completed") {
+    facts.push("marked complete");
+    facts.push("hidden from list");
+  } else if (session.state === "working") {
     facts.push("processing");
   } else if (session.state === "waiting") {
     facts.push("waiting for next message");
@@ -258,7 +273,7 @@ function renderSessionDetailsPane(args: {
   maxDetailLines: number;
 }): string[] {
   if (!args.selected) {
-    return [brandLine("Selected"), dimText("Use ↑↓ to reselect before attach, restore, or kill.")];
+    return [brandLine("Selected"), dimText("Use ↑↓ to reselect before acting.")];
   }
 
   const selected = args.selected;
@@ -366,7 +381,12 @@ export function renderInteractiveSessionList(args: {
     selected,
     maxDetailLines: args.maxDetailLines,
   });
-  lines.push("", ...detailLines, "", dimText("↑↓ move  Enter attach  r restore  k kill  Esc quit"));
+  lines.push(
+    "",
+    ...detailLines,
+    "",
+    dimText("↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Esc quit"),
+  );
   if (args.statusMessage) {
     lines.push("", args.statusMessage);
   }

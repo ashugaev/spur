@@ -139,7 +139,9 @@ describe("client.ensureServer", () => {
 
   it("keeps stop as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ pid: 7777 }), { status: 200 }),
+    );
 
     const { stopDaemonIfRunning } = await loadClientModule();
     const result = await stopDaemonIfRunning("/tmp/spur.yaml");
@@ -182,6 +184,34 @@ describe("client.ensureServer", () => {
     );
   });
 
+  it("waits through an extended starting window after restart", async () => {
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
+      .mockRejectedValueOnce(new Error("daemon stopped"));
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "Daemon is starting" }), { status: 503 }),
+      );
+    }
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+    );
+
+    const { restartDaemonIfRunning } = await loadClientModule();
+    const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");
+
+    expect(result).toEqual({
+      baseUrl: "http://127.0.0.1:4310",
+      previousPid: 4242,
+      restarted: true,
+      runtime: runtimeInfo(undefined, 8888),
+    });
+    expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps restart as a no-op when the daemon is not running", async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error("connect ECONNREFUSED"));
 
@@ -197,7 +227,9 @@ describe("client.ensureServer", () => {
 
   it("keeps restart as a no-op for an incompatible endpoint without a Spur runtime pid", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ pid: 7777 }), { status: 200 }));
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ pid: 7777 }), { status: 200 }),
+    );
 
     const { restartDaemonIfRunning } = await loadClientModule();
     const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");

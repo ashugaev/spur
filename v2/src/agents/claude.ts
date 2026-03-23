@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
@@ -55,6 +55,10 @@ async function findLatestSessionId(worktreePath: string): Promise<string | null>
   return sessionFile ? basename(sessionFile, ".jsonl") : null;
 }
 
+export async function findClaudeSessionId(worktreePath: string): Promise<string | null> {
+  return findLatestSessionId(worktreePath);
+}
+
 export function buildClaudePlan(prompt: string): AgentLaunchPlan {
   return {
     launchCommand: `${claudeCommand()} --dangerously-skip-permissions`,
@@ -63,18 +67,27 @@ export function buildClaudePlan(prompt: string): AgentLaunchPlan {
   };
 }
 
+export function buildClaudeResumePlan(
+  sessionId: string,
+  binary = claudeCommand(),
+): AgentResumePlan {
+  return {
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
+    readyMarkers: ["❯"],
+  };
+}
+
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
 ): Promise<AgentLaunchPlan | null> {
-  const sessionId = await findLatestSessionId(worktreePath);
+  const sessionId = await findClaudeSessionId(worktreePath);
   if (!sessionId) {
     return null;
   }
 
   return {
-    launchCommand: `${claudeCommand()} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
+    ...buildClaudeResumePlan(sessionId),
     initialMessage: prompt,
-    readyMarkers: ["❯"],
   };
 }

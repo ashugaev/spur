@@ -59,8 +59,32 @@ function parseGitHubSignals(path: string): Map<string, GitHubSignal> {
   return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, GitHubSignal]));
 }
 
+function normalizeSessionRecord(session: SessionRecord): SessionRecord {
+  return {
+    id: session.id,
+    project: session.project,
+    agent: session.agent,
+    ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
+    prompt: session.prompt,
+    branch: session.branch,
+    ...(session.branchSource ? { branchSource: session.branchSource } : {}),
+    worktree: session.worktree,
+    worktreePath: session.worktreePath,
+    tmuxSession: session.tmuxSession,
+    launchCommand: session.launchCommand,
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    ...(session.slots ? { slots: session.slots } : {}),
+    ...(session.error ? { error: session.error } : {}),
+  };
+}
+
 export function writeSession(dataDir: string, session: SessionRecord): void {
-  writeJsonFile(sessionFilePath(dataDir, session.project, session.id), session);
+  writeJsonFile(
+    sessionFilePath(dataDir, session.project, session.id),
+    normalizeSessionRecord(session),
+  );
 }
 
 export function listSessions(dataDir: string): SessionRecord[] {

@@ -1,6 +1,6 @@
 ---
 name: manager
-description: "Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, and recheck. Mandatory for every task in this repo. Don't use for Telegram notifications, PR-only follow-up, or CI-only monitoring."
+description: "Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, recheck, and close-out. Mandatory for every task in this repo. Don't use for Telegram notifications or CI-only monitoring."
 ---
 
 # Manager
@@ -16,7 +16,6 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 ## Do not use
 
 - `ao-telegram`
-- PR creation or PR updates
 - CI monitoring or CI-only follow-up
 
 ## Loop
@@ -94,11 +93,14 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 12. Final audit
 - Verify each acceptance criterion has evidence.
 - Verify required mirrors and prompt/skill sync updates landed when applicable.
+- Default close-out unless the user opts out:
+  - if the current branch already has an open PR, commit and push to that branch
+  - if no PR exists, create one after local validation
 - Prepare a short activity summary for the final report:
   - activations: every skill and agent activated, with count
   - loops: every looped gate run count
   - edits: changed-file count for each implementation or fix pass
-- Stop. No Telegram, no PR, no CI loop.
+- Stop. No Telegram or CI loop.
 
 ## Rules
 

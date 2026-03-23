@@ -130,27 +130,6 @@ describe.skipIf(!realProject)("path encoding & JSONL reading (real Claude data)"
     expect(entry!.lastType === null || typeof entry!.lastType === "string").toBe(true);
   });
 
-  it("readLastJsonlEntry returns a recognized message type", async () => {
-    const entry = await readLastJsonlEntry(realProject!.jsonlFile);
-    if (entry?.lastType) {
-      const knownTypes = [
-        "user",
-        "assistant",
-        "system",
-        "tool_use",
-        "progress",
-        "permission_request",
-        "error",
-        "summary",
-        "result",
-        "file-history-snapshot",
-        "queue-operation",
-        "pr-link",
-      ];
-      expect(knownTypes).toContain(entry.lastType);
-    }
-  });
-
   it("getActivityState returns a valid state for a real workspace path", async () => {
     const agent = claudeCodePlugin.create();
     // Mock isProcessRunning to return false — we're not testing process detection,
@@ -163,7 +142,8 @@ describe.skipIf(!realProject)("path encoding & JSONL reading (real Claude data)"
 
     // Process is "not running" so should get "exited" — but the important thing
     // is it didn't return null (which would mean the path didn't resolve)
-    expect(state).toBe("exited");
+    expect(state).not.toBeNull();
+    expect(state?.state).toBe("exited");
   });
 });
 

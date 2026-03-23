@@ -45,7 +45,7 @@ describe("agent restore plans", () => {
     const plan = await buildCodexRestorePlan(worktreePath, "restore prompt");
 
     expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toContain("/tmp/fake-codex resume");
+    expect(plan?.launchCommand).toContain("'/tmp/fake-codex' resume");
     expect(plan?.launchCommand).toContain("thread-123");
   });
 
@@ -78,7 +78,7 @@ describe("agent restore plans", () => {
     const plan = await buildCodexRestorePlan(worktreePath, "restore prompt");
 
     expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toContain("/tmp/fake-codex resume");
+    expect(plan?.launchCommand).toContain("'/tmp/fake-codex' resume");
     expect(plan?.launchCommand).toContain("session-123");
   });
 

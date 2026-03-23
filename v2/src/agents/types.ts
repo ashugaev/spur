@@ -3,3 +3,8 @@ export interface AgentLaunchPlan {
   initialMessage: string;
   readyMarkers: string[];
 }
+
+export interface AgentResumePlan {
+  launchCommand: string;
+  readyMarkers: string[];
+}

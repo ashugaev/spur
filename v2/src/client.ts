@@ -5,7 +5,7 @@ import { SPUR_DAEMON_API_VERSION, type RuntimeInfo } from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
 const DAEMON_STOP_RETRY_DELAY_MS = 100;
-const DAEMON_START_ATTEMPTS = 20;
+const DAEMON_START_ATTEMPTS = 80;
 const DAEMON_START_RETRY_DELAY_MS = 250;
 
 export function createBaseUrl(configPath?: string): { baseUrl: string; configPath: string } {
