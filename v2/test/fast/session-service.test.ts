@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
+const buildAgentResumePlanMock = vi.fn();
+const findAgentSessionIdMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const loadConfigMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
@@ -33,6 +35,8 @@ const logSpurEventMock = vi.fn();
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
   buildAgentRestorePlan: buildAgentRestorePlanMock,
+  buildAgentResumePlan: buildAgentResumePlanMock,
+  findAgentSessionId: findAgentSessionIdMock,
   parseAgentName: parseAgentNameMock,
 }));
 
@@ -129,6 +133,11 @@ describe("SessionService", () => {
         "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
       readyMarkers: ["❯"],
     });
+    buildAgentResumePlanMock.mockReset().mockReturnValue({
+      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      readyMarkers: ["❯"],
+    });
+    findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
@@ -236,6 +245,7 @@ describe("SessionService", () => {
       "session.spawn.tmux_created",
       "session.spawn.ready",
       "session.spawn.prompt_sent",
+      "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
   });
@@ -821,6 +831,7 @@ describe("SessionService", () => {
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -879,6 +890,7 @@ describe("SessionService", () => {
   });
 
   it("fails restore when native resume state is unavailable", async () => {
+    findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -915,6 +927,7 @@ describe("SessionService", () => {
   });
 
   it("waits for native resume state to appear before restoring", async () => {
+    findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
     buildAgentRestorePlanMock.mockResolvedValueOnce(null).mockResolvedValue({
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
@@ -951,6 +964,7 @@ describe("SessionService", () => {
   });
 
   it("fails restore before sending the prompt when the resumed agent exits back to the shell", async () => {
+    findAgentSessionIdMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",

@@ -1,7 +1,13 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { buildAgentLaunchPlan, buildAgentRestorePlan, parseAgentName } from "./agents/index.js";
+import {
+  buildAgentLaunchPlan,
+  buildAgentRestorePlan,
+  buildAgentResumePlan,
+  findAgentSessionId,
+  parseAgentName,
+} from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -72,6 +78,9 @@ const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
 const INTERVIEW_OPTION_RE = /^\d+\.\s/;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
+const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
+const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
+const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 
@@ -156,6 +165,15 @@ export function classifyRunningState(args: {
     return "working";
   }
   return "waiting";
+}
+
+function isPromptReadyState(pane: string): boolean {
+  const lines = normalizePaneLines(pane);
+  if (isWaitingInput(lines)) {
+    return false;
+  }
+  const lastLine = lines.at(-1)?.trim() ?? "";
+  return Boolean(lastLine) && PROMPT_RE.test(lastLine);
 }
 
 export function isRestorableSession(
@@ -507,7 +525,11 @@ export class SessionService {
       });
 
       stage = "record.write";
-      writeSession(this.config.dataDir, runningRecord);
+      const persistedRecord = await this.captureAgentSessionId(
+        runningRecord,
+        AGENT_SESSION_ID_INITIAL_WAIT_MS,
+      );
+      writeSession(this.config.dataDir, persistedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -517,10 +539,11 @@ export class SessionService {
           worktreePath: workspacePath,
           tmuxSession,
           agent,
+          agentSessionId: persistedRecord.agentSessionId ?? null,
         },
       });
 
-      return await this.enrich(runningRecord);
+      return await this.enrich(persistedRecord);
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
@@ -597,23 +620,31 @@ export class SessionService {
     }
 
     try {
-      await sendMessageToTmux(session.tmuxSession, message, options);
+      const readySession = await this.ensureSessionReadyForSend(session);
+      let interrupt = options?.interrupt === true;
+      if (interrupt) {
+        const pane = await captureTmuxPane(readySession.tmuxSession, 80);
+        interrupt = !isPromptReadyState(pane);
+      }
+      await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
-        ...session,
+        ...readySession,
         updatedAt: nowIso(),
       };
-      writeSession(this.config.dataDir, updated);
+      const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+      writeSession(this.config.dataDir, persisted);
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
         projectId: session.project,
         message: `Delivered message to ${sessionId}`,
         details: {
-          interrupt: options?.interrupt === true,
+          interrupt,
           messageLength: message.length,
+          agentSessionId: persisted.agentSessionId ?? null,
         },
       });
-      return await this.enrich(updated);
+      return await this.enrich(persisted);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
@@ -724,6 +755,186 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private async captureAgentSessionId(
+    session: SessionRecord,
+    timeoutMs: number,
+  ): Promise<SessionRecord> {
+    if (!session.worktreePath) {
+      return session;
+    }
+
+    const deadline = Date.now() + Math.max(timeoutMs, 0);
+    while (true) {
+      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
+      if (agentSessionId) {
+        if (agentSessionId === session.agentSessionId) {
+          return session;
+        }
+        this.logEvent("session.agent_session_id.discovered", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Discovered native agent session id for ${session.id}`,
+          details: {
+            agent: session.agent,
+            previousAgentSessionId: session.agentSessionId ?? null,
+            agentSessionId,
+          },
+        });
+        return {
+          ...session,
+          agentSessionId,
+        };
+      }
+
+      if (Date.now() >= deadline) {
+        return session;
+      }
+      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
+    }
+  }
+
+  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    let processAlive = false;
+    if (runtimeAlive) {
+      processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+      if (processAlive) {
+        return this.captureAgentSessionId(session, 0);
+      }
+    }
+
+    const workspacePresent =
+      session.worktree && session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    this.logEvent("session.recover.check", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Checking whether ${session.id} needs recovery`,
+      details: {
+        agent: session.agent,
+        status: session.status,
+        runtimeAlive,
+        processAlive,
+        workspaceExists: workspacePresent,
+        agentSessionId: session.agentSessionId ?? null,
+      },
+    });
+
+    if (session.status === "killed") {
+      throw new Error(`Session ${session.id} was killed and cannot be recovered`);
+    }
+    if (!session.worktree || !session.worktreePath || !workspacePresent) {
+      throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
+    }
+
+    await killTmuxSession(session.tmuxSession);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
+    const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
+    const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    const recoveryPlan = sessionWithAgentId.agentSessionId
+      ? buildAgentResumePlan(
+          sessionWithAgentId.agent,
+          sessionWithAgentId.agentSessionId,
+          baseLaunchCommand,
+        )
+      : null;
+    let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    this.logEvent("session.recover.started", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Recovering ${session.id}`,
+      details: {
+        agent: session.agent,
+        recoveryMode: recoveryPlan ? "native_resume" : "fresh_launch",
+        agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+      },
+    });
+
+    const sessionToolDir = ensureSessionSlotTool({
+      dataDir: this.config.dataDir,
+      sessionId: session.id,
+      configPath: this.config.configPath,
+    });
+    const env = buildSessionEnv({
+      agent: session.agent,
+      projectId: session.project,
+      sessionId: session.id,
+      sessionToolDir,
+    });
+
+    try {
+      await createTmuxSession({
+        sessionName: session.tmuxSession,
+        cwd: session.worktreePath,
+        launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+        env,
+      });
+      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await waitForTmuxReady(
+        session.tmuxSession,
+        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+      );
+      if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
+        throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+      }
+    } catch (error) {
+      if (!recoveryPlan) {
+        throw error;
+      }
+
+      const failure = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.recover.resume_failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
+        details: {
+          agent: session.agent,
+          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+          launchCommand: recoveryPlan.launchCommand,
+          failure,
+        },
+      });
+      await killTmuxSession(session.tmuxSession);
+      recoveredAgentSessionId = undefined;
+      await createTmuxSession({
+        sessionName: session.tmuxSession,
+        cwd: session.worktreePath,
+        launchCommand: baseLaunchCommand,
+        env,
+      });
+      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
+      if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
+        throw new Error(`Agent ${session.agent} exited before recovery became ready`);
+      }
+    }
+
+    const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
+    const recovered: SessionRecord = {
+      ...recoveredBase,
+      ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+      launchCommand: baseLaunchCommand,
+      status: "running",
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, recovered);
+    this.logEvent("session.recover.completed", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Recovered ${session.id}`,
+      details: {
+        agent: session.agent,
+        agentSessionId: recovered.agentSessionId ?? null,
+        tmuxSession: session.tmuxSession,
+      },
+    });
+    return recovered;
+  }
+
   async restore(sessionId: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -804,11 +1015,16 @@ export class SessionService {
     const { error: _ignoredError, ...restoredBase } = current;
     const restored: SessionRecord = {
       ...restoredBase,
-      launchCommand: launchPlan.launchCommand,
+      launchCommand:
+        current.launchCommand || buildAgentLaunchPlan(current.agent, current.prompt).launchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
-    writeSession(this.config.dataDir, restored);
+    const persistedRestored = await this.captureAgentSessionId(
+      restored,
+      AGENT_SESSION_ID_REFRESH_WAIT_MS,
+    );
+    writeSession(this.config.dataDir, persistedRestored);
     this.logEvent("session.restore.completed", {
       level: "info",
       sessionId,
@@ -816,9 +1032,10 @@ export class SessionService {
       message: `Restored ${sessionId}`,
       details: {
         agent: current.agent,
+        agentSessionId: persistedRestored.agentSessionId ?? null,
       },
     });
-    return this.enrich(restored);
+    return this.enrich(persistedRestored);
   }
 
   private async enrich(session: SessionRecord): Promise<SessionView> {

@@ -18,6 +18,10 @@ spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--wor
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
 
+`list` and `get` derive live `state` and `lastActivityAt` from `tmux`.
+When a worktree-backed session is `stopped`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
+Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, and fresh-launch fallbacks.
+
 Agents run with full access:
 
 - `claude --dangerously-skip-permissions`

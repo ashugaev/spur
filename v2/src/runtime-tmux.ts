@@ -14,6 +14,14 @@ async function tmux(...args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+function exactSessionTarget(sessionName: string): string {
+  return `=${sessionName}`;
+}
+
+function exactPaneTarget(sessionName: string): string {
+  return `=${sessionName}:`;
+}
+
 function escapeStatusText(text: string): string {
   return text.replace(/\s+/g, " ").trim().replace(/#/g, "##");
 }
@@ -45,16 +53,18 @@ function renderStatusRight(slots: SessionSlots | undefined): string {
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
+  const target = exactPaneTarget(sessionName);
   try {
-    return await tmux("capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`);
+    return await tmux("capture-pane", "-t", target, "-p", "-S", `-${lines}`);
   } catch {
     return "";
   }
 }
 
 export async function getTmuxSessionActivity(sessionName: string): Promise<Date | null> {
+  const target = exactPaneTarget(sessionName);
   try {
-    const output = await tmux("display-message", "-t", sessionName, "-p", "#{session_activity}");
+    const output = await tmux("display-message", "-t", target, "-p", "#{session_activity}");
     const seconds = Number.parseInt(output, 10);
     if (Number.isNaN(seconds)) {
       return null;
@@ -69,8 +79,9 @@ export async function isProcessRunningInTmux(
   sessionName: string,
   processName: AgentName,
 ): Promise<boolean> {
+  const target = exactSessionTarget(sessionName);
   try {
-    const ttyOut = await tmux("list-panes", "-t", sessionName, "-F", "#{pane_tty}");
+    const ttyOut = await tmux("list-panes", "-t", target, "-F", "#{pane_tty}");
     const ttys = ttyOut
       .trim()
       .split("\n")
@@ -107,6 +118,7 @@ export async function createTmuxSession(input: {
   launchCommand: string;
   env?: Record<string, string>;
 }): Promise<void> {
+  const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs: string[] = [];
   const sessionEnv = {
     ...Object.fromEntries(
@@ -127,7 +139,7 @@ export async function createTmuxSession(input: {
     await sendMessageToTmux(input.sessionName, input.launchCommand);
   } catch (error) {
     try {
-      await tmux("kill-session", "-t", input.sessionName);
+      await tmux("kill-session", "-t", sessionTarget);
     } catch {
       // Best effort only.
     }
@@ -136,25 +148,27 @@ export async function createTmuxSession(input: {
 }
 
 export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
+  const target = exactPaneTarget(sessionName);
   try {
-    await tmux("set-option", "-t", sessionName, "status", "on");
-    await tmux("set-option", "-t", sessionName, "status-left-length", "120");
-    await tmux("set-option", "-t", sessionName, "status-right-length", "160");
-    await tmux("set-option", "-t", sessionName, "status-left", renderStatusLeft(sessionName, slots));
-    await tmux("set-option", "-t", sessionName, "status-right", renderStatusRight(slots));
+    await tmux("set-option", "-t", target, "status", "on");
+    await tmux("set-option", "-t", target, "status-left-length", "120");
+    await tmux("set-option", "-t", target, "status-right-length", "160");
+    await tmux("set-option", "-t", target, "status-left", renderStatusLeft(sessionName, slots));
+    await tmux("set-option", "-t", target, "status-right", renderStatusRight(slots));
   } catch {
     // Best effort only.
   }
 }
 
 async function sendLiteral(sessionName: string, message: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
   if (message.includes("\n") || message.length > 200) {
     const bufferName = `spur-${randomUUID()}`;
     const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
     writeFileSync(tempPath, message, { encoding: "utf-8", mode: 0o600 });
     try {
       await tmux("load-buffer", "-b", bufferName, tempPath);
-      await tmux("paste-buffer", "-b", bufferName, "-t", sessionName, "-d");
+      await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
     } finally {
       try {
         unlinkSync(tempPath);
@@ -170,7 +184,7 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
     return;
   }
 
-  await tmux("send-keys", "-t", sessionName, "-l", message);
+  await tmux("send-keys", "-t", target, "-l", message);
 }
 
 export async function sendMessageToTmux(
@@ -178,14 +192,15 @@ export async function sendMessageToTmux(
   message: string,
   options?: { interrupt?: boolean },
 ): Promise<void> {
+  const target = exactPaneTarget(sessionName);
   if (options?.interrupt) {
-    await tmux("send-keys", "-t", sessionName, "C-c");
+    await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
-  await tmux("send-keys", "-t", sessionName, "C-u");
+  await tmux("send-keys", "-t", target, "C-u");
   await sendLiteral(sessionName, message);
   await sleep(300);
-  await tmux("send-keys", "-t", sessionName, "Enter");
+  await tmux("send-keys", "-t", target, "Enter");
 }
 
 export async function waitForTmuxReady(
@@ -218,16 +233,18 @@ export async function waitForTmuxReady(
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {
+  const target = exactSessionTarget(sessionName);
   try {
-    await tmux("kill-session", "-t", sessionName);
+    await tmux("kill-session", "-t", target);
   } catch {
     // Best effort only.
   }
 }
 
 export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  const target = exactSessionTarget(sessionName);
   try {
-    await tmux("has-session", "-t", sessionName);
+    await tmux("has-session", "-t", target);
     return true;
   } catch {
     return false;

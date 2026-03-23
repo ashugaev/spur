@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -153,6 +153,11 @@ async function readThreadId(filePath: string): Promise<string | null> {
   return null;
 }
 
+export async function findCodexSessionId(worktreePath: string): Promise<string | null> {
+  const sessionFile = await findSessionFile(worktreePath);
+  return sessionFile ? readThreadId(sessionFile) : null;
+}
+
 export function buildCodexPlan(prompt: string): AgentLaunchPlan {
   return {
     launchCommand: `${codexCommand()} --dangerously-bypass-approvals-and-sandbox`,
@@ -161,19 +166,27 @@ export function buildCodexPlan(prompt: string): AgentLaunchPlan {
   };
 }
 
+export function buildCodexResumePlan(
+  threadId: string,
+  binary = codexCommand(),
+): AgentResumePlan {
+  return {
+    launchCommand: `${shellEscape(binary)} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+    readyMarkers: ["›"],
+  };
+}
+
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
 ): Promise<AgentLaunchPlan | null> {
-  const sessionFile = await findSessionFile(worktreePath);
-  const threadId = sessionFile ? await readThreadId(sessionFile) : null;
+  const threadId = await findCodexSessionId(worktreePath);
   if (!threadId) {
     return null;
   }
 
   return {
-    launchCommand: `${codexCommand()} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+    ...buildCodexResumePlan(threadId),
     initialMessage: prompt,
-    readyMarkers: ["›"],
   };
 }
