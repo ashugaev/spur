@@ -54,6 +54,7 @@ export interface SessionRecord {
   id: string;
   project: string;
   agent: AgentName;
+  agentSessionId?: string;
   prompt: string;
   branch: string;
   worktreePath: string;

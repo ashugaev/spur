@@ -41,8 +41,29 @@ function writeJsonFile(path: string, value: unknown): void {
   renameSync(tmpPath, path);
 }
 
+function normalizeSessionRecord(session: SessionRecord): SessionRecord {
+  return {
+    id: session.id,
+    project: session.project,
+    agent: session.agent,
+    agentSessionId: session.agentSessionId,
+    prompt: session.prompt,
+    branch: session.branch,
+    worktreePath: session.worktreePath,
+    tmuxSession: session.tmuxSession,
+    launchCommand: session.launchCommand,
+    status: session.status,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    ...(session.error ? { error: session.error } : {}),
+  };
+}
+
 export function writeSession(dataDir: string, session: SessionRecord): void {
-  writeJsonFile(sessionFilePath(dataDir, session.project, session.id), session);
+  writeJsonFile(
+    sessionFilePath(dataDir, session.project, session.id),
+    normalizeSessionRecord(session),
+  );
 }
 
 export function listSessions(dataDir: string): SessionRecord[] {

@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
+import { errorDetails } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers } from "./triggers.js";
@@ -140,24 +141,84 @@ export async function startServer(configPath?: string): Promise<SessionService> 
   }
 
   ready = true;
+  service.logEvent({
+    event: "daemon.started",
+    message: "Spur daemon started",
+    details: {
+      host: service.config.server.host,
+      port: service.config.server.port,
+      configPath: service.config.configPath,
+      cwd: process.cwd(),
+      startedAt: service.startedAt,
+    },
+  });
 
   let shuttingDown = false;
-  const shutdown = async () => {
-    if (shuttingDown) return;
+  const shutdown = async (reason: string, details?: Record<string, unknown>) => {
+    if (shuttingDown) {
+      service.logEvent({
+        event: "daemon.shutdown.duplicate",
+        level: "warn",
+        message: "Ignored duplicate daemon shutdown request",
+        details: {
+          reason,
+          ...details,
+        },
+      });
+      return;
+    }
     shuttingDown = true;
     ready = false;
+    service.logEvent({
+      event: "daemon.shutdown.requested",
+      level: reason.startsWith("signal:") ? "warn" : "error",
+      message: "Stopping Spur daemon",
+      details: {
+        reason,
+        ...details,
+      },
+    });
     const closePromise = closeServer();
     sources.stop();
     await triggers.stop();
     await closePromise;
+    service.logEvent({
+      event: "daemon.stopped",
+      message: "Stopped Spur daemon",
+      details: {
+        reason,
+        ...details,
+      },
+    });
     process.exit(0);
   };
 
   process.on("SIGINT", () => {
-    void shutdown();
+    void shutdown("signal:SIGINT");
   });
   process.on("SIGTERM", () => {
-    void shutdown();
+    void shutdown("signal:SIGTERM");
+  });
+  process.on("SIGHUP", () => {
+    void shutdown("signal:SIGHUP");
+  });
+  process.on("uncaughtException", (error) => {
+    service.logEvent({
+      event: "daemon.uncaught_exception",
+      level: "error",
+      message: "Uncaught exception in Spur daemon",
+      details: errorDetails(error),
+    });
+    void shutdown("uncaughtException", errorDetails(error));
+  });
+  process.on("unhandledRejection", (reason) => {
+    service.logEvent({
+      event: "daemon.unhandled_rejection",
+      level: "error",
+      message: "Unhandled rejection in Spur daemon",
+      details: errorDetails(reason),
+    });
+    void shutdown("unhandledRejection", errorDetails(reason));
   });
 
   return service;

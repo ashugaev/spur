@@ -26,7 +26,10 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - `get/list`: report `activity: exited` when the tmux session or agent process is gone.
 - `get/list`: surface `status: stopped` when the agent/runtime is gone but the worktree still exists.
 - `get/list` during `spawning`: report `activity: active` and keep `runtimeAlive` aligned with the actual tmux session state.
-- `send` on a `stopped` session: relaunches the configured agent in the existing worktree and delivers the new message.
+- `get/list/send/kill`: target the exact tmux session name, so `spur-1` never resolves to `spur-11`.
+- `spawn`: stores the native agent session/thread id when Claude or Codex writes it to disk.
+- `send` on a `stopped` session: uses the stored native agent session/thread id to resume the same conversation in the existing worktree before delivering the new message.
+- `send` on a `stopped` session without a stored id: re-discovers the id from agent state on disk before falling back to a fresh relaunch.
 
 ## Agents
 
@@ -54,6 +57,8 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - Missing session for `kill`.
 - Empty message for `send`.
 - `send` on a `killed` session or a stopped session with no worktree fails instead of trying to recreate the workspace.
+- `send` on a `stopped` session with a stale native id falls back to a fresh relaunch instead of failing before message delivery.
+- `events.jsonl`: records daemon shutdown reason and recover path details, including native resume failure and fresh-launch fallback.
 - `cron` source without `schedule`.
 - Trigger referencing an unknown source.
 

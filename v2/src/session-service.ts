@@ -1,6 +1,13 @@
 import { mkdirSync } from "node:fs";
-import { buildAgentLaunchPlan, parseAgentName } from "./agents/index.js";
+import { setTimeout as sleep } from "node:timers/promises";
+import {
+  buildAgentLaunchPlan,
+  buildAgentResumePlan,
+  findAgentSessionId,
+  parseAgentName,
+} from "./agents/index.js";
 import { loadConfig } from "./config.js";
+import { appendEvent, errorDetails, type EventLevel } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
 import {
@@ -26,6 +33,9 @@ import type {
 import { createWorktree, removeWorktree, workspaceExists } from "./workspace.js";
 
 const IDLE_THRESHOLD_MS = 300_000;
+const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
+const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
+const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const PROMPT_RE = /^[❯›>$#]\s*$/;
 const TRAILING_UI_RE = [/^[─━]+$/, /^⏵⏵ /, /^Claude in Chrome enabled\b/, /^Update available!\b/];
 const PERMISSION_PROMPTS = [
@@ -100,6 +110,7 @@ function classifyActivity(
 export class SessionService {
   readonly config: AppConfig;
   readonly startedAt: string;
+  private readonly runtimeSnapshots = new Map<string, string>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     this.config = loadConfig(configPath);
@@ -110,6 +121,24 @@ export class SessionService {
 
   info(): RuntimeInfo {
     return createRuntimeInfo(this.config, this.startedAt);
+  }
+
+  logEvent(input: {
+    event: string;
+    level?: EventLevel;
+    message: string;
+    sessionId?: string;
+    projectId?: string;
+    details?: Record<string, unknown>;
+  }): void {
+    appendEvent(this.config.dataDir, {
+      event: input.event,
+      level: input.level ?? "info",
+      message: input.message,
+      sessionId: input.sessionId,
+      projectId: input.projectId,
+      details: input.details,
+    });
   }
 
   async list(): Promise<SessionView[]> {
@@ -156,6 +185,7 @@ export class SessionService {
       id: sessionId,
       project: request.project,
       agent,
+      agentSessionId: undefined,
       prompt: request.prompt,
       branch,
       worktreePath: "",
@@ -166,6 +196,16 @@ export class SessionService {
       updatedAt: createdAt,
     };
     writeSession(this.config.dataDir, placeholder);
+    this.logEvent({
+      event: "session.spawn.started",
+      sessionId,
+      projectId: request.project,
+      message: `Spawning ${sessionId}`,
+      details: {
+        agent,
+        branch,
+      },
+    });
 
     let worktreePath = "";
     try {
@@ -201,8 +241,24 @@ export class SessionService {
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
       await sendMessageToTmux(tmuxSession, launchPlan.initialMessage);
 
-      writeSession(this.config.dataDir, runningRecord);
-      return this.enrich(runningRecord);
+      const persistedRecord = await this.captureAgentSessionId(
+        runningRecord,
+        AGENT_SESSION_ID_INITIAL_WAIT_MS,
+      );
+      writeSession(this.config.dataDir, persistedRecord);
+      this.logEvent({
+        event: "session.spawn.completed",
+        sessionId,
+        projectId: request.project,
+        message: `Spawned ${sessionId}`,
+        details: {
+          agent,
+          worktreePath,
+          tmuxSession,
+          agentSessionId: persistedRecord.agentSessionId ?? null,
+        },
+      });
+      return this.enrich(persistedRecord);
     } catch (error) {
       await killTmuxSession(tmuxSession);
       if (worktreePath) {
@@ -218,6 +274,19 @@ export class SessionService {
         error: message,
       };
       writeSession(this.config.dataDir, erroredRecord);
+      this.logEvent({
+        event: "session.spawn.failed",
+        level: "error",
+        sessionId,
+        projectId: request.project,
+        message: `Failed to spawn ${sessionId}`,
+        details: {
+          agent,
+          branch,
+          worktreePath,
+          ...errorDetails(error),
+        },
+      });
       throw new Error(`Failed to spawn ${sessionId}: ${message}`);
     }
   }
@@ -233,12 +302,16 @@ export class SessionService {
 
     const activeSession = await this.ensureSessionReadyForSend(session);
     await sendMessageToTmux(activeSession.tmuxSession, request.message);
-    const updated: SessionRecord = {
+    const updatedRecord: SessionRecord = {
       ...activeSession,
       updatedAt: nowIso(),
     };
-    writeSession(this.config.dataDir, updated);
-    return this.enrich(updated);
+    const persistedRecord = await this.captureAgentSessionId(
+      updatedRecord,
+      AGENT_SESSION_ID_REFRESH_WAIT_MS,
+    );
+    writeSession(this.config.dataDir, persistedRecord);
+    return this.enrich(persistedRecord);
   }
 
   async kill(sessionId: string): Promise<SessionView> {
@@ -264,6 +337,16 @@ export class SessionService {
     if (record !== session) {
       writeSession(this.config.dataDir, record);
     }
+    this.logEvent({
+      event: "session.kill.completed",
+      sessionId,
+      projectId: session.project,
+      message: `Killed ${sessionId}`,
+      details: {
+        tmuxSession: session.tmuxSession,
+        worktreePath: session.worktreePath,
+      },
+    });
     return this.enrich(record);
   }
 
@@ -275,42 +358,195 @@ export class SessionService {
     };
   }
 
-  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
-    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    if (runtimeAlive) {
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (processAlive) {
+  private async captureAgentSessionId(
+    session: SessionRecord,
+    timeoutMs: number,
+  ): Promise<SessionRecord> {
+    if (!session.worktreePath) {
+      return session;
+    }
+
+    const deadline = Date.now() + Math.max(timeoutMs, 0);
+    while (true) {
+      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
+      if (agentSessionId) {
+        if (agentSessionId === session.agentSessionId) {
+          return session;
+        }
+        this.logEvent({
+          event: "session.agent_session_id.discovered",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `Discovered native agent session id for ${session.id}`,
+          details: {
+            agent: session.agent,
+            previousAgentSessionId: session.agentSessionId ?? null,
+            agentSessionId,
+          },
+        });
+        return {
+          ...session,
+          agentSessionId,
+        };
+      }
+
+      if (Date.now() >= deadline) {
         return session;
       }
+      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
     }
+  }
+
+  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    let processAlive = false;
+    if (runtimeAlive) {
+      processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+      if (processAlive) {
+        return this.captureAgentSessionId(session, 0);
+      }
+    }
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    this.logEvent({
+      event: "session.recover.check",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Checking whether ${session.id} needs recovery`,
+      details: {
+        agent: session.agent,
+        status: session.status,
+        runtimeAlive,
+        processAlive,
+        workspaceExists: workspacePresent,
+        agentSessionId: session.agentSessionId ?? null,
+      },
+    });
 
     if (session.status === "killed") {
       throw new Error(`Session ${session.id} was killed and cannot be recovered`);
     }
-    if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
+    if (!session.worktreePath || !workspacePresent) {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
     }
 
     await killTmuxSession(session.tmuxSession);
-    const launchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
-    const launchCommand = session.launchCommand || launchPlan.launchCommand;
-    await createTmuxSession({
-      sessionName: session.tmuxSession,
-      cwd: session.worktreePath,
-      launchCommand,
-      env: this.sessionEnv(session),
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
+    const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
+    const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
+    const recoveryPlan = sessionWithAgentId.agentSessionId
+      ? buildAgentResumePlan(
+          sessionWithAgentId.agent,
+          sessionWithAgentId.agentSessionId,
+          baseLaunchCommand,
+        )
+      : null;
+    let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    this.logEvent({
+      event: "session.recover.started",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Recovering ${session.id}`,
+      details: {
+        agent: session.agent,
+        recoveryMode: recoveryPlan ? "native_resume" : "fresh_launch",
+        agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+      },
     });
-    await waitForTmuxReady(session.tmuxSession, launchPlan.readyMarkers);
+    try {
+      await createTmuxSession({
+        sessionName: session.tmuxSession,
+        cwd: session.worktreePath,
+        launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+        env: this.sessionEnv(session),
+      });
+      await waitForTmuxReady(
+        session.tmuxSession,
+        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+      );
+    } catch (error) {
+      if (!recoveryPlan) {
+        throw error;
+      }
+
+      this.logEvent({
+        event: "session.recover.resume_failed",
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
+        details: {
+          agent: session.agent,
+          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+          launchCommand: recoveryPlan.launchCommand,
+          ...errorDetails(error),
+        },
+      });
+      await killTmuxSession(session.tmuxSession);
+      recoveredAgentSessionId = undefined;
+      await createTmuxSession({
+        sessionName: session.tmuxSession,
+        cwd: session.worktreePath,
+        launchCommand: baseLaunchCommand,
+        env: this.sessionEnv(session),
+      });
+      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
+    }
 
     const recovered: SessionRecord = {
-      ...session,
-      launchCommand,
+      ...sessionWithAgentId,
+      agentSessionId: recoveredAgentSessionId,
+      launchCommand: baseLaunchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
     delete recovered.error;
     writeSession(this.config.dataDir, recovered);
+    this.logEvent({
+      event: "session.recover.completed",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Recovered ${session.id}`,
+      details: {
+        agent: session.agent,
+        agentSessionId: recovered.agentSessionId ?? null,
+        tmuxSession: session.tmuxSession,
+      },
+    });
     return recovered;
+  }
+
+  private logRuntimeObservation(
+    session: SessionRecord,
+    view: SessionView,
+    processAlive: boolean | null,
+  ): void {
+    const snapshot = [
+      session.status,
+      view.status,
+      view.runtimeAlive ? "1" : "0",
+      view.workspaceExists ? "1" : "0",
+      processAlive === null ? "?" : processAlive ? "1" : "0",
+    ].join("|");
+    const previous = this.runtimeSnapshots.get(session.id);
+    if (previous === snapshot) {
+      return;
+    }
+    this.runtimeSnapshots.set(session.id, snapshot);
+    this.logEvent({
+      event: "session.runtime.observed",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Observed runtime state for ${session.id}`,
+      details: {
+        persistedStatus: session.status,
+        derivedStatus: view.status,
+        runtimeAlive: view.runtimeAlive,
+        workspaceExists: view.workspaceExists,
+        processAlive,
+        activity: view.activity,
+        lastActivityAt: view.lastActivityAt,
+      },
+    });
   }
 
   private async enrich(session: SessionRecord): Promise<SessionView> {
@@ -320,17 +556,19 @@ export class SessionService {
 
     if (session.status === "spawning") {
       const activityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-      return {
+      const view: SessionView = {
         ...session,
         runtimeAlive,
         workspaceExists: workspacePresent,
         activity: "active",
         lastActivityAt: resolveLastActivityAt(fallbackActivityAt, activityAt).toISOString(),
       };
+      this.logRuntimeObservation(session, view, null);
+      return view;
     }
 
     if (!runtimeAlive) {
-      return {
+      const view: SessionView = {
         ...session,
         status: deriveStoppedStatus(session, workspacePresent),
         runtimeAlive,
@@ -338,6 +576,8 @@ export class SessionService {
         activity: "exited",
         lastActivityAt: fallbackActivityAt,
       };
+      this.logRuntimeObservation(session, view, false);
+      return view;
     }
 
     const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
@@ -347,7 +587,7 @@ export class SessionService {
     );
     const lastActivityAt = activityAt.toISOString();
     if (!processAlive) {
-      return {
+      const view: SessionView = {
         ...session,
         status: deriveStoppedStatus(session, workspacePresent),
         runtimeAlive,
@@ -355,15 +595,19 @@ export class SessionService {
         activity: "exited",
         lastActivityAt,
       };
+      this.logRuntimeObservation(session, view, false);
+      return view;
     }
 
     const pane = await captureTmuxPane(session.tmuxSession, 80);
-    return {
+    const view: SessionView = {
       ...session,
       runtimeAlive,
       workspaceExists: workspacePresent,
       activity: classifyActivity(pane, activityAt),
       lastActivityAt,
     };
+    this.logRuntimeObservation(session, view, true);
+    return view;
   }
 }
