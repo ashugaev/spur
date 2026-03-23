@@ -5,6 +5,10 @@
       {
         "command": ".cursor/hooks/build.sh",
         "timeout": 60
+      },
+      {
+        "command": ".claude/hooks/code-simplifier.sh",
+        "timeout": 60
       }
     ]
   }

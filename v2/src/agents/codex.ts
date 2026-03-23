@@ -1,44 +1,56 @@
 import { createReadStream } from "node:fs";
-import { lstat, open, readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { AgentLaunchPlan, AgentResumePlan } from "./shared.js";
-import { shellEscape } from "./shared.js";
+import { shellEscape } from "./shell-escape.js";
+import { resolveWorktreePathCandidates } from "./worktree-path.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
-export const CODEX_FULL_ACCESS_COMMAND = "codex --dangerously-bypass-approvals-and-sandbox";
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
-const CODEX_READY_MARKERS = ["Codex", "›"];
 
-interface CodexJsonlLine {
-  type?: string;
+export function codexCommand(): string {
+  return process.env["SPUR_CODEX_BIN"] || "codex";
+}
+
+interface CodexSessionLine {
   cwd?: string;
+  payload?: {
+    cwd?: string;
+    id?: string;
+  };
   threadId?: string;
+  type?: string;
 }
 
-export function buildCodexPlan(prompt: string): AgentLaunchPlan {
-  return {
-    agent: "codex",
-    launchCommand: CODEX_FULL_ACCESS_COMMAND,
-    initialMessage: prompt,
-    readyMarkers: CODEX_READY_MARKERS,
-  };
+function sessionMetaCwd(line: CodexSessionLine): string | null {
+  if (line.type !== "session_meta") {
+    return null;
+  }
+  if (typeof line.cwd === "string" && line.cwd) {
+    return line.cwd;
+  }
+  if (typeof line.payload?.cwd === "string" && line.payload.cwd) {
+    return line.payload.cwd;
+  }
+  return null;
 }
 
-export function buildCodexResumePlan(
-  threadId: string,
-  binary = "codex",
-): AgentResumePlan {
-  return {
-    agent: "codex",
-    launchCommand: `${shellEscape(binary)} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
-    readyMarkers: CODEX_READY_MARKERS,
-  };
+function sessionResumeId(line: CodexSessionLine): string | null {
+  if (typeof line.threadId === "string" && line.threadId) {
+    return line.threadId;
+  }
+  if (line.type === "session_meta" && typeof line.payload?.id === "string" && line.payload.id) {
+    return line.payload.id;
+  }
+  return null;
 }
 
 async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
-  if (depth > MAX_SESSION_SCAN_DEPTH) return [];
+  if (depth > MAX_SESSION_SCAN_DEPTH) {
+    return [];
+  }
 
   let entries: string[];
   try {
@@ -47,69 +59,68 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
     return [];
   }
 
-  const results: string[] = [];
+  const files: string[] = [];
   for (const entry of entries) {
-    const fullPath = join(dir, entry);
+    const filePath = join(dir, entry);
     if (entry.endsWith(".jsonl")) {
-      results.push(fullPath);
+      files.push(filePath);
       continue;
     }
-
     try {
-      const details = await lstat(fullPath);
-      if (details.isDirectory()) {
-        results.push(...(await collectJsonlFiles(fullPath, depth + 1)));
+      if ((await lstat(filePath)).isDirectory()) {
+        files.push(...(await collectJsonlFiles(filePath, depth + 1)));
       }
     } catch {
-      // Ignore unreadable entries.
+      // Ignore inaccessible entries.
     }
   }
-  return results;
+  return files;
 }
 
-async function sessionFileMatchesCwd(filePath: string, workspacePath: string): Promise<boolean> {
+async function sessionFileMatchesWorktree(
+  filePath: string,
+  worktreePath: string,
+): Promise<boolean> {
+  const candidates = new Set(await resolveWorktreePathCandidates(worktreePath));
   try {
-    const handle = await open(filePath, "r");
-    let content: string;
-    try {
-      const buffer = Buffer.allocUnsafe(4096);
-      const { bytesRead } = await handle.read(buffer, 0, 4096, 0);
-      content = buffer.subarray(0, bytesRead).toString("utf-8");
-    } finally {
-      await handle.close();
-    }
-
-    for (const line of content.split("\n").slice(0, 10)) {
+    const input = createReadStream(filePath, { encoding: "utf-8" });
+    const reader = createInterface({ input, crlfDelay: Infinity });
+    let linesRead = 0;
+    for await (const line of reader) {
+      if (linesRead >= 10) {
+        break;
+      }
+      linesRead += 1;
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const parsed = JSON.parse(trimmed) as CodexJsonlLine;
-        if (parsed.type === "session_meta" && parsed.cwd === workspacePath) {
+        const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        const cwd = sessionMetaCwd(parsed);
+        if (cwd && candidates.has(cwd)) {
           return true;
         }
       } catch {
-        // Ignore malformed lines.
+        // Ignore malformed lines and keep scanning the file header.
       }
     }
   } catch {
-    // Ignore unreadable files.
+    return false;
   }
-
   return false;
 }
 
-async function findCodexSessionFile(workspacePath: string): Promise<string | null> {
+async function findSessionFile(worktreePath: string): Promise<string | null> {
   const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
-  let bestMatch: { path: string; mtime: number } | null = null;
+  let bestMatch: { path: string; mtimeMs: number } | null = null;
 
   for (const filePath of files) {
-    if (!(await sessionFileMatchesCwd(filePath, workspacePath))) {
+    if (!(await sessionFileMatchesWorktree(filePath, worktreePath))) {
       continue;
     }
     try {
-      const details = await stat(filePath);
-      if (!bestMatch || details.mtimeMs > bestMatch.mtime) {
-        bestMatch = { path: filePath, mtime: details.mtimeMs };
+      const fileStat = await stat(filePath);
+      if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
+        bestMatch = { path: filePath, mtimeMs: fileStat.mtimeMs };
       }
     } catch {
       // Ignore unreadable files.
@@ -119,25 +130,18 @@ async function findCodexSessionFile(workspacePath: string): Promise<string | nul
   return bestMatch?.path ?? null;
 }
 
-export async function findCodexSessionId(workspacePath: string): Promise<string | null> {
-  const sessionFile = await findCodexSessionFile(workspacePath);
-  if (!sessionFile) {
-    return null;
-  }
-
+async function readThreadId(filePath: string): Promise<string | null> {
   try {
-    const reader = createInterface({
-      input: createReadStream(sessionFile, { encoding: "utf-8" }),
-      crlfDelay: Infinity,
-    });
-
+    const input = createReadStream(filePath, { encoding: "utf-8" });
+    const reader = createInterface({ input, crlfDelay: Infinity });
     for await (const line of reader) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       try {
-        const parsed = JSON.parse(trimmed) as CodexJsonlLine;
-        if (typeof parsed.threadId === "string" && parsed.threadId) {
-          return parsed.threadId;
+        const parsed = JSON.parse(trimmed) as CodexSessionLine;
+        const resumeId = sessionResumeId(parsed);
+        if (resumeId) {
+          return resumeId;
         }
       } catch {
         // Ignore malformed lines.
@@ -146,6 +150,43 @@ export async function findCodexSessionId(workspacePath: string): Promise<string 
   } catch {
     return null;
   }
-
   return null;
+}
+
+export async function findCodexSessionId(worktreePath: string): Promise<string | null> {
+  const sessionFile = await findSessionFile(worktreePath);
+  return sessionFile ? readThreadId(sessionFile) : null;
+}
+
+export function buildCodexPlan(prompt: string): AgentLaunchPlan {
+  return {
+    launchCommand: `${codexCommand()} --dangerously-bypass-approvals-and-sandbox`,
+    initialMessage: prompt,
+    readyMarkers: ["OpenAI Codex", "›"],
+  };
+}
+
+export function buildCodexResumePlan(
+  threadId: string,
+  binary = codexCommand(),
+): AgentResumePlan {
+  return {
+    launchCommand: `${shellEscape(binary)} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+    readyMarkers: ["›"],
+  };
+}
+
+export async function buildCodexRestorePlan(
+  worktreePath: string,
+  prompt: string,
+): Promise<AgentLaunchPlan | null> {
+  const threadId = await findCodexSessionId(worktreePath);
+  if (!threadId) {
+    return null;
+  }
+
+  return {
+    ...buildCodexResumePlan(threadId),
+    initialMessage: prompt,
+  };
 }

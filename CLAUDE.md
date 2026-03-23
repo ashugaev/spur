@@ -8,17 +8,26 @@
 - Keep instructions short and operational. Cut anything that does not change implementation.
 - Think twice, write once. Do not add code, commands, docs, or instructions until the shorter version is clearly insufficient.
 - Keep commands, docs, and prompts minimal. Prefer the shortest form that still preserves correctness and clarity.
+- Do not ask the same question twice in one task. If clarification is still needed, ask one narrower follow-up that names the remaining decision.
+- Ask the smallest precise question that changes implementation. Prefer concrete choices over broad or open-ended prompts.
 - Absolute local filesystem paths in docs and comments are an antipattern. Prefer relative paths; if that is not practical, use path placeholders or `~/`-style examples instead of machine-specific paths.
 - Do not write anything for the future. No speculative hooks, no placeholder branches, no config fields, no docs sections for behavior that does not exist yet.
 - If code is not functional in the current product behavior, delete it instead of keeping it around for later.
 - Do not keep two different ways to solve the same task. Pick one interface, one code path, and remove the alternate form.
 - Prefer one implementation path per feature.
 - Remove fallback paths, compatibility shims, and duplicate abstractions before adding new ones.
+- Do not duplicate type definitions, helper functions, or validation logic. Define once, import everywhere.
+- Do not re-validate data that was already validated upstream. If a function receives a typed value, trust it.
+- Do not write `catch (error) { throw error; }` or other no-op wrappers. If the catch does nothing, remove it.
+- Do not repeat the same cleanup/teardown sequence inline. Extract a named helper when the same steps appear in 3+ places.
+- Identical constants (regexes, thresholds, magic strings) must be one binding, not separate copies.
 - Prefer narrow types and explicit config shapes. In TypeScript, use discriminated unions and validated objects instead of index-signature bags.
+- In Spur, avoid TypeScript overhead. Prefer the smallest type shape that preserves safety; balance and concision beat type-level cleverness.
 - Apply defaults once at the boundary. Do not scatter re-defaulting and fallback branches through the runtime path.
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
-- Default to `$manager` for complex or multi-step tasks. Use direct execution for short one-shot work.
+- Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
+- For Spur work, change only `v2/`. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - For `v2/`, port behavior only when it reduces code. Do not port the old architecture by default.
 - If a feature is not needed for the current milestone, leave it out.
 - `AGENTS.md` and `CLAUDE.md` must stay in sync. If you add or change a durable instruction in one, mirror it in the other in the same change.
@@ -28,7 +37,10 @@
 
 - `Spur` is the lean `v2/` orchestrator. Treat its interface as fixed unless the user asks to change it.
 - `Spur` is CLI plus local HTTP daemon. There is no UI layer in the current milestone.
-- The current `Spur` command surface is: `info`, `spawn`, `list`, `get`, `send`, `kill`.
+- The current human-facing `Spur` command surface is: `spawn`, `list`, `send`. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
+- `Spur` CLI defaults to human output. Use `--json` only on commands that expose structured data for scripts.
+- `Spur` brand mark is `𖤓`. Use it for CLI help headers, runtime summary lines, and spinner frames.
+- `Spur list` is the only session UI: on a TTY it opens the live selector with runtime summary and selected-session details; `Enter` attaches in place, `r` restores, `k` kills, and `Esc` quits. Non-TTY `list` prints a one-shot runtime summary plus session cards.
 - `spawn` is positional: `spur spawn <project> <prompt...>` with optional `--agent` and `--branch`.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
 - Supported agents in `Spur` are only `claude` and `codex`.
@@ -38,19 +50,26 @@
 
 ## Spur Validation
 
-- If you change `Spur` CLI, daemon, agent launch, worktree setup, tmux behavior, or session lifecycle, you must run the relevant `Spur` scenarios yourself before marking the work complete.
-- Minimum `Spur` validation is: positive path for every touched command, negative/error path for every touched command, and cleanup verification.
-- If the change touches daemon startup or client transport, test both direct daemon start and CLI auto-start.
-- If the change touches agent launch or prompt delivery, test both `claude` and `codex`.
-- If the change touches workspace or runtime behavior, test worktree creation, symlinks, `tmux` session creation, message delivery, and teardown.
-- If only `v2/` changed, `$tester` must exercise the touched `spur` CLI commands through positive and negative paths and rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`.
+- Always run `pnpm --dir v2 build` after changing Spur code.
+- Spur has three test tiers:
+  `fast` = `pnpm --dir v2 test` for mocked and in-process coverage. This is the default root `pnpm test` path and must stay fast.
+  `runtime integration` = `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
+  `real-agent smoke` = `pnpm --dir v2 test:smoke` for narrow real `claude` and `codex` spawn/send checks on the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
+- Run `fast` for every Spur code change.
+- Run `runtime integration` when the change touches CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, or automation runtime boundaries.
+- Run `real-agent smoke` when the change touches agent launch or prompt delivery. Cover both `claude` and `codex`.
+- Keep queueing, dedupe, and validation logic in `fast`; keep source, process, and `tmux` boundaries in `runtime integration`.
+- Minimum Spur validation is: positive path for every touched command, negative or error path for every touched command, and cleanup verification at the cheapest tier that still crosses the changed boundary.
+- If the change touches daemon startup or client transport, `runtime integration` must cover both direct daemon start and CLI auto-start.
+- If the change touches workspace or runtime behavior, `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, and teardown.
+- If only `v2/` changed, `$tester` must run the required tiers, exercise the touched `spur` CLI commands through positive and negative paths, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`, and run impacted `real-agent smoke` scenarios through `pnpm --dir v2 test:smoke` on the real `ao` repo with real `claude` and `codex`.
 - For touched `v2/` code, `$tester` also checks for hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes.
-- Spur test scenarios live in `v2/TEST_SCENARIOS.md`. When a new Spur feature is added, extend that file in the same change.
+- Spur test scenarios live in `v2/TEST_SCENARIOS.md`. Each scenario belongs to exactly one tier. When a new Spur feature is added, extend that file in the same change.
 - `$tester` must cover both: potentially affected existing Spur scenarios and the new scenarios introduced by the feature.
 
 ## Tech Stack
 
-TypeScript (ESM), Node 20+, pnpm workspaces. Next.js 15 (App Router) + Tailwind. Commander.js CLI. YAML + Zod config. Server-Sent Events for real-time. Flat metadata files + JSONL event log. ESLint + Prettier. vitest.
+TypeScript (ESM), Node 20+, pnpm workspaces. Next.js 15 (App Router) + Tailwind. Commander.js CLI + `@clack/prompts` for interactive TUI. YAML + Zod config. Server-Sent Events for real-time. Flat metadata files + JSONL event log. ESLint + Prettier. vitest.
 
 ## Architecture
 
@@ -226,6 +245,13 @@ When adding or changing CLI commands or features, update these files:
 2. **`.agents/skills/ao/SKILL.md`** — the `/ao` skill reference used by Codex and Claude Code (via symlink at `.claude/skills/ao.md`)
 
 This ensures both human-facing docs (`/ao` skill) and agent-facing context (orchestrator prompt) stay accurate.
+
+## PR Pipeline Resolve Team (Terminal-Driven)
+
+- Use `.agents/skills/manager/SKILL.md` as the only manager workflow for this repo.
+- Run it for every task, including short one-shot work.
+- Do not duplicate the manager loop in configs or agent files. Reference the skill instead.
+- Keep `.claude/skills/manager/SKILL.md` mirrored with `.agents/skills/manager/SKILL.md`.
 
 ## Config
 

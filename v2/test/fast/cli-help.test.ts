@@ -1,0 +1,75 @@
+import { describe, expect, it } from "vitest";
+import { createProgram } from "../../src/cli.js";
+
+function buildProgram() {
+  return createProgram("/tmp/dist/cli.js");
+}
+
+describe("spur help", () => {
+  it("renders branded root help without implicit or internal commands", () => {
+    const help = buildProgram().helpInformation();
+
+    expect(help).toContain("𖤓 Spur");
+    expect(help).toContain("Usage");
+    expect(help).toContain("Commands");
+    expect(help).toContain("spawn [options] <project> <prompt...>");
+    expect(help).toContain("list|ls [options]");
+    expect(help).toContain("send [options] <sessionId> <message...>");
+    expect(help).toContain("Use `spur <command> --help` for per-command details.");
+    expect(help).not.toContain("help [command]");
+    expect(help).not.toContain("daemon");
+    expect(help).not.toContain("slots");
+    expect(help).not.toContain("internal");
+  });
+
+  it("renders subcommand help with compact sections and inherited globals", () => {
+    const program = buildProgram();
+    const list = program.commands.find((command) => command.name() === "list");
+
+    expect(list).toBeDefined();
+    if (!list) {
+      throw new Error("Expected list command to be registered");
+    }
+
+    const help = list.helpInformation();
+
+    expect(list.aliases()).toContain("ls");
+    expect(help).toContain("𖤓 list");
+    expect(help).toContain("Usage");
+    expect(help).toContain("list|ls [options]");
+    expect(help).toContain("Options");
+    expect(help).toContain("--json");
+    expect(help).toContain("Global Options");
+    expect(help).toContain("--config <path>");
+    expect(help).toContain(
+      "On a TTY, this opens the live selector instead of printing a one-shot list.",
+    );
+    expect(help).toContain("TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.");
+    expect(help).toContain(
+      "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
+    );
+    expect(help).not.toContain("help [command]");
+  });
+
+  it("documents spawn branch and current workspace flags", () => {
+    const program = buildProgram();
+    const spawn = program.commands.find((command) => command.name() === "spawn");
+
+    expect(spawn).toBeDefined();
+    if (!spawn) {
+      throw new Error("Expected spawn command to be registered");
+    }
+
+    const help = spawn.helpInformation();
+
+    expect(help).toContain("--branch <name>");
+    expect(help).toContain("--worktree [defaultBranch]");
+    expect(help).toContain("--shared");
+    expect(help).toContain("Use the project path directly for this session (no worktree)");
+    expect(help).toContain(
+      "If the project enables spawn preflight, worktree spawns can derive a branch before worktree creation.",
+    );
+    expect(help).toContain("`--branch` bypasses any configured preflight branch suggestion.");
+    expect(help).toContain("`--shared` cannot be combined with `--worktree` or `--branch`.");
+  });
+});

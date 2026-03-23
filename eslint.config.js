@@ -2,6 +2,8 @@ import eslint from "@eslint/js";
 import tseslint from "typescript-eslint";
 import eslintConfigPrettier from "eslint-config-prettier";
 
+const SPUR_TS_FILES = ["v2/src/**/*.ts"];
+
 export default tseslint.config(
   // Global ignores
   {
@@ -16,6 +18,7 @@ export default tseslint.config(
       "test-clipboard*.mjs",
       "test-clipboard*.sh",
       "packages/mobile/**",
+      ".claude/worktrees/**",
     ],
   },
 
@@ -61,9 +64,33 @@ export default tseslint.config(
     },
   },
 
+  // Spur uses a stricter type-aware lint pass without adding style-only churn.
+  {
+    files: SPUR_TS_FILES,
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "no-console": "error",
+      "@typescript-eslint/await-thenable": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/no-non-null-assertion": "error",
+      "@typescript-eslint/no-unnecessary-condition": "error",
+      "@typescript-eslint/no-unnecessary-type-assertion": "error",
+      "@typescript-eslint/only-throw-error": "error",
+      "@typescript-eslint/return-await": ["error", "in-try-catch"],
+      "@typescript-eslint/switch-exhaustiveness-check": "error",
+    },
+  },
+
   // Relaxed rules for test files
   {
     files: ["**/*.test.ts", "**/__tests__/**"],
+    ignores: ["v2/test/**/*.ts"],
     rules: {
       "no-console": "off",
       "@typescript-eslint/no-explicit-any": "off",

@@ -1,38 +1,19 @@
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import type { AgentLaunchPlan, AgentResumePlan } from "./shared.js";
-import { shellEscape } from "./shared.js";
+import { shellEscape } from "./shell-escape.js";
+import { resolveWorktreePathCandidates } from "./worktree-path.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
-export const CLAUDE_FULL_ACCESS_COMMAND = "claude --dangerously-skip-permissions";
-const CLAUDE_READY_MARKERS = ["Claude Code", "❯"];
-
-export function buildClaudePlan(prompt: string): AgentLaunchPlan {
-  return {
-    agent: "claude",
-    launchCommand: CLAUDE_FULL_ACCESS_COMMAND,
-    initialMessage: prompt,
-    readyMarkers: CLAUDE_READY_MARKERS,
-  };
+export function claudeCommand(): string {
+  return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 
-export function buildClaudeResumePlan(
-  sessionId: string,
-  binary = "claude",
-): AgentResumePlan {
-  return {
-    agent: "claude",
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
-    readyMarkers: CLAUDE_READY_MARKERS,
-  };
+function toClaudeProjectPath(worktreePath: string): string {
+  return worktreePath.replaceAll("\\", "/").replaceAll(":", "").replace(/[/.]/g, "-");
 }
 
-function toClaudeProjectPath(workspacePath: string): string {
-  const normalized = workspacePath.replace(/\\/g, "/");
-  return normalized.replace(/:/g, "").replace(/[/.]/g, "-");
-}
-
-async function findLatestSessionFile(projectDir: string): Promise<string | null> {
+async function findLatestSessionFileForProjectDir(projectDir: string): Promise<string | null> {
   let entries: string[];
   try {
     entries = await readdir(projectDir);
@@ -40,29 +21,73 @@ async function findLatestSessionFile(projectDir: string): Promise<string | null>
     return null;
   }
 
-  const jsonlFiles = entries.filter((entry) => entry.endsWith(".jsonl") && !entry.startsWith("agent-"));
-  if (jsonlFiles.length === 0) return null;
-
-  const withStats = await Promise.all(
-    jsonlFiles.map(async (entry) => {
-      const path = join(projectDir, entry);
-      try {
-        const details = await stat(path);
-        return { path, mtime: details.mtimeMs };
-      } catch {
-        return { path, mtime: 0 };
-      }
-    }),
+  const files = await Promise.all(
+    entries
+      .filter((entry) => entry.endsWith(".jsonl") && !entry.startsWith("agent-"))
+      .map(async (entry) => {
+        const filePath = join(projectDir, entry);
+        try {
+          const fileStat = await stat(filePath);
+          return { path: filePath, mtimeMs: fileStat.mtimeMs };
+        } catch {
+          return { path: filePath, mtimeMs: 0 };
+        }
+      }),
   );
-  withStats.sort((left, right) => right.mtime - left.mtime);
-  return withStats[0]?.path ?? null;
+  files.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return files[0]?.path ?? null;
 }
 
-export async function findClaudeSessionId(workspacePath: string): Promise<string | null> {
-  const projectDir = join(homedir(), ".claude", "projects", toClaudeProjectPath(workspacePath));
-  const sessionFile = await findLatestSessionFile(projectDir);
-  if (!sessionFile) {
+async function findLatestSessionFile(worktreePath: string): Promise<string | null> {
+  for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
+    const sessionFile = await findLatestSessionFileForProjectDir(
+      join(homedir(), ".claude", "projects", toClaudeProjectPath(candidate)),
+    );
+    if (sessionFile) {
+      return sessionFile;
+    }
+  }
+  return null;
+}
+
+async function findLatestSessionId(worktreePath: string): Promise<string | null> {
+  const sessionFile = await findLatestSessionFile(worktreePath);
+  return sessionFile ? basename(sessionFile, ".jsonl") : null;
+}
+
+export async function findClaudeSessionId(worktreePath: string): Promise<string | null> {
+  return findLatestSessionId(worktreePath);
+}
+
+export function buildClaudePlan(prompt: string): AgentLaunchPlan {
+  return {
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions`,
+    initialMessage: prompt,
+    readyMarkers: ["Claude Code", "❯"],
+  };
+}
+
+export function buildClaudeResumePlan(
+  sessionId: string,
+  binary = claudeCommand(),
+): AgentResumePlan {
+  return {
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
+    readyMarkers: ["❯"],
+  };
+}
+
+export async function buildClaudeRestorePlan(
+  worktreePath: string,
+  prompt: string,
+): Promise<AgentLaunchPlan | null> {
+  const sessionId = await findClaudeSessionId(worktreePath);
+  if (!sessionId) {
     return null;
   }
-  return basename(sessionFile, ".jsonl") || null;
+
+  return {
+    ...buildClaudeResumePlan(sessionId),
+    initialMessage: prompt,
+  };
 }

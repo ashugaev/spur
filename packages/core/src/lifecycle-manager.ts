@@ -222,6 +222,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const states = new Map<SessionId, SessionStatus>();
   const mergeConflictStates = new Map<SessionId, boolean>();
   const reviewCommentFingerprints = new Map<SessionId, string>();
+  const pinnedCommentIds = new Map<SessionId, Set<string>>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
@@ -896,9 +897,14 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
         if (!hasPendingComments) {
           reactionTrackers.delete(`${session.id}:review-comments`);
+          pinnedCommentIds.delete(session.id);
         }
 
-        if (hasPendingComments && commentsChanged && !changesRequestedHandledBySendToAgent) {
+        const pinned = pinnedCommentIds.get(session.id) ?? new Set<string>();
+        const newCommentIds = pendingComments.map((c) => c.id).filter((id) => !pinned.has(id));
+        const hasNewComments = newCommentIds.length > 0;
+
+        if (hasPendingComments && commentsChanged && hasNewComments && !changesRequestedHandledBySendToAgent) {
           const eventType: EventType = "review.comments_unresolved";
           let reactionHandledNotify = false;
           const reactionKey = eventToReactionKey(eventType);
@@ -922,6 +928,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             });
             await notifyHuman(event, inferPriority(eventType));
           }
+
+          // Mark these comment IDs as pinged so they don't trigger again
+          for (const id of newCommentIds) pinned.add(id);
+          pinnedCommentIds.set(session.id, pinned);
         }
       } catch {
         // Keep lifecycle checks running if pending-comment polling fails.
@@ -929,6 +939,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     } else {
       reviewCommentFingerprints.delete(session.id);
       reactionTrackers.delete(`${session.id}:review-comments`);
+      pinnedCommentIds.delete(session.id);
     }
 
     // Trigger merge-conflicts reaction once per conflict period, independent of status transitions.
@@ -1013,6 +1024,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       for (const trackedId of reviewCommentFingerprints.keys()) {
         if (!currentSessionIds.has(trackedId)) {
           reviewCommentFingerprints.delete(trackedId);
+          pinnedCommentIds.delete(trackedId);
         }
       }
       for (const trackerKey of reactionTrackers.keys()) {

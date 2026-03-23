@@ -1,7 +1,18 @@
-import { buildClaudePlan, buildClaudeResumePlan, findClaudeSessionId } from "./claude.js";
-import { buildCodexPlan, buildCodexResumePlan, findCodexSessionId } from "./codex.js";
+import {
+  buildClaudePlan,
+  buildClaudeRestorePlan,
+  buildClaudeResumePlan,
+  findClaudeSessionId,
+} from "./claude.js";
+import {
+  buildCodexPlan,
+  buildCodexRestorePlan,
+  buildCodexResumePlan,
+  findCodexSessionId,
+} from "./codex.js";
 import type { AgentName } from "../types.js";
-import type { AgentResumePlan } from "./shared.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
@@ -11,12 +22,22 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(agent: string, prompt: string) {
-  const parsedAgent = parseAgentName(agent);
-  if (parsedAgent === "claude") {
+export function buildAgentLaunchPlan(agent: AgentName, prompt: string) {
+  if (agent === "claude") {
     return buildClaudePlan(prompt);
   }
   return buildCodexPlan(prompt);
+}
+
+export async function buildAgentRestorePlan(
+  agent: AgentName,
+  worktreePath: string,
+  prompt: string,
+): Promise<AgentLaunchPlan | null> {
+  if (agent === "claude") {
+    return buildClaudeRestorePlan(worktreePath, prompt);
+  }
+  return buildCodexRestorePlan(worktreePath, prompt);
 }
 
 function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
@@ -24,21 +45,18 @@ function extractCommandBinary(launchCommand: string, fallbackBinary: string): st
   if (!trimmed) {
     return fallbackBinary;
   }
-
   if (trimmed.startsWith("'")) {
     const closing = trimmed.indexOf("'", 1);
     if (closing > 1) {
       return trimmed.slice(1, closing);
     }
   }
-
   if (trimmed.startsWith("\"")) {
     const closing = trimmed.indexOf("\"", 1);
     if (closing > 1) {
       return trimmed.slice(1, closing);
     }
   }
-
   return trimmed.split(/\s+/, 1)[0] || fallbackBinary;
 }
 
@@ -48,7 +66,6 @@ export function buildAgentResumePlan(
   launchCommand = "",
 ): AgentResumePlan {
   const binary = extractCommandBinary(launchCommand, agent);
-
   if (agent === "claude") {
     return buildClaudeResumePlan(agentSessionId, binary);
   }
@@ -57,10 +74,10 @@ export function buildAgentResumePlan(
 
 export async function findAgentSessionId(
   agent: AgentName,
-  workspacePath: string,
+  worktreePath: string,
 ): Promise<string | null> {
   if (agent === "claude") {
-    return findClaudeSessionId(workspacePath);
+    return findClaudeSessionId(worktreePath);
   }
-  return findCodexSessionId(workspacePath);
+  return findCodexSessionId(worktreePath);
 }
