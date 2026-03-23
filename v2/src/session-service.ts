@@ -17,6 +17,7 @@ import type {
   AppConfig,
   RuntimeInfo,
   SessionActivity,
+  SessionStatus,
   SendMessageRequest,
   SessionRecord,
   SessionView,
@@ -56,6 +57,16 @@ function resolveLastActivityAt(sessionUpdatedAt: string, activityAt: Date | null
     return updatedAt;
   }
   return activityAt;
+}
+
+function deriveStoppedStatus(session: SessionRecord, workspacePresent: boolean): SessionStatus {
+  if (!workspacePresent) {
+    return session.status;
+  }
+  if (session.status === "running" || session.status === "spawning" || session.status === "stopped") {
+    return "stopped";
+  }
+  return session.status;
 }
 
 function classifyActivity(
@@ -220,9 +231,10 @@ export class SessionService {
       throw new Error("message must be a non-empty string");
     }
 
-    await sendMessageToTmux(session.tmuxSession, request.message);
+    const activeSession = await this.ensureSessionReadyForSend(session);
+    await sendMessageToTmux(activeSession.tmuxSession, request.message);
     const updated: SessionRecord = {
-      ...session,
+      ...activeSession,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
@@ -255,6 +267,52 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private sessionEnv(session: SessionRecord): Record<string, string> {
+    return {
+      SPUR_SESSION: session.id,
+      SPUR_PROJECT: session.project,
+      SPUR_AGENT: session.agent,
+    };
+  }
+
+  private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
+    const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+    if (runtimeAlive) {
+      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+      if (processAlive) {
+        return session;
+      }
+    }
+
+    if (session.status === "killed") {
+      throw new Error(`Session ${session.id} was killed and cannot be recovered`);
+    }
+    if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
+      throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
+    }
+
+    await killTmuxSession(session.tmuxSession);
+    const launchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
+    const launchCommand = session.launchCommand || launchPlan.launchCommand;
+    await createTmuxSession({
+      sessionName: session.tmuxSession,
+      cwd: session.worktreePath,
+      launchCommand,
+      env: this.sessionEnv(session),
+    });
+    await waitForTmuxReady(session.tmuxSession, launchPlan.readyMarkers);
+
+    const recovered: SessionRecord = {
+      ...session,
+      launchCommand,
+      status: "running",
+      updatedAt: nowIso(),
+    };
+    delete recovered.error;
+    writeSession(this.config.dataDir, recovered);
+    return recovered;
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     const fallbackActivityAt = session.updatedAt;
@@ -274,6 +332,7 @@ export class SessionService {
     if (!runtimeAlive) {
       return {
         ...session,
+        status: deriveStoppedStatus(session, workspacePresent),
         runtimeAlive,
         workspaceExists: workspacePresent,
         activity: "exited",
@@ -290,6 +349,7 @@ export class SessionService {
     if (!processAlive) {
       return {
         ...session,
+        status: deriveStoppedStatus(session, workspacePresent),
         runtimeAlive,
         workspaceExists: workspacePresent,
         activity: "exited",

@@ -17,6 +17,8 @@ CLI commands reuse an already running daemon on the same configured `host`/`port
 
 `list` and `get` return live `activity` and `lastActivityAt` fields derived from `tmux`, alongside persisted session data.
 
+If the agent process exits but the worktree is still intact, Spur surfaces the session as `stopped`. A later `send` relaunches the configured agent in the same worktree before delivering the new message.
+
 `spawn` has one form:
 
 ```bash

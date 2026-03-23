@@ -24,7 +24,9 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - `get/list`: report `activity: waiting_input` when the pane tail shows a permission or confirmation prompt.
 - `get/list`: prefer the current prompt over stale permission text still visible in recent pane history.
 - `get/list`: report `activity: exited` when the tmux session or agent process is gone.
+- `get/list`: surface `status: stopped` when the agent/runtime is gone but the worktree still exists.
 - `get/list` during `spawning`: report `activity: active` and keep `runtimeAlive` aligned with the actual tmux session state.
+- `send` on a `stopped` session: relaunches the configured agent in the existing worktree and delivers the new message.
 
 ## Agents
 
@@ -51,6 +53,7 @@ Keep this file lean. Expand it every time Spur gets a new feature or a new failu
 - Missing session for `get`.
 - Missing session for `kill`.
 - Empty message for `send`.
+- `send` on a `killed` session or a stopped session with no worktree fails instead of trying to recreate the workspace.
 - `cron` source without `schedule`.
 - Trigger referencing an unknown source.
 
