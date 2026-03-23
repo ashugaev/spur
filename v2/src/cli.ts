@@ -125,14 +125,14 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
-function removeListedSession(args: { sessions: SessionView[]; removedSessionId: string }): {
-  sessions: SessionView[];
-  selectedSessionId: string | null;
-} {
-  return {
-    sessions: args.sessions.filter((session) => session.id !== args.removedSessionId),
-    selectedSessionId: null,
-  };
+function postSessionAction(
+  cliEntrypoint: string,
+  sessionId: string,
+  action: "pause" | "complete" | "kill",
+  configPath?: string,
+  body: object = {},
+): Promise<SessionView> {
+  return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
 function renderLiveSessionList(args: {
@@ -450,12 +450,7 @@ async function runInteractiveSessionList(
     render();
 
     try {
-      const paused = await postJson<SessionView>(
-        cliEntrypoint,
-        `/sessions/${session.id}/pause`,
-        {},
-        configPath,
-      );
+      const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
       pendingKillConfirmationSessionId = null;
@@ -479,18 +474,9 @@ async function runInteractiveSessionList(
     render();
 
     try {
-      const completed = await postJson<SessionView>(
-        cliEntrypoint,
-        `/sessions/${session.id}/complete`,
-        {},
-        configPath,
-      );
-      const removed = removeListedSession({
-        sessions,
-        removedSessionId: completed.id,
-      });
-      sessions = removed.sessions;
-      selectedSessionId = removed.selectedSessionId;
+      const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
+      sessions = sessions.filter((entry) => entry.id !== completed.id);
+      selectedSessionId = null;
       pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Completed ${completed.id}.`);
     } catch (error) {
@@ -515,18 +501,15 @@ async function runInteractiveSessionList(
     render();
 
     try {
-      const killed = await postJson<SessionView>(
+      const killed = await postSessionAction(
         cliEntrypoint,
-        `/sessions/${session.id}/kill`,
-        force ? { force: true } : {},
+        session.id,
+        "kill",
         configPath,
+        force ? { force: true } : {},
       );
-      const removed = removeListedSession({
-        sessions,
-        removedSessionId: killed.id,
-      });
-      sessions = removed.sessions;
-      selectedSessionId = removed.selectedSessionId;
+      sessions = sessions.filter((entry) => entry.id !== killed.id);
+      selectedSessionId = null;
       pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
@@ -771,8 +754,7 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "pausing session",
-        action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/pause`, {}, configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
         success: (session) => `Paused ${session.id}.`,
         render: renderSessionCard,
       });
@@ -788,8 +770,7 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
-        action: () =>
-          postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/complete`, {}, configPath),
+        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath),
         success: (session) => `Completed ${session.id}.`,
         render: renderSessionCard,
       });
@@ -807,11 +788,12 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "killing session",
         action: () =>
-          postJson<SessionView>(
+          postSessionAction(
             cliEntrypoint,
-            `/sessions/${sessionId}/kill`,
-            options.force ? { force: true } : {},
+            sessionId,
+            "kill",
             configPath,
+            options.force ? { force: true } : {},
           ),
         success: (session) => `Killed ${session.id}.`,
         render: renderSessionCard,
