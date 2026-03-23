@@ -385,7 +385,7 @@ export function renderInteractiveSessionList(args: {
     "",
     ...detailLines,
     "",
-    dimText("↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Esc quit"),
+    dimText("↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit"),
   );
   if (args.statusMessage) {
     lines.push("", args.statusMessage);

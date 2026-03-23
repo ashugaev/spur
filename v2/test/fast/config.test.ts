@@ -1,11 +1,12 @@
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, resolveConfigPath } from "../../src/config.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const initialCwd = process.cwd();
+const initialSpurConfig = process.env["SPUR_CONFIG"];
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -22,10 +23,19 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
 
 afterEach(async () => {
   process.chdir(initialCwd);
+  if (initialSpurConfig === undefined) {
+    delete process.env["SPUR_CONFIG"];
+  } else {
+    process.env["SPUR_CONFIG"] = initialSpurConfig;
+  }
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
 describe("loadConfig", () => {
+  beforeEach(() => {
+    delete process.env["SPUR_CONFIG"];
+  });
+
   it("applies Spur defaults once at the config boundary", async () => {
     const configPath = await writeConfig(`
 projects:

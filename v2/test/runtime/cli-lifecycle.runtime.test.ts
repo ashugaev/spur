@@ -1379,7 +1379,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       accept: (value) => value.includes("Claude Code"),
     });
 
-    await sendKeysToTmux(controllerSessionName, "C-b", "d");
+    await sendKeysToTmux(controllerSessionName, "C-g");
 
     const detachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
@@ -1387,7 +1387,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     expect(detachedPane).toContain(
-      "Enter attach  p pause  c complete  r restore  k kill  Esc quit",
+      "Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     );
   });
 
