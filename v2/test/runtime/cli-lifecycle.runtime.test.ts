@@ -1,10 +1,10 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import type { RuntimeInfo, SessionView } from "../../src/types.js";
+import type { RuntimeInfo, SessionRecord, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -1006,9 +1006,26 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
     );
     expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
+    const humanList = await context.execCli(["--config", configPath, "list"]);
+    expect(humanList.stdout).toContain(spawned.branch);
+    expect(humanList.stdout).toContain("task Investigate status bar links");
+    expect(humanList.stdout).toContain("tracker tracker.example.com/TASK-9");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
+
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    const persisted = JSON.parse(
+      await readFile(join(context.dataDir, "sessions", "api", `${spawned.id}.json`), "utf8"),
+    ) as SessionRecord;
+    expect(persisted.status).toBe("completed");
+    expect(persisted.slots).toEqual({
+      title: "Investigate status bar links",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+      ],
+    });
   });
 
   it("rejects invalid or missing slot targets through the built CLI", async () => {

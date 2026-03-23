@@ -46,6 +46,35 @@ interface SessionColumnWidths {
   agent: number;
 }
 
+function formatLinkDisplay(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host}${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+  } catch {
+    return url;
+  }
+}
+
+function findSessionLink(session: Pick<SessionView, "slots">, label: string): string | undefined {
+  return session.slots?.links.find((link) => link.label === label)?.url;
+}
+
+function renderSessionSlotSummary(session: SessionView): string[] {
+  const width = renderWidth();
+  const lines: string[] = [];
+  if (session.slots?.title) {
+    lines.push(`  ${dimText(`task ${truncate(session.slots.title, Math.max(1, width - 7))}`)}`);
+  }
+
+  const trackerUrl = findSessionLink(session, "tracker");
+  if (trackerUrl) {
+    const tracker = `tracker ${formatLinkDisplay(trackerUrl)}`;
+    lines.push(`  ${dimText(truncate(tracker, Math.max(1, width - 2)))}`);
+  }
+
+  return lines;
+}
+
 function useColor(): boolean {
   return Boolean(process.stdout.isTTY) && process.env["NO_COLOR"] === undefined;
 }
@@ -231,7 +260,11 @@ export function renderSessionCard(
   session: SessionView,
   widths = measureSessionColumns([session]),
 ): string {
-  const lines = [`${renderSessionRow(session, widths)}`, `  ${dimText(describeSession(session))}`];
+  const lines = [
+    `${renderSessionRow(session, widths)}`,
+    `  ${dimText(describeSession(session))}`,
+    ...renderSessionSlotSummary(session),
+  ];
   return lines.join("\n");
 }
 
@@ -287,12 +320,15 @@ function renderSessionDetailsPane(args: {
     const prefix = `${label} `;
     return `${boldText(label)} ${truncate(value, Math.max(1, width - prefix.length))}`;
   };
+  const trackerUrl = findSessionLink(selected, "tracker");
 
   const fields = [
     renderField(
       "branch",
       selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
     ),
+    ...(selected.slots?.title ? [renderField("task", selected.slots.title)] : []),
+    ...(trackerUrl ? [renderField("tracker", formatLinkDisplay(trackerUrl))] : []),
     renderField("prompt", selected.prompt),
     renderField("tmux", selected.tmuxSession),
     renderField("workspace", selected.worktreePath),

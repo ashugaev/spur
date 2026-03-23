@@ -974,6 +974,51 @@ describe("SessionService", () => {
     expect(result.status).toBe("killed");
   });
 
+  it.each([
+    { action: "complete", status: "completed" },
+    { action: "kill", status: "killed" },
+  ])("keeps slots attached when transitioning a session to %s", async ({ action, status }) => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        title: "Investigate status bar links",
+        links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result =
+      action === "complete" ? await service.complete("api-1") : await service.kill("api-1");
+
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        status,
+        slots: {
+          title: "Investigate status bar links",
+          links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+        },
+      }),
+    );
+    expect(result.slots).toEqual({
+      title: "Investigate status bar links",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+  });
+
   it("updates slots without changing the session timestamp", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

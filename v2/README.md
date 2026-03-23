@@ -22,6 +22,7 @@ spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--wor
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
 
 `list` derives live `state` and `lastActivityAt` from `tmux`.
+When session slots are set, `list` also surfaces the persisted task title and `tracker` link alongside the branch.
 When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
 Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, and fresh-launch fallbacks.
 
@@ -40,6 +41,8 @@ spur-slots --title "Fix flaky auth test"
 spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
+
+Spur keeps these slots in the persisted session record, so they stay attached to the session across restore and terminal lifecycle transitions.
 
 ## Start
 

@@ -3,6 +3,7 @@ import {
   describeSession,
   renderInteractiveSessionList,
   renderRuntimeSummary,
+  renderSessionList,
 } from "../../src/cli-view.js";
 import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SessionView } from "../../src/types.js";
 
@@ -78,6 +79,29 @@ describe("cli-view.renderRuntimeSummary", () => {
 });
 
 describe("cli-view.renderInteractiveSessionList", () => {
+  it("shows branch, task, and tracker details for the selected session", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [
+        session({
+          branch: "feature/task-9",
+          slots: {
+            title: "Investigate status bar links",
+            links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+          },
+        }),
+      ],
+      selectedSessionId: "api-1",
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 4,
+    });
+
+    expect(output).toContain("feature/task-9");
+    expect(output).toContain("task Investigate status bar links");
+    expect(output).toContain("tracker tracker.example.com/TASK-9");
+  });
+
   it("shows the full live-list action hint", () => {
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
@@ -106,5 +130,23 @@ describe("cli-view.renderInteractiveSessionList", () => {
     });
 
     expect(output).toContain("Use ↑↓ to reselect before acting.");
+  });
+});
+
+describe("cli-view.renderSessionList", () => {
+  it("shows task title and tracker link on session cards", () => {
+    const output = renderSessionList([
+      session({
+        branch: "feature/task-9",
+        slots: {
+          title: "Investigate status bar links",
+          links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+        },
+      }),
+    ]);
+
+    expect(output).toContain("feature/task-9");
+    expect(output).toContain("task Investigate status bar links");
+    expect(output).toContain("tracker tracker.example.com/TASK-9");
   });
 });
