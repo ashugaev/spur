@@ -7,6 +7,11 @@ allowed-tools: Read, Grep, Glob, Bash
 
 # GitHub Operations via `gh`
 
+## Default Close-Out
+
+- If the current branch already has an open PR, commit local changes and push to that branch.
+- If the current branch has no PR, create one after local validation unless the user explicitly opts out.
+
 ## Create Draft PR
 
 ```bash

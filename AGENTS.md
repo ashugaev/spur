@@ -24,6 +24,7 @@
 - Apply defaults once at the boundary. Do not scatter re-defaulting and fallback branches through the runtime path.
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
+- Default close-out for repo work: if the current branch already has an open PR, commit and push to that branch. If no PR exists, create one unless the user explicitly says not to.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
 - For Spur work, change only `v2/`. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - For `v2/` migration planning or implementation, use `$migrate-orchestrator-v2`.
