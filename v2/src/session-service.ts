@@ -86,10 +86,6 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
 
-function shouldHideFromList(status: SessionStatus): boolean {
-  return status === "completed" || status === "killed";
-}
-
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
 }
@@ -336,7 +332,7 @@ export class SessionService {
 
   async list(): Promise<SessionView[]> {
     const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !shouldHideFromList(session.status),
+      (session) => !isTerminalSessionStatus(session.status),
     );
     return Promise.all(sessions.map((session) => this.enrich(session)));
   }
@@ -634,7 +630,7 @@ export class SessionService {
     if (typeof message !== "string" || !message.trim()) {
       throw new Error("message must be a non-empty string");
     }
-    if (session.status !== "running" && session.status !== "paused") {
+    if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
