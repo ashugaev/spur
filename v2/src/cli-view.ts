@@ -55,8 +55,8 @@ function formatLinkDisplay(url: string): string {
   }
 }
 
-function findSessionLink(session: Pick<SessionView, "slots">, label: string): string | undefined {
-  return session.slots?.links.find((link) => link.label === label)?.url;
+function findTrackerUrl(session: Pick<SessionView, "slots">): string | undefined {
+  return session.slots?.links.find((link) => link.label === "tracker")?.url;
 }
 
 function renderSessionSlotSummary(session: SessionView): string[] {
@@ -66,7 +66,7 @@ function renderSessionSlotSummary(session: SessionView): string[] {
     lines.push(`  ${dimText(`task ${truncate(session.slots.title, Math.max(1, width - 7))}`)}`);
   }
 
-  const trackerUrl = findSessionLink(session, "tracker");
+  const trackerUrl = findTrackerUrl(session);
   if (trackerUrl) {
     const tracker = `tracker ${formatLinkDisplay(trackerUrl)}`;
     lines.push(`  ${dimText(truncate(tracker, Math.max(1, width - 2)))}`);
@@ -320,7 +320,7 @@ function renderSessionDetailsPane(args: {
     const prefix = `${label} `;
     return `${boldText(label)} ${truncate(value, Math.max(1, width - prefix.length))}`;
   };
-  const trackerUrl = findSessionLink(selected, "tracker");
+  const trackerUrl = findTrackerUrl(selected);
 
   const fields = [
     renderField(
