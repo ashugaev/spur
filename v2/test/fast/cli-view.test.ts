@@ -91,6 +91,7 @@ describe("cli-view.renderInteractiveSessionList", () => {
     expect(output).toContain("Esc quit");
     expect(output).toContain("p pause");
     expect(output).toContain("c complete");
+    expect(output).toContain("Ctrl+G detach");
     expect(output).not.toContain("q/Esc quit");
   });
 
