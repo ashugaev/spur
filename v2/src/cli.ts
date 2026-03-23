@@ -230,7 +230,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }

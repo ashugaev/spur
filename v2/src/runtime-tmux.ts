@@ -4,10 +4,12 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
+const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
@@ -132,7 +134,17 @@ export async function createTmuxSession(input: {
     envArgs.push("-e", `${key}=${value}`);
   }
 
-  await tmux("new-session", "-d", "-s", input.sessionName, "-c", input.cwd, ...envArgs);
+  await execFileAsync("tmux", [
+    "-f",
+    TMUX_CONFIG_PATH,
+    "new-session",
+    "-d",
+    "-s",
+    input.sessionName,
+    "-c",
+    input.cwd,
+    ...envArgs,
+  ]);
   await sleep(300);
 
   try {
