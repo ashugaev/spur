@@ -26,6 +26,7 @@
 - Apply defaults once at the boundary. Do not scatter re-defaulting and fallback branches through the runtime path.
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
+- Default close-out for repo work: if the current branch already has an open PR, commit and push to that branch. If no PR exists, create one unless the user explicitly says not to.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
 - For Spur work, change only `v2/`. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - For `v2/`, port behavior only when it reduces code. Do not port the old architecture by default.
@@ -37,10 +38,11 @@
 
 - `Spur` is the lean `v2/` orchestrator. Treat its interface as fixed unless the user asks to change it.
 - `Spur` is CLI plus local HTTP daemon. There is no UI layer in the current milestone.
-- The current human-facing `Spur` command surface is: `spawn`, `list`, `send`. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
+- The current human-facing `Spur` command surface is: `spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `Spur` CLI defaults to human output. Use `--json` only on commands that expose structured data for scripts.
 - `Spur` brand mark is `𖤓`. Use it for CLI help headers, runtime summary lines, and spinner frames.
-- `Spur list` is the only session UI: on a TTY it opens the live selector with runtime summary and selected-session details; `Enter` attaches in place, `r` restores, `k` kills, and `Esc` quits. Non-TTY `list` prints a one-shot runtime summary plus session cards.
+- `Spur list` is the only session UI: on a TTY it opens the live selector with runtime summary and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores, `k` kills, and `Esc` quits. Non-TTY `list` prints a one-shot runtime summary plus session cards.
+- `Spur list` hides `completed` and `killed` sessions by default.
 - `spawn` is positional: `spur spawn <project> <prompt...>` with optional `--agent` and `--branch`.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
 - Supported agents in `Spur` are only `claude` and `codex`.

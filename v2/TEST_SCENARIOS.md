@@ -15,8 +15,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Fast
 
-- Root help exposes only `spawn`, `list`, and `send`, keeps the branded help output, and hides the internal `daemon` command.
-- `list` subcommand help keeps the compact sections, inherited global options, and the TTY note.
+- Root help exposes `spawn`, `list`, `send`, `pause`, `complete`, and `kill`, keeps the branded help output, and hides the internal `daemon` and `slots` commands.
+- `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
@@ -28,11 +28,15 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can suggest the new worktree branch through the selected agent's one-shot mode, and fails before reserving a session id when preflight output is invalid.
 - Session lifecycle and trigger handling append structured key events to `dataDir/events.jsonl` for spawn, send, slot updates, kill, restore, and trigger match/deliver/drop paths.
 - Spawn captures Claude/Codex native session ids when the agent writes them to disk.
-- Stopped-session send recovery reuses stored native resume state when available, re-discovers it from agent state on disk when missing, and falls back to a fresh launch when native resume is stale.
-- `get`, `list`, `send`, and `kill` target the exact tmux session name, so `spur-1` never resolves to `spur-11`.
+- Paused and crashed worktree-backed sessions can resume on later `send` by reusing stored native resume state when available, re-discovering it from agent state on disk when missing, and falling back to a fresh launch when native resume is stale.
+- `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-1` never resolves to `spur-11`.
+- `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
+- `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
+- `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
+- Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, including plan-mode menus, permission prompts, and Codex trailing UI.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
@@ -50,16 +54,19 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
-- `send --json` to a stopped worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
+- `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
+- `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
+- `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path and refreshes `tmux` status hyperlinks without restarting the session.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, and returns to the selector after detach.
-- TTY `list` can kill the selected live session in place, leaves terminal metadata with `runtimeAlive: false` and `workspaceExists: false`, and reports that the killed session is not restorable on `Enter` or `r`.
+- TTY `list` can pause, complete, and kill the selected live session in place, and `completed` or `killed` sessions disappear from the live list without silently retargeting another row.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
-- `send` rejects an unknown session id through the built CLI.
+- `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
+- `send` rejects a `completed` or `killed` session through the built CLI.
 - `POST /sessions/:id/kill` rejects a session whose worktree has uncommitted changes or unpushed commits unless `force: true`.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - Hidden `daemon stop --json` stops a running daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
@@ -79,6 +86,22 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Real `claude` and `codex` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
 - When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
+
+## Negative Paths
+
+- Unknown project.
+- Unsupported agent fails before session metadata, worktree, or tmux side effects.
+- Empty prompt.
+- Missing positional prompt for `spawn`.
+- Empty branch.
+- Missing session for `send`.
+- Missing session for `pause`.
+- Missing session for `complete`.
+- Missing session for `kill`.
+- Empty message for `send`.
+- `send` to a `completed` or `killed` session.
+- `cron` source without `schedule`.
+- Trigger referencing an unknown source.
 
 ## Regression Rule
 

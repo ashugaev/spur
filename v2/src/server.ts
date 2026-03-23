@@ -61,10 +61,7 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
-  const logEvent = (
-    event: string,
-    entry: Omit<SpurLogEntry, "timestamp" | "event">,
-  ): void => {
+  const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
   const handleRequest = async (
@@ -133,6 +130,18 @@ export async function startServer(
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request);
         sendJson(response, 200, await service.send(sendSessionId, body));
+        return;
+      }
+
+      const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
+      if (method === "POST" && pauseSessionId) {
+        sendJson(response, 200, await service.pause(pauseSessionId));
+        return;
+      }
+
+      const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
+      if (method === "POST" && completeSessionId) {
+        sendJson(response, 200, await service.complete(completeSessionId));
         return;
       }
 

@@ -16,7 +16,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - Spur is separate from the current `ao`.
 - Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - Spur is CLI plus local HTTP daemon. No UI layer in the current milestone.
-- Current human-facing command surface: `spawn`, `list`, `send`.
+- Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
   `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>]`
@@ -26,6 +26,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
   `codex --dangerously-bypass-approvals-and-sandbox`
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
+- `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
 - Current built-in source types are `cron` and `github`.
@@ -112,9 +113,9 @@ cron source
   primary line = `id`, colored status dot, state, project, agent, branch
   secondary line = `updated`, runtime/worktree facts, and at most one short exceptional hint
 - `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
+  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
   Non-TTY `list` stays a one-shot runtime summary plus session cards.
-- Never silently retarget `Enter`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
+- Never silently retarget `Enter`, `p`, `c`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
 - Empty states should be one sentence plus one dim next-step hint.
 - Optional animation is only a one-line transient spinner during wait states, cleared before final output.
 

@@ -31,11 +31,11 @@ projects:
         source: gh
         event: github:changes_requested
         send: {}
-      gh-ci-failed:
-        source: gh
-        event: github:ci_failed
-        send:
-          interrupt: true
+      # gh-ci-failed:
+      #   source: gh
+      #   event: github:ci_failed
+      #   send:
+      #     interrupt: true
       gh-comment:
         source: gh
         event: github:comment

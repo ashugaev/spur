@@ -78,7 +78,7 @@ describe("cli-view.renderRuntimeSummary", () => {
 });
 
 describe("cli-view.renderInteractiveSessionList", () => {
-  it("shows only Esc in the quit hint", () => {
+  it("shows the full live-list action hint", () => {
     const output = renderInteractiveSessionList({
       info: runtimeInfo(),
       sessions: [session({})],
@@ -89,6 +89,21 @@ describe("cli-view.renderInteractiveSessionList", () => {
     });
 
     expect(output).toContain("Esc quit");
+    expect(output).toContain("p pause");
+    expect(output).toContain("c complete");
     expect(output).not.toContain("q/Esc quit");
+  });
+
+  it("asks the user to reselect before acting when nothing is selected", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [session({}), session({ id: "api-2", tmuxSession: "api-2", branch: "api-2" })],
+      selectedSessionId: null,
+      totalSessions: 2,
+      windowStart: 0,
+      maxDetailLines: 2,
+    });
+
+    expect(output).toContain("Use ↑↓ to reselect before acting.");
   });
 });

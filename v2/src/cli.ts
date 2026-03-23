@@ -125,6 +125,16 @@ function replaceListedSession(sessions: SessionView[], updated: SessionView): Se
   return sortSessionsForList(sessions.map((entry) => (entry.id === updated.id ? updated : entry)));
 }
 
+function postSessionAction(
+  cliEntrypoint: string,
+  sessionId: string,
+  action: "pause" | "complete" | "kill",
+  configPath?: string,
+  body: object = {},
+): Promise<SessionView> {
+  return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
+}
+
 function renderLiveSessionList(args: {
   info: RuntimeInfo;
   sessions: SessionView[];
@@ -207,7 +217,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `spawn`, `list`, and `send` for scripts.",
+      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, and `kill` for scripts.",
     ];
   }
   if (command.name() === "spawn") {
@@ -220,9 +230,12 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
+  }
+  if (command.name() === "kill") {
+    return ["Use `--force` to kill a dirty worktree or unpushed commits."];
   }
   return [];
 }
@@ -335,9 +348,7 @@ async function runInteractiveSessionList(
         const vanishedId = selectedSessionId;
         selectedSessionId = null;
         pendingKillConfirmationSessionId = null;
-        statusMessage = brandLine(
-          `${vanishedId} disappeared. Use ↑↓ to reselect before attach, restore, or kill.`,
-        );
+        statusMessage = brandLine(`${vanishedId} disappeared. Use ↑↓ to reselect before acting.`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -430,24 +441,75 @@ async function runInteractiveSessionList(
     }
   };
 
+  const pauseSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+
+    busy = true;
+    statusMessage = brandLine(`Pausing ${session.id}...`);
+    render();
+
+    try {
+      const paused = await postSessionAction(cliEntrypoint, session.id, "pause", configPath);
+      sessions = replaceListedSession(sessions, paused);
+      selectedSessionId = paused.id;
+      pendingKillConfirmationSessionId = null;
+      statusMessage = brandLine(`Paused ${paused.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
+  const completeSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+
+    busy = true;
+    statusMessage = brandLine(`Completing ${session.id}...`);
+    render();
+
+    try {
+      const completed = await postSessionAction(cliEntrypoint, session.id, "complete", configPath);
+      sessions = sessions.filter((entry) => entry.id !== completed.id);
+      selectedSessionId = null;
+      pendingKillConfirmationSessionId = null;
+      statusMessage = brandLine(`Completed ${completed.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
   const killSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     const force = pendingKillConfirmationSessionId === session.id;
 
     busy = true;
-    statusMessage = brandLine(force ? `Killing ${session.id} anyway...` : `Killing ${session.id}...`);
+    statusMessage = brandLine(
+      force ? `Killing ${session.id} anyway...` : `Killing ${session.id}...`,
+    );
     render();
 
     try {
-      const killed = await postJson<SessionView>(
+      const killed = await postSessionAction(
         cliEntrypoint,
-        `/sessions/${session.id}/kill`,
-        force ? { force: true } : {},
+        session.id,
+        "kill",
         configPath,
+        force ? { force: true } : {},
       );
-      sessions = replaceListedSession(sessions, killed);
-      selectedSessionId = killed.id;
+      sessions = sessions.filter((entry) => entry.id !== killed.id);
+      selectedSessionId = null;
       pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Killed ${killed.id}.`);
     } catch (error) {
@@ -509,6 +571,16 @@ async function runInteractiveSessionList(
       if (key.name === "return" || key.name === "enter") {
         pendingKillConfirmationSessionId = null;
         void attachSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "p" || key.sequence === "p") {
+        pendingKillConfirmationSessionId = null;
+        void pauseSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "c" || key.sequence === "c") {
+        pendingKillConfirmationSessionId = null;
+        void completeSelectedSession().catch(fail);
         return;
       }
       if (key.name === "r" || key.sequence === "r") {
@@ -668,6 +740,62 @@ export function createProgram(cliEntrypoint: string): Command {
         action: () =>
           postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/send`, payload, configPath),
         success: (session) => `Sent message to ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("pause")
+    .description("Stop a session but keep its worktree.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "pausing session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
+        success: (session) => `Paused ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("complete")
+    .description("Mark a session complete and clean up its runtime artifacts.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "completing session",
+        action: () => postSessionAction(cliEntrypoint, sessionId, "complete", configPath),
+        success: (session) => `Completed ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("kill")
+    .description("Stop a session and discard its artifacts without marking it complete.")
+    .argument("<sessionId>", "Session id")
+    .option("--force", "Skip dirty-worktree and unpushed-commit confirmation")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "killing session",
+        action: () =>
+          postSessionAction(
+            cliEntrypoint,
+            sessionId,
+            "kill",
+            configPath,
+            options.force ? { force: true } : {},
+          ),
+        success: (session) => `Killed ${session.id}.`,
         render: renderSessionCard,
       });
     });
