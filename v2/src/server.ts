@@ -136,6 +136,18 @@ export async function startServer(
         return;
       }
 
+      const pauseSessionId = path.match(/^\/sessions\/([^/]+)\/pause$/)?.[1];
+      if (method === "POST" && pauseSessionId) {
+        sendJson(response, 200, await service.pause(pauseSessionId));
+        return;
+      }
+
+      const completeSessionId = path.match(/^\/sessions\/([^/]+)\/complete$/)?.[1];
+      if (method === "POST" && completeSessionId) {
+        sendJson(response, 200, await service.complete(completeSessionId));
+        return;
+      }
+
       const killSessionId = path.match(/^\/sessions\/([^/]+)\/kill$/)?.[1];
       if (method === "POST" && killSessionId) {
         const body = await readJsonBody<KillSessionRequest>(request);

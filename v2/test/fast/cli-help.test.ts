@@ -15,6 +15,9 @@ describe("spur help", () => {
     expect(help).toContain("spawn [options] <project> <prompt...>");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
+    expect(help).toContain("pause [options] <sessionId>");
+    expect(help).toContain("complete [options] <sessionId>");
+    expect(help).toContain("kill [options] <sessionId>");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
@@ -44,7 +47,9 @@ describe("spur help", () => {
     expect(help).toContain(
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
-    expect(help).toContain("TTY keys: ↑↓ move, Enter attach, r restore, k kill, Esc quit.");
+    expect(help).toContain(
+      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Esc quit.",
+    );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     );

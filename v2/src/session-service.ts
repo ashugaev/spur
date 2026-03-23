@@ -41,6 +41,7 @@ import {
   type RuntimeInfo,
   type SendMessageRequest,
   type SessionRecord,
+  type SessionStatus,
   type SessionState,
   type SessionView,
   type SpawnOverrides,
@@ -83,6 +84,19 @@ const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
+type ManualSessionStatus = "paused" | "completed";
+
+function shouldHideFromList(status: SessionStatus): boolean {
+  return status === "completed" || status === "killed";
+}
+
+function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
+  return status === "completed" || status === "killed";
+}
+
+function isRestorableStatus(status: SessionStatus): boolean {
+  return status === "running" || status === "paused";
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -181,7 +195,7 @@ export function isRestorableSession(
 ): boolean {
   return (
     session.worktree &&
-    session.status === "running" &&
+    isRestorableStatus(session.status) &&
     session.state === "stopped" &&
     session.workspaceExists
   );
@@ -321,7 +335,9 @@ export class SessionService {
   }
 
   async list(): Promise<SessionView[]> {
-    const sessions = listSessions(this.config.dataDir);
+    const sessions = listSessions(this.config.dataDir).filter(
+      (session) => !shouldHideFromList(session.status),
+    );
     return Promise.all(sessions.map((session) => this.enrich(session)));
   }
 
@@ -618,6 +634,9 @@ export class SessionService {
     if (typeof message !== "string" || !message.trim()) {
       throw new Error("message must be a non-empty string");
     }
+    if (session.status !== "running" && session.status !== "paused") {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
 
     try {
       const readySession = await this.ensureSessionReadyForSend(session);
@@ -629,6 +648,7 @@ export class SessionService {
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
         ...readySession,
+        status: "running",
         updatedAt: nowIso(),
       };
       const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
@@ -660,12 +680,19 @@ export class SessionService {
     }
   }
 
+  async pause(sessionId: string): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "paused");
+  }
+
+  async complete(sessionId: string): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed");
+  }
+
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-
     const slots = applySlotsUpdate(session.slots, request);
     const updated: SessionRecord = {
       ...session,
@@ -689,10 +716,67 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  private async applyManualStatus(
+    sessionId: string,
+    targetStatus: ManualSessionStatus,
+  ): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.status === targetStatus) {
+      return this.enrich(session);
+    }
+    if (isTerminalSessionStatus(session.status)) {
+      throw new Error(`Session ${sessionId} is already ${session.status}`);
+    }
+    const eventAction = targetStatus === "paused" ? "pause" : "complete";
+
+    try {
+      await killTmuxSession(session.tmuxSession);
+      if (targetStatus === "completed") {
+        if (session.worktree && session.worktreePath) {
+          const project = this.getProject(session.project);
+          await removeWorktree(project.path, session.worktreePath);
+        }
+        removeSessionSlotTool(this.config.dataDir, sessionId);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent(`session.${eventAction}.failed`, {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to mark ${sessionId} as ${targetStatus}: ${message}`,
+      });
+      throw error;
+    }
+
+    const record: SessionRecord = {
+      ...session,
+      status: targetStatus,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, record);
+    this.logEvent(`session.${eventAction}.completed`, {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `${targetStatus === "paused" ? "Paused" : "Completed"} ${sessionId}`,
+      details: {
+        worktree: session.worktree,
+      },
+    });
+    return this.enrich(record);
+  }
+
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.status === "completed") {
+      throw new Error(`Session ${sessionId} is already completed`);
     }
 
     if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
@@ -823,6 +907,9 @@ export class SessionService {
 
     if (session.status === "killed") {
       throw new Error(`Session ${session.id} was killed and cannot be recovered`);
+    }
+    if (session.status === "completed") {
+      throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
     if (!session.worktree || !session.worktreePath || !workspacePresent) {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
@@ -1048,6 +1135,8 @@ export class SessionService {
     let state: SessionState;
     if (session.status === "killed") {
       state = "killed";
+    } else if (session.status === "paused" || session.status === "completed") {
+      state = "stopped";
     } else if (session.status === "errored") {
       state = "error";
     } else if (session.status === "spawning") {
