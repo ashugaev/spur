@@ -47,7 +47,8 @@ export interface ProjectPreflightConfig {
 }
 
 export interface TriggerSpawnConfig {
-  steps: string[];
+  prompt: string;
+  steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
@@ -121,7 +122,7 @@ export interface SessionRecord {
   project: string;
   agent: AgentName;
   agentSessionId?: string;
-  initialStep: string;
+  prompt: string;
   branch: string;
   branchSource?: BranchSource;
   worktree: boolean;
@@ -145,7 +146,8 @@ export interface SessionView extends SessionRecord {
 
 export interface SpawnSessionRequest {
   project: string;
-  steps: string[];
+  prompt: string;
+  steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;

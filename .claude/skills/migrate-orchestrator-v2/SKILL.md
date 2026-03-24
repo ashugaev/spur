@@ -18,7 +18,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
-- `spawn` is positional: `spur spawn <project> <step...> [--step <step> ...]`, with optional `agent`, `branch`, `--worktree`, and `--shared`.
+- `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent`, `branch`, `--worktree`, and `--shared`.
 - Milestone 1 human session ops are: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
 - `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `list` is the only session UI.
@@ -32,7 +32,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - Minimal automation is allowed only as project-local `sources -> events -> triggers -> spawn|send`.
 - Current built-in sources are `cron` and `github`.
 - A lean sequential startup pipeline is allowed:
-  `steps[0]` is the first step, later `steps` entries append more agent messages.
+  one task prompt plus optional `steps` phase labels that are delivered one-by-one.
 - Do not write speculative code in `v2`. If a field, branch, or helper is not used by current Spur behavior, remove it.
 - No UI, dashboard, SSE, mobile, or terminal-web layer.
 - No tracker, PR, SCM, notifier, reaction, rich pipeline state machine, or event-driven step automation yet.
@@ -95,11 +95,12 @@ projects:
         source: weekday-review
         event: cron:tick
         spawn:
+          prompt: "Review all open PRs"
           steps:
-            - "Review all open PRs"
-            - "Pick the highest-priority task"
-            - "Run $code-simplifier before handoff and remove unnecessary complexity"
-            - "Continue it until the next checkpoint"
+            - "research"
+            - "develop"
+            - "run $code-simplifier"
+            - "test"
 ```
 
 ## Milestone 1 behavior
@@ -115,8 +116,8 @@ CLI -> ensure daemon -> POST /sessions
   -> build agent launch command + env
   -> create detached tmux session in worktree
   -> start agent inside tmux
-  -> send first step
-  -> auto-send later steps after each prompt return
+  -> send task prompt or first staged phase
+  -> auto-send later phases after each prompt return
   -> persist flat metadata
   -> return session record
 ```

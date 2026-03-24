@@ -237,7 +237,10 @@ export function renderSessionCard(
 
 export function renderSessionList(sessions: SessionView[]): string {
   if (sessions.length === 0) {
-    return renderEmptyState("No sessions.", "Run `spur spawn <project> <step...>` to start one.");
+    return renderEmptyState(
+      "No sessions.",
+      "Run `spur spawn <project> <prompt...>` to start one.",
+    );
   }
 
   const widths = measureSessionColumns(sessions);
@@ -293,7 +296,7 @@ function renderSessionDetailsPane(args: {
       "branch",
       selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
     ),
-    renderField("step", selected.initialStep),
+    renderField("prompt", selected.prompt),
     renderField("tmux", selected.tmuxSession),
     renderField("workspace", selected.worktreePath),
     renderField("launch", selected.launchCommand),
@@ -351,7 +354,7 @@ export function renderInteractiveSessionList(args: {
     lines.push(
       brandLine("Sessions"),
       "",
-      renderEmptyState("No sessions.", "Run `spur spawn <project> <step...>` to start one."),
+      renderEmptyState("No sessions.", "Run `spur spawn <project> <prompt...>` to start one."),
       "",
       brandLine("Selected"),
       dimText("No session selected."),

@@ -106,14 +106,20 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function normalizeSteps(request: SpawnSessionRequest): string[] {
+function normalizePrompt(request: SpawnSessionRequest): string {
   const rawRequest = request as unknown as Record<string, unknown>;
-  if (rawRequest["prompt"] !== undefined) {
-    throw new Error("spawn.prompt was removed; use steps");
+  if (typeof request.prompt !== "string" || !request.prompt.trim()) {
+    if (rawRequest["steps"] !== undefined) {
+      throw new Error("spawn.prompt is required; steps are optional phase labels");
+    }
+    throw new Error("prompt must be a non-empty string");
   }
+  return request.prompt.trim();
+}
 
-  if (!Array.isArray(request.steps) || request.steps.length === 0) {
-    throw new Error("steps must be a non-empty array of non-empty strings");
+function normalizeSteps(request: SpawnSessionRequest): string[] | undefined {
+  if (request.steps === undefined) {
+    return undefined;
   }
 
   return request.steps.map((step, index) => {
@@ -223,8 +229,8 @@ export function isRestorableSession(
   );
 }
 
-function buildRestorePrompt(initialStep: string): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${initialStep}`;
+function buildRestorePrompt(prompt: string): string {
+  return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -385,14 +391,10 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
-    let firstStep = "";
+    let prompt = "";
     try {
+      prompt = normalizePrompt(request);
       const steps = normalizeSteps(request);
-      const resolvedFirstStep = steps[0];
-      if (resolvedFirstStep === undefined) {
-        throw new Error("steps must contain at least one non-empty string");
-      }
-      firstStep = resolvedFirstStep;
       project = this.getProject(request.project);
       if (
         request.branch !== undefined &&
@@ -416,7 +418,7 @@ export class SessionService {
           project,
           baseBranch: defaultBranch,
           worktree,
-          prompt: firstStep,
+          prompt,
         });
         if (preflight.branch) {
           effectiveBranch = preflight.branch;
@@ -456,7 +458,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
-        initialStep: firstStep,
+        prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         worktree,
@@ -512,8 +514,9 @@ export class SessionService {
         });
       }
 
-      const initialMessage =
-        steps.length > 1 ? formatPipelineStepMessage(firstStep, 0, steps.length) : firstStep;
+      const initialMessage = steps?.length
+        ? formatPipelineStepMessage(prompt, steps[0] ?? "", 0, steps.length)
+        : prompt;
       const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
       const pipeline = createSessionPipeline(steps);
       if (pipeline) {
@@ -564,11 +567,11 @@ export class SessionService {
 
       stage = "prompt.send";
       await sendMessageToTmux(tmuxSession, withSessionSlotInstructions(launchPlan.initialMessage));
-      this.logEvent("session.spawn.initial_step_sent", {
+      this.logEvent("session.spawn.initial_prompt_sent", {
         level: "info",
         sessionId,
         projectId: request.project,
-        message: `Sent initial step to ${sessionId}`,
+        message: `Sent initial prompt to ${sessionId}`,
         details: {
           messageLength: launchPlan.initialMessage.length,
         },
@@ -612,7 +615,7 @@ export class SessionService {
           agent:
             agent ??
             parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-          initialStep: firstStep,
+          prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
           worktree,
@@ -953,7 +956,7 @@ export class SessionService {
     }
 
     await killTmuxSession(session.tmuxSession);
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.initialStep);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
     const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     const recoveryPlan = sessionWithAgentId.agentSessionId
@@ -1086,7 +1089,7 @@ export class SessionService {
       },
     });
 
-    const restorePrompt = buildRestorePrompt(current.initialStep);
+    const restorePrompt = buildRestorePrompt(current.prompt);
     const launchPlan = await waitForRestorePlan(current.agent, current.worktreePath, restorePrompt);
     if (!launchPlan) {
       this.logEvent("session.restore.failed", {
@@ -1143,7 +1146,7 @@ export class SessionService {
       ...restoredBase,
       launchCommand:
         current.launchCommand ||
-        buildAgentLaunchPlan(current.agent, current.initialStep).launchCommand,
+        buildAgentLaunchPlan(current.agent, current.prompt).launchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
@@ -1295,7 +1298,7 @@ export class SessionService {
         }
         await sendMessageToTmux(
           session.tmuxSession,
-          formatPipelineStepMessage(step, stepIndex, session.pipeline.steps.length),
+          formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
         );
 
         const latest = readSession(this.config.dataDir, sessionId);

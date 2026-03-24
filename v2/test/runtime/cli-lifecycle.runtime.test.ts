@@ -1177,7 +1177,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     await sendKeysToTmux(controllerSessionName, "q");
   });
 
-  it("runs multiple spawn steps through the built CLI", async () => {
+  it("keeps manual spawn as one task prompt through the built CLI", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-pipeline-${port}`;
@@ -1201,9 +1201,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
           configPath,
           "spawn",
           "api",
-          "cli pipeline step one",
-          "--step",
-          "cli pipeline step two",
+          "ship the task",
           "--json",
         ])
       ).stdout,
@@ -1211,18 +1209,15 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("cli pipeline step two"),
+      accept: (value) => value.includes("ship the task"),
     });
     const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
       timeoutMs: 15_000,
-      accept: (value) =>
-        value.includes("cli pipeline step one") && value.includes("cli pipeline step two"),
+      accept: (value) => value.includes("ship the task"),
     });
 
-    expect(pane).toContain("cli pipeline step one");
-    expect(pane).toContain("cli pipeline step two");
-    expect(log).toContain("cli pipeline step one");
-    expect(log).toContain("cli pipeline step two");
+    expect(pane).toContain("ship the task");
+    expect(log).toContain("ship the task");
   });
 
   it("blocks kill from the interactive list when the worktree is dirty", async () => {

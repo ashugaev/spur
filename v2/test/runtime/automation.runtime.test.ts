@@ -107,9 +107,10 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         source: morning
         event: cron:tick
         spawn:
+          prompt: "Review the repo"
           steps:
-            - "cron runtime step one"
-            - "cron runtime step two"
+            - "research"
+            - "test"
 `,
       ),
     );
@@ -134,12 +135,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     const pane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("cron runtime step two"),
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
     });
 
     expect(sessions[0]?.project).toBe("api");
-    expect(pane).toContain("cron runtime step one");
-    expect(pane).toContain("cron runtime step two");
+    expect(pane).toContain("Review the repo");
+    expect(pane).toContain("[Spur step 1/2: research]");
+    expect(pane).toContain("[Spur step 2/2: test]");
     const cronEvents = await pollUntil(
       async () => readEventLog(context.dataDir).map((entry) => entry.event),
       {
@@ -194,8 +196,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         source: morning
         event: cron:tick
         spawn:
-          steps:
-            - "cron shared prompt"
+          prompt: "cron shared prompt"
           overrides:
             worktree: false
 `,
@@ -289,7 +290,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         project: "api",
         agent: "claude",
         branch: "feature-runtime-gh",
-        steps: ["initial github runtime prompt"],
+        prompt: "initial github runtime prompt",
       });
 
       await pollUntil(async () => captureTmuxPane(session.id), {
@@ -447,7 +448,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         project: "api",
         agent: "claude",
         branch: "feature-runtime-ci",
-        steps: ["initial github ci runtime prompt"],
+        prompt: "initial github ci runtime prompt",
       });
 
       await pollUntil(async () => captureTmuxPane(session.id), {

@@ -227,7 +227,7 @@ describe("SessionService", () => {
 
     const result = await service.spawn({
       project: "api",
-      steps: ["hello"],
+      prompt: "hello",
     });
 
     expect(createWorktreeMock).toHaveBeenCalledWith({
@@ -269,7 +269,7 @@ describe("SessionService", () => {
       "session.spawn.worktree_created",
       "session.spawn.tmux_created",
       "session.spawn.ready",
-      "session.spawn.initial_step_sent",
+      "session.spawn.initial_prompt_sent",
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
@@ -282,20 +282,21 @@ describe("SessionService", () => {
 
     const result = await service.spawn({
       project: "api",
-      steps: ["step one", "step two"],
+      prompt: "ship the task",
+      steps: ["research", "test"],
     });
 
-    expect(result.initialStep).toBe("step one");
+    expect(result.prompt).toBe("ship the task");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur pipeline step 1/2]");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("step one");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur step 1/2: research]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
 
     await vi.waitFor(() => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
     });
     expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
-    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("[Spur pipeline step 2/2]");
-    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("step two");
+    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("[Spur step 2/2: test]");
+    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("ship the task");
 
     expect(sessions.get("api-1")?.pipeline).toMatchObject({
       status: "running",
@@ -304,16 +305,16 @@ describe("SessionService", () => {
     });
   });
 
-  it("rejects the removed spawn.prompt request field", async () => {
+  it("rejects a steps-only spawn request", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await expect(
       service.spawn({
         project: "api",
-        prompt: "hello",
+        steps: ["research"],
       } as never),
-    ).rejects.toThrow("spawn.prompt was removed; use steps");
+    ).rejects.toThrow("spawn.prompt is required; steps are optional phase labels");
   });
 
   it("resumes an unfinished pipeline after daemon restart", async () => {
@@ -324,7 +325,7 @@ describe("SessionService", () => {
         id: "api-1",
         project: "api",
         agent: "claude",
-        initialStep: "step one",
+        prompt: "ship the task",
         branch: "api-1",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -334,7 +335,7 @@ describe("SessionService", () => {
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
         pipeline: {
-          steps: ["step one", "step two"],
+          steps: ["research", "test"],
           nextStepIndex: 1,
           awaitingStepIndex: 0,
           status: "running",
@@ -349,8 +350,8 @@ describe("SessionService", () => {
       expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
     });
     expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur pipeline step 2/2]");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("step two");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur step 2/2: test]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
 
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => {
@@ -374,7 +375,7 @@ describe("SessionService", () => {
 
     const result = await service.spawn({
       project: "api",
-      steps: ["hello"],
+      prompt: "hello",
     });
 
     expect(readCurrentBranchMock).toHaveBeenCalledWith("/repo/api");
@@ -406,7 +407,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -446,7 +447,7 @@ describe("SessionService", () => {
         id: "api-1",
         project: "api",
         agent: "claude",
-        initialStep: "hello",
+        prompt: "hello",
         branch: "api-1",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -460,7 +461,7 @@ describe("SessionService", () => {
         id: "api-2",
         project: "api",
         agent: "claude",
-        initialStep: "hello",
+        prompt: "hello",
         branch: "api-2",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-2",
@@ -474,7 +475,7 @@ describe("SessionService", () => {
         id: "api-3",
         project: "api",
         agent: "claude",
-        initialStep: "hello",
+        prompt: "hello",
         branch: "api-3",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-3",
@@ -488,7 +489,7 @@ describe("SessionService", () => {
         id: "api-4",
         project: "api",
         agent: "claude",
-        initialStep: "hello",
+        prompt: "hello",
         branch: "api-4",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-4",
@@ -518,7 +519,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -562,7 +563,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -608,7 +609,7 @@ describe("SessionService", () => {
       project: "api",
       agent: "claude",
       agentSessionId: "session-uuid",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -666,7 +667,7 @@ describe("SessionService", () => {
 
     await service.spawn({
       project: "api",
-      steps: ["hello"],
+      prompt: "hello",
       overrides: {
         worktree: true,
       },
@@ -682,7 +683,7 @@ describe("SessionService", () => {
 
     await service.spawn({
       project: "api",
-      steps: ["hello"],
+      prompt: "hello",
       overrides: {
         defaultBranch: "release",
       },
@@ -705,7 +706,7 @@ describe("SessionService", () => {
 
     const result = await service.spawn({
       project: "api",
-      steps: ["hello"],
+      prompt: "hello",
       branch: "feature/api-1",
     });
 
@@ -741,7 +742,7 @@ describe("SessionService", () => {
 
     const result = await service.spawn({
       project: "api",
-      steps: ["Fix runtime regression from PR #42"],
+      prompt: "Fix runtime regression from PR #42",
     });
 
     expect(runSpawnPreflightMock).toHaveBeenCalledWith({
@@ -792,7 +793,7 @@ describe("SessionService", () => {
 
     await service.spawn({
       project: "api",
-      steps: ["Fix runtime regression from PR #42"],
+      prompt: "Fix runtime regression from PR #42",
       branch: "feature/manual-branch",
     });
 
@@ -819,7 +820,7 @@ describe("SessionService", () => {
     await expect(
       service.spawn({
         project: "api",
-        steps: ["Fix runtime regression from PR #42"],
+        prompt: "Fix runtime regression from PR #42",
       }),
     ).rejects.toThrow("Spawn preflight returned invalid JSON");
     expect(reserveNextSessionIdMock).not.toHaveBeenCalled();
@@ -835,7 +836,7 @@ describe("SessionService", () => {
     await expect(
       service.spawn({
         project: "api",
-        steps: ["hello"],
+        prompt: "hello",
         overrides: {
           worktree: "nope",
         } as never,
@@ -862,7 +863,7 @@ describe("SessionService", () => {
     await expect(
       service.spawn({
         project: "api",
-        steps: ["hello"],
+        prompt: "hello",
         overrides: {
           defaultBranch: "release",
         },
@@ -881,7 +882,7 @@ describe("SessionService", () => {
     await expect(
       service.spawn({
         project: "api",
-        steps: ["hello"],
+        prompt: "hello",
       }),
     ).rejects.toThrow("Failed to spawn api-1: tmux boom");
 
@@ -918,7 +919,7 @@ describe("SessionService", () => {
     await expect(
       service.spawn({
         project: "api",
-        steps: ["hello"],
+        prompt: "hello",
         branch: "feature/shared",
       }),
     ).rejects.toThrow("branch override requires worktree=true; shared workspace is on branch main");
@@ -933,7 +934,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -971,7 +972,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "main",
       worktree: false,
       worktreePath: "/repo/api",
@@ -1001,7 +1002,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1030,7 +1031,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1059,7 +1060,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1087,7 +1088,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1154,7 +1155,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1214,7 +1215,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1257,7 +1258,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1287,7 +1288,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1314,7 +1315,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "main",
       worktree: false,
       worktreePath: "/repo/api",
@@ -1340,7 +1341,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      initialStep: "hello",
+      prompt: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",

@@ -672,7 +672,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
-    .argument("<step...>", "First pipeline step")
+    .argument("<prompt...>", "Task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--branch <name>", "Branch name to use")
     .option(
@@ -681,29 +681,16 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
     .option("--json", "Print raw JSON")
-    .option(
-      "--step <step>",
-      "Additional pipeline step. Repeat for more steps.",
-      collectOptionValue,
-      [],
-    )
-    .action(async (project: string, stepParts: string[], options, command) => {
+    .action(async (project: string, promptParts: string[], options, command) => {
       const overrides = resolveCliSpawnOverrides(options);
-      const firstStep = stepParts.join(" ").trim();
-      if (!firstStep) {
-        throw new Error("spawn requires a non-empty first step");
+      const prompt = promptParts.join(" ").trim();
+      if (!prompt) {
+        throw new Error("spawn requires a non-empty prompt");
       }
-      const extraSteps = (options.step as string[]).map((step, index) => {
-        const normalized = step.trim();
-        if (!normalized) {
-          throw new Error(`--step[${index + 1}] must be a non-empty string`);
-        }
-        return normalized;
-      });
       const configPath = getConfigPath(command.parent as Command);
       const payload: SpawnSessionRequest = {
         project,
-        steps: [firstStep, ...extraSteps],
+        prompt,
         agent: options.agent,
         branch: options.branch,
         ...(overrides !== undefined ? { overrides } : {}),

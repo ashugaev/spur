@@ -82,9 +82,10 @@ projects:
         source: weekday
         event: cron:tick
         spawn:
+          prompt: "review this task"
           steps:
-            - "review"
-            - "continue"
+            - "research"
+            - "implement"
           overrides:
             worktree: true
             defaultBranch: release
@@ -101,7 +102,8 @@ projects:
       source: "weekday",
       event: "cron:tick",
       spawn: {
-        steps: ["review", "continue"],
+        prompt: "review this task",
+        steps: ["research", "implement"],
         overrides: {
           worktree: true,
           defaultBranch: "release",
@@ -146,7 +148,7 @@ projects:
     );
   });
 
-  it("rejects the removed trigger spawn.prompt field", async () => {
+  it("requires trigger spawn.prompt", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -160,13 +162,12 @@ projects:
         source: weekday
         event: cron:tick
         spawn:
-          prompt: "review"
           steps:
             - "continue"
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.triggers.review.spawn.prompt was removed; use projects.backend.triggers.review.spawn.steps",
+      "projects.backend.triggers.review.spawn.prompt must be a non-empty string",
     );
   });
 

@@ -12,7 +12,7 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
-    expect(help).toContain("spawn [options] <project> <step...>");
+    expect(help).toContain("spawn [options] <project> <prompt...>");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
@@ -70,7 +70,6 @@ describe("spur help", () => {
     expect(help).toContain("--branch <name>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
-    expect(help).toContain("--step <step>");
     expect(help).toContain("Use the project path directly for this session (no worktree)");
     expect(help).toContain(
       "If the project enables spawn preflight, worktree spawns can derive a branch before worktree creation.",

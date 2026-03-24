@@ -51,6 +51,7 @@ function spawnConfig() {
             source: "morning",
             event: "cron:tick",
             spawn: {
+              prompt: "ship the task",
               steps: ["review", "continue"],
               overrides: {
                 worktree: false,
@@ -350,6 +351,7 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledWith({
           project: "api",
+          prompt: "ship the task",
           steps: ["review", "continue"],
           overrides: {
             worktree: false,

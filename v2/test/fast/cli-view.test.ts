@@ -11,7 +11,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     id: "api-1",
     project: "api",
     agent: "claude",
-    initialStep: "test",
+    prompt: "test",
     branch: "main",
     worktree: true,
     worktreePath: "/tmp/worktree",

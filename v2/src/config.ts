@@ -207,13 +207,8 @@ function parseTrigger(
   }
 
   const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
-  if (spawnRaw["prompt"] !== undefined) {
-    throw new Error(`${label}.spawn.prompt was removed; use ${label}.spawn.steps`);
-  }
+  const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
   const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
-  if (!steps || steps.length === 0) {
-    throw new Error(`${label}.spawn.steps must be a non-empty array of strings`);
-  }
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
@@ -222,7 +217,8 @@ function parseTrigger(
     source,
     event,
     spawn: {
-      steps,
+      prompt,
+      ...(steps !== undefined ? { steps } : {}),
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
