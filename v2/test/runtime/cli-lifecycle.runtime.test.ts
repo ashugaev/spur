@@ -1195,16 +1195,8 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     currentActiveContext().daemonPid = daemon.info.pid;
 
     const spawned = JSON.parse(
-      (
-        await context.execCli([
-          "--config",
-          configPath,
-          "spawn",
-          "api",
-          "ship the task",
-          "--json",
-        ])
-      ).stdout,
+      (await context.execCli(["--config", configPath, "spawn", "api", "ship the task", "--json"]))
+        .stdout,
     ) as SessionView;
 
     const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {

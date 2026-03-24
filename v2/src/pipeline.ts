@@ -1,5 +1,3 @@
-import type { SessionPipelineState } from "./types.js";
-
 export const PIPELINE_STEP_TIMEOUT_MS = 60 * 60 * 1000;
 
 export function formatPipelineStepMessage(
