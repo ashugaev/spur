@@ -2,19 +2,6 @@ import type { SessionPipelineState } from "./types.js";
 
 export const PIPELINE_STEP_TIMEOUT_MS = 60 * 60 * 1000;
 
-export function createSessionPipeline(steps?: string[]): SessionPipelineState | undefined {
-  if (!steps || steps.length === 0) {
-    return undefined;
-  }
-
-  return {
-    steps,
-    nextStepIndex: 1,
-    awaitingStepIndex: 0,
-    status: "running",
-  };
-}
-
 export function formatPipelineStepMessage(
   prompt: string,
   step: string,

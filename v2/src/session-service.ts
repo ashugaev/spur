@@ -16,7 +16,6 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import {
   PIPELINE_STEP_TIMEOUT_MS,
-  createSessionPipeline,
   formatPipelineStepMessage,
 } from "./pipeline.js";
 import {
@@ -106,24 +105,23 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function normalizePrompt(request: SpawnSessionRequest): string {
+function normalizeSpawnRequest(request: SpawnSessionRequest): {
+  prompt: string;
+  steps?: string[];
+} {
   if (typeof request.prompt !== "string" || !request.prompt.trim()) {
     throw new Error("prompt must be a non-empty string");
   }
-  return request.prompt.trim();
-}
-
-function normalizeSteps(request: SpawnSessionRequest): string[] | undefined {
-  if (request.steps === undefined) {
-    return undefined;
-  }
-
-  return request.steps.map((step, index) => {
+  const steps = request.steps?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
     return step.trim();
   });
+  if (!steps || steps.length === 0) {
+    return { prompt: request.prompt.trim() };
+  }
+  return { prompt: request.prompt.trim(), steps };
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -388,9 +386,9 @@ export class SessionService {
     let createdAt: string | undefined;
     let placeholderWritten = false;
     let prompt = "";
+    let steps: string[] | undefined;
     try {
-      prompt = normalizePrompt(request);
-      const steps = normalizeSteps(request);
+      ({ prompt, steps } = normalizeSpawnRequest(request));
       project = this.getProject(request.project);
       if (
         request.branch !== undefined &&
@@ -510,11 +508,18 @@ export class SessionService {
         });
       }
 
-      const initialMessage = steps?.length
-        ? formatPipelineStepMessage(prompt, steps[0] ?? "", 0, steps.length)
-        : prompt;
+      const firstStage = steps?.[0];
+      const initialMessage =
+        steps && firstStage ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length) : prompt;
       const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
-      const pipeline = createSessionPipeline(steps);
+      const pipeline = steps
+        ? {
+            steps,
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running" as const,
+          }
+        : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
         worktreePath: workspacePath,
