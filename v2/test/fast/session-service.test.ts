@@ -305,7 +305,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("rejects a steps-only spawn request", async () => {
+  it("requires a prompt for spawn", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -314,7 +314,7 @@ describe("SessionService", () => {
         project: "api",
         steps: ["research"],
       } as never),
-    ).rejects.toThrow("spawn.prompt is required; steps are optional phase labels");
+    ).rejects.toThrow("prompt must be a non-empty string");
   });
 
   it("resumes an unfinished pipeline after daemon restart", async () => {

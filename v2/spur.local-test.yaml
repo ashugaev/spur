@@ -24,8 +24,8 @@ projects:
         event: cron:tick
         spawn:
           agent: claude
+          prompt: "Review this repo."
           steps:
-            - "Review this repo."
-            - "Pick the highest-priority task."
-            - "Run $code-simplifier before handoff and remove unnecessary complexity."
-            - "Continue it until the next concrete checkpoint."
+            - "research"
+            - "develop"
+            - "test"

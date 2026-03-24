@@ -268,12 +268,10 @@ async function runSmoke(
     const session = await service.spawn({
       project: "api",
       agent,
-      steps: [
-        `Create a file named smoke-initial.txt containing exactly "${agent} initial".
+      prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
 After the file and the session metadata are set, wait for more instructions.`,
-      ],
     });
     cleanupItem.branch = session.branch;
     cleanupItem.worktreePath = session.worktreePath;

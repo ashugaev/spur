@@ -107,11 +107,7 @@ function nowIso(): string {
 }
 
 function normalizePrompt(request: SpawnSessionRequest): string {
-  const rawRequest = request as unknown as Record<string, unknown>;
   if (typeof request.prompt !== "string" || !request.prompt.trim()) {
-    if (rawRequest["steps"] !== undefined) {
-      throw new Error("spawn.prompt is required; steps are optional phase labels");
-    }
     throw new Error("prompt must be a non-empty string");
   }
   return request.prompt.trim();
@@ -519,10 +515,6 @@ export class SessionService {
         : prompt;
       const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
       const pipeline = createSessionPipeline(steps);
-      if (pipeline) {
-        pipeline.nextStepIndex = 1;
-        pipeline.awaitingStepIndex = 0;
-      }
       const runningRecord: SessionRecord = {
         ...placeholder,
         worktreePath: workspacePath,

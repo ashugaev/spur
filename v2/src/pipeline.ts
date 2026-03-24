@@ -9,7 +9,8 @@ export function createSessionPipeline(steps?: string[]): SessionPipelineState | 
 
   return {
     steps,
-    nextStepIndex: 0,
+    nextStepIndex: 1,
+    awaitingStepIndex: 0,
     status: "running",
   };
 }
