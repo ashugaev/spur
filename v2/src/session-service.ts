@@ -7,6 +7,7 @@ import {
   buildAgentResumePlan,
   findAgentSessionId,
   parseAgentName,
+  probeAgentState,
 } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -1413,7 +1414,18 @@ export class SessionService {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     const updatedAt = new Date(session.updatedAt);
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
+    const processAlive = runtimeAlive
+      ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
+      : false;
+    const agentState = workspacePresent
+      ? await probeAgentState(session.agent, session.worktreePath, {
+          processAlive,
+          signalWindowMs: WORKING_SIGNAL_WINDOW_MS,
+        })
+      : null;
+    const lastActivityAt = (
+      latestActivityAt(updatedAt, tmuxActivityAt, agentState?.signalAt ?? null) ?? updatedAt
+    ).toISOString();
 
     let state: SessionState;
     if (session.status === "killed") {
@@ -1424,19 +1436,25 @@ export class SessionService {
       state = "error";
     } else if (session.status === "spawning") {
       state = "working";
-    } else if (!runtimeAlive) {
-      state = "stopped";
+    } else if (!runtimeAlive || !processAlive) {
+      state = agentState?.state === "error" ? "error" : "stopped";
+    } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
+      state = agentState.state;
     } else {
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
-        state = "stopped";
+      const pane = await captureTmuxPane(session.tmuxSession, 80);
+      const paneState = classifyRunningState({
+        pane,
+        updatedAt,
+        signalAt: tmuxActivityAt,
+      });
+      if (paneState === "needs_input") {
+        state = paneState;
+      } else if (session.agent === "claude" && agentState) {
+        state = agentState.state;
+      } else if (session.agent === "codex" && agentState) {
+        state = paneState === "working" || agentState.state === "working" ? "working" : "waiting";
       } else {
-        const pane = await captureTmuxPane(session.tmuxSession, 80);
-        state = classifyRunningState({
-          pane,
-          updatedAt,
-          signalAt: tmuxActivityAt,
-        });
+        state = paneState;
       }
     }
 

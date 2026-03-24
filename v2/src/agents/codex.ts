@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
@@ -156,6 +156,30 @@ async function readThreadId(filePath: string): Promise<string | null> {
 export async function findCodexSessionId(worktreePath: string): Promise<string | null> {
   const sessionFile = await findSessionFile(worktreePath);
   return sessionFile ? readThreadId(sessionFile) : null;
+}
+
+export async function probeCodexState(
+  worktreePath: string,
+  args: { processAlive: boolean; signalWindowMs: number },
+): Promise<AgentStateProbe | null> {
+  const sessionFile = await findSessionFile(worktreePath);
+  if (!sessionFile) {
+    return null;
+  }
+
+  try {
+    const fileStat = await stat(sessionFile);
+    const signalAt = fileStat.mtime;
+    if (!args.processAlive) {
+      return { state: "stopped", signalAt };
+    }
+    return {
+      state: Date.now() - fileStat.mtimeMs <= args.signalWindowMs ? "working" : "waiting",
+      signalAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function buildCodexPlan(prompt: string): AgentLaunchPlan {

@@ -6,6 +6,7 @@ const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
 const findAgentSessionIdMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
+const probeAgentStateMock = vi.fn();
 const loadConfigMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
@@ -39,6 +40,7 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentResumePlan: buildAgentResumePlanMock,
   findAgentSessionId: findAgentSessionIdMock,
   parseAgentName: parseAgentNameMock,
+  probeAgentState: probeAgentStateMock,
 }));
 
 vi.mock("../../src/config.js", () => ({
@@ -164,6 +166,7 @@ describe("SessionService", () => {
     });
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
+    probeAgentStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
@@ -439,6 +442,95 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("prefers Claude native waiting state over a stale busy-looking pane", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    probeAgentStateMock.mockResolvedValue({
+      state: "waiting",
+      signalAt: new Date("2026-03-18T10:04:40.000Z"),
+    });
+    captureTmuxPaneMock.mockResolvedValue("Claude Code\nthinking...");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
+    expect(result.lastActivityAt).toBe("2026-03-18T10:04:40.000Z");
+  });
+
+  it("keeps Codex approval prompts in needs_input even when native probe is only waiting", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    probeAgentStateMock.mockResolvedValue({
+      state: "waiting",
+      signalAt: new Date("2026-03-18T10:04:40.000Z"),
+    });
+    captureTmuxPaneMock.mockResolvedValue("approval required\n(Y)es / (N)o");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("surfaces an agent-native error when the runtime is gone", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    probeAgentStateMock.mockResolvedValue({
+      state: "error",
+      signalAt: new Date("2026-03-18T10:04:45.000Z"),
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("error");
+    expect(result.runtimeAlive).toBe(false);
   });
 
   it("hides completed and killed sessions from list while keeping paused sessions", async () => {
