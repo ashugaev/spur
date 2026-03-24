@@ -7,6 +7,8 @@ import {
   buildAgentResumePlan,
   findAgentSessionId,
   parseAgentName,
+  probeAgentState,
+  type AgentStateProbe,
 } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -14,14 +16,15 @@ import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
 import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  captureTmuxPane,
   createTmuxSession,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
   killTmuxSession,
   sendMessageToTmux,
   syncTmuxStatus,
-  captureTmuxPane,
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
@@ -69,6 +72,7 @@ const TRAILING_UI_RE = [
   /^Update available!\b/,
   /^gpt-[\w.-]+\b.*·/,
 ];
+const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -94,8 +98,29 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "paused";
 }
 
+type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function normalizeSpawnRequest(request: SpawnSessionRequest): {
+  prompt: string;
+  steps?: string[];
+} {
+  if (typeof request.prompt !== "string" || !request.prompt.trim()) {
+    throw new Error("prompt must be a non-empty string");
+  }
+  const steps = request.steps?.map((step, index) => {
+    if (typeof step !== "string" || !step.trim()) {
+      throw new Error(`steps[${index}] must be a non-empty string`);
+    }
+    return step.trim();
+  });
+  if (!steps || steps.length === 0) {
+    return { prompt: request.prompt.trim() };
+  }
+  return { prompt: request.prompt.trim(), steps };
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -177,6 +202,25 @@ export function classifyRunningState(args: {
   return "waiting";
 }
 
+function resolveRunningSessionState(args: {
+  agent: SessionRecord["agent"];
+  agentState: AgentStateProbe | null;
+  paneState: SessionState;
+}): SessionState {
+  if (args.paneState === "needs_input") {
+    return "needs_input";
+  }
+  if (!args.agentState) {
+    return args.paneState;
+  }
+  if (args.agent === "claude") {
+    return args.agentState.state;
+  }
+  return args.paneState === "working" || args.agentState.state === "working"
+    ? "working"
+    : "waiting";
+}
+
 function isPromptReadyState(pane: string): boolean {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) {
@@ -237,13 +281,13 @@ function buildSessionEnv(args: {
 async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
-  prompt: string,
+  restoreMessage: string,
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
-  let plan = await buildAgentRestorePlan(agent, worktreePath, prompt);
+  let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage);
   while (!plan && Date.now() < deadline) {
     await sleep(RESTORE_PLAN_POLL_MS);
-    plan = await buildAgentRestorePlan(agent, worktreePath, prompt);
+    plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage);
   }
   return plan;
 }
@@ -301,11 +345,14 @@ async function resolveSpawnBranch(args: {
 export class SessionService {
   readonly config: AppConfig;
   readonly startedAt: string;
+  private readonly pipelineRuns = new Map<string, Promise<void>>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     this.config = loadConfig(configPath);
     this.startedAt = startedAt;
     mkdirSync(this.config.dataDir, { recursive: true });
+    mkdirSync(this.config.worktreeDir, { recursive: true });
+    this.resumeRunningPipelines();
   }
 
   info(): RuntimeInfo {
@@ -317,6 +364,10 @@ export class SessionService {
     entry: Omit<SpurLogEntry, "timestamp" | "event"> = { level: "info" },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private schedulePipelineRunner(sessionId: string): void {
+    this.ensurePipelineRunner(sessionId);
   }
 
   private getProject(projectId: string): ProjectConfig {
@@ -352,12 +403,11 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
-
+    let prompt = "";
+    let steps: string[] | undefined;
     try {
+      ({ prompt, steps } = normalizeSpawnRequest(request));
       project = this.getProject(request.project);
-      if (typeof request.prompt !== "string" || !request.prompt.trim()) {
-        throw new Error("prompt must be a non-empty string");
-      }
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -380,7 +430,7 @@ export class SessionService {
           project,
           baseBranch: defaultBranch,
           worktree,
-          prompt: request.prompt,
+          prompt,
         });
         if (preflight.branch) {
           effectiveBranch = preflight.branch;
@@ -420,7 +470,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
-        prompt: request.prompt,
+        prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         worktree,
@@ -476,13 +526,27 @@ export class SessionService {
         });
       }
 
-      const launchPlan = buildAgentLaunchPlan(agent, request.prompt);
+      const firstStage = steps?.[0];
+      const initialMessage =
+        steps && firstStage
+          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
+          : prompt;
+      const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
+      const pipeline = steps
+        ? {
+            steps,
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running" as const,
+          }
+        : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(pipeline ? { pipeline } : {}),
       };
 
       stage = "tmux.create";
@@ -520,7 +584,7 @@ export class SessionService {
 
       stage = "prompt.send";
       await sendMessageToTmux(tmuxSession, withSessionSlotInstructions(launchPlan.initialMessage));
-      this.logEvent("session.spawn.prompt_sent", {
+      this.logEvent("session.spawn.initial_prompt_sent", {
         level: "info",
         sessionId,
         projectId: request.project,
@@ -548,6 +612,9 @@ export class SessionService {
           agentSessionId: persistedRecord.agentSessionId ?? null,
         },
       });
+      if (persistedRecord.pipeline?.status === "running") {
+        this.schedulePipelineRunner(persistedRecord.id);
+      }
 
       return await this.enrich(persistedRecord);
     } catch (error) {
@@ -565,7 +632,7 @@ export class SessionService {
           agent:
             agent ??
             parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-          prompt: request.prompt,
+          prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
           worktree,
@@ -1114,7 +1181,250 @@ export class SessionService {
         agentSessionId: persistedRestored.agentSessionId ?? null,
       },
     });
+    if (persistedRestored.pipeline?.status === "running") {
+      this.schedulePipelineRunner(persistedRestored.id);
+    }
     return this.enrich(persistedRestored);
+  }
+
+  private resumeRunningPipelines(): void {
+    for (const session of listSessions(this.config.dataDir)) {
+      this.ensurePipelineRunner(session.id);
+    }
+  }
+
+  private ensurePipelineRunner(sessionId: string): void {
+    if (this.pipelineRuns.has(sessionId)) {
+      return;
+    }
+
+    const session = readSession(this.config.dataDir, sessionId);
+    if (
+      !session?.pipeline ||
+      session.status !== "running" ||
+      session.pipeline.status !== "running"
+    ) {
+      return;
+    }
+
+    const run = this.runPipeline(sessionId).finally(() => {
+      this.pipelineRuns.delete(sessionId);
+    });
+    this.pipelineRuns.set(sessionId, run);
+  }
+
+  private async runPipeline(sessionId: string): Promise<void> {
+    try {
+      for (;;) {
+        const session = readSession(this.config.dataDir, sessionId);
+        if (
+          !session?.pipeline ||
+          session.status !== "running" ||
+          session.pipeline.status !== "running"
+        ) {
+          return;
+        }
+
+        if (session.pipeline.awaitingStepIndex !== undefined) {
+          const waitOutcome = await this.waitForPipelineStep(sessionId);
+          if (waitOutcome === "stopped") {
+            return;
+          }
+          if (waitOutcome === "ready") {
+            const latest = readSession(this.config.dataDir, sessionId);
+            if (
+              !latest?.pipeline ||
+              latest.status !== "running" ||
+              latest.pipeline.status !== "running"
+            ) {
+              return;
+            }
+
+            if (latest.pipeline.awaitingStepIndex === undefined) {
+              continue;
+            }
+
+            const {
+              awaitingStepIndex: _awaitingStepIndex,
+              error: _pipelineError,
+              ...pipelineBase
+            } = latest.pipeline;
+            const completedPipeline =
+              latest.pipeline.nextStepIndex >= latest.pipeline.steps.length
+                ? {
+                    ...pipelineBase,
+                    status: "completed" as const,
+                  }
+                : pipelineBase;
+            writeSession(this.config.dataDir, {
+              ...latest,
+              updatedAt: nowIso(),
+              pipeline: completedPipeline,
+            });
+            if (completedPipeline.status === "completed") {
+              this.logEvent("session.pipeline.completed", {
+                level: "info",
+                sessionId,
+                projectId: latest.project,
+                message: `Pipeline completed for ${sessionId}`,
+              });
+              return;
+            }
+            continue;
+          }
+
+          const failedStepIndex = session.pipeline.awaitingStepIndex;
+          const message =
+            waitOutcome === "timeout"
+              ? `Pipeline step ${failedStepIndex + 1}/${session.pipeline.steps.length} timed out waiting for the agent prompt`
+              : `Pipeline step ${failedStepIndex + 1}/${session.pipeline.steps.length} ended before the agent returned to a prompt`;
+          this.markPipelineErrored(sessionId, message);
+          return;
+        }
+
+        if (session.pipeline.nextStepIndex >= session.pipeline.steps.length) {
+          const {
+            awaitingStepIndex: _awaitingStepIndex,
+            error: _pipelineError,
+            ...pipelineBase
+          } = session.pipeline;
+          writeSession(this.config.dataDir, {
+            ...session,
+            updatedAt: nowIso(),
+            pipeline: {
+              ...pipelineBase,
+              status: "completed",
+            },
+          });
+          this.logEvent("session.pipeline.completed", {
+            level: "info",
+            sessionId,
+            projectId: session.project,
+            message: `Pipeline completed for ${sessionId}`,
+          });
+          return;
+        }
+
+        const stepIndex = session.pipeline.nextStepIndex;
+        const step = session.pipeline.steps[stepIndex];
+        if (step === undefined) {
+          throw new Error(
+            `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
+          );
+        }
+        await sendMessageToTmux(
+          session.tmuxSession,
+          formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
+        );
+
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (
+          !latest?.pipeline ||
+          latest.status !== "running" ||
+          latest.pipeline.status !== "running"
+        ) {
+          return;
+        }
+
+        const { error: _pipelineError, ...pipelineBase } = latest.pipeline;
+        writeSession(this.config.dataDir, {
+          ...latest,
+          updatedAt: nowIso(),
+          pipeline: {
+            ...pipelineBase,
+            nextStepIndex: Math.max(latest.pipeline.nextStepIndex, stepIndex + 1),
+            awaitingStepIndex: stepIndex,
+          },
+        });
+        this.logEvent("session.pipeline.step_sent", {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message: `Sent pipeline step ${stepIndex + 1}/${session.pipeline.steps.length} to ${sessionId}`,
+          details: {
+            stepIndex: stepIndex + 1,
+            totalSteps: session.pipeline.steps.length,
+          },
+        });
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.markPipelineErrored(sessionId, message);
+    }
+  }
+
+  private async waitForPipelineStep(sessionId: string): Promise<PipelineWaitOutcome> {
+    const deadline = Date.now() + PIPELINE_STEP_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (
+        !session?.pipeline ||
+        session.status !== "running" ||
+        session.pipeline.status !== "running"
+      ) {
+        return "stopped";
+      }
+      if (session.pipeline.awaitingStepIndex === undefined) {
+        return "ready";
+      }
+
+      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+      if (!runtimeAlive) {
+        return "exited";
+      }
+
+      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+      if (!processAlive) {
+        return "exited";
+      }
+
+      const pane = await captureTmuxPane(session.tmuxSession, 80);
+      const state = classifyRunningState({
+        pane,
+        updatedAt: new Date(0),
+        signalAt: null,
+      });
+      if (state === "waiting") {
+        return "ready";
+      }
+
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+    }
+
+    return "timeout";
+  }
+
+  private markPipelineErrored(sessionId: string, message: string): void {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (
+      !session?.pipeline ||
+      session.status !== "running" ||
+      session.pipeline.status !== "running"
+    ) {
+      return;
+    }
+
+    writeSession(this.config.dataDir, {
+      ...session,
+      updatedAt: nowIso(),
+      pipeline: {
+        ...session.pipeline,
+        status: "errored",
+        error: message,
+      },
+    });
+    this.logEvent("session.pipeline.errored", {
+      level: "error",
+      sessionId,
+      projectId: session.project,
+      message: `Pipeline errored for ${sessionId}: ${message}`,
+      details: {
+        nextStepIndex: session.pipeline.nextStepIndex,
+        awaitingStepIndex: session.pipeline.awaitingStepIndex ?? null,
+      },
+    });
   }
 
   private async enrich(session: SessionRecord): Promise<SessionView> {
@@ -1122,7 +1432,18 @@ export class SessionService {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     const updatedAt = new Date(session.updatedAt);
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
+    const processAlive = runtimeAlive
+      ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
+      : false;
+    const agentState = workspacePresent
+      ? await probeAgentState(session.agent, session.worktreePath, {
+          processAlive,
+          signalWindowMs: WORKING_SIGNAL_WINDOW_MS,
+        })
+      : null;
+    const lastActivityAt = (
+      latestActivityAt(updatedAt, tmuxActivityAt, agentState?.signalAt ?? null) ?? updatedAt
+    ).toISOString();
 
     let state: SessionState;
     if (session.status === "killed") {
@@ -1133,20 +1454,21 @@ export class SessionService {
       state = "error";
     } else if (session.status === "spawning") {
       state = "working";
-    } else if (!runtimeAlive) {
-      state = "stopped";
+    } else if (!runtimeAlive || !processAlive) {
+      state = agentState?.state === "error" ? "error" : "stopped";
+    } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
+      state = agentState.state;
     } else {
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
-        state = "stopped";
-      } else {
-        const pane = await captureTmuxPane(session.tmuxSession, 80);
-        state = classifyRunningState({
+      const pane = await captureTmuxPane(session.tmuxSession, 80);
+      state = resolveRunningSessionState({
+        agent: session.agent,
+        agentState,
+        paneState: classifyRunningState({
           pane,
           updatedAt,
           signalAt: tmuxActivityAt,
-        });
-      }
+        }),
+      });
     }
 
     return {

@@ -1,9 +1,25 @@
-import { readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
+
+const ACTIVE_ENTRY_TYPES = new Set([
+  "user",
+  "tool_use",
+  "progress",
+  "file-history-snapshot",
+  "queue-operation",
+  "pr-link",
+]);
+
+const WAITING_ENTRY_TYPES = new Set(["assistant", "system", "summary", "result"]);
+const MAX_SESSION_TAIL_BYTES = 131_072;
+
+interface ClaudeSessionLine {
+  type?: string;
+}
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
@@ -55,8 +71,111 @@ async function findLatestSessionId(worktreePath: string): Promise<string | null>
   return sessionFile ? basename(sessionFile, ".jsonl") : null;
 }
 
+async function readSessionTail(filePath: string, fileSize?: number): Promise<ClaudeSessionLine[]> {
+  let content: string;
+  let offset: number;
+  try {
+    const size = fileSize ?? (await stat(filePath)).size;
+    offset = Math.max(0, size - MAX_SESSION_TAIL_BYTES);
+    if (offset === 0) {
+      content = await readFile(filePath, "utf-8");
+    } else {
+      const handle = await open(filePath, "r");
+      try {
+        const length = size - offset;
+        const buffer = Buffer.allocUnsafe(length);
+        await handle.read(buffer, 0, length, offset);
+        content = buffer.toString("utf-8");
+      } finally {
+        await handle.close();
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  const firstNewline = content.indexOf("\n");
+  const safeContent = offset > 0 && firstNewline >= 0 ? content.slice(firstNewline + 1) : content;
+  const lines: ClaudeSessionLine[] = [];
+  for (const line of safeContent.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = JSON.parse(trimmed) as ClaudeSessionLine;
+      if (typeof parsed.type === "string" && parsed.type) {
+        lines.push(parsed);
+      }
+    } catch {
+      // Ignore malformed lines and keep searching for the latest valid entry.
+    }
+  }
+  return lines;
+}
+
+async function readLastEntryType(filePath: string, fileSize?: number): Promise<string | null> {
+  const lines = await readSessionTail(filePath, fileSize);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const type = lines[index]?.type;
+    if (typeof type === "string" && type) {
+      return type;
+    }
+  }
+  return null;
+}
+
 export async function findClaudeSessionId(worktreePath: string): Promise<string | null> {
   return findLatestSessionId(worktreePath);
+}
+
+export async function probeClaudeState(
+  worktreePath: string,
+  args: { processAlive: boolean; signalWindowMs: number },
+): Promise<AgentStateProbe | null> {
+  const sessionFile = await findLatestSessionFile(worktreePath);
+  if (!sessionFile) {
+    return null;
+  }
+
+  let signalAt: Date;
+  let signalAgeMs: number;
+  try {
+    const fileStat = await stat(sessionFile);
+    signalAt = fileStat.mtime;
+    signalAgeMs = Date.now() - fileStat.mtimeMs;
+    const lastType = await readLastEntryType(sessionFile, fileStat.size);
+    if (!lastType) {
+      return null;
+    }
+
+    if (!args.processAlive) {
+      return {
+        state: lastType === "error" ? "error" : "stopped",
+        signalAt,
+      };
+    }
+
+    if (lastType === "permission_request") {
+      return { state: "needs_input", signalAt };
+    }
+    if (lastType === "error") {
+      return { state: "error", signalAt };
+    }
+    if (WAITING_ENTRY_TYPES.has(lastType)) {
+      return { state: "waiting", signalAt };
+    }
+    if (ACTIVE_ENTRY_TYPES.has(lastType)) {
+      return {
+        state: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
+        signalAt,
+      };
+    }
+    return {
+      state: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
+      signalAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function buildClaudePlan(prompt: string): AgentLaunchPlan {

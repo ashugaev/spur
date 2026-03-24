@@ -31,7 +31,11 @@ projects:
         event: cron:tick
         spawn:
           agent: claude
-          prompt: "Review all open PRs and continue the highest-priority one."
+          prompt: "Review all open PRs."
+          steps:
+            - "research"
+            - "run $code-simplifier"
+            - "continue implementation"
           overrides:
             worktree: true
       pr-watch-changes-requested:

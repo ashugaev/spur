@@ -2,12 +2,14 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const execFileMock = vi.fn();
-const execFileAsyncMock = vi.fn<
-  (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>
->();
+type ExecFileAsync = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
-execFileMock[promisify.custom] = execFileAsyncMock;
+const execFileAsyncMock = vi.fn<ExecFileAsync>();
+const execFileMock: ((...args: unknown[]) => void) & {
+  [promisify.custom]: typeof execFileAsyncMock;
+} = Object.assign(vi.fn(), {
+  [promisify.custom]: execFileAsyncMock,
+});
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
@@ -39,7 +41,11 @@ describe("runtime-tmux", () => {
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
     });
 
-    const [file, args] = execFileAsyncMock.mock.calls[0] ?? [];
+    const firstCall = execFileAsyncMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error("Expected createTmuxSession to invoke tmux");
+    }
+    const [file, args] = firstCall;
     expect(file).toBe("tmux");
     expect(args.slice(0, 8)).toEqual([
       "-f",

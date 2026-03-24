@@ -107,7 +107,10 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         source: morning
         event: cron:tick
         spawn:
-          prompt: "cron runtime prompt"
+          prompt: "Review the repo"
+          steps:
+            - "research"
+            - "test"
 `,
       ),
     );
@@ -132,11 +135,13 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     const pane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("cron runtime prompt"),
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
     });
 
     expect(sessions[0]?.project).toBe("api");
-    expect(pane).toContain("cron runtime prompt");
+    expect(pane).toContain("Review the repo");
+    expect(pane).toContain("[Spur step 1/2: research]");
+    expect(pane).toContain("[Spur step 2/2: test]");
     const cronEvents = await pollUntil(
       async () => readEventLog(context.dataDir).map((entry) => entry.event),
       {
@@ -147,7 +152,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           value.includes("source.event.emitted") &&
           value.includes("trigger.spawn.matched") &&
           value.includes("trigger.spawn.completed") &&
-          value.includes("session.spawn.completed"),
+          value.includes("session.spawn.completed") &&
+          value.includes("session.pipeline.step_sent"),
       },
     );
     expect(cronEvents).toEqual(
@@ -158,6 +164,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         "trigger.spawn.matched",
         "trigger.spawn.completed",
         "session.spawn.completed",
+        "session.pipeline.step_sent",
       ]),
     );
   });

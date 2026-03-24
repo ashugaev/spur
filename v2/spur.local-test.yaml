@@ -7,21 +7,8 @@ worktreeDir: ~/.spur-local-test-worktrees
 defaultAgent: claude
 
 projects:
-  spur-local:
-    path: /Users/alek/projects/agent-orchestrator
+  spur:
+    path: ..
     defaultBranch: main
     sessionPrefix: spur
     symlinks: []
-    sources:
-      local-cron:
-        type: cron
-        schedule: "0 0 1 1 *"
-        # Intentionally omitted:
-        # runOnStart defaults to false.
-    triggers:
-      local-cron-spawn:
-        source: local-cron
-        event: cron:tick
-        spawn:
-          agent: claude
-          prompt: "Review this repo and continue the highest-priority task."

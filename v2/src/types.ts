@@ -8,6 +8,7 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
@@ -47,6 +48,7 @@ export interface ProjectPreflightConfig {
 
 export interface TriggerSpawnConfig {
   prompt: string;
+  steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
@@ -107,6 +109,14 @@ export interface AppConfig {
   projects: Record<string, ProjectConfig>;
 }
 
+export interface SessionPipelineState {
+  steps: string[];
+  nextStepIndex: number;
+  awaitingStepIndex?: number;
+  status: SessionPipelineStatus;
+  error?: string;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -123,6 +133,7 @@ export interface SessionRecord {
   createdAt: string;
   updatedAt: string;
   slots?: SessionSlots;
+  pipeline?: SessionPipelineState;
   error?: string;
 }
 
@@ -136,6 +147,7 @@ export interface SessionView extends SessionRecord {
 export interface SpawnSessionRequest {
   project: string;
   prompt: string;
+  steps?: string[];
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;

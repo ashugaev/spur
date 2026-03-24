@@ -672,7 +672,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
-    .argument("<prompt...>", "Initial agent prompt")
+    .argument("<prompt...>", "Task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--branch <name>", "Branch name to use")
     .option(
@@ -683,10 +683,14 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--json", "Print raw JSON")
     .action(async (project: string, promptParts: string[], options, command) => {
       const overrides = resolveCliSpawnOverrides(options);
+      const prompt = promptParts.join(" ").trim();
+      if (!prompt) {
+        throw new Error("spawn requires a non-empty prompt");
+      }
       const configPath = getConfigPath(command.parent as Command);
       const payload: SpawnSessionRequest = {
         project,
-        prompt: promptParts.join(" "),
+        prompt,
         agent: options.agent,
         branch: options.branch,
         ...(overrides !== undefined ? { overrides } : {}),
