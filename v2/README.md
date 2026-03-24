@@ -163,6 +163,39 @@ projects:
           interrupt: false # queued, deduped, flushed as one batch
 ```
 
+Field reference:
+
+- `server.host`: optional, default `127.0.0.1`.
+- `server.port`: optional, default `4310`.
+- `dataDir`: optional, default `~/.spur`.
+- `worktreeDir`: optional, default `~/.spur-worktrees`.
+- `defaultAgent`: optional, `claude|codex`, default `claude`.
+- `projects.<id>.path`: required repo path.
+- `projects.<id>.defaultBranch`: optional, default `main`.
+- `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
+- `projects.<id>.worktree`: optional, default `true`.
+- `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
+- `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt.
+- `projects.<id>.defaultAgent`: optional per-project `claude|codex`, falls back to top-level `defaultAgent`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github`.
+- `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
+- `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
+- `projects.<id>.sources.<sourceId>.intervalMs`: optional for `github`, default `60000`.
+- `projects.<id>.triggers.<triggerId>.source`: required source id.
+- `projects.<id>.triggers.<triggerId>.event`: required event name.
+- `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
+- `projects.<id>.triggers.<triggerId>.spawn.steps`: required non-empty ordered step list.
+- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
+- `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
+- `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
+- `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
+
+Event surface:
+
+- `cron` sources support only `cron:tick`.
+- `github` sources support only `github:changes_requested`, `github:ci_failed`, and `github:comment`.
+
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
 
 `projects.<id>.worktree` defaults to `true`. Set it to `false` to run in the project path instead of creating an owned `git worktree`.
