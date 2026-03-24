@@ -19,7 +19,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
-  `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>]`
+  `spur spawn <project> <step...> [--step <step> ...] [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]`
 - Supported agents are only `claude` and `codex`.
 - Both agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -30,6 +30,9 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
 - Current built-in source types are `cron` and `github`.
+- Spur supports a lean sequential startup pipeline:
+  first step from the required CLI positional step or `spawn.steps[0]`, optional later steps from repeated `--step` or later `spawn.steps` entries.
+- Extra steps are sent only after the agent returns to its prompt.
 - `cron` emits `cron:tick`.
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`.
   `github:comment` covers top-level PR comments and review comments/replies.
@@ -61,7 +64,10 @@ projects:
         source: weekday-review
         event: cron:tick
         spawn:
-          prompt: "Review all open PRs"
+          steps:
+            - "Review all open PRs"
+            - "Pick the highest-priority task"
+            - "Continue it until the next checkpoint"
 ```
 
 ## Main flow
@@ -75,7 +81,8 @@ spawn
   -> apply symlinks
   -> start tmux
   -> launch agent
-  -> send initial prompt
+  -> send first step
+  -> auto-send later steps after each prompt return
   -> persist session metadata
 ```
 

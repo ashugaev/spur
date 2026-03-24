@@ -53,7 +53,7 @@ async function runSpawnTrigger(
   triggerId: string,
   sourceId: string,
   eventName: string,
-  triggerPrompt: string,
+  triggerSteps: string[],
   agent: AgentName | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
@@ -80,7 +80,7 @@ async function runSpawnTrigger(
   try {
     const session = await service.spawn({
       project: projectId,
-      prompt: triggerPrompt,
+      steps: triggerSteps,
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
@@ -505,7 +505,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           triggerId,
           event.sourceId,
           event.name,
-          trigger.spawn.prompt,
+          trigger.spawn.steps,
           trigger.spawn.agent,
           trigger.spawn.branch,
           trigger.spawn.overrides,

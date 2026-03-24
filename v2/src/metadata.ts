@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import type { GitHubSignal, SessionRecord } from "./types.js";
+import type { GitHubSignal, SessionPipelineState, SessionRecord } from "./types.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -59,6 +59,18 @@ function parseGitHubSignals(path: string): Map<string, GitHubSignal> {
   return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, GitHubSignal]));
 }
 
+function normalizePipelineState(pipeline: SessionPipelineState): SessionPipelineState {
+  return {
+    steps: pipeline.steps,
+    nextStepIndex: pipeline.nextStepIndex,
+    ...(pipeline.awaitingStepIndex !== undefined
+      ? { awaitingStepIndex: pipeline.awaitingStepIndex }
+      : {}),
+    status: pipeline.status,
+    ...(pipeline.error !== undefined ? { error: pipeline.error } : {}),
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: session.id,
@@ -76,6 +88,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     ...(session.slots ? { slots: session.slots } : {}),
+    ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
     ...(session.error ? { error: session.error } : {}),
   };
 }

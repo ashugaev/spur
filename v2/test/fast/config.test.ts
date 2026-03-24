@@ -6,6 +6,7 @@ import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const initialCwd = process.cwd();
+const initialSpurConfig = process.env["SPUR_CONFIG"];
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -22,6 +23,11 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
 
 afterEach(async () => {
   process.chdir(initialCwd);
+  if (initialSpurConfig === undefined) {
+    delete process.env["SPUR_CONFIG"];
+  } else {
+    process.env["SPUR_CONFIG"] = initialSpurConfig;
+  }
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -76,7 +82,9 @@ projects:
         source: weekday
         event: cron:tick
         spawn:
-          prompt: "review"
+          steps:
+            - "review"
+            - "continue"
           overrides:
             worktree: true
             defaultBranch: release
@@ -93,7 +101,7 @@ projects:
       source: "weekday",
       event: "cron:tick",
       spawn: {
-        prompt: "review",
+        steps: ["review", "continue"],
         overrides: {
           worktree: true,
           defaultBranch: "release",
@@ -135,6 +143,30 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       'projects.backend.triggers.old-trigger.event uses unsupported event "github:review"',
+    );
+  });
+
+  it("rejects the removed trigger spawn.prompt field", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      weekday:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      review:
+        source: weekday
+        event: cron:tick
+        spawn:
+          prompt: "review"
+          steps:
+            - "continue"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.prompt was removed; use projects.backend.triggers.review.spawn.steps",
     );
   });
 
@@ -180,6 +212,7 @@ projects:
   });
 
   it("finds spur.yml in the current directory when no config path is passed", async () => {
+    delete process.env["SPUR_CONFIG"];
     const configPath = await writeNamedConfig(
       "spur.yml",
       `
@@ -197,6 +230,7 @@ projects:
   });
 
   it("reports the default spur.yaml path when no default config file exists", async () => {
+    delete process.env["SPUR_CONFIG"];
     const dir = await createTempDir("spur-fast-config-missing-");
     tempDirs.push(dir);
     process.chdir(dir);

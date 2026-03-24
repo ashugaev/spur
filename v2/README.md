@@ -13,7 +13,29 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
+spur spawn <project> <step...> [--step <step> ...] [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
+```
+
+`spawn` can run a sequential startup pipeline:
+
+- The positional `<step...>` is the required first step.
+- Repeat `--step` to append more steps.
+- Spur sends the next step only after the agent returns to its prompt.
+- Inside Spur there is one ordered pipeline shape only: `steps: [...]`.
+- Trigger configs use `spawn.steps`. `spawn.prompt` was removed.
+
+```bash
+spur spawn backend-api "Review open PRs" \
+  --step "Pick the highest-priority task" \
+  --step "Continue it until the next checkpoint"
+```
+
+```yaml
+spawn:
+  steps:
+    - "Review open PRs"
+    - "Pick the highest-priority task"
+    - "Continue it until the next checkpoint"
 ```
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
@@ -23,7 +45,7 @@ spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--wor
 
 `list` derives live `state` and `lastActivityAt` from `tmux`.
 When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
-Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, and fresh-launch fallbacks.
+Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
 
 Agents run with full access:
 
@@ -51,6 +73,7 @@ pnpm --dir v2 build
 
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
+node dist/cli.js spawn backend-api "Review open PRs" --step "Pick the highest-priority one" --step "Continue it until the next checkpoint" --config spur.yaml
 node dist/cli.js list --config spur.yaml
 node dist/cli.js pause api-1 --config spur.yaml
 node dist/cli.js complete api-1 --config spur.yaml
@@ -118,7 +141,9 @@ projects:
         event: cron:tick
         spawn: # spawns a new session every weekday at 9am
           agent: claude
-          prompt: "Review all open PRs and continue the highest-priority one."
+          steps:
+            - "Review all open PRs."
+            - "Continue the highest-priority one."
           overrides:
             worktree: true
       pr-watch-changes-requested:
@@ -144,7 +169,7 @@ projects:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight.prompt` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the initial spawn prompt. If the preflight returns `{"branch":"..."}`, Spur uses it. `--branch` bypasses preflight.
+If `projects.<id>.preflight.prompt` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the first spawn step. If the preflight returns `{"branch":"..."}`, Spur uses it. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 

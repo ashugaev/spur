@@ -31,7 +31,10 @@ projects:
         event: cron:tick
         spawn:
           agent: claude
-          prompt: "Review all open PRs and continue the highest-priority one."
+          steps:
+            - "Review all open PRs."
+            - "Pick the highest-priority task."
+            - "Continue it until the next concrete checkpoint."
           overrides:
             worktree: true
       pr-watch-changes-requested:

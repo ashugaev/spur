@@ -107,7 +107,9 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         source: morning
         event: cron:tick
         spawn:
-          prompt: "cron runtime prompt"
+          steps:
+            - "cron runtime step one"
+            - "cron runtime step two"
 `,
       ),
     );
@@ -132,11 +134,12 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     const pane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("cron runtime prompt"),
+      accept: (value) => value.includes("cron runtime step two"),
     });
 
     expect(sessions[0]?.project).toBe("api");
-    expect(pane).toContain("cron runtime prompt");
+    expect(pane).toContain("cron runtime step one");
+    expect(pane).toContain("cron runtime step two");
     const cronEvents = await pollUntil(
       async () => readEventLog(context.dataDir).map((entry) => entry.event),
       {
@@ -147,7 +150,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           value.includes("source.event.emitted") &&
           value.includes("trigger.spawn.matched") &&
           value.includes("trigger.spawn.completed") &&
-          value.includes("session.spawn.completed"),
+          value.includes("session.spawn.completed") &&
+          value.includes("session.pipeline.step_sent"),
       },
     );
     expect(cronEvents).toEqual(
@@ -158,6 +162,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         "trigger.spawn.matched",
         "trigger.spawn.completed",
         "session.spawn.completed",
+        "session.pipeline.step_sent",
       ]),
     );
   });
@@ -189,7 +194,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         source: morning
         event: cron:tick
         spawn:
-          prompt: "cron shared prompt"
+          steps:
+            - "cron shared prompt"
           overrides:
             worktree: false
 `,
@@ -283,7 +289,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         project: "api",
         agent: "claude",
         branch: "feature-runtime-gh",
-        prompt: "initial github runtime prompt",
+        steps: ["initial github runtime prompt"],
       });
 
       await pollUntil(async () => captureTmuxPane(session.id), {
@@ -441,7 +447,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         project: "api",
         agent: "claude",
         branch: "feature-runtime-ci",
-        prompt: "initial github ci runtime prompt",
+        steps: ["initial github ci runtime prompt"],
       });
 
       await pollUntil(async () => captureTmuxPane(session.id), {

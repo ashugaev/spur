@@ -23,6 +23,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, and `github:comment`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- `spawn` requires the first step as the positional `<step...>` argument and accepts optional repeated `--step` flags for later steps.
+- Config spawn triggers use one ordered `spawn.steps` list.
+- Multi-step spawn sends the first step through the normal spawn path, then auto-sends later steps in order after the agent returns to a prompt.
+- Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can suggest the new worktree branch through the selected agent's one-shot mode, and fails before reserving a session id when preflight output is invalid.
@@ -49,6 +53,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - `list --json` auto-starts the daemon and returns `[]` on a fresh config, and `ls --json` does the same.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
+- `spawn --json --step ...` keeps one session and delivers ordered startup steps through the built CLI.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
@@ -74,6 +79,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
+- `cron` `runOnStart: true` can also reach `trigger.spawn.steps` and deliver the same ordered pipeline behavior as CLI `spawn <step...> --step ...`.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.
 - GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a matching PR branch.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR.
@@ -82,6 +88,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - `claude` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - `codex` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- Real `claude` and `codex` can also complete a multi-step `spawn --step` session in one worktree after returning to a prompt between steps.
 - Real `claude` and `codex` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
 - Real `claude` and `codex` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
@@ -91,8 +98,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - Unknown project.
 - Unsupported agent fails before session metadata, worktree, or tmux side effects.
-- Empty prompt.
-- Missing positional prompt for `spawn`.
+- Missing first step for `spawn`.
+- Empty pipeline step in request or config.
 - Empty branch.
 - Missing session for `send`.
 - Missing session for `pause`.
@@ -101,6 +108,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Empty message for `send`.
 - `send` to a `completed` or `killed` session.
 - `cron` source without `schedule`.
+- Trigger spawn without `steps`.
+- Trigger spawn using removed `prompt`.
 - Trigger referencing an unknown source.
 
 ## Regression Rule
