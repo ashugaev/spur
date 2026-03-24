@@ -8,6 +8,7 @@ import {
   findAgentSessionId,
   parseAgentName,
   probeAgentState,
+  type AgentStateProbe,
 } from "./agents/index.js";
 import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -15,10 +16,7 @@ import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
 import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
-import {
-  PIPELINE_STEP_TIMEOUT_MS,
-  formatPipelineStepMessage,
-} from "./pipeline.js";
+import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
   captureTmuxPane,
   createTmuxSession,
@@ -202,6 +200,25 @@ export function classifyRunningState(args: {
     return "working";
   }
   return "waiting";
+}
+
+function resolveRunningSessionState(args: {
+  agent: SessionRecord["agent"];
+  agentState: AgentStateProbe | null;
+  paneState: SessionState;
+}): SessionState {
+  if (args.paneState === "needs_input") {
+    return "needs_input";
+  }
+  if (!args.agentState) {
+    return args.paneState;
+  }
+  if (args.agent === "claude") {
+    return args.agentState.state;
+  }
+  return args.paneState === "working" || args.agentState.state === "working"
+    ? "working"
+    : "waiting";
 }
 
 function isPromptReadyState(pane: string): boolean {
@@ -511,7 +528,9 @@ export class SessionService {
 
       const firstStage = steps?.[0];
       const initialMessage =
-        steps && firstStage ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length) : prompt;
+        steps && firstStage
+          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
+          : prompt;
       const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
       const pipeline = steps
         ? {
@@ -1143,8 +1162,7 @@ export class SessionService {
     const restored: SessionRecord = {
       ...restoredBase,
       launchCommand:
-        current.launchCommand ||
-        buildAgentLaunchPlan(current.agent, current.prompt).launchCommand,
+        current.launchCommand || buildAgentLaunchPlan(current.agent, current.prompt).launchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
@@ -1442,20 +1460,15 @@ export class SessionService {
       state = agentState.state;
     } else {
       const pane = await captureTmuxPane(session.tmuxSession, 80);
-      const paneState = classifyRunningState({
-        pane,
-        updatedAt,
-        signalAt: tmuxActivityAt,
+      state = resolveRunningSessionState({
+        agent: session.agent,
+        agentState,
+        paneState: classifyRunningState({
+          pane,
+          updatedAt,
+          signalAt: tmuxActivityAt,
+        }),
       });
-      if (paneState === "needs_input") {
-        state = paneState;
-      } else if (session.agent === "claude" && agentState) {
-        state = agentState.state;
-      } else if (session.agent === "codex" && agentState) {
-        state = paneState === "working" || agentState.state === "working" ? "working" : "waiting";
-      } else {
-        state = paneState;
-      }
     }
 
     return {

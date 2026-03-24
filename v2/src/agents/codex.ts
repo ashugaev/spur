@@ -79,9 +79,8 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
 
 async function sessionFileMatchesWorktree(
   filePath: string,
-  worktreePath: string,
+  candidates: Set<string>,
 ): Promise<boolean> {
-  const candidates = new Set(await resolveWorktreePathCandidates(worktreePath));
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
     const reader = createInterface({ input, crlfDelay: Infinity });
@@ -111,10 +110,11 @@ async function sessionFileMatchesWorktree(
 
 async function findSessionFile(worktreePath: string): Promise<string | null> {
   const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
+  const candidates = new Set(await resolveWorktreePathCandidates(worktreePath));
   let bestMatch: { path: string; mtimeMs: number } | null = null;
 
   for (const filePath of files) {
-    if (!(await sessionFileMatchesWorktree(filePath, worktreePath))) {
+    if (!(await sessionFileMatchesWorktree(filePath, candidates))) {
       continue;
     }
     try {

@@ -10,7 +10,11 @@ function toClaudeProjectPath(worktreePath: string): string {
   return worktreePath.replaceAll("\\", "/").replaceAll(":", "").replace(/[/.]/g, "-");
 }
 
-async function writeJsonl(filePath: string, lines: Array<Record<string, unknown>>, modifiedAt: Date) {
+async function writeJsonl(
+  filePath: string,
+  lines: Array<Record<string, unknown>>,
+  modifiedAt: Date,
+) {
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, lines.map((line) => JSON.stringify(line)).join("\n"), "utf8");
   await utimes(filePath, modifiedAt, modifiedAt);
@@ -67,6 +71,41 @@ describe("agent state probes", () => {
       [{ type: "permission_request" }],
       signalAt,
     );
+
+    vi.resetModules();
+    const { probeClaudeState } = await import("../../src/agents/claude.js");
+
+    const result = await probeClaudeState(worktreePath, {
+      processAlive: true,
+      signalWindowMs: 90_000,
+    });
+
+    expect(result).toEqual({
+      state: "needs_input",
+      signalAt,
+    });
+  });
+
+  it("reads Claude state from the file tail even with large and malformed trailing content", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "spur-claude-probe-"));
+    cleanupDirs.push(homeDir);
+    process.env.HOME = homeDir;
+    const worktreePath = join(homeDir, "workspace");
+    const signalAt = new Date("2026-03-24T10:04:30.000Z");
+    const sessionFile = join(
+      homeDir,
+      ".claude",
+      "projects",
+      toClaudeProjectPath(worktreePath),
+      "session.jsonl",
+    );
+    await mkdir(dirname(sessionFile), { recursive: true });
+    await writeFile(
+      sessionFile,
+      `${"x".repeat(140_000)}\n${JSON.stringify({ type: "permission_request" })}\n{broken-json}\n`,
+      "utf8",
+    );
+    await utimes(sessionFile, signalAt, signalAt);
 
     vi.resetModules();
     const { probeClaudeState } = await import("../../src/agents/claude.js");
