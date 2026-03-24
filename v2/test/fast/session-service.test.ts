@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionRecord } from "../../src/types.js";
 
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
@@ -115,17 +116,41 @@ async function loadSessionServiceModule() {
   return import("../../src/session-service.js");
 }
 
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function createSessionStore() {
+  const sessions = new Map<string, SessionRecord>();
+  readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
+    const session = sessions.get(sessionId);
+    return session ? clone(session) : undefined;
+  });
+  writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
+    sessions.set(session.id, clone(session));
+  });
+  listSessionsMock.mockImplementation(() =>
+    [...sessions.values()].map((session) => clone(session)),
+  );
+  return sessions;
+}
+
 describe("SessionService", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
 
-    buildAgentLaunchPlanMock.mockReset().mockReturnValue({
-      agent: "claude",
-      launchCommand: "claude --dangerously-skip-permissions",
-      initialMessage: "hello",
-      readyMarkers: ["Claude Code", "❯"],
-    });
+    buildAgentLaunchPlanMock
+      .mockReset()
+      .mockImplementation((agent: string, initialMessage: string) => ({
+        agent,
+        launchCommand:
+          agent === "codex"
+            ? "codex --dangerously-bypass-approvals-and-sandbox"
+            : "claude --dangerously-skip-permissions",
+        initialMessage,
+        readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
+      }));
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
@@ -244,10 +269,94 @@ describe("SessionService", () => {
       "session.spawn.worktree_created",
       "session.spawn.tmux_created",
       "session.spawn.ready",
-      "session.spawn.prompt_sent",
+      "session.spawn.initial_prompt_sent",
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
+  });
+
+  it("runs later pipeline steps in order after the agent prompt returns", async () => {
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+      steps: ["research", "test"],
+    });
+
+    expect(result.prompt).toBe("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur step 1/2: research]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+
+    await vi.waitFor(() => {
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(2);
+    });
+    expect(sendMessageToTmuxMock.mock.calls[1]?.[0]).toBe("api-1");
+    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("[Spur step 2/2: test]");
+    expect(sendMessageToTmuxMock.mock.calls[1]?.[1]).toContain("ship the task");
+
+    expect(sessions.get("api-1")?.pipeline).toMatchObject({
+      status: "running",
+      nextStepIndex: 2,
+      awaitingStepIndex: 1,
+    });
+  });
+
+  it("requires a prompt for spawn", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        steps: ["research"],
+      } as never),
+    ).rejects.toThrow("prompt must be a non-empty string");
+  });
+
+  it("resumes an unfinished pipeline after daemon restart", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "ship the task",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        pipeline: {
+          steps: ["research", "test"],
+          nextStepIndex: 1,
+          awaitingStepIndex: 0,
+          status: "running",
+        },
+      }),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.waitFor(() => {
+      expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    });
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur step 2/2: test]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(sessions.get("api-1")?.pipeline?.status).toBe("completed");
+    });
   });
 
   it("spawns against the shared project path when worktree is disabled", async () => {

@@ -237,7 +237,10 @@ export function renderSessionCard(
 
 export function renderSessionList(sessions: SessionView[]): string {
   if (sessions.length === 0) {
-    return renderEmptyState("No sessions.", "Run `spur spawn <project> <prompt...>` to start one.");
+    return renderEmptyState(
+      "No sessions.",
+      "Run `spur spawn <project> <prompt...>` to start one.",
+    );
   }
 
   const widths = measureSessionColumns(sessions);
@@ -385,7 +388,9 @@ export function renderInteractiveSessionList(args: {
     "",
     ...detailLines,
     "",
-    dimText("↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit"),
+    dimText(
+      "↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+    ),
   );
   if (args.statusMessage) {
     lines.push("", args.statusMessage);

@@ -26,7 +26,11 @@ projects:
         event: cron:tick
         spawn:
           agent: claude
-          prompt: "Review this repo and continue the highest-priority task."
+          prompt: "Review this repo."
+          steps:
+            - "research"
+            - "develop"
+            - "test"
       gh-changes-requested:
         source: gh
         event: github:changes_requested

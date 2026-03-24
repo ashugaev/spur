@@ -1177,6 +1177,49 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     await sendKeysToTmux(controllerSessionName, "q");
   });
 
+  it("keeps manual spawn as one task prompt through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-pipeline-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "pipeline.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+
+    expect(pane).toContain("ship the task");
+    expect(log).toContain("ship the task");
+  });
+
   it("blocks kill from the interactive list when the worktree is dirty", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
