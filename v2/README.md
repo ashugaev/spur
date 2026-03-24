@@ -27,6 +27,7 @@ spur spawn <project> <step...> [--step <step> ...] [--agent claude|codex] [--bra
 ```bash
 spur spawn backend-api "Review open PRs" \
   --step "Pick the highest-priority task" \
+  --step "Run \$code-simplifier before handoff and remove unnecessary complexity" \
   --step "Continue it until the next checkpoint"
 ```
 
@@ -35,8 +36,11 @@ spawn:
   steps:
     - "Review open PRs"
     - "Pick the highest-priority task"
+    - "Run $code-simplifier before handoff and remove unnecessary complexity"
     - "Continue it until the next checkpoint"
 ```
+
+Steps are sent as literal agent messages, so they can include repo skill calls such as `$code-simplifier`.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
 
@@ -73,7 +77,7 @@ pnpm --dir v2 build
 
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
-node dist/cli.js spawn backend-api "Review open PRs" --step "Pick the highest-priority one" --step "Continue it until the next checkpoint" --config spur.yaml
+node dist/cli.js spawn backend-api "Review open PRs" --step "Pick the highest-priority one" --step "Run \$code-simplifier before handoff and remove unnecessary complexity" --step "Continue it until the next checkpoint" --config spur.yaml
 node dist/cli.js list --config spur.yaml
 node dist/cli.js pause api-1 --config spur.yaml
 node dist/cli.js complete api-1 --config spur.yaml
@@ -143,6 +147,7 @@ projects:
           agent: claude
           steps:
             - "Review all open PRs."
+            - "Run $code-simplifier before handoff and remove unnecessary complexity."
             - "Continue the highest-priority one."
           overrides:
             worktree: true

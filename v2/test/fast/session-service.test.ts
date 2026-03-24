@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SessionRecord } from "../../src/types.js";
 
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
@@ -120,15 +121,17 @@ function clone<T>(value: T): T {
 }
 
 function createSessionStore() {
-  const sessions = new Map<string, any>();
+  const sessions = new Map<string, SessionRecord>();
   readSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     const session = sessions.get(sessionId);
     return session ? clone(session) : undefined;
   });
-  writeSessionMock.mockImplementation((_dataDir: string, session: any) => {
+  writeSessionMock.mockImplementation((_dataDir: string, session: SessionRecord) => {
     sessions.set(session.id, clone(session));
   });
-  listSessionsMock.mockImplementation(() => [...sessions.values()].map((session) => clone(session)));
+  listSessionsMock.mockImplementation(() =>
+    [...sessions.values()].map((session) => clone(session)),
+  );
   return sessions;
 }
 
@@ -137,15 +140,17 @@ describe("SessionService", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
 
-    buildAgentLaunchPlanMock.mockReset().mockImplementation((agent: string, initialMessage: string) => ({
-      agent,
-      launchCommand:
-        agent === "codex"
-          ? "codex --dangerously-bypass-approvals-and-sandbox"
-          : "claude --dangerously-skip-permissions",
-      initialMessage,
-      readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-    }));
+    buildAgentLaunchPlanMock
+      .mockReset()
+      .mockImplementation((agent: string, initialMessage: string) => ({
+        agent,
+        launchCommand:
+          agent === "codex"
+            ? "codex --dangerously-bypass-approvals-and-sandbox"
+            : "claude --dangerously-skip-permissions",
+        initialMessage,
+        readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
+      }));
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
@@ -280,7 +285,7 @@ describe("SessionService", () => {
       steps: ["step one", "step two"],
     });
 
-    expect(result.prompt).toBe("step one");
+    expect(result.initialStep).toBe("step one");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur pipeline step 1/2]");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("step one");
@@ -319,7 +324,7 @@ describe("SessionService", () => {
         id: "api-1",
         project: "api",
         agent: "claude",
-        prompt: "step one",
+        initialStep: "step one",
         branch: "api-1",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -401,7 +406,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -441,7 +446,7 @@ describe("SessionService", () => {
         id: "api-1",
         project: "api",
         agent: "claude",
-        prompt: "hello",
+        initialStep: "hello",
         branch: "api-1",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -455,7 +460,7 @@ describe("SessionService", () => {
         id: "api-2",
         project: "api",
         agent: "claude",
-        prompt: "hello",
+        initialStep: "hello",
         branch: "api-2",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-2",
@@ -469,7 +474,7 @@ describe("SessionService", () => {
         id: "api-3",
         project: "api",
         agent: "claude",
-        prompt: "hello",
+        initialStep: "hello",
         branch: "api-3",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-3",
@@ -483,7 +488,7 @@ describe("SessionService", () => {
         id: "api-4",
         project: "api",
         agent: "claude",
-        prompt: "hello",
+        initialStep: "hello",
         branch: "api-4",
         worktree: true,
         worktreePath: "/tmp/spur-worktrees/api/api-4",
@@ -513,7 +518,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -557,7 +562,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -603,7 +608,7 @@ describe("SessionService", () => {
       project: "api",
       agent: "claude",
       agentSessionId: "session-uuid",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -928,7 +933,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -966,7 +971,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "main",
       worktree: false,
       worktreePath: "/repo/api",
@@ -996,7 +1001,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1025,7 +1030,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1054,7 +1059,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1082,7 +1087,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1149,7 +1154,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1209,7 +1214,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1252,7 +1257,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1282,7 +1287,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
@@ -1309,7 +1314,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "main",
       worktree: false,
       worktreePath: "/repo/api",
@@ -1335,7 +1340,7 @@ describe("SessionService", () => {
       id: "api-1",
       project: "api",
       agent: "claude",
-      prompt: "hello",
+      initialStep: "hello",
       branch: "api-1",
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",

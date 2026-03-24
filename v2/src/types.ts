@@ -121,7 +121,7 @@ export interface SessionRecord {
   project: string;
   agent: AgentName;
   agentSessionId?: string;
-  prompt: string;
+  initialStep: string;
   branch: string;
   branchSource?: BranchSource;
   worktree: boolean;

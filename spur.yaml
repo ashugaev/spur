@@ -26,7 +26,11 @@ projects:
         event: cron:tick
         spawn:
           agent: claude
-          prompt: "Review this repo and continue the highest-priority task."
+          steps:
+            - "Review this repo."
+            - "Pick the highest-priority task."
+            - "Run $code-simplifier before handoff and remove unnecessary complexity."
+            - "Continue it until the next concrete checkpoint."
       gh-changes-requested:
         source: gh
         event: github:changes_requested

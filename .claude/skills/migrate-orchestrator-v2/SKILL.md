@@ -98,6 +98,7 @@ projects:
           steps:
             - "Review all open PRs"
             - "Pick the highest-priority task"
+            - "Run $code-simplifier before handoff and remove unnecessary complexity"
             - "Continue it until the next checkpoint"
 ```
 

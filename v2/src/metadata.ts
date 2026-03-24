@@ -77,7 +77,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     project: session.project,
     agent: session.agent,
     ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-    prompt: session.prompt,
+    initialStep: session.initialStep,
     branch: session.branch,
     ...(session.branchSource ? { branchSource: session.branchSource } : {}),
     worktree: session.worktree,

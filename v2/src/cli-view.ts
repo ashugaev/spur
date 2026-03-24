@@ -293,7 +293,7 @@ function renderSessionDetailsPane(args: {
       "branch",
       selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
     ),
-    renderField("step", selected.prompt),
+    renderField("step", selected.initialStep),
     renderField("tmux", selected.tmuxSession),
     renderField("workspace", selected.worktreePath),
     renderField("launch", selected.launchCommand),
@@ -385,7 +385,9 @@ export function renderInteractiveSessionList(args: {
     "",
     ...detailLines,
     "",
-    dimText("↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit"),
+    dimText(
+      "↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+    ),
   );
   if (args.statusMessage) {
     lines.push("", args.statusMessage);

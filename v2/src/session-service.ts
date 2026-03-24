@@ -223,8 +223,8 @@ export function isRestorableSession(
   );
 }
 
-function buildRestorePrompt(prompt: string): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
+function buildRestorePrompt(initialStep: string): string {
+  return `${RESTORE_PROMPT_PREFIX}\n\n${initialStep}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -263,13 +263,13 @@ function buildSessionEnv(args: {
 async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
-  prompt: string,
+  restoreMessage: string,
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
-  let plan = await buildAgentRestorePlan(agent, worktreePath, prompt);
+  let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage);
   while (!plan && Date.now() < deadline) {
     await sleep(RESTORE_PLAN_POLL_MS);
-    plan = await buildAgentRestorePlan(agent, worktreePath, prompt);
+    plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage);
   }
   return plan;
 }
@@ -388,7 +388,11 @@ export class SessionService {
     let firstStep = "";
     try {
       const steps = normalizeSteps(request);
-      firstStep = steps[0]!;
+      const resolvedFirstStep = steps[0];
+      if (resolvedFirstStep === undefined) {
+        throw new Error("steps must contain at least one non-empty string");
+      }
+      firstStep = resolvedFirstStep;
       project = this.getProject(request.project);
       if (
         request.branch !== undefined &&
@@ -452,7 +456,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
-        prompt: firstStep,
+        initialStep: firstStep,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         worktree,
@@ -608,7 +612,7 @@ export class SessionService {
           agent:
             agent ??
             parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-          prompt: firstStep,
+          initialStep: firstStep,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
           worktree,
@@ -949,7 +953,7 @@ export class SessionService {
     }
 
     await killTmuxSession(session.tmuxSession);
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.initialStep);
     const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     const recoveryPlan = sessionWithAgentId.agentSessionId
@@ -1082,7 +1086,7 @@ export class SessionService {
       },
     });
 
-    const restorePrompt = buildRestorePrompt(current.prompt);
+    const restorePrompt = buildRestorePrompt(current.initialStep);
     const launchPlan = await waitForRestorePlan(current.agent, current.worktreePath, restorePrompt);
     if (!launchPlan) {
       this.logEvent("session.restore.failed", {
@@ -1138,7 +1142,8 @@ export class SessionService {
     const restored: SessionRecord = {
       ...restoredBase,
       launchCommand:
-        current.launchCommand || buildAgentLaunchPlan(current.agent, current.prompt).launchCommand,
+        current.launchCommand ||
+        buildAgentLaunchPlan(current.agent, current.initialStep).launchCommand,
       status: "running",
       updatedAt: nowIso(),
     };
@@ -1175,7 +1180,11 @@ export class SessionService {
     }
 
     const session = readSession(this.config.dataDir, sessionId);
-    if (!session?.pipeline || session.status !== "running" || session.pipeline.status !== "running") {
+    if (
+      !session?.pipeline ||
+      session.status !== "running" ||
+      session.pipeline.status !== "running"
+    ) {
       return;
     }
 
@@ -1187,9 +1196,13 @@ export class SessionService {
 
   private async runPipeline(sessionId: string): Promise<void> {
     try {
-      while (true) {
+      for (;;) {
         const session = readSession(this.config.dataDir, sessionId);
-        if (!session?.pipeline || session.status !== "running" || session.pipeline.status !== "running") {
+        if (
+          !session?.pipeline ||
+          session.status !== "running" ||
+          session.pipeline.status !== "running"
+        ) {
           return;
         }
 
@@ -1274,13 +1287,15 @@ export class SessionService {
         }
 
         const stepIndex = session.pipeline.nextStepIndex;
+        const step = session.pipeline.steps[stepIndex];
+        if (step === undefined) {
+          throw new Error(
+            `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
+          );
+        }
         await sendMessageToTmux(
           session.tmuxSession,
-          formatPipelineStepMessage(
-            session.pipeline.steps[stepIndex]!,
-            stepIndex,
-            session.pipeline.steps.length,
-          ),
+          formatPipelineStepMessage(step, stepIndex, session.pipeline.steps.length),
         );
 
         const latest = readSession(this.config.dataDir, sessionId);
@@ -1325,7 +1340,11 @@ export class SessionService {
 
     while (Date.now() < deadline) {
       const session = readSession(this.config.dataDir, sessionId);
-      if (!session?.pipeline || session.status !== "running" || session.pipeline.status !== "running") {
+      if (
+        !session?.pipeline ||
+        session.status !== "running" ||
+        session.pipeline.status !== "running"
+      ) {
         return "stopped";
       }
       if (session.pipeline.awaitingStepIndex === undefined) {
@@ -1360,7 +1379,11 @@ export class SessionService {
 
   private markPipelineErrored(sessionId: string, message: string): void {
     const session = readSession(this.config.dataDir, sessionId);
-    if (!session?.pipeline || session.status !== "running" || session.pipeline.status !== "running") {
+    if (
+      !session?.pipeline ||
+      session.status !== "running" ||
+      session.pipeline.status !== "running"
+    ) {
       return;
     }
 
