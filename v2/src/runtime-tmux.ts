@@ -12,9 +12,7 @@ import type { AgentName, SessionSlots } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
-const OPEN_LINK_OPTION = "@spur_open_link_command";
 const OPEN_LINK_BINDING_KEY = "MouseUp1StatusRight";
-const OPEN_LINK_TMUX_COMMAND = `run-shell -b "#{${OPEN_LINK_OPTION}} #{q:mouse_hyperlink}"`;
 
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
@@ -45,6 +43,10 @@ function buildOpenLinkCommand(): string {
   return `${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)}`;
 }
 
+function buildOpenLinkTmuxCommand(): string {
+  return `run-shell -b "${buildOpenLinkCommand()} #{q:mouse_hyperlink}"`;
+}
+
 function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
   const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
   return title
@@ -64,7 +66,6 @@ function renderStatusRight(slots: SessionSlots | undefined): string {
 }
 
 async function syncTmuxLinkClicks(): Promise<void> {
-  await tmux("set-option", "-g", OPEN_LINK_OPTION, buildOpenLinkCommand());
   await tmux(
     "bind-key",
     "-n",
@@ -72,7 +73,7 @@ async function syncTmuxLinkClicks(): Promise<void> {
     "if-shell",
     "-F",
     "#{mouse_hyperlink}",
-    OPEN_LINK_TMUX_COMMAND,
+    buildOpenLinkTmuxCommand(),
   );
 }
 
