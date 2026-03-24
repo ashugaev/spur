@@ -6,10 +6,15 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
+const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
+const OPEN_LINK_OPTION = "@spur_open_link_command";
+const OPEN_LINK_BINDING_KEY = "MouseUp1StatusRight";
+const OPEN_LINK_TMUX_COMMAND = `run-shell -b "#{${OPEN_LINK_OPTION}} #{q:mouse_hyperlink}"`;
 
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
@@ -36,6 +41,10 @@ function escapeHyperlinkUrl(url: string): string {
   return encodeURI(url).replaceAll("#", "%23").replaceAll(",", "%2C").replaceAll("]", "%5D");
 }
 
+function buildOpenLinkCommand(): string {
+  return `${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)}`;
+}
+
 function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
   const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
   return title
@@ -52,6 +61,19 @@ function renderStatusRight(slots: SessionSlots | undefined): string {
       return `#[fg=cyan]#[hyperlink=${url}]${label}#[hyperlink=]#[default]`;
     })
     .join(" | ");
+}
+
+async function syncTmuxLinkClicks(): Promise<void> {
+  await tmux("set-option", "-g", OPEN_LINK_OPTION, buildOpenLinkCommand());
+  await tmux(
+    "bind-key",
+    "-n",
+    OPEN_LINK_BINDING_KEY,
+    "if-shell",
+    "-F",
+    "#{mouse_hyperlink}",
+    OPEN_LINK_TMUX_COMMAND,
+  );
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
@@ -162,6 +184,7 @@ export async function createTmuxSession(input: {
 export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
   const target = exactPaneTarget(sessionName);
   try {
+    await syncTmuxLinkClicks();
     await tmux("set-option", "-t", target, "status", "on");
     await tmux("set-option", "-t", target, "status-left-length", "120");
     await tmux("set-option", "-t", target, "status-right-length", "160");

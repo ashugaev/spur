@@ -991,6 +991,17 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     const statusLeft = await readTmuxOption(spawned.id, "status-left");
     const statusRight = await readTmuxOption(spawned.id, "status-right");
+    const { stdout: openLinkCommand } = await execFileAsync("tmux", [
+      "show-options",
+      "-g",
+      "@spur_open_link_command",
+    ]);
+    const { stdout: mouseBinding } = await execFileAsync("tmux", [
+      "list-keys",
+      "-T",
+      "root",
+      "MouseUp1StatusRight",
+    ]);
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
@@ -1006,6 +1017,10 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
     );
     expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
+    expect(openLinkCommand).toContain("open-link.js");
+    expect(mouseBinding).toContain("MouseUp1StatusRight");
+    expect(mouseBinding).toContain("@spur_open_link_command");
+    expect(mouseBinding).toContain("q:mouse_hyperlink");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
