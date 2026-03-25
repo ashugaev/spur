@@ -22,10 +22,9 @@ projects:
         source: gh
         event: github:changes_requested
         spawn:
-          prompt: "Address the latest requested review changes on the active PR."
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
           steps:
-            - "run $manager"
-            - "spawn the reviewer agent and run a focused review pass on the current diff"
+            - "run reviewer agent on the current diff"
             - "run $code-simplifier"
             - "run $self-verify"
       # gh-ci-failed:

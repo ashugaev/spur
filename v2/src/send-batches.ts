@@ -65,13 +65,29 @@ class GitHubSendBatch implements SendBatch {
     return this.signals.size === 0;
   }
 
+  private buildActionLines(): string[] {
+    const kinds = new Set([...this.signals.values()].map((signal) => signal.kind));
+    const lines = ["Run `$manager` and `$github`."];
+    if (kinds.has("changes_requested")) {
+      lines.push("Address the requested review changes on the active PR.");
+    }
+    if (kinds.has("ci_failed")) {
+      lines.push("Inspect the failing checks, fix them, and rerun the relevant validation.");
+    }
+    if (kinds.has("comment")) {
+      lines.push("Read the latest PR comments and act on them.");
+    }
+    lines.push("Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.");
+    return lines;
+  }
+
   format(): string {
     const lines = [...this.signals.values()].map((signal) => `- ${signal.text}`);
     return [
       `GitHub updates on PR #${this.prNumber} "${this.prTitle}":`,
       ...lines,
       "",
-      "Check `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.",
+      ...this.buildActionLines(),
     ].join("\n");
   }
 }

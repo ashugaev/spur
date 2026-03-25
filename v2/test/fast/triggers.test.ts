@@ -176,6 +176,11 @@ describe("startConfiguredTriggers", () => {
           { interrupt: false },
         );
       });
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Run `$manager` and `$github`."),
+        { interrupt: false },
+      );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.queued",
       );
@@ -218,6 +223,11 @@ describe("startConfiguredTriggers", () => {
       expect(deliverMock).toHaveBeenLastCalledWith(
         "api-1",
         expect.stringContaining("CI is failing: test suite."),
+        { interrupt: true },
+      );
+      expect(deliverMock).toHaveBeenLastCalledWith(
+        "api-1",
+        expect.stringContaining("Inspect the failing checks, fix them, and rerun the relevant validation."),
         { interrupt: true },
       );
 
@@ -283,6 +293,11 @@ describe("startConfiguredTriggers", () => {
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("CI is failing: test suite."),
+        { interrupt: false },
+      );
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Run `$manager` and `$github`."),
         { interrupt: false },
       );
     } finally {

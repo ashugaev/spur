@@ -514,6 +514,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
         expect(pane).toContain("CI is failing: test suite.");
+        expect(pane).toContain("Run `$manager` and `$github`.");
         const ciEvents = await pollUntil(
           async () => readEventLog(context.dataDir).map((entry) => entry.event),
           {
