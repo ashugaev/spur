@@ -1,11 +1,8 @@
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_PROJECT_PREFLIGHT_PROMPT,
-  loadConfig,
-  resolveConfigPath,
-} from "../../src/config.js";
+import { loadConfig, resolveConfigPath } from "../../src/config.js";
+import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];

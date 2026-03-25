@@ -11,7 +11,7 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
-    preflight: {} # optional: omit prompt to use Spur's default branch-naming prompt
+    preflight: {} # optional: omit prompt to use Spur's default rule-or-defer prompt
     symlinks:
       - .env
       - .claude

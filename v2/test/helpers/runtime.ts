@@ -79,9 +79,9 @@ function fakeAgentScript(agentName: "claude" | "codex"): string {
       ? `if [[ "\${1:-}" == "--print" ]]; then
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   if [[ -n "$branch_hint" ]]; then
-    printf '{"branch":"%s"}\n' "$branch_hint"
+    printf '%s\n' "$branch_hint"
   else
-    printf '{"branch":null}\n'
+    printf 'NO_PROJECT_RULES\n'
   fi
   exit 0
 fi
@@ -108,9 +108,9 @@ fi`
     fi
   done
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
-  payload='{"branch":null}'
+  payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
-    payload="$(printf '{"branch":"%s"}' "$branch_hint")"
+    payload="$branch_hint"
   fi
   if [[ -n "$output_file" ]]; then
     printf '%s\n' "$payload" > "$output_file"
