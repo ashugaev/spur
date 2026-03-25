@@ -10,7 +10,6 @@ import {
   probeAgentState,
   type AgentStateProbe,
 } from "./agents/index.js";
-import { loadConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { listSessions, readSession, writeSession } from "./metadata.js";
@@ -35,6 +34,7 @@ import {
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
+import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
   type AppConfig,
@@ -343,16 +343,71 @@ async function resolveSpawnBranch(args: {
 }
 
 export class SessionService {
-  readonly config: AppConfig;
+  readonly bootstrapConfigPath: string;
   readonly startedAt: string;
+  config: AppConfig;
+  private registryPaths: string[];
   private readonly pipelineRuns = new Map<string, Promise<void>>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
-    this.config = loadConfig(configPath);
+    const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
+      skipInvalid: false,
+    });
+    this.bootstrapConfigPath = initial.config.configPath;
     this.startedAt = startedAt;
+    mkdirSync(initial.config.dataDir, { recursive: true });
+    mkdirSync(initial.config.worktreeDir, { recursive: true });
+    this.registryPaths = upsertConfigRegistryPath(initial.config.dataDir, initial.config.configPath);
+    const merged = buildMergedConfig(
+      this.bootstrapConfigPath,
+      this.registryPaths,
+      {
+        skipInvalid: true,
+        warn: (message) => {
+          logSpurEvent(initial.config.dataDir, {
+            event: "daemon.registry.warning",
+            level: "warn",
+            message,
+          });
+        },
+      },
+    );
+    this.config = initial.config;
+    this.registryPaths = [];
+    this.applyConfig(merged.config, merged.configPaths);
+  }
+
+  previewConfigSync(configPath: string): { config: AppConfig; registryPaths: string[]; changed: boolean } {
+    const nextRegistryPaths = [...this.registryPaths];
+    if (!nextRegistryPaths.includes(configPath)) {
+      nextRegistryPaths.push(configPath);
+    }
+    const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
+      skipInvalid: false,
+    });
+    const currentSignature = JSON.stringify(this.config.projects);
+    const nextSignature = JSON.stringify(merged.config.projects);
+    return {
+      config: merged.config,
+      registryPaths: merged.configPaths,
+      changed:
+        currentSignature !== nextSignature ||
+        merged.configPaths.length !== this.registryPaths.length ||
+        merged.configPaths.some((path, index) => path !== this.registryPaths[index]),
+    };
+  }
+
+  applyConfig(config: AppConfig, registryPaths: string[]): void {
+    this.config = config;
+    this.registryPaths = [...new Set(registryPaths)];
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
+    writeConfigRegistry(this.config.dataDir, this.registryPaths);
     this.resumeRunningPipelines();
+  }
+
+  getRegistryPaths(): string[] {
+    return [...this.registryPaths];
   }
 
   info(): RuntimeInfo {

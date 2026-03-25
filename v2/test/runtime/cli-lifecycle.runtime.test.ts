@@ -9,6 +9,7 @@ import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common
 import {
   CLI_PATH,
   captureTmuxPane,
+  createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
   isTmuxAvailable,
@@ -296,6 +297,82 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       restarted: false,
     });
     await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("reloads all registered projects after a restart from a different config path", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-registry-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+
+    const extraRepo = await createGitRepo();
+    try {
+      const baseConfigPath = await context.writeConfig(
+        "registry-base.yaml",
+        baseConfig(context, `${sessionPrefix}-api`),
+      );
+      const extraConfigPath = await context.writeConfig(
+        "registry-extra.yaml",
+        `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: codex
+projects:
+  web:
+    path: ${extraRepo.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+`,
+      );
+
+      const daemon = await context.startDaemon(baseConfigPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const extraSpawn = JSON.parse(
+        (await context.execCli(["--config", extraConfigPath, "spawn", "web", "sync project", "--json"]))
+          .stdout,
+      ) as SessionView;
+      expect(extraSpawn.project).toBe("web");
+
+      const restarted = JSON.parse(
+        (await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"])).stdout,
+      ) as {
+        restarted: boolean;
+        runtime?: RuntimeInfo;
+      };
+      expect(restarted.restarted).toBe(true);
+      const restartedPid = restarted.runtime?.pid;
+      expect(restartedPid).toBeTypeOf("number");
+      if (typeof restartedPid === "number") {
+        currentActiveContext().daemonPid = restartedPid;
+      }
+
+      const apiSpawn = await context.fetchJson<SessionView>("/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "api",
+          prompt: "registry survived restart",
+        }),
+      });
+      expect(apiSpawn.project).toBe("api");
+
+      const listed = await context.fetchJson<SessionView[]>("/sessions");
+      expect(listed.map((session) => session.project)).toEqual(
+        expect.arrayContaining(["api", "web"]),
+      );
+    } finally {
+      await rm(extraRepo.repoDir, { recursive: true, force: true });
+      await rm(extraRepo.originDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps build as a no-op when /info is incompatible and does not expose a Spur runtime pid", async () => {

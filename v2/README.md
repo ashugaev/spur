@@ -71,6 +71,14 @@ pnpm --dir v2 build
 
 `build` also restarts a running daemon when Spur config is discoverable.
 
+Spur keeps a durable config registry in `dataDir`. Any normal CLI command syncs its current
+`--config` into the running daemon, and daemon boot reloads every registered config path,
+rehydrates durable session state, resumes running pipelines, and restarts configured
+sources/triggers.
+
+Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`, and
+their `project` ids plus `sessionPrefix` values must stay globally unique within that daemon.
+
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml

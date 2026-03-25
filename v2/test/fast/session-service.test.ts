@@ -846,6 +846,7 @@ describe("SessionService", () => {
         sessionPrefix: "api",
         worktree: true,
         symlinks: [".env"],
+        defaultAgent: "claude",
         preflight: {
           prompt: "Suggest a branch name from the task context.",
         },
