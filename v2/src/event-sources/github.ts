@@ -319,13 +319,17 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
-  if (!deps.config.runOnStart) {
-    await poll(false);
-  }
-
   const timer = startInterval(() => {
     void poll(false);
   }, deps.config.intervalMs);
+
+  if (!deps.config.runOnStart) {
+    if (deps.deferInitialSync) {
+      void poll(false);
+    } else {
+      await poll(false);
+    }
+  }
 
   deps.logger.info?.(
     `[source:${deps.projectId}/${deps.sourceId}] github started: intervalMs=${deps.config.intervalMs}, events="github:*", runOnStart=${deps.config.runOnStart}`,

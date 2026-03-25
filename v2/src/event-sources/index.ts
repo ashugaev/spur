@@ -57,6 +57,7 @@ export async function startConfiguredSources(
           projectId,
           dataDir: deps.config.dataDir,
           config: source,
+          deferInitialSync: true,
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {

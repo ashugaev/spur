@@ -17,6 +17,7 @@ export interface SourceStartDeps<TConfig extends SourceConfig = SourceConfig> {
   projectId: string;
   dataDir: string;
   config: TConfig;
+  deferInitialSync?: boolean;
   emit<TEvent = unknown>(name: string, data?: TEvent): void;
   signal: AbortSignal;
   logger: SourceLogger;

@@ -437,7 +437,11 @@ export class SessionService {
     const sessions = listSessions(this.config.dataDir).filter(
       (session) => !isTerminalSessionStatus(session.status),
     );
-    return Promise.all(sessions.map((session) => this.enrich(session)));
+    const views: SessionView[] = [];
+    for (const session of sessions) {
+      views.push(await this.enrich(session));
+    }
+    return views;
   }
 
   async get(sessionId: string): Promise<SessionView> {
@@ -1490,7 +1494,7 @@ export class SessionService {
     const processAlive = runtimeAlive
       ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
       : false;
-    const agentState = workspacePresent
+    const agentState = workspacePresent && session.agent === "claude"
       ? await probeAgentState(session.agent, session.worktreePath, {
           processAlive,
           signalWindowMs: WORKING_SIGNAL_WINDOW_MS,

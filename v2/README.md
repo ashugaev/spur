@@ -119,7 +119,7 @@ server:
   port: 4310
 
 dataDir: ~/.spur
-worktreeDir: ~/.spur-worktrees
+worktreeDir: ~/.spur/worktrees
 defaultAgent: claude
 
 projects:
@@ -176,7 +176,7 @@ Field reference:
 - `server.host`: optional, default `127.0.0.1`.
 - `server.port`: optional, default `4310`.
 - `dataDir`: optional, default `~/.spur`.
-- `worktreeDir`: optional, default `~/.spur-worktrees`.
+- `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex`, default `claude`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
