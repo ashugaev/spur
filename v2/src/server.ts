@@ -5,11 +5,12 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
-import { startConfiguredTriggers } from "./triggers.js";
+import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   KillSessionRequest,
   SendMessageRequest,
   SpawnSessionRequest,
+  SyncProjectsRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -61,8 +62,73 @@ export async function startServer(
   const service = new SessionService(configPath);
   const bus = new EventBus();
   let ready = false;
+  let triggers: TriggerGroupController | null = null;
+  let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
+  };
+  const startAutomation = async (): Promise<void> => {
+    const nextTriggers = startConfiguredTriggers({
+      config: service.config,
+      bus,
+      sessionService: service,
+      logger: {
+        warn: logger.warn ?? writeStderr,
+        ...(logger.info ? { info: logger.info } : {}),
+      },
+    });
+    try {
+      const nextSources = await startConfiguredSources({
+        config: service.config,
+        bus,
+        logger: {
+          ...(logger.info ? { info: logger.info } : {}),
+          ...(logger.warn ? { warn: logger.warn } : {}),
+        },
+      });
+      triggers = nextTriggers;
+      sources = nextSources;
+    } catch (error) {
+      await nextTriggers.stop();
+      throw error;
+    }
+  };
+  const reloadAutomation = async (requestConfigPath: string): Promise<void> => {
+    const preview = service.previewConfigSync(requestConfigPath);
+    if (!preview.changed) {
+      return;
+    }
+
+    ready = false;
+    const previousConfig = service.config;
+    const previousRegistryPaths = service.getRegistryPaths();
+
+    sources?.stop();
+    sources = null;
+    if (triggers) {
+      await triggers.stop();
+      triggers = null;
+    }
+
+    service.applyConfig(preview.config, preview.registryPaths);
+    try {
+      await startAutomation();
+    } catch (error) {
+      service.applyConfig(previousConfig, previousRegistryPaths);
+      await startAutomation();
+      ready = true;
+      throw error;
+    }
+
+    logEvent("daemon.registry.reloaded", {
+      level: "info",
+      message: `Reloaded daemon project registry from ${requestConfigPath}`,
+      details: {
+        configPaths: preview.registryPaths,
+        projectCount: Object.keys(preview.config.projects).length,
+      },
+    });
+    ready = true;
   };
   const handleRequest = async (
     request: IncomingMessage,
@@ -111,6 +177,16 @@ export async function startServer(
 
       if (method === "GET" && path === "/sessions") {
         sendJson(response, 200, await service.list());
+        return;
+      }
+
+      if (method === "POST" && path === "/projects/sync") {
+        const body = await readJsonBody<SyncProjectsRequest>(request);
+        if (typeof body.configPath !== "string" || !body.configPath.trim()) {
+          throw new Error("configPath must be a non-empty string");
+        }
+        await reloadAutomation(body.configPath);
+        sendJson(response, 200, { ok: true });
         return;
       }
 
@@ -203,33 +279,14 @@ export async function startServer(
     });
   });
 
-  const triggers = startConfiguredTriggers({
-    config: service.config,
-    bus,
-    sessionService: service,
-    logger: {
-      warn: logger.warn ?? writeStderr,
-      ...(logger.info ? { info: logger.info } : {}),
-    },
-  });
-
-  let sources: Awaited<ReturnType<typeof startConfiguredSources>>;
   try {
-    sources = await startConfiguredSources({
-      config: service.config,
-      bus,
-      logger: {
-        ...(logger.info ? { info: logger.info } : {}),
-        ...(logger.warn ? { warn: logger.warn } : {}),
-      },
-    });
+    await startAutomation();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logEvent("daemon.startup.failed", {
       level: "error",
       message: `Spur daemon failed during startup: ${message}`,
     });
-    await triggers.stop();
     await closeServer();
     throw error;
   }
@@ -254,8 +311,11 @@ export async function startServer(
       message: "Stopping Spur daemon",
     });
     const closePromise = closeServer();
-    sources.stop();
-    await triggers.stop();
+    sources?.stop();
+    const triggerController = triggers;
+    if (triggerController) {
+      await triggerController.stop();
+    }
     await closePromise;
     logEvent("daemon.stopped", {
       level: "info",

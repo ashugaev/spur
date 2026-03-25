@@ -19,6 +19,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
+- Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, and `github:comment`.
 - Config rejects duplicate `sessionPrefix` values across projects.
@@ -52,6 +53,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 ## Runtime Integration
 
 - `list --json` auto-starts the daemon and returns `[]` on a fresh config, and `ls --json` does the same.
+- Normal CLI session commands sync their current config into the running daemon registry before they hit `/sessions`.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
@@ -76,6 +78,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - Hidden `daemon stop --json` stops a running daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
 - Hidden `daemon restart --json` replaces a live daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
+- Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.
 - `pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.

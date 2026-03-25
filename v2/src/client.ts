@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./config.js";
-import { SPUR_DAEMON_API_VERSION, type RuntimeInfo } from "./types.js";
+import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SyncProjectsRequest } from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
 const DAEMON_STOP_RETRY_DELAY_MS = 100;
@@ -293,7 +293,15 @@ export async function getJson<T>(
   path: string,
   configPath?: string,
 ): Promise<T> {
+  const { configPath: resolvedConfigPath } = createBaseUrl(configPath);
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  if (path !== "/info") {
+    await requestJson(baseUrl, "/projects/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ configPath: resolvedConfigPath } satisfies SyncProjectsRequest),
+    });
+  }
   return requestJson<T>(baseUrl, path);
 }
 
@@ -303,7 +311,15 @@ export async function postJson<T>(
   body: unknown,
   configPath?: string,
 ): Promise<T> {
+  const { configPath: resolvedConfigPath } = createBaseUrl(configPath);
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
+  if (path !== "/projects/sync") {
+    await requestJson(baseUrl, "/projects/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ configPath: resolvedConfigPath } satisfies SyncProjectsRequest),
+    });
+  }
   return requestJson<T>(baseUrl, path, {
     method: "POST",
     headers: { "content-type": "application/json" },

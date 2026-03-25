@@ -151,6 +151,7 @@ export interface SpawnSessionRequest {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  configPath?: string;
 }
 
 export interface SendMessageRequest {
@@ -166,6 +167,10 @@ export interface UpdateSessionSlotsRequest {
   clearTitle?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+}
+
+export interface SyncProjectsRequest {
+  configPath: string;
 }
 
 export interface RuntimeInfo {
