@@ -54,7 +54,7 @@ projects:
     expect(config.server.port).toBe(4310);
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
-    expect(config.worktreeDir).toContain(".spur-worktrees");
+    expect(config.worktreeDir).toContain(".spur/worktrees");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
     expect(config.projects["backend"]?.worktree).toBe(true);

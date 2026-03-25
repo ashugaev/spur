@@ -310,7 +310,7 @@ export function loadConfig(input?: string): AppConfig {
   const dataDir = resolveFrom(configDir, asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur");
   const worktreeDir = resolveFrom(
     configDir,
-    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur-worktrees",
+    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur/worktrees",
   );
 
   const normalizedProjects: Record<string, ProjectConfig> = {};

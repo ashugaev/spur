@@ -2,7 +2,7 @@ server:
   port: 4310
 
 dataDir: ~/.spur
-worktreeDir: ~/.spur-worktrees
+worktreeDir: ~/.spur/worktrees
 defaultAgent: claude
 
 projects:

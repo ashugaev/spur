@@ -9,6 +9,20 @@ import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
+const SESSION_INDEX_TTL_MS = 30_000;
+
+interface IndexedSessionFile {
+  path: string;
+  mtimeMs: number;
+  threadId: string | null;
+}
+
+interface SessionIndexCache {
+  expiresAt: number;
+  byCwd: Map<string, IndexedSessionFile>;
+}
+
+let sessionIndexCache: SessionIndexCache | null = null;
 
 export function codexCommand(): string {
   return process.env["SPUR_CODEX_BIN"] || "codex";
@@ -77,14 +91,12 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
   return files;
 }
 
-async function sessionFileMatchesWorktree(
-  filePath: string,
-  candidates: Set<string>,
-): Promise<boolean> {
+async function readSessionMeta(filePath: string): Promise<{ cwd: string; threadId: string | null } | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
     const reader = createInterface({ input, crlfDelay: Infinity });
     let linesRead = 0;
+    let threadId: string | null = null;
     for await (const line of reader) {
       if (linesRead >= 10) {
         break;
@@ -95,38 +107,69 @@ async function sessionFileMatchesWorktree(
       try {
         const parsed = JSON.parse(trimmed) as CodexSessionLine;
         const cwd = sessionMetaCwd(parsed);
-        if (cwd && candidates.has(cwd)) {
-          return true;
+        const resumeId = sessionResumeId(parsed);
+        if (resumeId && !threadId) {
+          threadId = resumeId;
+        }
+        if (cwd) {
+          return { cwd, threadId };
         }
       } catch {
         // Ignore malformed lines and keep scanning the file header.
       }
     }
   } catch {
-    return false;
+    return null;
   }
-  return false;
+  return null;
 }
 
-async function findSessionFile(worktreePath: string): Promise<string | null> {
+async function loadSessionIndex(): Promise<Map<string, IndexedSessionFile>> {
+  const now = Date.now();
+  if (sessionIndexCache && sessionIndexCache.expiresAt > now) {
+    return sessionIndexCache.byCwd;
+  }
+
   const files = await collectJsonlFiles(CODEX_SESSIONS_DIR);
-  const candidates = new Set(await resolveWorktreePathCandidates(worktreePath));
-  let bestMatch: { path: string; mtimeMs: number } | null = null;
+  const byCwd = new Map<string, IndexedSessionFile>();
 
   for (const filePath of files) {
-    if (!(await sessionFileMatchesWorktree(filePath, candidates))) {
+    const meta = await readSessionMeta(filePath);
+    if (!meta) {
       continue;
     }
     try {
       const fileStat = await stat(filePath);
-      if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
-        bestMatch = { path: filePath, mtimeMs: fileStat.mtimeMs };
+      const existing = byCwd.get(meta.cwd);
+      if (!existing || fileStat.mtimeMs > existing.mtimeMs) {
+        byCwd.set(meta.cwd, {
+          path: filePath,
+          mtimeMs: fileStat.mtimeMs,
+          threadId: meta.threadId,
+        });
       }
     } catch {
       // Ignore unreadable files.
     }
   }
 
+  sessionIndexCache = {
+    expiresAt: now + SESSION_INDEX_TTL_MS,
+    byCwd,
+  };
+  return byCwd;
+}
+
+async function findSessionFile(worktreePath: string): Promise<string | null> {
+  const sessionIndex = await loadSessionIndex();
+  const candidates = await resolveWorktreePathCandidates(worktreePath);
+  let bestMatch: IndexedSessionFile | null = null;
+  for (const candidate of candidates) {
+    const match = sessionIndex.get(candidate);
+    if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
+      bestMatch = match;
+    }
+  }
   return bestMatch?.path ?? null;
 }
 
@@ -154,8 +197,19 @@ async function readThreadId(filePath: string): Promise<string | null> {
 }
 
 export async function findCodexSessionId(worktreePath: string): Promise<string | null> {
-  const sessionFile = await findSessionFile(worktreePath);
-  return sessionFile ? readThreadId(sessionFile) : null;
+  const sessionIndex = await loadSessionIndex();
+  const candidates = await resolveWorktreePathCandidates(worktreePath);
+  let bestMatch: IndexedSessionFile | null = null;
+  for (const candidate of candidates) {
+    const match = sessionIndex.get(candidate);
+    if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
+      bestMatch = match;
+    }
+  }
+  if (!bestMatch) {
+    return null;
+  }
+  return bestMatch.threadId ?? readThreadId(bestMatch.path);
 }
 
 export async function probeCodexState(

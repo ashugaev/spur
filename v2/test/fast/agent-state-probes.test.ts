@@ -200,4 +200,39 @@ describe("agent state probes", () => {
       signalAt,
     });
   });
+
+  it("uses the latest matching Codex session file for the worktree", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
+    cleanupDirs.push(homeDir);
+    process.env.HOME = homeDir;
+    const worktreePath = join(homeDir, "workspace");
+    const olderSignalAt = new Date("2026-03-24T10:00:00.000Z");
+    const newerSignalAt = new Date("2026-03-24T10:04:30.000Z");
+    const sessionDir = join(homeDir, ".codex", "sessions", "2026", "03", "24");
+    await writeJsonl(
+      join(sessionDir, "older.jsonl"),
+      [{ type: "session_meta", payload: { cwd: worktreePath, id: "thread-old" } }],
+      olderSignalAt,
+    );
+    await writeJsonl(
+      join(sessionDir, "newer.jsonl"),
+      [{ type: "session_meta", payload: { cwd: worktreePath, id: "thread-new" } }],
+      newerSignalAt,
+    );
+
+    vi.resetModules();
+    const { findCodexSessionId, probeCodexState } = await import("../../src/agents/codex.js");
+
+    const sessionId = await findCodexSessionId(worktreePath);
+    const state = await probeCodexState(worktreePath, {
+      processAlive: true,
+      signalWindowMs: 90_000,
+    });
+
+    expect(sessionId).toBe("thread-new");
+    expect(state).toEqual({
+      state: "working",
+      signalAt: newerSignalAt,
+    });
+  });
 });
