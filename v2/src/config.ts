@@ -14,6 +14,7 @@ import {
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
+import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
 const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
@@ -164,7 +165,8 @@ function parseProjectPreflight(
   const label = `projects.${projectId}.preflight`;
   const raw = asObject(value, label);
   return {
-    prompt: asString(raw["prompt"], `${label}.prompt`),
+    prompt:
+      asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
 }
 

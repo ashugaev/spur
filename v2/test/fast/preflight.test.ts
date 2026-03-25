@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
 const { mockExecFileAsync } = vi.hoisted(() => ({
@@ -48,7 +49,7 @@ describe("runSpawnPreflight", () => {
 
   it("runs claude in print mode and parses a branch suggestion", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"type":"result","structured_output":{"branch":"feature/login-rate-limit"}}\n',
+      stdout: "feature/login-rate-limit\n",
       stderr: "",
     });
 
@@ -68,9 +69,6 @@ describe("runSpawnPreflight", () => {
     expect(args).toEqual(
       expect.arrayContaining([
         "--print",
-        "--output-format",
-        "json",
-        "--json-schema",
         "--no-session-persistence",
         "--dangerously-skip-permissions",
       ]),
@@ -86,14 +84,14 @@ describe("runSpawnPreflight", () => {
     );
   });
 
-  it("runs codex exec with a schema file and reads the structured output file", async () => {
+  it("runs codex exec with output-last-message and reads the branch line", async () => {
     mockExecFileAsync.mockImplementationOnce(async (_command: string, args: string[]) => {
       const outputIndex = args.indexOf("--output-last-message");
       const outputPath = args[outputIndex + 1];
       if (!outputPath) {
         throw new Error("Expected codex preflight to receive --output-last-message <path>");
       }
-      writeFileSync(outputPath, '{"branch":"feature/runtime-preflight"}\n', "utf8");
+      writeFileSync(outputPath, "feature/runtime-preflight\n", "utf8");
       return { stdout: "", stderr: "" };
     });
 
@@ -114,8 +112,9 @@ describe("runSpawnPreflight", () => {
       expect.arrayContaining([
         "exec",
         "--ephemeral",
+        "--disable",
+        "codex_hooks",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--output-schema",
         "--output-last-message",
       ]),
     );
@@ -129,9 +128,9 @@ describe("runSpawnPreflight", () => {
     );
   });
 
-  it("fails fast when the agent returns invalid JSON", async () => {
+  it("fails fast when the agent returns prose instead of one branch line", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: "not-json\n",
+      stdout: "branch one branch two\n",
       stderr: "",
     });
 
@@ -144,12 +143,12 @@ describe("runSpawnPreflight", () => {
         worktree: true,
         prompt: "Fix login rate limiting for PR #42",
       }),
-    ).rejects.toThrow("Spawn preflight returned invalid JSON");
+    ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
-  it("treats a null branch as an explicit defer to Spur default naming", async () => {
+  it("treats the defer sentinel as an explicit fallback to Spur default naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
-      stdout: '{"branch":null}\n',
+      stdout: `${PREFLIGHT_DEFER_SENTINEL}\n`,
       stderr: "",
     });
 
