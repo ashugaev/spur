@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-if grep -Eq '"stop_hook_active"[[:space:]]*:[[:space:]]*true'; then
-  exit 0
-fi
+set -euo pipefail
 
-# Codex Stop hooks continue the session by exiting 2 and writing the next prompt to stderr.
-printf '$code-simplifier\n' >&2
-exit 2
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+exec "$script_dir/../../.hooks/code-simplifier-stop.sh" codex
