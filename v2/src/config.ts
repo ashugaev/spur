@@ -18,6 +18,8 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 
 const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
+export const DEFAULT_PROJECT_PREFLIGHT_PROMPT =
+  "Suggest a git branch name from the user's task prompt and project rules. Prefer tracker or PR identifiers when present.";
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -164,7 +166,8 @@ function parseProjectPreflight(
   const label = `projects.${projectId}.preflight`;
   const raw = asObject(value, label);
   return {
-    prompt: asString(raw["prompt"], `${label}.prompt`),
+    prompt:
+      asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
 }
 
