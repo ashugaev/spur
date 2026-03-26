@@ -29,7 +29,6 @@ projects:
         source: gh
         event: github:ci_failed
         send:
-          interrupt: true
           prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       gh-comment:
         source: gh
