@@ -1289,7 +1289,7 @@ projects:
     expect(log).toContain("ship the task");
   });
 
-  it("uses project default spawn steps and lets CLI steps override them", async () => {
+  it("uses project default spawn steps, paces later steps, and lets CLI steps override them", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-pipeline-defaults-${port}`;
@@ -1325,6 +1325,16 @@ projects:
     });
     expect(defaultPane).toContain("ship the task");
     expect(defaultPane).toContain("[Spur step 1/2: research]");
+
+    await sleep(5_000);
+    const earlyDefaultLog = await context.readAgentLog(defaultSpawned.id);
+    expect(earlyDefaultLog).not.toContain("[Spur step 2/2: test]");
+
+    const defaultLog = await pollUntil(async () => context.readAgentLog(defaultSpawned.id), {
+      timeoutMs: 45_000,
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
+    });
+    expect(defaultLog).toContain("[Spur step 2/2: test]");
 
     const overridden = JSON.parse(
       (

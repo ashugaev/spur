@@ -175,6 +175,99 @@ describe("agent state probes", () => {
     });
   });
 
+  it("maps Codex task completion events to waiting even when the file is fresh", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
+    cleanupDirs.push(homeDir);
+    process.env.HOME = homeDir;
+    const worktreePath = join(homeDir, "workspace");
+    const signalAt = new Date("2026-03-24T10:04:30.000Z");
+    await writeJsonl(
+      join(homeDir, ".codex", "sessions", "2026", "03", "24", "rollout-test.jsonl"),
+      [
+        { type: "session_meta", payload: { cwd: worktreePath, id: "thread-1" } },
+        { type: "event_msg", payload: { type: "task_complete" } },
+      ],
+      signalAt,
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
+    vi.resetModules();
+    const { probeCodexState } = await import("../../src/agents/codex.js");
+
+    const result = await probeCodexState(worktreePath, {
+      processAlive: true,
+      signalWindowMs: 90_000,
+    });
+
+    expect(result).toEqual({
+      state: "waiting",
+      signalAt,
+    });
+  });
+
+  it("maps Codex commentary output to working while the file is fresh", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
+    cleanupDirs.push(homeDir);
+    process.env.HOME = homeDir;
+    const worktreePath = join(homeDir, "workspace");
+    const signalAt = new Date("2026-03-24T10:04:30.000Z");
+    await writeJsonl(
+      join(homeDir, ".codex", "sessions", "2026", "03", "24", "rollout-test.jsonl"),
+      [
+        { type: "session_meta", payload: { cwd: worktreePath, id: "thread-1" } },
+        { type: "event_msg", payload: { type: "agent_message", phase: "commentary" } },
+      ],
+      signalAt,
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
+    vi.resetModules();
+    const { probeCodexState } = await import("../../src/agents/codex.js");
+
+    const result = await probeCodexState(worktreePath, {
+      processAlive: true,
+      signalWindowMs: 90_000,
+    });
+
+    expect(result).toEqual({
+      state: "working",
+      signalAt,
+    });
+  });
+
+  it("maps Codex final answers to waiting even before task_complete lands", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
+    cleanupDirs.push(homeDir);
+    process.env.HOME = homeDir;
+    const worktreePath = join(homeDir, "workspace");
+    const signalAt = new Date("2026-03-24T10:04:30.000Z");
+    await writeJsonl(
+      join(homeDir, ".codex", "sessions", "2026", "03", "24", "rollout-test.jsonl"),
+      [
+        { type: "session_meta", payload: { cwd: worktreePath, id: "thread-1" } },
+        { type: "event_msg", payload: { type: "agent_message", phase: "final_answer" } },
+      ],
+      signalAt,
+    );
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
+    vi.resetModules();
+    const { probeCodexState } = await import("../../src/agents/codex.js");
+
+    const result = await probeCodexState(worktreePath, {
+      processAlive: true,
+      signalWindowMs: 90_000,
+    });
+
+    expect(result).toEqual({
+      state: "waiting",
+      signalAt,
+    });
+  });
+
   it("maps stopped Codex processes to stopped even with a matching session file", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
     cleanupDirs.push(homeDir);

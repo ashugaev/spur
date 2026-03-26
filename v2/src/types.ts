@@ -119,6 +119,7 @@ export interface SessionPipelineState {
   steps: string[];
   nextStepIndex: number;
   awaitingStepIndex?: number;
+  nextStepNotBefore?: string;
   status: SessionPipelineStatus;
   error?: string;
 }

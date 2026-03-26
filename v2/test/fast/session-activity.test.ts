@@ -1,12 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyRunningState, isWaitingInput } from "../../src/session-service.js";
+import { describe, expect, it } from "vitest";
+import { isWaitingInput } from "../../src/session-service.js";
 
 describe("session state detection", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
-  });
-
   it("detects permission and plan-mode menus as needs_input", () => {
     expect(
       isWaitingInput([
@@ -17,43 +12,17 @@ describe("session state detection", () => {
         "Esc to cancel",
       ]),
     ).toBe(true);
-
-    expect(
-      classifyRunningState({
-        pane: ["Need approval required before continuing", "(Y)es / (N)o"].join("\n"),
-        updatedAt: new Date("2026-03-18T10:04:00.000Z"),
-        signalAt: null,
-      }),
-    ).toBe("needs_input");
   });
 
-  it("keeps working state when the pane is not sitting at a prompt", () => {
+  it("detects approval prompts as needs_input", () => {
     expect(
-      classifyRunningState({
-        pane: ["OpenAI Codex", "›", "• Working (reviewing changes)", "gpt-5.4 · footer"].join("\n"),
-        updatedAt: new Date("2026-03-18T10:04:00.000Z"),
-        signalAt: null,
-      }),
-    ).toBe("working");
+      isWaitingInput(["Need approval required before continuing", "(Y)es / (N)o"]),
+    ).toBe(true);
   });
 
-  it("keeps a prompt in working during the delivery grace window", () => {
+  it("does not mark normal output as needs_input", () => {
     expect(
-      classifyRunningState({
-        pane: "Claude Code\n❯",
-        updatedAt: new Date("2026-03-18T10:04:35.000Z"),
-        signalAt: null,
-      }),
-    ).toBe("working");
-  });
-
-  it("treats a stale prompt as waiting when no fresh signal remains", () => {
-    expect(
-      classifyRunningState({
-        pane: "Claude Code\n❯",
-        updatedAt: new Date("2026-03-18T10:03:59.000Z"),
-        signalAt: null,
-      }),
-    ).toBe("waiting");
+      isWaitingInput(["OpenAI Codex", "Working on the task", "No questions for you"]),
+    ).toBe(false);
   });
 });

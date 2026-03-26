@@ -95,6 +95,12 @@ export async function startServer(
   };
   const reloadAutomation = async (requestConfigPath: string): Promise<void> => {
     const preview = service.previewConfigSync(requestConfigPath);
+    for (const message of preview.warnings) {
+      logEvent("daemon.registry.warning", {
+        level: "warn",
+        message,
+      });
+    }
     if (!preview.changed) {
       return;
     }
