@@ -465,8 +465,13 @@ export class SessionService {
     let prompt = "";
     let steps: string[] | undefined;
     try {
-      ({ prompt, steps } = normalizeSpawnRequest(request));
       project = this.getProject(request.project);
+      ({ prompt, steps } = normalizeSpawnRequest({
+        ...request,
+        ...(request.steps === undefined && project.spawn?.steps !== undefined
+          ? { steps: project.spawn.steps }
+          : {}),
+      }));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())

@@ -9,6 +9,7 @@ import {
   type CronSourceConfig,
   type GitHubSourceConfig,
   type ProjectPreflightConfig,
+  type ProjectSpawnConfig,
   type ProjectConfig,
   type SendTriggerConfig,
   type SourceConfig,
@@ -149,8 +150,10 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
+    ...(prompt !== undefined ? { prompt } : {}),
   };
 }
 
@@ -168,6 +171,17 @@ function parseProjectPreflight(
     prompt:
       asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
+}
+
+function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.spawn`;
+  const raw = asObject(value, label);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  return steps !== undefined ? { steps } : {};
 }
 
 function parseTrigger(
@@ -244,6 +258,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
+  const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
   const sourcesRaw = raw["sources"]
@@ -272,6 +287,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sessionPrefix,
     worktree,
     symlinks,
+    ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,

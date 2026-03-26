@@ -18,7 +18,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
 - `v2` has its own CLI, YAML config, state directory, daemon runtime, and API surface.
 - CLI is an HTTP client over a local daemon and auto-starts that daemon when needed.
-- `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent`, `branch`, `--worktree`, and `--shared`.
+- `spawn` is positional: `spur spawn <project> <prompt...>`, with optional `agent`, `branch`, repeatable `--step`, `--worktree`, and `--shared`.
 - Milestone 1 human session ops are: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
 - `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `list` is the only session UI.
@@ -84,6 +84,8 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    spawn:
+      steps: [research, test]
     symlinks: [.env, .claude]
     sources:
       weekday-review:

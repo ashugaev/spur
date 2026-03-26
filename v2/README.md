@@ -13,18 +13,21 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]
+spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` always takes one task prompt. Optional `steps` are a pipeline skeleton around that task:
 
 - The positional `<prompt...>` is the task.
+- `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt.
+- Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
+spur spawn backend-api "Fix the flaky auth test" --step research --step test
 ```
 
 ```yaml
@@ -112,6 +115,11 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 - `false`: queue while `working`/`needs_input`, dedupe, flush when `waiting`
 - `true`: interrupt immediately while `working`; `needs_input` still queues
 
+`send.prompt` (GitHub send triggers):
+
+- optional custom action text appended after the PR signal summary
+- when set, replaces Spur's built-in GitHub action lines for that delivery
+
 ## Config
 
 ```yaml
@@ -128,6 +136,10 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    spawn:
+      steps:
+        - "research"
+        - "test"
     preflight: {} # optional: omit prompt to use Spur's default rule-or-defer prompt
     symlinks:
       - .env
@@ -159,16 +171,19 @@ projects:
         event: github:changes_requested
         send:
           interrupt: false # queued until agent is waiting
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
       pr-watch-ci-failed:
         source: pr-watch
         event: github:ci_failed
         send:
           interrupt: true # delivered immediately and retried every 10m (up to 3) while CI still fails
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       pr-watch-comment:
         source: pr-watch
         event: github:comment
         send:
           interrupt: false # queued, deduped, flushed as one batch
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
 ```
 
 Field reference:
@@ -183,6 +198,7 @@ Field reference:
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
 - `projects.<id>.worktree`: optional, default `true`.
 - `projects.<id>.symlinks`: optional array of repo-relative paths, default `[]`.
+- `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
 - `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex`, falls back to top-level `defaultAgent`.
@@ -195,11 +211,13 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
+- `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
+- `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 
 Event surface:
 

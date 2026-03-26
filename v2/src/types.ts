@@ -46,6 +46,10 @@ export interface ProjectPreflightConfig {
   prompt: string;
 }
 
+export interface ProjectSpawnConfig {
+  steps?: string[];
+}
+
 export interface TriggerSpawnConfig {
   prompt: string;
   steps?: string[];
@@ -56,6 +60,7 @@ export interface TriggerSpawnConfig {
 
 export interface TriggerSendConfig {
   interrupt: boolean;
+  prompt?: string;
 }
 
 export interface SpawnTriggerConfig {
@@ -91,6 +96,7 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
   sources: Record<string, SourceConfig>;

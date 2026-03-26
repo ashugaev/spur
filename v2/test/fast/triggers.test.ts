@@ -12,9 +12,10 @@ vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
 }));
 
-function config(options?: { event?: string; interrupt?: boolean }) {
+function config(options?: { event?: string; interrupt?: boolean; prompt?: string }) {
   const event = options?.event ?? "github:comment";
   const interrupt = options?.interrupt ?? false;
+  const prompt = options?.prompt;
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -28,7 +29,10 @@ function config(options?: { event?: string; interrupt?: boolean }) {
           send: {
             source: "pr-watch",
             event,
-            send: { interrupt },
+            send: {
+              interrupt,
+              ...(prompt !== undefined ? { prompt } : {}),
+            },
           },
         },
       },
@@ -176,12 +180,57 @@ describe("startConfiguredTriggers", () => {
           { interrupt: false },
         );
       });
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
+        { interrupt: false },
+      );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.queued",
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.delivered",
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("uses custom send prompt when configured", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({
+        prompt: "Run $manager and $github. Address the latest requested review changes on the active PR.",
+      }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      const delivered = deliverMock.mock.calls[0]?.[1];
+      expect(typeof delivered).toBe("string");
+      expect(delivered).toContain(
+        "Run $manager and $github. Address the latest requested review changes on the active PR.",
+      );
+      expect(delivered).not.toContain("Review the latest GitHub updates on the active PR and act on them.");
     } finally {
       await controller.stop();
     }
@@ -218,6 +267,11 @@ describe("startConfiguredTriggers", () => {
       expect(deliverMock).toHaveBeenLastCalledWith(
         "api-1",
         expect.stringContaining("CI is failing: test suite."),
+        { interrupt: true },
+      );
+      expect(deliverMock).toHaveBeenLastCalledWith(
+        "api-1",
+        expect.stringContaining("Inspect the failing checks, fix them, and rerun the relevant validation."),
         { interrupt: true },
       );
 
@@ -283,6 +337,11 @@ describe("startConfiguredTriggers", () => {
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
         expect.stringContaining("CI is failing: test suite."),
+        { interrupt: false },
+      );
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
         { interrupt: false },
       );
     } finally {

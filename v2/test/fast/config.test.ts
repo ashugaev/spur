@@ -113,6 +113,74 @@ projects:
     });
   });
 
+  it("parses optional send prompt on triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:changes_requested
+        send:
+          interrupt: true
+          prompt: "Run $manager and $github. Address requested changes."
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "pr-watch",
+      event: "github:changes_requested",
+      send: {
+        interrupt: true,
+        prompt: "Run $manager and $github. Address requested changes.",
+      },
+    });
+  });
+
+  it("rejects non-string send prompts", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:comment
+        send:
+          prompt: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.notify.send.prompt must be a non-empty string",
+    );
+  });
+
+  it("parses project default spawn steps", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    spawn:
+      steps:
+        - "research"
+        - "test"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.spawn).toEqual({
+      steps: ["research", "test"],
+    });
+  });
+
   it("parses an optional project spawn preflight prompt", async () => {
     const configPath = await writeConfig(`
 projects:

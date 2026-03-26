@@ -135,6 +135,10 @@ function postSessionAction(
   return postJson<SessionView>(cliEntrypoint, `/sessions/${sessionId}/${action}`, body, configPath);
 }
 
+function appendOptionValue(value: string, previous?: string[]): string[] {
+  return [...(previous ?? []), value];
+}
+
 function renderLiveSessionList(args: {
   info: RuntimeInfo;
   sessions: SessionView[];
@@ -675,6 +679,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<prompt...>", "Task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--branch <name>", "Branch name to use")
+    .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
     .option(
       "--worktree [defaultBranch]",
       "Use an owned worktree; optionally override the base branch",
@@ -691,6 +696,7 @@ export function createProgram(cliEntrypoint: string): Command {
       const payload: SpawnSessionRequest = {
         project,
         prompt,
+        ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
         branch: options.branch,
         ...(overrides !== undefined ? { overrides } : {}),
