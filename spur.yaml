@@ -12,7 +12,8 @@ projects:
     symlinks: [node_modules, .env]
     spawn:
       steps:
-        - "run reviewer agent on the current diff"
+        - "run $manager"
+        - "find the reviewer agent for this repo and run it on the current diff"
         - "run $code-simplifier"
         - "run $self-verify"
     sources:
