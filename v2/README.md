@@ -21,7 +21,7 @@ spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--ste
 - The positional `<prompt...>` is the task.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
-- Spur sends the next phase only after the agent returns to its prompt.
+- Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
 
@@ -46,7 +46,7 @@ When `steps` are present, Spur sends messages like "step 1/N: research" plus the
 `list` hides `completed` and `killed` sessions by default.
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
 
-`list` derives live `state` and `lastActivityAt` from `tmux`.
+`list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
 When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
 Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
 
@@ -85,9 +85,9 @@ their `project` ids plus `sessionPrefix` values must stay globally unique within
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml
-node dist/cli.js pause api-1 --config spur.yaml
-node dist/cli.js complete api-1 --config spur.yaml
-node dist/cli.js send api-1 "Run the focused test and report back." --config spur.yaml
+node dist/cli.js pause api-a1b2 --config spur.yaml
+node dist/cli.js complete api-a1b2 --config spur.yaml
+node dist/cli.js send api-a1b2 "Run the focused test and report back." --config spur.yaml
 ```
 
 ## Validate

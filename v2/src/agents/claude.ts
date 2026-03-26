@@ -1,4 +1,4 @@
-import { open, readFile, readdir, stat } from "node:fs/promises";
+import { open, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
@@ -16,6 +16,7 @@ const ACTIVE_ENTRY_TYPES = new Set([
 
 const WAITING_ENTRY_TYPES = new Set(["assistant", "system", "summary", "result"]);
 const MAX_SESSION_TAIL_BYTES = 131_072;
+const CLAUDE_HOOK_SETTINGS_FILE = "claude-hooks.settings.json";
 
 interface ClaudeSessionLine {
   type?: string;
@@ -179,8 +180,18 @@ export async function probeClaudeState(
 }
 
 export function buildClaudePlan(prompt: string): AgentLaunchPlan {
+  return buildClaudePlanWithSettings(prompt);
+}
+
+function buildClaudePlanWithSettings(
+  prompt: string,
+  options?: { settingsPath?: string },
+): AgentLaunchPlan {
+  const settingsArg = options?.settingsPath
+    ? ` --settings ${shellEscape(options.settingsPath)}`
+    : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${settingsArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -189,9 +200,13 @@ export function buildClaudePlan(prompt: string): AgentLaunchPlan {
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
+  options?: { settingsPath?: string },
 ): AgentResumePlan {
+  const settingsArg = options?.settingsPath
+    ? ` --settings ${shellEscape(options.settingsPath)}`
+    : "";
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${settingsArg}`,
     readyMarkers: ["❯"],
   };
 }
@@ -209,4 +224,41 @@ export async function buildClaudeRestorePlan(
     ...buildClaudeResumePlan(sessionId),
     initialMessage: prompt,
   };
+}
+
+export async function ensureClaudeHookSettings(sessionToolDir: string): Promise<string> {
+  const settingsPath = join(sessionToolDir, CLAUDE_HOOK_SETTINGS_FILE);
+  const hooksConfig = {
+    hooks: {
+      SessionStart: [
+        {
+          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
+        },
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
+        },
+      ],
+    },
+  };
+  await writeFile(settingsPath, JSON.stringify(hooksConfig, null, 2) + "\n", "utf8");
+  return settingsPath;
+}
+
+export function buildClaudePlanWithHooks(prompt: string, settingsPath: string): AgentLaunchPlan {
+  return buildClaudePlanWithSettings(prompt, { settingsPath });
+}
+
+export function buildClaudeResumePlanWithHooks(
+  sessionId: string,
+  settingsPath: string,
+  binary = claudeCommand(),
+): AgentResumePlan {
+  return buildClaudeResumePlan(sessionId, binary, { settingsPath });
 }

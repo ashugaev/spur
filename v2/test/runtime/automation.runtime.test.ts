@@ -8,7 +8,7 @@ import { githubSourceModule } from "../../src/event-sources/github.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
-import { findFreePort, pollUntil } from "../helpers/common.js";
+import { findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
   createRuntimeTestContext,
@@ -133,14 +133,23 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       throw new Error("Expected GitHub automation test session");
     }
 
-    const pane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
+    const earlyPane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("[Spur step 2/2: test]"),
+      accept: (value) => value.includes("[Spur step 1/2: research]"),
     });
 
     expect(sessions[0]?.project).toBe("api");
-    expect(pane).toContain("Review the repo");
-    expect(pane).toContain("[Spur step 1/2: research]");
+    expect(earlyPane).toContain("Review the repo");
+    expect(earlyPane).toContain("[Spur step 1/2: research]");
+
+    await sleep(5_000);
+    const beforeCooldownPane = await captureTmuxPane(firstSession.id);
+    expect(beforeCooldownPane).not.toContain("[Spur step 2/2: test]");
+
+    const pane = await pollUntil(async () => captureTmuxPane(firstSession.id), {
+      timeoutMs: 45_000,
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
+    });
     expect(pane).toContain("[Spur step 2/2: test]");
     const cronEvents = await pollUntil(
       async () => readEventLog(context.dataDir).map((entry) => entry.event),

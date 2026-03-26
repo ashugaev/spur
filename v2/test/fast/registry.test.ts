@@ -119,4 +119,45 @@ describe("registry.buildMergedConfig", () => {
       'Project "api" is duplicated',
     );
   });
+
+  it("skips duplicate registered configs when skipInvalid is enabled", async () => {
+    const rootDir = await createTempDir("spur-registry-skip-dup-");
+    tempDirs.push(rootDir);
+    const dataDir = join(rootDir, "data");
+    const worktreeDir = join(rootDir, "worktrees");
+    const warnings: string[] = [];
+
+    const basePath = await writeConfig(
+      rootDir,
+      "base.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-a"),
+        sessionPrefix: "api",
+      }),
+    );
+    const duplicatePath = await writeConfig(
+      rootDir,
+      "duplicate.yaml",
+      configYaml({
+        port: 4310,
+        dataDir,
+        worktreeDir,
+        projectId: "api",
+        projectPath: join(rootDir, "repo-b"),
+        sessionPrefix: "api-copy",
+      }),
+    );
+
+    const merged = buildMergedConfig(basePath, [basePath, duplicatePath], {
+      skipInvalid: true,
+      warn: (message) => warnings.push(message),
+    });
+
+    expect(Object.keys(merged.config.projects)).toEqual(["api"]);
+    expect(warnings).toEqual([expect.stringContaining(`Skipping registered config ${duplicatePath}`)]);
+  });
 });

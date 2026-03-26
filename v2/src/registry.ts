@@ -149,6 +149,7 @@ export function buildMergedConfig(
     try {
       const candidate = materializeProjectDefaults(loadConfig(path));
       assertCompatibleConfig(base, candidate);
+      mergeProjects(base, [...mergedConfigs, candidate]);
       mergedConfigs.push(candidate);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
