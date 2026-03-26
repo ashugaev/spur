@@ -11,6 +11,10 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
+    spawn:
+      steps:
+        - "research"
+        - "test"
     preflight: {} # optional: omit prompt to use Spur's default rule-or-defer prompt
     symlinks:
       - .env

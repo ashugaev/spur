@@ -25,7 +25,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - `spawn` requires one positional `<prompt...>` task.
+- `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
+- Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt.
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.

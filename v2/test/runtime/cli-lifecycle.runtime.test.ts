@@ -1289,6 +1289,67 @@ projects:
     expect(log).toContain("ship the task");
   });
 
+  it("uses project default spawn steps and lets CLI steps override them", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-pipeline-defaults-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "pipeline-defaults.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - "research"
+        - "test"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const defaultSpawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "ship the task", "--json"]))
+        .stdout,
+    ) as SessionView;
+
+    const defaultPane = await pollUntil(async () => captureTmuxPane(defaultSpawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("[Spur step 1/2: research]"),
+    });
+    expect(defaultPane).toContain("ship the task");
+    expect(defaultPane).toContain("[Spur step 1/2: research]");
+
+    const overridden = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--step",
+          "review",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const overridePane = await pollUntil(async () => captureTmuxPane(overridden.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("[Spur step 1/1: review]"),
+    });
+    expect(overridePane).toContain("ship the task");
+    expect(overridePane).toContain("[Spur step 1/1: review]");
+    expect(overridePane).not.toContain("[Spur step 1/2: research]");
+  });
+
   it("blocks kill from the interactive list when the worktree is dirty", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

@@ -10,6 +10,11 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     symlinks: [node_modules, .env]
+    spawn:
+      steps:
+        - "run reviewer agent on the current diff"
+        - "run $code-simplifier"
+        - "run $self-verify"
     sources:
       gh:
         type: github
@@ -23,10 +28,6 @@ projects:
         event: github:changes_requested
         spawn:
           prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
-          steps:
-            - "run reviewer agent on the current diff"
-            - "run $code-simplifier"
-            - "run $self-verify"
       # gh-ci-failed:
       #   source: gh
       #   event: github:ci_failed

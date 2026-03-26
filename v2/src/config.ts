@@ -9,6 +9,7 @@ import {
   type CronSourceConfig,
   type GitHubSourceConfig,
   type ProjectPreflightConfig,
+  type ProjectSpawnConfig,
   type ProjectConfig,
   type SendTriggerConfig,
   type SourceConfig,
@@ -170,6 +171,17 @@ function parseProjectPreflight(
   };
 }
 
+function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.spawn`;
+  const raw = asObject(value, label);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  return steps !== undefined ? { steps } : {};
+}
+
 function parseTrigger(
   projectId: string,
   triggerId: string,
@@ -244,6 +256,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
+  const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
   const sourcesRaw = raw["sources"]
@@ -272,6 +285,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sessionPrefix,
     worktree,
     symlinks,
+    ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,

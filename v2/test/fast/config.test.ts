@@ -113,6 +113,24 @@ projects:
     });
   });
 
+  it("parses project default spawn steps", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    spawn:
+      steps:
+        - "research"
+        - "test"
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.spawn).toEqual({
+      steps: ["research", "test"],
+    });
+  });
+
   it("parses an optional project spawn preflight prompt", async () => {
     const configPath = await writeConfig(`
 projects:

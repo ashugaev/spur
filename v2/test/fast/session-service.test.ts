@@ -308,6 +308,75 @@ describe("SessionService", () => {
     });
   });
 
+  it("uses project default spawn steps when the request does not provide them", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          spawn: {
+            steps: ["research", "test"],
+          },
+        },
+      },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    createSessionStore();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+    });
+
+    expect(result.pipeline).toMatchObject({
+      steps: ["research", "test"],
+      nextStepIndex: 1,
+      awaitingStepIndex: 0,
+      status: "running",
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(
+      1,
+      "api-1",
+      expect.stringContaining("[Spur step 1/2: research]"),
+    );
+  });
+
+  it("lets request spawn steps override the project default steps", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          spawn: {
+            steps: ["research", "test"],
+          },
+        },
+      },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    createSessionStore();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+      steps: ["review"],
+    });
+
+    expect(result.pipeline).toMatchObject({
+      steps: ["review"],
+      nextStepIndex: 1,
+      awaitingStepIndex: 0,
+      status: "running",
+    });
+    expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(
+      1,
+      "api-1",
+      expect.stringContaining("[Spur step 1/1: review]"),
+    );
+  });
+
   it("requires a prompt for spawn", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
