@@ -182,7 +182,7 @@ describe("startConfiguredTriggers", () => {
       });
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
-        expect.stringContaining("Run `$manager` and `$github`."),
+        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
         { interrupt: false },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
@@ -230,7 +230,7 @@ describe("startConfiguredTriggers", () => {
       expect(delivered).toContain(
         "Run $manager and $github. Address the latest requested review changes on the active PR.",
       );
-      expect(delivered).not.toContain("Run `$manager` and `$github`.");
+      expect(delivered).not.toContain("Review the latest GitHub updates on the active PR and act on them.");
     } finally {
       await controller.stop();
     }
@@ -341,7 +341,7 @@ describe("startConfiguredTriggers", () => {
       );
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
-        expect.stringContaining("Run `$manager` and `$github`."),
+        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
         { interrupt: false },
       );
     } finally {

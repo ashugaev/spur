@@ -13,7 +13,7 @@ projects:
     spawn:
       steps:
         - "run $manager"
-        - "find the reviewer agent for this repo and run it on the current diff"
+        - "run $reviewer"
         - "run $code-simplifier"
         - "run $self-verify"
     sources:

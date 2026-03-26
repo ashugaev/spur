@@ -51,7 +51,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Busy GitHub updates queue, dedupe, drop entries that vanished from the latest source snapshot, and flush once the session returns to `waiting`.
 - `send.interrupt: true` interrupts immediately while working but does not repeatedly interrupt the same busy interval.
 - `github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.
-- GitHub send triggers include the repo workflow hints to run `$manager` and `$github`, plus event-specific next actions for review changes, CI failures, and comments.
+- GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 

@@ -77,7 +77,7 @@ class GitHubSendBatch implements SendBatch {
     }
 
     const kinds = new Set([...this.signals.values()].map((signal) => signal.kind));
-    const lines = ["Run `$manager` and `$github`."];
+    const lines = ["Review the latest GitHub updates on the active PR and act on them."];
     if (kinds.has("changes_requested")) {
       lines.push("Address the requested review changes on the active PR.");
     }
