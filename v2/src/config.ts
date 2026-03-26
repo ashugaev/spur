@@ -150,8 +150,10 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
+    ...(prompt !== undefined ? { prompt } : {}),
   };
 }
 

@@ -46,13 +46,16 @@ projects:
         event: github:changes_requested
         send:
           interrupt: false
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
       pr-watch-ci-failed:
         source: pr-watch
         event: github:ci_failed
         send:
           interrupt: true # resend every 10m up to 3 while CI still fails
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       pr-watch-comment:
         source: pr-watch
         event: github:comment
         send:
           interrupt: false
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."

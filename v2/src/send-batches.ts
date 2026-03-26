@@ -12,9 +12,14 @@ export interface SendBatch {
 export type SendBatchParser = (data: unknown) => SendBatch | null;
 
 class GitHubSendBatch implements SendBatch {
-  static parse(projectId: string, sourceId: string, data: unknown): GitHubSendBatch | null {
+  static parse(
+    projectId: string,
+    sourceId: string,
+    prompt: string | undefined,
+    data: unknown,
+  ): GitHubSendBatch | null {
     if (!isGitHubEventData(data)) return null;
-    return new GitHubSendBatch(projectId, sourceId, data);
+    return new GitHubSendBatch(projectId, sourceId, prompt, data);
   }
 
   readonly sessionId: string;
@@ -25,6 +30,7 @@ class GitHubSendBatch implements SendBatch {
   private constructor(
     private readonly projectId: string,
     private readonly sourceId: string,
+    private readonly prompt: string | undefined,
     data: GitHubEventData,
   ) {
     this.sessionId = data.sessionId;
@@ -66,6 +72,10 @@ class GitHubSendBatch implements SendBatch {
   }
 
   private buildActionLines(): string[] {
+    if (this.prompt !== undefined) {
+      return [this.prompt];
+    }
+
     const kinds = new Set([...this.signals.values()].map((signal) => signal.kind));
     const lines = ["Run `$manager` and `$github`."];
     if (kinds.has("changes_requested")) {
@@ -107,9 +117,10 @@ export function createSendBatchParser(
   sourceType: SourceType,
   projectId: string,
   sourceId: string,
+  prompt?: string,
 ): SendBatchParser {
   if (sourceType === "github") {
-    return (data) => GitHubSendBatch.parse(projectId, sourceId, data);
+    return (data) => GitHubSendBatch.parse(projectId, sourceId, prompt, data);
   }
   return () => null;
 }

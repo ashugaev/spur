@@ -23,18 +23,16 @@ projects:
       gh-changes-requested:
         source: gh
         event: github:changes_requested
-        send: {}
-      gh-changes-requested-spawn:
-        source: gh
-        event: github:changes_requested
-        spawn:
+        send:
           prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
-      # gh-ci-failed:
-      #   source: gh
-      #   event: github:ci_failed
-      #   send:
-      #     interrupt: true
+      gh-ci-failed:
+        source: gh
+        event: github:ci_failed
+        send:
+          interrupt: true
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       gh-comment:
         source: gh
         event: github:comment
-        send: {}
+        send:
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."

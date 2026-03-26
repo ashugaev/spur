@@ -60,6 +60,7 @@ export interface TriggerSpawnConfig {
 
 export interface TriggerSendConfig {
   interrupt: boolean;
+  prompt?: string;
 }
 
 export interface SpawnTriggerConfig {

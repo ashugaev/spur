@@ -115,6 +115,11 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 - `false`: queue while `working`/`needs_input`, dedupe, flush when `waiting`
 - `true`: interrupt immediately while `working`; `needs_input` still queues
 
+`send.prompt` (GitHub send triggers):
+
+- optional custom action text appended after the PR signal summary
+- when set, replaces Spur's built-in GitHub action lines for that delivery
+
 ## Config
 
 ```yaml
@@ -166,16 +171,19 @@ projects:
         event: github:changes_requested
         send:
           interrupt: false # queued until agent is waiting
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
       pr-watch-ci-failed:
         source: pr-watch
         event: github:ci_failed
         send:
           interrupt: true # delivered immediately and retried every 10m (up to 3) while CI still fails
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       pr-watch-comment:
         source: pr-watch
         event: github:comment
         send:
           interrupt: false # queued, deduped, flushed as one batch
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
 ```
 
 Field reference:
@@ -209,6 +217,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
 - `projects.<id>.triggers.<triggerId>.send.interrupt`: optional boolean, default `false`.
+- `projects.<id>.triggers.<triggerId>.send.prompt`: optional custom GitHub send action text; replaces built-in action lines when present.
 
 Event surface:
 

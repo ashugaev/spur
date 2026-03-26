@@ -414,6 +414,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         event: github:ci_failed
         send:
           interrupt: true
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
 `,
       ),
     );
@@ -511,10 +512,16 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
           timeoutMs: 20_000,
           accept: (value) => value.includes("CI is failing: test suite."),
         });
+        const normalizedPane = pane.replaceAll(/\s+/g, " ");
 
         expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
         expect(pane).toContain("CI is failing: test suite.");
-        expect(pane).toContain("Run `$manager` and `$github`.");
+        expect(normalizedPane).toContain(
+          "Run $manager and $github. Check failing CI on the active PR",
+        );
+        expect(pane).not.toContain(
+          "Inspect the failing checks, fix them, and rerun the relevant validation.",
+        );
         const ciEvents = await pollUntil(
           async () => readEventLog(context.dataDir).map((entry) => entry.event),
           {
