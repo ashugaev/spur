@@ -529,7 +529,7 @@ describe("SessionService", () => {
     expect(result.id).toBe("api-1");
   });
 
-  it("prefers Claude native waiting state over a stale busy-looking pane", async () => {
+  it("prefers Claude native waiting state without reading the pane", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -548,8 +548,6 @@ describe("SessionService", () => {
       state: "waiting",
       signalAt: new Date("2026-03-18T10:04:40.000Z"),
     });
-    captureTmuxPaneMock.mockResolvedValue("Claude Code\nthinking...");
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -557,6 +555,7 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("waiting");
     expect(result.lastActivityAt).toBe("2026-03-18T10:04:40.000Z");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
   it("prefers fresh hook state over a stale native probe", async () => {
@@ -592,9 +591,10 @@ describe("SessionService", () => {
     expect(readAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.state).toBe("working");
     expect(result.lastActivityAt).toBe("2026-03-18T10:04:59.000Z");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
-  it("keeps Codex approval prompts in needs_input even when native probe is only waiting", async () => {
+  it("does not promote status from pane text when the native probe is only waiting", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -613,17 +613,15 @@ describe("SessionService", () => {
       state: "waiting",
       signalAt: new Date("2026-03-18T10:04:40.000Z"),
     });
-    captureTmuxPaneMock.mockResolvedValue("approval required\n(Y)es / (N)o");
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("needs_input");
+    expect(result.state).toBe("waiting");
   });
 
-  it("prefers fresh native working signals over an idle-looking prompt pane", async () => {
+  it("prefers fresh native working signals without reading the pane", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -643,8 +641,6 @@ describe("SessionService", () => {
       state: "working",
       signalAt: new Date("2026-03-18T10:04:58.000Z"),
     });
-    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
