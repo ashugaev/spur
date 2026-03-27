@@ -3,14 +3,14 @@
 Local daemon + CLI orchestrator.
 
 - Spawns agents (`claude` / `codex`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
-- Watches sources (`cron`, `github`) and routes events to triggers
+- Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
 No UI. No tracker flow. No plugin layer.
 
 ## Commands
 
-`spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
+`spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -41,7 +41,7 @@ spawn:
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is.
 
-`list` on a TTY opens a live selector: `Enter` attaches in place, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. Non-TTY prints a one-shot summary.
+`list` on a TTY opens a live selector: `Enter` attaches in place, `s` attaches to the selected session's first live service sidecar, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` detaches from either attach target back to the selector. Non-TTY prints a one-shot summary.
 
 `list` hides `completed` and `killed` sessions by default.
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
@@ -65,6 +65,19 @@ spur-slots --title "Fix flaky auth test"
 spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
+
+Each live session also gets a `spur` wrapper on its shell `PATH`, bound to that session's config.
+Use it from inside the session workspace when the agent needs to start a session-bound sidecar:
+
+```bash
+spur service run web --port 3000 -- pnpm dev
+spur service status api-a1b2
+spur service logs api-a1b2 web --tail 200
+spur service attach api-a1b2 web
+```
+
+`service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
+If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
 
 ## Start
 
@@ -106,6 +119,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 - `cron` emits `cron:tick`
 - `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`
+- `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
@@ -153,6 +167,16 @@ projects:
         type: github
         intervalMs: 60000
         runOnStart: false
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 2000
+        tailLines: 200
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+            clear: "SERVICE_OK"
+            cooldownMs: 60000
     triggers:
       weekday-review-spawn:
         source: weekday-review
@@ -184,6 +208,11 @@ projects:
         send:
           interrupt: false # queued, deduped, flushed as one batch
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      web-watch-crash:
+        source: web-watch
+        event: service:crash
+        send:
+          interrupt: false
 ```
 
 Field reference:
@@ -202,10 +231,16 @@ Field reference:
 - `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
 - `projects.<id>.defaultAgent`: optional per-project `claude|codex`, falls back to top-level `defaultAgent`.
-- `projects.<id>.sources.<sourceId>.type`: required, `cron|github`.
+- `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
 - `projects.<id>.sources.<sourceId>.intervalMs`: optional for `github`, default `60000`.
+- `projects.<id>.sources.<sourceId>.service`: required for `service`; logical id used by `spur service run <serviceId>`.
+- `projects.<id>.sources.<sourceId>.intervalMs`: optional for `service`, default `2000`.
+- `projects.<id>.sources.<sourceId>.tailLines`: optional for `service`, default `200`.
+- `projects.<id>.sources.<sourceId>.rules.<ruleId>.match`: required regex string for `service`.
+- `projects.<id>.sources.<sourceId>.rules.<ruleId>.clear`: optional regex string that clears the active problem state.
+- `projects.<id>.sources.<sourceId>.rules.<ruleId>.cooldownMs`: optional for `service`, default `60000`.
 - `projects.<id>.triggers.<triggerId>.source`: required source id.
 - `projects.<id>.triggers.<triggerId>.event`: required event name.
 - `projects.<id>.triggers.<triggerId>.spawn`: exactly one of `spawn` or `send` is required.
@@ -223,6 +258,7 @@ Event surface:
 
 - `cron` sources support only `cron:tick`.
 - `github` sources support only `github:changes_requested`, `github:ci_failed`, and `github:comment`.
+- `service` sources support `service:<ruleId>` for each configured rule on that source.
 
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
 

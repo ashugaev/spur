@@ -12,6 +12,8 @@ import {
   type ProjectSpawnConfig,
   type ProjectConfig,
   type SendTriggerConfig,
+  type ServiceRuleConfig,
+  type ServiceSourceConfig,
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
@@ -88,6 +90,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "cron") {
     return ["cron:tick"];
   }
+  if (source.type === "service") {
+    return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
+  }
   return VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
 }
 
@@ -123,6 +128,53 @@ function parseGitHubSource(
   };
 }
 
+function parseServiceRule(
+  projectId: string,
+  sourceId: string,
+  ruleId: string,
+  value: unknown,
+): ServiceRuleConfig {
+  if (!VALID_ID_RE.test(ruleId)) {
+    throw new Error(
+      `projects.${projectId}.sources.${sourceId}.rules.${ruleId} is invalid: rule ids must match ${VALID_ID_RE.source}`,
+    );
+  }
+
+  const label = `projects.${projectId}.sources.${sourceId}.rules.${ruleId}`;
+  const raw = asObject(value, label);
+  const clear = asOptionalString(raw["clear"], `${label}.clear`);
+  return {
+    match: asString(raw["match"], `${label}.match`),
+    ...(clear !== undefined ? { clear } : {}),
+    cooldownMs: asOptionalNumber(raw["cooldownMs"], `${label}.cooldownMs`) ?? 60_000,
+  };
+}
+
+function parseServiceSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): ServiceSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const rulesRaw = asObject(raw["rules"], `${label}.rules`);
+  const rules: Record<string, ServiceRuleConfig> = {};
+  for (const [ruleId, ruleValue] of Object.entries(rulesRaw)) {
+    rules[ruleId] = parseServiceRule(projectId, sourceId, ruleId, ruleValue);
+  }
+  if (Object.keys(rules).length === 0) {
+    throw new Error(`${label}.rules must define at least one rule`);
+  }
+
+  return {
+    type: "service",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    service: asString(raw["service"], `${label}.service`),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 2_000,
+    tailLines: asOptionalNumber(raw["tailLines"], `${label}.tailLines`) ?? 200,
+    rules,
+  };
+}
+
 function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
   if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
@@ -138,6 +190,9 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   }
   if (type === "github") {
     return parseGitHubSource(projectId, sourceId, raw);
+  }
+  if (type === "service") {
+    return parseServiceSource(projectId, sourceId, raw);
   }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);

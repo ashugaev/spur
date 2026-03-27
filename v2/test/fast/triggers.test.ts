@@ -68,6 +68,31 @@ function spawnConfig() {
   };
 }
 
+function serviceConfig(options?: { prompt?: string }) {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "web-watch": {
+            type: "service",
+          },
+        },
+        triggers: {
+          notify: {
+            source: "web-watch",
+            event: "service:crash",
+            send: {
+              interrupt: false,
+              ...(options?.prompt !== undefined ? { prompt: options.prompt } : {}),
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function githubEvent(signalKey = "comment:1") {
   return {
     name: "github:comment",
@@ -129,6 +154,19 @@ function cronEvent() {
     projectId: "api",
     sourceId: "morning",
     data: {},
+  };
+}
+
+function serviceEvent(ruleId = "crash") {
+  return {
+    name: `service:${ruleId}`,
+    projectId: "api",
+    sourceId: "web-watch",
+    data: {
+      sessionId: "api-1",
+      serviceId: "web",
+      ruleId,
+    },
   };
 }
 
@@ -423,6 +461,44 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.spawn.completed",
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers service alerts with inspection commands for the bound session", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: serviceConfig() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(serviceEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      const delivered = deliverMock.mock.calls[0]?.[1];
+      expect(typeof delivered).toBe("string");
+      expect(delivered).toContain('The bound service "web" has a problem.');
+      expect(delivered).toContain("Triggered rules: crash");
+      expect(delivered).toContain("spur service logs api-1 web --tail 200");
+      expect(delivered).toContain("spur service attach api-1 web");
     } finally {
       await controller.stop();
     }

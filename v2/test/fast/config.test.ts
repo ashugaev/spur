@@ -142,6 +142,49 @@ projects:
     });
   });
 
+  it("parses service sources with rule defaults and matching trigger events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      web-watch:
+        type: service
+        service: web
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers:
+      notify:
+        source: web-watch
+        event: service:crash
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["web-watch"]).toEqual({
+      type: "service",
+      runOnStart: false,
+      service: "web",
+      intervalMs: 2_000,
+      tailLines: 200,
+      rules: {
+        crash: {
+          match: "SERVICE_ERROR",
+          cooldownMs: 60_000,
+        },
+      },
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "web-watch",
+      event: "service:crash",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
   it("rejects non-string send prompts", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -252,6 +295,30 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.triggers.review.spawn.prompt must be a non-empty string",
+    );
+  });
+
+  it("rejects unsupported service events during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      web-watch:
+        type: service
+        service: web
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers:
+      notify:
+        source: web-watch
+        event: service:missing
+        send: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.notify.event uses unsupported event "service:missing"',
     );
   });
 

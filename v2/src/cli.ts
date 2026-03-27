@@ -20,6 +20,8 @@ import {
   boldText,
   dimText,
   renderSessionDashboard,
+  renderServiceCard,
+  renderServiceList,
   renderRuntimeInfo,
   renderSessionCard,
   renderInteractiveSessionList,
@@ -32,8 +34,10 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { startServer } from "./server.js";
 import type {
   RuntimeInfo,
+  RunServiceRequest,
   SendMessageRequest,
   SessionLink,
+  ServiceInstanceView,
   SessionView,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
@@ -54,6 +58,96 @@ function enableTmuxMouse(sessionName: string): void {
     });
   } catch {
     // Best effort only.
+  }
+}
+
+function isInsideTmuxSession(): boolean {
+  return Boolean(process.env["TMUX"]);
+}
+
+function tmuxOutput(args: string[]): string {
+  return execFileSync("tmux", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
+
+function captureTmuxTarget(sessionName: string, lines = 200): string {
+  return execFileSync(
+    "tmux",
+    ["capture-pane", "-t", `=${sessionName}:`, "-p", "-S", `-${lines}`],
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).trimEnd();
+}
+
+function currentTmuxSessionHasAttachedClient(): boolean {
+  return tmuxOutput(["display-message", "-p", "#{session_attached}"]) !== "0";
+}
+
+function attachTmuxTargetFromList(targetSession: string): void {
+  const target = `=${targetSession}`;
+  if (!isInsideTmuxSession()) {
+    execFileSync("tmux", ["attach-session", "-t", target], {
+      stdio: "inherit",
+    });
+    return;
+  }
+
+  const controllerSession = tmuxOutput(["display-message", "-p", "#{session_name}"]);
+  const suffix = `${process.pid}-${Date.now().toString(36)}`;
+  const returnTable = `spur-return-${suffix}`;
+  const returnSignal = `spur-return-${suffix}`;
+  try {
+    execFileSync(
+      "tmux",
+      [
+        "bind-key",
+        "-T",
+        returnTable,
+        "C-g",
+        "set-option",
+        "key-table",
+        "root",
+        "\\;",
+        "switch-client",
+        "-t",
+        `=${controllerSession}`,
+        "\\;",
+        "wait-for",
+        "-S",
+        returnSignal,
+      ],
+      {
+        stdio: "ignore",
+      },
+    );
+    execFileSync("tmux", ["set-option", "key-table", returnTable], {
+      stdio: "ignore",
+    });
+    execFileSync("tmux", ["switch-client", "-t", target], {
+      stdio: "inherit",
+    });
+    execFileSync("tmux", ["wait-for", returnSignal], {
+      stdio: "ignore",
+    });
+  } finally {
+    try {
+      execFileSync("tmux", ["set-option", "key-table", "root"], {
+        stdio: "ignore",
+      });
+    } catch {
+      // Best effort only.
+    }
+    try {
+      execFileSync("tmux", ["unbind-key", "-T", returnTable, "C-g"], {
+        stdio: "ignore",
+      });
+    } catch {
+      // Best effort only.
+    }
   }
 }
 
@@ -108,6 +202,18 @@ function moveSelection(
 
 async function loadRawSessions(cliEntrypoint: string, configPath?: string): Promise<SessionView[]> {
   return getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath);
+}
+
+async function loadServices(
+  cliEntrypoint: string,
+  sessionId: string,
+  configPath?: string,
+): Promise<ServiceInstanceView[]> {
+  return getJson<ServiceInstanceView[]>(
+    cliEntrypoint,
+    `/sessions/${sessionId}/services`,
+    configPath,
+  );
 }
 
 async function loadHumanListData(
@@ -176,6 +282,16 @@ function renderLiveSessionList(args: {
   return renderInteractiveSessionList(renderArgs);
 }
 
+function renderAttachedPaneView(args: { title: string; content: string }): string {
+  return [
+    brandLine(args.title),
+    "",
+    args.content || dimText("(no output)"),
+    "",
+    dimText("Ctrl+G back"),
+  ].join("\n");
+}
+
 interface HelpRow {
   term: string;
   description: string;
@@ -208,6 +324,22 @@ function parseSlotLink(value: string): SessionLink {
   };
 }
 
+function currentSessionId(): string {
+  const sessionId = process.env["SPUR_SESSION"]?.trim();
+  if (!sessionId) {
+    throw new Error("service run requires a live Spur session");
+  }
+  return sessionId;
+}
+
+function parsePortOption(value: string, label: string): number {
+  const port = Number.parseInt(value, 10);
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
+    throw new Error(`${label} must be an integer between 1 and 65535`);
+  }
+  return port;
+}
+
 function helpTitle(command: Command): string {
   return command.parent ? command.name() : "Spur";
 }
@@ -221,7 +353,7 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, and `kill` for scripts.",
+      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
     ];
   }
   if (command.name() === "spawn") {
@@ -234,12 +366,18 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, s attach service, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
   if (command.name() === "kill") {
     return ["Use `--force` to kill a dirty worktree or unpushed commits."];
+  }
+  if (command.name() === "service") {
+    return [
+      "`service run` is intended to be called from inside a live Spur session workspace.",
+      "Service sidecars stay session-bound; use `service logs` or `service attach` to inspect them.",
+    ];
   }
   return [];
 }
@@ -311,11 +449,27 @@ async function runInteractiveSessionList(
   let busy = false;
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
+  let attachedPane:
+    | {
+        tmuxSession: string;
+        title: string;
+      }
+    | null = null;
+  let attachedPaneContent = "";
   let terminalActive = false;
   let refreshTimer: NodeJS.Timeout | undefined;
 
   const render = (): void => {
     if (closed) return;
+    if (attachedPane) {
+      process.stdout.write(
+        `\u001b[2J\u001b[H${renderAttachedPaneView({
+          title: attachedPane.title,
+          content: attachedPaneContent,
+        })}\n`,
+      );
+      return;
+    }
     const listArgs = {
       info,
       sessions,
@@ -346,6 +500,10 @@ async function runInteractiveSessionList(
     if (closed || busy || refreshing) return;
     refreshing = true;
     try {
+      if (attachedPane) {
+        attachedPaneContent = captureTmuxTarget(attachedPane.tmuxSession);
+        return;
+      }
       const nextSessions = sortSessionsForList(await loadRawSessions(cliEntrypoint, configPath));
       sessions = nextSessions;
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
@@ -366,12 +524,23 @@ async function runInteractiveSessionList(
   const getSelectedSession = (): SessionView | null =>
     sessions.find((session) => session.id === selectedSessionId) ?? null;
 
+  const getSelectedService = (session: SessionView): ServiceInstanceView | null =>
+    session.services.find((service) => service.runtimeAlive) ?? null;
+
   const getSelectedSessionOrWarn = (): SessionView | null => {
     const session = getSelectedSession();
     if (session) return session;
     statusMessage = brandLine(RESELECT_MESSAGE);
     render();
     return null;
+  };
+
+  const openAttachedPane = (tmuxSession: string, title: string): void => {
+    attachedPane = { tmuxSession, title };
+    attachedPaneContent = captureTmuxTarget(tmuxSession);
+    pendingKillConfirmationSessionId = null;
+    statusMessage = undefined;
+    render();
   };
 
   const restoreSelectedSession = async (): Promise<void> => {
@@ -425,12 +594,54 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Attaching to ${session.id}...`);
     render();
 
+    if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
+      busy = false;
+      openAttachedPane(session.tmuxSession, `Attached ${session.id}`);
+      return;
+    }
+
     disableTerminal();
     try {
       enableTmuxMouse(session.tmuxSession);
-      execFileSync("tmux", ["attach-session", "-t", session.tmuxSession], {
-        stdio: "inherit",
-      });
+      attachTmuxTargetFromList(session.tmuxSession);
+      pendingKillConfirmationSessionId = null;
+      statusMessage = undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      if (!closed) {
+        enableTerminal();
+      }
+      busy = false;
+      await refresh();
+    }
+  };
+
+  const attachSelectedService = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    const service = getSelectedService(session);
+    if (!service) {
+      statusMessage = brandLine(`Session ${session.id} has no live service sidecar.`);
+      render();
+      return;
+    }
+
+    busy = true;
+    statusMessage = brandLine(`Attaching to ${session.id}/${service.serviceId}...`);
+    render();
+
+    if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
+      busy = false;
+      openAttachedPane(service.tmuxSession, `Attached ${session.id}/${service.serviceId}`);
+      return;
+    }
+
+    disableTerminal();
+    try {
+      enableTmuxMouse(service.tmuxSession);
+      attachTmuxTargetFromList(service.tmuxSession);
       pendingKillConfirmationSessionId = null;
       statusMessage = undefined;
     } catch (error) {
@@ -556,6 +767,14 @@ async function runInteractiveSessionList(
         finish();
         return;
       }
+      if (attachedPane) {
+        if (key.ctrl && key.name === "g") {
+          attachedPane = null;
+          attachedPaneContent = "";
+          render();
+        }
+        return;
+      }
       if (key.name === "escape" || key.name === "q" || key.sequence === "q") {
         finish();
         return;
@@ -575,6 +794,11 @@ async function runInteractiveSessionList(
       if (key.name === "return" || key.name === "enter") {
         pendingKillConfirmationSessionId = null;
         void attachSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "s" || key.sequence === "s") {
+        pendingKillConfirmationSessionId = null;
+        void attachSelectedService().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
@@ -807,6 +1031,120 @@ export function createProgram(cliEntrypoint: string): Command {
           ),
         success: (session) => `Killed ${session.id}.`,
         render: renderSessionCard,
+      });
+    });
+
+  const service = program.command("service").description("Run and inspect session-bound sidecar services.");
+
+  service
+    .command("run")
+    .description("Run a service command bound to the current Spur session.")
+    .argument("<serviceId>", "Logical service id")
+    .argument("<command...>", "Shell command to run")
+    .option("--port <number>", "Port held by this service")
+    .option("--json", "Print raw JSON")
+    .action(async (serviceId: string, commandParts: string[], options, command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      const sessionId = currentSessionId();
+      const shellCommand = commandParts.join(" ").trim();
+      if (!shellCommand) {
+        throw new Error("service run requires a non-empty command");
+      }
+      const payload: RunServiceRequest = {
+        command: shellCommand,
+        cwd: process.cwd(),
+        ...(options.port !== undefined ? { port: parsePortOption(options.port, "--port") } : {}),
+      };
+      await outputResult({
+        json: Boolean(options.json),
+        label: `starting service ${serviceId}`,
+        action: () =>
+          postJson<ServiceInstanceView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/services/${serviceId}/run`,
+            payload,
+            configPath,
+          ),
+        success: (service) => `Started ${service.serviceId} for ${service.sessionId}.`,
+        render: renderServiceCard,
+      });
+    });
+
+  service
+    .command("status")
+    .description("Show services bound to a session.")
+    .argument("<sessionId>", "Session id")
+    .argument("[serviceId]", "Optional service id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, serviceId: string | undefined, options, command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      if (serviceId) {
+        await outputResult({
+          json: Boolean(options.json),
+          label: `loading service ${serviceId}`,
+          action: () =>
+            getJson<ServiceInstanceView>(
+              cliEntrypoint,
+              `/sessions/${sessionId}/services/${serviceId}`,
+              configPath,
+            ),
+          render: renderServiceCard,
+        });
+        return;
+      }
+
+      await outputResult({
+        json: Boolean(options.json),
+        label: `loading services for ${sessionId}`,
+        action: () => loadServices(cliEntrypoint, sessionId, configPath),
+        render: renderServiceList,
+      });
+    });
+
+  service
+    .command("logs")
+    .description("Show recent logs for a bound service.")
+    .argument("<sessionId>", "Session id")
+    .argument("<serviceId>", "Service id")
+    .option("--tail <n>", "Number of lines to capture", "200")
+    .action(async (sessionId: string, serviceId: string, options, command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      const tail = Number.parseInt(options.tail as string, 10);
+      if (Number.isNaN(tail) || tail <= 0) {
+        throw new Error("--tail must be a positive integer");
+      }
+      const result = await withSpinner("loading service logs", () =>
+        getJson<{ service: ServiceInstanceView; content: string }>(
+          cliEntrypoint,
+          `/sessions/${sessionId}/services/${serviceId}/logs?tail=${String(tail)}`,
+          configPath,
+        ),
+      );
+      writeStdout(renderServiceCard(result.service));
+      writeStdout("");
+      writeStdout(result.content.trimEnd() || dimText("(no log output)"));
+    });
+
+  service
+    .command("attach")
+    .description("Attach to the tmux session for a bound service.")
+    .argument("<sessionId>", "Session id")
+    .argument("<serviceId>", "Service id")
+    .action(async (sessionId: string, serviceId: string, _options, command) => {
+      const configPath = getConfigPath(command.parent?.parent as Command);
+      const serviceView = await withSpinner("loading service", () =>
+        getJson<ServiceInstanceView>(
+          cliEntrypoint,
+          `/sessions/${sessionId}/services/${serviceId}`,
+          configPath,
+        ),
+      );
+      if (!serviceView.runtimeAlive) {
+        throw new Error(`Service is not live: ${sessionId}/${serviceId}`);
+      }
+      enableTmuxMouse(serviceView.tmuxSession);
+      execFileSync("tmux", ["attach-session", "-t", `=${serviceView.tmuxSession}`], {
+        stdio: "inherit",
       });
     });
 

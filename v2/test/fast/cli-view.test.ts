@@ -24,6 +24,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    services: [],
     ...overrides,
   };
 }
@@ -91,8 +92,36 @@ describe("cli-view.renderInteractiveSessionList", () => {
     expect(output).toContain("Esc quit");
     expect(output).toContain("p pause");
     expect(output).toContain("c complete");
+    expect(output).toContain("s service");
     expect(output).toContain("Ctrl+G detach");
     expect(output).not.toContain("q/Esc quit");
+  });
+
+  it("shows a live service port in the session description", () => {
+    expect(
+      describeSession(
+        session({
+          services: [
+            {
+              sessionId: "api-1",
+              project: "api",
+              serviceId: "web",
+              port: 3000,
+              command: "pnpm dev",
+              cwd: "/tmp/worktree",
+              tmuxSession: "api-1--svc--web",
+              status: "running",
+              createdAt: "2026-03-18T10:00:00.000Z",
+              updatedAt: "2026-03-18T10:00:00.000Z",
+              runtimeAlive: true,
+              state: "running",
+              lastActivityAt: "2026-03-18T10:00:00.000Z",
+              problemRuleIds: [],
+            },
+          ],
+        }),
+      ),
+    ).toContain("service web:3000");
   });
 
   it("asks the user to reselect before acting when nothing is selected", () => {

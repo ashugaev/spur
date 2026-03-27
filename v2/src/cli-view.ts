@@ -1,5 +1,11 @@
 import { spinner } from "@clack/prompts";
-import type { RuntimeInfo, SessionState, SessionView } from "./types.js";
+import type {
+  RuntimeInfo,
+  ServiceInstanceState,
+  ServiceInstanceView,
+  SessionState,
+  SessionView,
+} from "./types.js";
 
 const THEME = {
   accent: "#f04c4c",
@@ -146,6 +152,7 @@ function statusColor(session: SessionView): string {
 
 export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
+  const services = session.services ?? [];
 
   if (session.status === "paused") {
     facts.push("paused by user");
@@ -175,8 +182,28 @@ export function describeSession(session: SessionView): string {
   if (session.state === "error" && session.error) {
     facts.push(`error ${truncate(session.error, 48)}`);
   }
+  const liveServices = services.filter((service) => service.runtimeAlive);
+  if (liveServices.length === 1) {
+    const service = liveServices[0];
+    if (service) {
+      facts.push(
+        service.port !== undefined
+          ? `service ${service.serviceId}:${service.port}`
+          : `service ${service.serviceId}`,
+      );
+    }
+  } else if (liveServices.length > 1) {
+    facts.push(`${liveServices.length} services live`);
+  }
 
   return facts.join(" • ");
+}
+
+function formatInlineService(service: ServiceInstanceView): string {
+  const base = service.port !== undefined ? `${service.serviceId}:${service.port}` : service.serviceId;
+  return service.problemRuleIds.length > 0
+    ? `${base}:${serviceStateLabel(service.state)}(${service.problemRuleIds.join(",")})`
+    : `${base}:${serviceStateLabel(service.state)}`;
 }
 
 function measureSessionColumns(sessions: SessionView[]): SessionColumnWidths {
@@ -277,6 +304,7 @@ function renderSessionDetailsPane(args: {
   }
 
   const selected = args.selected;
+  const services = selected.services ?? [];
   const title = brandLine(`Selected ${selected.id}`);
   if (args.maxDetailLines <= 0) {
     return [title];
@@ -297,6 +325,7 @@ function renderSessionDetailsPane(args: {
     renderField("tmux", selected.tmuxSession),
     renderField("workspace", selected.worktreePath),
     renderField("launch", selected.launchCommand),
+    ...services.map((service) => renderField("service", formatInlineService(service))),
     renderField("created", selected.createdAt),
     renderField("updated", selected.updatedAt),
   ];
@@ -386,7 +415,7 @@ export function renderInteractiveSessionList(args: {
     ...detailLines,
     "",
     dimText(
-      "↑↓ move  Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "↑↓ move  Enter attach  s service  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     ),
   );
   if (args.statusMessage) {
@@ -411,4 +440,46 @@ export async function withSpinner<T>(label: string, action: () => Promise<T>): P
   } finally {
     loading.clear();
   }
+}
+
+function serviceStateLabel(state: ServiceInstanceState): string {
+  switch (state) {
+    case "running":
+      return "running";
+    case "problem":
+      return "problem";
+    case "stopped":
+      return "stopped";
+    case "error":
+      return "error";
+  }
+}
+
+function serviceStateColor(state: ServiceInstanceState): string {
+  if (state === "running") return SUCCESS;
+  if (state === "problem") return WARNING;
+  if (state === "error") return ACCENT;
+  return MUTED;
+}
+
+export function renderServiceCard(service: ServiceInstanceView): string {
+  const lines = [
+    `${accent(service.port !== undefined ? `${service.serviceId}:${service.port}` : service.serviceId)}  ${colorize(serviceStateLabel(service.state), `${BOLD}${serviceStateColor(service.state)}`)}  ${dimText(`updated ${formatRelativeTime(service.lastActivityAt)}`)}`,
+    `  ${dimText(`tmux ${service.tmuxSession}${service.port !== undefined ? ` • port ${service.port}` : ""} • cwd ${service.cwd}`)}`,
+    `  ${dimText(`command ${truncate(service.command, Math.max(20, renderWidth() - 12))}`)}`,
+  ];
+  if (service.problemRuleIds.length > 0) {
+    lines.push(`  ${dimText(`rules ${service.problemRuleIds.join(", ")}`)}`);
+  }
+  if (service.state === "error" && service.error) {
+    lines.push(`  ${dimText(`error ${truncate(service.error, 80)}`)}`);
+  }
+  return lines.join("\n");
+}
+
+export function renderServiceList(services: ServiceInstanceView[]): string {
+  if (services.length === 0) {
+    return renderEmptyState("No services.", "Run `spur service run <serviceId> -- <command...>` inside the session.");
+  }
+  return services.map((service) => renderServiceCard(service)).join("\n");
 }

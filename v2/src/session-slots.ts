@@ -15,6 +15,7 @@ const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
 export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
+const SPUR_WRAPPER_NAME = "spur";
 
 interface NormalizedSlotsUpdate {
   title?: string;
@@ -171,6 +172,14 @@ export function ensureSessionSlotTool(args: {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
   mkdirSync(toolDir, { recursive: true });
+  writeFileSync(
+    join(toolDir, SPUR_WRAPPER_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
   writeFileSync(
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash

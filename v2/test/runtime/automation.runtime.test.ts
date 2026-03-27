@@ -8,7 +8,7 @@ import { githubSourceModule } from "../../src/event-sources/github.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
-import { findFreePort, pollUntil, sleep } from "../helpers/common.js";
+import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
   createRuntimeTestContext,
@@ -560,5 +560,107 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
       process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
     }
+  });
+
+  it("delivers service problem alerts back into the bound session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-alert-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service-alert.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        tailLines: 50
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers:
+      web-problem:
+        source: web-watch
+        event: service:crash
+        send: {}
+`,
+      ),
+    );
+
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const session = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "watch the dev service",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", session.id, "spur");
+
+    await execFileAsync(
+      helperPath,
+      [
+        "service",
+        "run",
+        "web",
+        "--port",
+        "3000",
+        "--json",
+        "--",
+        "sh",
+        "-lc",
+        `'printf "SERVICE_BOOT\\nSERVICE_ERROR\\n"; sleep 30'`,
+      ],
+      {
+        cwd: session.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: session.id,
+        },
+      },
+    );
+
+    const log = await pollUntil(async () => context.readAgentLog(session.id), {
+      timeoutMs: 45_000,
+      accept: (value) =>
+        value.includes('The bound service "web" has a problem.') &&
+        value.includes(`spur service logs ${session.id} web --tail 200`) &&
+        value.includes(`spur service attach ${session.id} web`),
+    });
+
+    const events = await pollUntil(
+      async () => readEventLog(context.dataDir).map((entry) => entry.event),
+      {
+        timeoutMs: 20_000,
+        accept: (value) =>
+          value.includes("source.started") &&
+          value.includes("source.event.emitted") &&
+          value.includes("trigger.send.queued"),
+      },
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "source.started",
+        "source.event.emitted",
+        "trigger.send.queued",
+      ]),
+    );
   });
 });

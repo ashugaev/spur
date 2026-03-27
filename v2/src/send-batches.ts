@@ -1,5 +1,5 @@
 import { readGitHubSourceSnapshot } from "./metadata.js";
-import type { GitHubEventData, GitHubSignal, SourceType } from "./types.js";
+import type { GitHubEventData, GitHubSignal, ServiceProblemEventData, SourceType } from "./types.js";
 
 export interface SendBatch {
   readonly sessionId: string;
@@ -102,6 +102,54 @@ class GitHubSendBatch implements SendBatch {
   }
 }
 
+class ServiceSendBatch implements SendBatch {
+  static parse(prompt: string | undefined, data: unknown): ServiceSendBatch | null {
+    if (!isServiceProblemEventData(data)) return null;
+    return new ServiceSendBatch(prompt, data);
+  }
+
+  readonly sessionId: string;
+  private readonly serviceId: string;
+  private readonly ruleIds = new Set<string>();
+
+  private constructor(
+    private readonly prompt: string | undefined,
+    data: ServiceProblemEventData,
+  ) {
+    this.sessionId = data.sessionId;
+    this.serviceId = data.serviceId;
+    this.ruleIds.add(data.ruleId);
+  }
+
+  merge(incoming: SendBatch): void {
+    const next = incoming as ServiceSendBatch;
+    for (const ruleId of next.ruleIds) {
+      this.ruleIds.add(ruleId);
+    }
+  }
+
+  prune(_dataDir: string): void {
+    // Service alerts are already reduced to the latest per-rule match window.
+  }
+
+  isEmpty(): boolean {
+    return this.ruleIds.size === 0;
+  }
+
+  format(): string {
+    const sessionId = this.sessionId;
+    const serviceId = this.serviceId;
+    return [
+      this.prompt ?? `The bound service "${serviceId}" has a problem.`,
+      `Triggered rules: ${[...this.ruleIds].sort().join(", ")}`,
+      "",
+      `Inspect it with:`,
+      `- spur service logs ${sessionId} ${serviceId} --tail 200`,
+      `- spur service attach ${sessionId} ${serviceId}`,
+    ].join("\n");
+  }
+}
+
 function isGitHubEventData(value: unknown): value is GitHubEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
@@ -113,6 +161,16 @@ function isGitHubEventData(value: unknown): value is GitHubEventData {
   );
 }
 
+function isServiceProblemEventData(value: unknown): value is ServiceProblemEventData {
+  if (!value || typeof value !== "object") return false;
+  const data = value as Record<string, unknown>;
+  return (
+    typeof data["sessionId"] === "string" &&
+    typeof data["serviceId"] === "string" &&
+    typeof data["ruleId"] === "string"
+  );
+}
+
 export function createSendBatchParser(
   sourceType: SourceType,
   projectId: string,
@@ -121,6 +179,9 @@ export function createSendBatchParser(
 ): SendBatchParser {
   if (sourceType === "github") {
     return (data) => GitHubSendBatch.parse(projectId, sourceId, prompt, data);
+  }
+  if (sourceType === "service") {
+    return (data) => ServiceSendBatch.parse(prompt, data);
   }
   return () => null;
 }

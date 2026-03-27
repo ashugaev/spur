@@ -1,10 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  ensureSessionSlotTool,
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
 } from "../../src/session-slots.js";
+import { createTempDir } from "../helpers/common.js";
+
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
 
 describe("session slots", () => {
   it("normalizes and merges title and named links", () => {
@@ -59,5 +70,23 @@ describe("session slots", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
+  });
+
+  it("writes the spur wrapper alongside slot helpers", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-1",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
+    expect(wrapper).toContain("--config '/tmp/spur.yaml'");
+    expect(wrapper).toContain('"$@"');
+    expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
+      "slots --session 'api-1'",
+    );
   });
 });

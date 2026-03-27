@@ -4,7 +4,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import type { RuntimeInfo, SessionView } from "../../src/types.js";
+import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -1088,6 +1088,266 @@ projects:
     );
   });
 
+  it("runs, inspects, and attaches to a session-bound service through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers: {}
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "service runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur");
+
+    const runResult = JSON.parse(
+      (
+        await execFileAsync(
+          helperPath,
+          [
+            "service",
+            "run",
+            "web",
+            "--port",
+            "3000",
+            "--json",
+            "--",
+            "sh",
+            "-lc",
+            `'printf "SERVICE_BOOT\\n"; sleep 30'`,
+          ],
+          {
+            cwd: spawned.worktreePath,
+            env: {
+              ...context.env,
+              SPUR_SESSION: spawned.id,
+            },
+          },
+        )
+      ).stdout,
+    ) as ServiceInstanceView;
+
+    expect(runResult.serviceId).toBe("web");
+    expect(runResult.port).toBe(3000);
+
+    const listed = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "service", "status", spawned.id, "--json"]))
+            .stdout,
+        ) as ServiceInstanceView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value[0]?.serviceId === "web" && value[0]?.runtimeAlive === true,
+      },
+    );
+    expect(listed).toHaveLength(1);
+
+    const detail = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "service",
+          "status",
+          spawned.id,
+          "web",
+          "--json",
+        ])
+      ).stdout,
+    ) as ServiceInstanceView;
+    expect(detail.tmuxSession).toBe(`${spawned.id}--svc--web`);
+    expect(detail.port).toBe(3000);
+    expect(detail.state).toBe("running");
+
+    const logs = await pollUntil(
+      async () =>
+        (await context.execCli(["--config", configPath, "service", "logs", spawned.id, "web", "--tail", "20"]))
+          .stdout,
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("SERVICE_BOOT"),
+      },
+    );
+    expect(logs).toContain("SERVICE_BOOT");
+
+    const controllerSessionName = `${sessionPrefix}-service-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
+
+    const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("s service"),
+    });
+    expect(attachedPane).toContain("service web:3000:running");
+
+    await sendKeysToTmux(controllerSessionName, "s");
+
+    const servicePane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("SERVICE_BOOT"),
+    });
+    expect(servicePane).toContain("SERVICE_BOOT");
+
+    await sendKeysToTmux(controllerSessionName, "C-g");
+
+    const detachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("s service"),
+    });
+    expect(detachedPane).toContain("s service");
+  });
+
+  it("surfaces service command errors through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-errors-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service-errors.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers: {}
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "service error prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur");
+
+    await expect(
+      context.execCli(
+        ["--config", configPath, "service", "run", "web", "--json", "--", "echo", "hi"],
+        { env: { SPUR_SESSION: "" } },
+      ),
+    ).rejects.toThrow("service run requires a live Spur session");
+
+    await expect(
+      context.execCli(["--config", configPath, "service", "status", "api-999", "--json"]),
+    ).rejects.toThrow("Session not found: api-999");
+
+    await execFileAsync(
+      helperPath,
+      [
+        "service",
+        "run",
+        "web",
+        "--json",
+        "--",
+        "sh",
+        "-lc",
+        `'printf "SERVICE_DONE\\n"; sleep 1'`,
+      ],
+      {
+        cwd: spawned.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: spawned.id,
+        },
+      },
+    );
+
+    const stopped = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "service",
+              "status",
+              spawned.id,
+              "web",
+              "--json",
+            ])
+          ).stdout,
+        ) as ServiceInstanceView,
+      {
+        timeoutMs: 20_000,
+        accept: (value) => value.runtimeAlive === false,
+      },
+    );
+    expect(["stopped", "error"]).toContain(stopped.state);
+
+    await expect(
+      context.execCli(["--config", configPath, "service", "logs", spawned.id, "web"]),
+    ).rejects.toThrow(`Service is not live: ${spawned.id}/web`);
+    await expect(
+      context.execCli(["--config", configPath, "service", "attach", spawned.id, "web"]),
+    ).rejects.toThrow(`Service is not live: ${spawned.id}/web`);
+  });
+
   it("rejects invalid or missing slot targets through the built CLI", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -1570,7 +1830,7 @@ projects:
     });
 
     expect(detachedPane).toContain(
-      "Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "Enter attach  s service  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     );
   });
 
