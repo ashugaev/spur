@@ -305,12 +305,10 @@ function renderAttachedPaneView(args: { title: string; content: string }): strin
 }
 
 interface SessionLogViewState {
-  sessionId: string;
   session: SessionView;
   agentPane: string;
   eventLines: string[];
   localLines: string[];
-  signature: string;
 }
 
 function formatLogTime(input: string): string {
@@ -341,16 +339,6 @@ function formatEventLine(entry: SpurLogEntry): string {
   return summary === entry.event
     ? `${time} ${level} ${entry.event}`
     : `${time} ${level} ${entry.event} ${summary}`;
-}
-
-function sessionLogSignature(session: SessionView): string {
-  return JSON.stringify({
-    status: session.status,
-    state: session.state,
-    runtimeAlive: session.runtimeAlive,
-    workspaceExists: session.workspaceExists,
-    error: session.error ?? null,
-  });
 }
 
 function buildStateChangeLine(previous: SessionView, next: SessionView): string | null {
@@ -631,21 +619,17 @@ async function runInteractiveSessionList(
       if (logView) {
         const nextSession = await getJson<SessionView>(
           cliEntrypoint,
-          `/sessions/${logView.sessionId}`,
+          `/sessions/${logView.session.id}`,
           configPath,
         );
-        const nextSignature = sessionLogSignature(nextSession);
-        if (nextSignature !== logView.signature) {
-          const line = buildStateChangeLine(logView.session, nextSession);
-          if (line) {
-            logView.localLines = [...logView.localLines, line].slice(-SESSION_LOG_LOCAL_LIMIT);
-          }
+        const line = buildStateChangeLine(logView.session, nextSession);
+        if (line) {
+          logView.localLines = [...logView.localLines, line].slice(-SESSION_LOG_LOCAL_LIMIT);
         }
         logView = {
           ...logView,
           session: nextSession,
-          signature: nextSignature,
-          eventLines: readSessionEventLog(info.dataDir, logView.sessionId, SESSION_LOG_EVENT_LIMIT).map(
+          eventLines: readSessionEventLog(info.dataDir, logView.session.id, SESSION_LOG_EVENT_LIMIT).map(
             formatEventLine,
           ),
           agentPane:
@@ -697,13 +681,11 @@ async function runInteractiveSessionList(
     render();
   };
 
-  const openSelectedSessionLogs = async (): Promise<void> => {
+  const openSelectedSessionLogs = (): void => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
     logView = {
-      sessionId: session.id,
       session,
-      signature: sessionLogSignature(session),
       eventLines: readSessionEventLog(info.dataDir, session.id, SESSION_LOG_EVENT_LIMIT).map(
         formatEventLine,
       ),
@@ -938,7 +920,7 @@ async function runInteractiveSessionList(
       }
       if (key.name === "l" || key.sequence === "l") {
         pendingKillConfirmationSessionId = null;
-        void openSelectedSessionLogs().catch(fail);
+        openSelectedSessionLogs();
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
