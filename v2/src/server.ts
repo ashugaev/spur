@@ -277,27 +277,6 @@ export async function startServer(
         return;
       }
 
-      const serviceLogsMatch = path.match(/^\/sessions\/([^/]+)\/services\/([^/]+)\/logs$/);
-      if (method === "GET" && serviceLogsMatch) {
-        const sessionId = serviceLogsMatch[1];
-        const serviceId = serviceLogsMatch[2];
-        if (!sessionId || !serviceId) {
-          throw new Error("service logs route is invalid");
-        }
-        const tailParam = url.searchParams.get("tail");
-        const tail = tailParam ? Number.parseInt(tailParam, 10) : undefined;
-        sendJson(
-          response,
-          200,
-          await service.readServiceLogs(
-            sessionId,
-            serviceId,
-            Number.isNaN(tail ?? Number.NaN) ? undefined : tail,
-          ),
-        );
-        return;
-      }
-
       logEvent("http.route.not_found", {
         level: "warn",
         method,

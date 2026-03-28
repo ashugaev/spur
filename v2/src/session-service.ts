@@ -701,21 +701,6 @@ export class SessionService {
     }
   }
 
-  async readServiceLogs(
-    sessionId: string,
-    serviceId: string,
-    tailLines = 200,
-  ): Promise<{ service: ServiceInstanceView; content: string }> {
-    const service = await this.getService(sessionId, serviceId);
-    if (!service.runtimeAlive) {
-      throw new Error(`Service is not live: ${sessionId}/${serviceId}`);
-    }
-    return {
-      service,
-      content: await captureTmuxPane(service.tmuxSession, tailLines),
-    };
-  }
-
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
@@ -728,6 +713,8 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
+    let preflightOutcome: "branch" | "defer" | undefined;
+    let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
       ({ prompt, steps } = normalizeSpawnRequest({
@@ -761,8 +748,12 @@ export class SessionService {
           prompt,
         });
         if (preflight.branch) {
+          preflightOutcome = "branch";
+          preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
+        } else {
+          preflightOutcome = "defer";
         }
       }
       sessionId = await reserveNextSessionId(
@@ -770,6 +761,22 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      if (preflightOutcome) {
+        this.logEvent("session.preflight.completed", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message:
+            preflightOutcome === "branch"
+              ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
+              : `Spawn preflight deferred branch selection for ${sessionId}`,
+          details: {
+            outcome: preflightOutcome,
+            branch: preflightBranch ?? null,
+            baseBranch: defaultBranch,
+          },
+        });
+      }
       resolvedBranch = await resolveSpawnBranch({
         repoPath: project.path,
         requestBranch: effectiveBranch,
@@ -1001,6 +1008,16 @@ export class SessionService {
       }
 
       const message = error instanceof Error ? error.message : String(error);
+      if (stage === "preflight") {
+        this.logEvent("session.preflight.failed", {
+          level: "error",
+          projectId: request.project,
+          message: `Spawn preflight failed for ${request.project}: ${message}`,
+          details: {
+            requestedAgent: request.agent ?? null,
+          },
+        });
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         projectId: request.project,

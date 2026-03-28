@@ -146,9 +146,7 @@ class ServiceSendBatch implements SendBatch {
       this.prompt ?? `The bound service "${serviceId}" has a problem.`,
       `Triggered rules: ${[...this.ruleIds].sort().join(", ")}`,
       "",
-      `Inspect it with:`,
-      `- spur service logs ${sessionId} ${serviceId} --tail 200`,
-      `- spur service attach ${sessionId} ${serviceId}`,
+      `Inspect it in Spur list: select ${sessionId} and press l for the live session log view.`,
     ].join("\n");
   }
 }

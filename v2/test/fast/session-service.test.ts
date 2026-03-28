@@ -1199,6 +1199,18 @@ describe("SessionService", () => {
     });
     expect(result.branch).toBe("feature/runtime-preflight");
     expect(result.branchSource).toBe("preflight");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.preflight.completed",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({
+          outcome: "branch",
+          branch: "feature/runtime-preflight",
+        }),
+      }),
+    );
   });
 
   it("skips spawn preflight when an explicit branch is provided", async () => {
@@ -1253,6 +1265,13 @@ describe("SessionService", () => {
     expect(writeSessionMock).not.toHaveBeenCalled();
     expect(createWorktreeMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.preflight.failed",
+        projectId: "api",
+      }),
+    );
   });
 
   it("rejects invalid spawn overrides before reserving a session id", async () => {

@@ -41,7 +41,7 @@ spawn:
 
 When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is.
 
-`list` on a TTY opens a live selector: `Enter` attaches in place, `s` attaches to the selected session's first live service sidecar, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` detaches from either attach target back to the selector. Non-TTY prints a one-shot summary.
+`list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
 `list` hides `completed` and `killed` sessions by default.
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
@@ -49,6 +49,7 @@ When `steps` are present, Spur sends messages like "step 1/N: research" plus the
 `list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
 When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
 Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
+The `list` log view combines those key session events with a live tail of the main agent tmux pane for the selected session.
 
 Agents run with full access:
 
@@ -72,8 +73,6 @@ Use it from inside the session workspace when the agent needs to start a session
 ```bash
 spur service run web --port 3000 -- pnpm dev
 spur service status api-a1b2
-spur service logs api-a1b2 web --tail 200
-spur service attach api-a1b2 web
 ```
 
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.

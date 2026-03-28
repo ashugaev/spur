@@ -913,8 +913,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       timeoutMs: 45_000,
       accept: (value) =>
         value.includes('The bound service "web" has a problem.') &&
-        value.includes(`spur service logs ${session.id} web --tail 200`) &&
-        value.includes(`spur service attach ${session.id} web`),
+        value.includes(`select ${session.id} and press l`),
     });
 
     const events = await pollUntil(

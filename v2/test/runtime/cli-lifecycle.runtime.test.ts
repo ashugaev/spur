@@ -1088,7 +1088,7 @@ projects:
     );
   });
 
-  it("runs, inspects, and attaches to a session-bound service through the built CLI", async () => {
+  it("runs a session-bound service and opens the live session log view from the TTY list", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-service-${port}`;
@@ -1193,17 +1193,6 @@ projects:
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
 
-    const logs = await pollUntil(
-      async () =>
-        (await context.execCli(["--config", configPath, "service", "logs", spawned.id, "web", "--tail", "20"]))
-          .stdout,
-      {
-        timeoutMs: 15_000,
-        accept: (value) => value.includes("SERVICE_BOOT"),
-      },
-    );
-    expect(logs).toContain("SERVICE_BOOT");
-
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
     await createTmuxSession({
@@ -1220,25 +1209,29 @@ projects:
 
     const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("s service"),
+      accept: (value) => value.includes("l logs"),
     });
     expect(attachedPane).toContain("service web:3000:running");
 
-    await sendKeysToTmux(controllerSessionName, "s");
+    await sendKeysToTmux(controllerSessionName, "l");
 
-    const servicePane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("SERVICE_BOOT"),
+      accept: (value) =>
+        value.includes(`Logs ${spawned.id}`) &&
+        value.includes("session.spawn.completed") &&
+        value.includes("service.run.completed") &&
+        value.includes("service runtime prompt"),
     });
-    expect(servicePane).toContain("SERVICE_BOOT");
+    expect(logPane).toContain("Ctrl+G back");
 
     await sendKeysToTmux(controllerSessionName, "C-g");
 
     const detachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("s service"),
+      accept: (value) => value.includes("l logs"),
     });
-    expect(detachedPane).toContain("s service");
+    expect(detachedPane).toContain("l logs");
   });
 
   it("surfaces service command errors through the built CLI", async () => {
@@ -1339,13 +1332,6 @@ projects:
       },
     );
     expect(["stopped", "error"]).toContain(stopped.state);
-
-    await expect(
-      context.execCli(["--config", configPath, "service", "logs", spawned.id, "web"]),
-    ).rejects.toThrow(`Service is not live: ${spawned.id}/web`);
-    await expect(
-      context.execCli(["--config", configPath, "service", "attach", spawned.id, "web"]),
-    ).rejects.toThrow(`Service is not live: ${spawned.id}/web`);
   });
 
   it("rejects invalid or missing slot targets through the built CLI", async () => {
@@ -1830,7 +1816,7 @@ projects:
     });
 
     expect(detachedPane).toContain(
-      "Enter attach  s service  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "Enter attach  l logs  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     );
   });
 

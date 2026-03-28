@@ -60,3 +60,12 @@ export function readEventLog(dataDir: string): SpurLogEntry[] {
       }
     });
 }
+
+export function readSessionEventLog(
+  dataDir: string,
+  sessionId: string,
+  limit?: number,
+): SpurLogEntry[] {
+  const entries = readEventLog(dataDir).filter((entry) => entry.sessionId === sessionId);
+  return limit === undefined ? entries : entries.slice(-limit);
+}

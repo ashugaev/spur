@@ -415,7 +415,7 @@ export function renderInteractiveSessionList(args: {
     ...detailLines,
     "",
     dimText(
-      "↑↓ move  Enter attach  s service  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "↑↓ move  Enter attach  l logs  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     ),
   );
   if (args.statusMessage) {

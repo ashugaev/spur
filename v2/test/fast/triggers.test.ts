@@ -531,7 +531,7 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
-  it("delivers service alerts with inspection commands for the bound session", async () => {
+  it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
       status: "running",
@@ -562,8 +562,7 @@ describe("startConfiguredTriggers", () => {
       expect(typeof delivered).toBe("string");
       expect(delivered).toContain('The bound service "web" has a problem.');
       expect(delivered).toContain("Triggered rules: crash");
-      expect(delivered).toContain("spur service logs api-1 web --tail 200");
-      expect(delivered).toContain("spur service attach api-1 web");
+      expect(delivered).toContain("select api-1 and press l");
     } finally {
       await controller.stop();
     }

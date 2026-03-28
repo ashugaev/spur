@@ -13,6 +13,7 @@ import {
   type RestartDaemonResult,
   type StopDaemonResult,
 } from "./client.js";
+import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
   brandMark,
@@ -50,6 +51,9 @@ const LIST_MAX_DETAIL_ROWS = 6;
 const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
 const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
 const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
+const SESSION_LOG_EVENT_LIMIT = 16;
+const SESSION_LOG_OUTPUT_LINES = 80;
+const SESSION_LOG_LOCAL_LIMIT = 8;
 
 function enableTmuxMouse(sessionName: string): void {
   try {
@@ -81,6 +85,14 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
       stdio: ["ignore", "pipe", "pipe"],
     },
   ).trimEnd();
+}
+
+function tryCaptureTmuxTarget(sessionName: string, lines = 200): string | null {
+  try {
+    return captureTmuxTarget(sessionName, lines);
+  } catch {
+    return null;
+  }
 }
 
 function currentTmuxSessionHasAttachedClient(): boolean {
@@ -292,6 +304,117 @@ function renderAttachedPaneView(args: { title: string; content: string }): strin
   ].join("\n");
 }
 
+interface SessionLogViewState {
+  sessionId: string;
+  session: SessionView;
+  agentPane: string;
+  eventLines: string[];
+  localLines: string[];
+  signature: string;
+}
+
+function formatLogTime(input: string): string {
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) {
+    return "--:--:--";
+  }
+  return date.toISOString().slice(11, 19);
+}
+
+function eventSummary(entry: SpurLogEntry): string {
+  const message = entry.message?.trim();
+  if (message) {
+    return message;
+  }
+  return entry.event;
+}
+
+function formatEventLine(entry: SpurLogEntry): string {
+  const time = dimText(formatLogTime(entry.timestamp));
+  const level =
+    entry.level === "error"
+      ? accent("error")
+      : entry.level === "warn"
+        ? accent("warn")
+        : dimText("info");
+  const summary = eventSummary(entry);
+  return summary === entry.event
+    ? `${time} ${level} ${entry.event}`
+    : `${time} ${level} ${entry.event} ${summary}`;
+}
+
+function sessionLogSignature(session: SessionView): string {
+  return JSON.stringify({
+    status: session.status,
+    state: session.state,
+    runtimeAlive: session.runtimeAlive,
+    workspaceExists: session.workspaceExists,
+    error: session.error ?? null,
+  });
+}
+
+function buildStateChangeLine(previous: SessionView, next: SessionView): string | null {
+  const changes: string[] = [];
+  if (previous.status !== next.status) {
+    changes.push(`status ${previous.status} -> ${next.status}`);
+  }
+  if (previous.state !== next.state) {
+    changes.push(`state ${previous.state} -> ${next.state}`);
+  }
+  if (previous.runtimeAlive !== next.runtimeAlive) {
+    changes.push(`tmux ${previous.runtimeAlive ? "live" : "dead"} -> ${next.runtimeAlive ? "live" : "dead"}`);
+  }
+  if (previous.workspaceExists !== next.workspaceExists) {
+    changes.push(
+      `workspace ${previous.workspaceExists ? "live" : "missing"} -> ${next.workspaceExists ? "live" : "missing"}`,
+    );
+  }
+  if ((previous.error ?? "") !== (next.error ?? "") && next.error) {
+    changes.push(`error ${next.error}`);
+  }
+  if (changes.length === 0) {
+    return null;
+  }
+  return `${dimText(formatLogTime(new Date().toISOString()))} ${accent("local")} ${changes.join(" • ")}`;
+}
+
+function renderSessionLogView(args: SessionLogViewState): string {
+  const session = args.session;
+  const summary = [
+    `status ${session.status}`,
+    `state ${session.state}`,
+    session.runtimeAlive ? "tmux live" : "tmux dead",
+    session.worktree
+      ? session.workspaceExists
+        ? "worktree live"
+        : "worktree missing"
+      : session.workspaceExists
+        ? "shared workspace live"
+        : "shared workspace missing",
+    `updated ${session.lastActivityAt}`,
+  ].join("  ");
+  const sections = [
+    brandLine(`Logs ${session.id}`),
+    "",
+    dimText(summary),
+    dimText(`project ${session.project}  agent ${session.agent}  branch ${session.branch}`),
+    "",
+    boldText("Events"),
+    ...(args.eventLines.length > 0 ? args.eventLines : [dimText("(no events yet)")]),
+  ];
+  if (args.localLines.length > 0) {
+    sections.push("", boldText("Live Transitions"), ...args.localLines);
+  }
+  sections.push(
+    "",
+    boldText("Agent Output"),
+    args.agentPane || dimText("(agent is not live)"),
+    "",
+    dimText("Ctrl+G back"),
+  );
+  return sections.join("\n");
+}
+
 interface HelpRow {
   term: string;
   description: string;
@@ -366,7 +489,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, s attach service, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -376,7 +499,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "service") {
     return [
       "`service run` is intended to be called from inside a live Spur session workspace.",
-      "Service sidecars stay session-bound; use `service logs` or `service attach` to inspect them.",
+      "Service sidecars stay session-bound; inspect session activity from `spur list` with `l`.",
     ];
   }
   return [];
@@ -455,12 +578,17 @@ async function runInteractiveSessionList(
         title: string;
       }
     | null = null;
+  let logView: SessionLogViewState | null = null;
   let attachedPaneContent = "";
   let terminalActive = false;
   let refreshTimer: NodeJS.Timeout | undefined;
 
   const render = (): void => {
     if (closed) return;
+    if (logView) {
+      process.stdout.write(`\u001b[2J\u001b[H${renderSessionLogView(logView)}\n`);
+      return;
+    }
     if (attachedPane) {
       process.stdout.write(
         `\u001b[2J\u001b[H${renderAttachedPaneView({
@@ -500,6 +628,34 @@ async function runInteractiveSessionList(
     if (closed || busy || refreshing) return;
     refreshing = true;
     try {
+      if (logView) {
+        const nextSession = await getJson<SessionView>(
+          cliEntrypoint,
+          `/sessions/${logView.sessionId}`,
+          configPath,
+        );
+        const nextSignature = sessionLogSignature(nextSession);
+        if (nextSignature !== logView.signature) {
+          const line = buildStateChangeLine(logView.session, nextSession);
+          if (line) {
+            logView.localLines = [...logView.localLines, line].slice(-SESSION_LOG_LOCAL_LIMIT);
+          }
+        }
+        logView = {
+          ...logView,
+          session: nextSession,
+          signature: nextSignature,
+          eventLines: readSessionEventLog(info.dataDir, logView.sessionId, SESSION_LOG_EVENT_LIMIT).map(
+            formatEventLine,
+          ),
+          agentPane:
+            nextSession.runtimeAlive
+              ? tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
+                dimText("(agent output unavailable)")
+              : "",
+        };
+        return;
+      }
       if (attachedPane) {
         attachedPaneContent = captureTmuxTarget(attachedPane.tmuxSession);
         return;
@@ -524,9 +680,6 @@ async function runInteractiveSessionList(
   const getSelectedSession = (): SessionView | null =>
     sessions.find((session) => session.id === selectedSessionId) ?? null;
 
-  const getSelectedService = (session: SessionView): ServiceInstanceView | null =>
-    session.services.find((service) => service.runtimeAlive) ?? null;
-
   const getSelectedSessionOrWarn = (): SessionView | null => {
     const session = getSelectedSession();
     if (session) return session;
@@ -538,6 +691,30 @@ async function runInteractiveSessionList(
   const openAttachedPane = (tmuxSession: string, title: string): void => {
     attachedPane = { tmuxSession, title };
     attachedPaneContent = captureTmuxTarget(tmuxSession);
+    logView = null;
+    pendingKillConfirmationSessionId = null;
+    statusMessage = undefined;
+    render();
+  };
+
+  const openSelectedSessionLogs = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    logView = {
+      sessionId: session.id,
+      session,
+      signature: sessionLogSignature(session),
+      eventLines: readSessionEventLog(info.dataDir, session.id, SESSION_LOG_EVENT_LIMIT).map(
+        formatEventLine,
+      ),
+      localLines: [],
+      agentPane:
+        session.runtimeAlive
+          ? tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
+            dimText("(agent output unavailable)")
+          : "",
+    };
+    attachedPane = null;
     pendingKillConfirmationSessionId = null;
     statusMessage = undefined;
     render();
@@ -604,44 +781,6 @@ async function runInteractiveSessionList(
     try {
       enableTmuxMouse(session.tmuxSession);
       attachTmuxTargetFromList(session.tmuxSession);
-      pendingKillConfirmationSessionId = null;
-      statusMessage = undefined;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      statusMessage = brandLine(message);
-    } finally {
-      if (!closed) {
-        enableTerminal();
-      }
-      busy = false;
-      await refresh();
-    }
-  };
-
-  const attachSelectedService = async (): Promise<void> => {
-    const session = getSelectedSessionOrWarn();
-    if (!session) return;
-    const service = getSelectedService(session);
-    if (!service) {
-      statusMessage = brandLine(`Session ${session.id} has no live service sidecar.`);
-      render();
-      return;
-    }
-
-    busy = true;
-    statusMessage = brandLine(`Attaching to ${session.id}/${service.serviceId}...`);
-    render();
-
-    if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
-      busy = false;
-      openAttachedPane(service.tmuxSession, `Attached ${session.id}/${service.serviceId}`);
-      return;
-    }
-
-    disableTerminal();
-    try {
-      enableTmuxMouse(service.tmuxSession);
-      attachTmuxTargetFromList(service.tmuxSession);
       pendingKillConfirmationSessionId = null;
       statusMessage = undefined;
     } catch (error) {
@@ -767,8 +906,9 @@ async function runInteractiveSessionList(
         finish();
         return;
       }
-      if (attachedPane) {
+      if (logView || attachedPane) {
         if (key.ctrl && key.name === "g") {
+          logView = null;
           attachedPane = null;
           attachedPaneContent = "";
           render();
@@ -796,9 +936,9 @@ async function runInteractiveSessionList(
         void attachSelectedSession().catch(fail);
         return;
       }
-      if (key.name === "s" || key.sequence === "s") {
+      if (key.name === "l" || key.sequence === "l") {
         pendingKillConfirmationSessionId = null;
-        void attachSelectedService().catch(fail);
+        void openSelectedSessionLogs().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
@@ -1098,53 +1238,6 @@ export function createProgram(cliEntrypoint: string): Command {
         label: `loading services for ${sessionId}`,
         action: () => loadServices(cliEntrypoint, sessionId, configPath),
         render: renderServiceList,
-      });
-    });
-
-  service
-    .command("logs")
-    .description("Show recent logs for a bound service.")
-    .argument("<sessionId>", "Session id")
-    .argument("<serviceId>", "Service id")
-    .option("--tail <n>", "Number of lines to capture", "200")
-    .action(async (sessionId: string, serviceId: string, options, command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
-      const tail = Number.parseInt(options.tail as string, 10);
-      if (Number.isNaN(tail) || tail <= 0) {
-        throw new Error("--tail must be a positive integer");
-      }
-      const result = await withSpinner("loading service logs", () =>
-        getJson<{ service: ServiceInstanceView; content: string }>(
-          cliEntrypoint,
-          `/sessions/${sessionId}/services/${serviceId}/logs?tail=${String(tail)}`,
-          configPath,
-        ),
-      );
-      writeStdout(renderServiceCard(result.service));
-      writeStdout("");
-      writeStdout(result.content.trimEnd() || dimText("(no log output)"));
-    });
-
-  service
-    .command("attach")
-    .description("Attach to the tmux session for a bound service.")
-    .argument("<sessionId>", "Session id")
-    .argument("<serviceId>", "Service id")
-    .action(async (sessionId: string, serviceId: string, _options, command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
-      const serviceView = await withSpinner("loading service", () =>
-        getJson<ServiceInstanceView>(
-          cliEntrypoint,
-          `/sessions/${sessionId}/services/${serviceId}`,
-          configPath,
-        ),
-      );
-      if (!serviceView.runtimeAlive) {
-        throw new Error(`Service is not live: ${sessionId}/${serviceId}`);
-      }
-      enableTmuxMouse(serviceView.tmuxSession);
-      execFileSync("tmux", ["attach-session", "-t", `=${serviceView.tmuxSession}`], {
-        stdio: "inherit",
       });
     });
 
