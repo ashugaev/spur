@@ -84,6 +84,9 @@ class GitHubSendBatch implements SendBatch {
     if (kinds.has("ci_failed")) {
       lines.push("Inspect the failing checks, fix them, and rerun the relevant validation.");
     }
+    if (kinds.has("merge_conflict")) {
+      lines.push("Resolve the active PR merge conflicts, rerun the relevant validation, and push.");
+    }
     if (kinds.has("comment")) {
       lines.push("Read the latest PR comments and act on them.");
     }

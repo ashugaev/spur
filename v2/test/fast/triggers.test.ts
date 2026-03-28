@@ -135,6 +135,27 @@ function ciFailedEvent() {
   };
 }
 
+function mergeConflictEvent() {
+  return {
+    name: "github:merge_conflict",
+    projectId: "api",
+    sourceId: "pr-watch",
+    data: {
+      sessionId: "api-1",
+      repo: "acme/api",
+      prNumber: 42,
+      prTitle: "Tighten coverage",
+      signals: [
+        {
+          key: "merge_conflict",
+          kind: "merge_conflict",
+          text: "Merge conflicts are blocking this PR.",
+        },
+      ],
+    },
+  };
+}
+
 function ciSnapshot() {
   return new Map([
     [
@@ -269,6 +290,50 @@ describe("startConfiguredTriggers", () => {
         "Run $manager and $github. Address the latest requested review changes on the active PR.",
       );
       expect(delivered).not.toContain("Review the latest GitHub updates on the active PR and act on them.");
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("adds built-in merge conflict guidance when no custom prompt is configured", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:merge_conflict" }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(mergeConflictEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: false },
+      );
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining(
+          "Resolve the active PR merge conflicts, rerun the relevant validation, and push.",
+        ),
+        { interrupt: false },
+      );
     } finally {
       await controller.stop();
     }

@@ -562,6 +562,353 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     }
   });
 
+  it("emits GitHub merge conflict events only when the conflict appears and reappears after clear", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "github-conflict.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 1000
+        runOnStart: false
+    triggers: {}
+`,
+      ),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-conflict": {
+          number: 42,
+          title: "Resolve mergeability state",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        },
+      },
+    });
+
+    const originalEnv = {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
+      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
+      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
+    };
+    process.env.HOME = context.env.HOME;
+    process.env.PATH = context.env.PATH;
+    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
+    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
+    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
+    try {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-conflict",
+        prompt: "initial github merge-conflict runtime prompt",
+      });
+
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial github merge-conflict runtime prompt"),
+      });
+
+      const events: Array<{ name: string; data?: unknown }> = [];
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: {
+          type: "github",
+          intervalMs: 1000,
+          runOnStart: false,
+        },
+        emit(name, data) {
+          events.push({ name, data });
+        },
+        signal: abortController.signal,
+        logger: {
+          warn: () => {},
+        },
+      });
+
+      try {
+        const snapshotPath = join(
+          context.dataDir,
+          "source-state",
+          "github",
+          "api",
+          "pr-watch",
+          `${session.id}.json`,
+        );
+        await pollUntil(async () => existsSync(snapshotPath), {
+          timeoutMs: 15_000,
+          accept: Boolean,
+        });
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const firstEvent = await pollUntil(async () => events[0], {
+          timeoutMs: 20_000,
+          accept: (value) =>
+            value?.name === "github:merge_conflict" &&
+            Array.isArray((value.data as { signals?: unknown[] } | undefined)?.signals),
+        });
+        expect(firstEvent?.data).toMatchObject({
+          sessionId: session.id,
+          prNumber: 42,
+          signals: [
+            expect.objectContaining({
+              text: "Merge conflicts are blocking this PR.",
+            }),
+          ],
+        });
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+            },
+          },
+        });
+        await sleep(1_500);
+        expect(events).toHaveLength(1);
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const secondEvent = await pollUntil(async () => events[1], {
+          timeoutMs: 20_000,
+          accept: (value) => value?.name === "github:merge_conflict",
+        });
+        expect(secondEvent?.data).toMatchObject({
+          sessionId: session.id,
+          prNumber: 42,
+          signals: [
+            expect.objectContaining({
+              text: "Merge conflicts are blocking this PR.",
+            }),
+          ],
+        });
+      } finally {
+        abortController.abort();
+        handle.stop();
+      }
+    } finally {
+      process.env.HOME = originalEnv.HOME;
+      process.env.PATH = originalEnv.PATH;
+      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
+      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
+      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
+    }
+  });
+
+  it("delivers github:merge_conflict to a live session through the trigger pipeline", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-merge-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "github-merge-conflict.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 1000
+        runOnStart: false
+    triggers:
+      pr-watch-merge-conflict:
+        source: pr-watch
+        event: github:merge_conflict
+        send:
+          interrupt: true
+`,
+      ),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-merge-conflict": {
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        },
+      },
+    });
+
+    const originalEnv = {
+      HOME: process.env.HOME,
+      PATH: process.env.PATH,
+      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
+      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
+      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
+    };
+    process.env.HOME = context.env.HOME;
+    process.env.PATH = context.env.PATH;
+    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
+    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
+    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
+    try {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-merge-conflict",
+        prompt: "initial github merge conflict runtime prompt",
+      });
+
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial github merge conflict runtime prompt"),
+      });
+
+      const config = loadConfig(configPath);
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config,
+        bus,
+        sessionService: service,
+        logger: {
+          warn: () => {},
+        },
+      });
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: config.projects["api"]?.sources["pr-watch"] as never,
+        emit(name, data) {
+          bus.emit({
+            name,
+            projectId: "api",
+            sourceId: "pr-watch",
+            data,
+          });
+        },
+        signal: abortController.signal,
+        logger: {
+          warn: () => {},
+        },
+      });
+
+      try {
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-merge-conflict": {
+              number: 42,
+              title: "Keep branch mergeable",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+          timeoutMs: 20_000,
+          accept: (value) => value.includes("Merge conflicts are blocking this PR."),
+        });
+        const normalizedPane = pane.replaceAll(/\s+/g, " ");
+
+        expect(pane).toContain('GitHub updates on PR #42 "Keep branch mergeable":');
+        expect(pane).toContain("Merge conflicts are blocking this PR.");
+        expect(normalizedPane).toContain(
+          "Resolve the active PR merge conflicts, rerun the relevant validation, and push.",
+        );
+
+        const conflictEvents = await pollUntil(
+          async () => readEventLog(context.dataDir).map((entry) => entry.event),
+          {
+            timeoutMs: 20_000,
+            accept: (value) =>
+              value.includes("trigger.send.queued") &&
+              value.includes("trigger.send.delivered") &&
+              value.includes("session.message.sent"),
+          },
+        );
+        expect(conflictEvents).toEqual(
+          expect.arrayContaining([
+            "trigger.send.queued",
+            "trigger.send.delivered",
+            "session.message.sent",
+          ]),
+        );
+      } finally {
+        abortController.abort();
+        handle.stop();
+        await controller.stop();
+      }
+    } finally {
+      process.env.HOME = originalEnv.HOME;
+      process.env.PATH = originalEnv.PATH;
+      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
+      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
+      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
+    }
+  });
+
   it("delivers service problem alerts back into the bound session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

@@ -20,7 +20,12 @@ export interface SessionSlots {
 export type SourceType = "cron" | "github" | "service";
 
 export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
-export const GITHUB_SIGNAL_KINDS = ["changes_requested", "ci_failed", "comment"] as const;
+export const GITHUB_SIGNAL_KINDS = [
+  "changes_requested",
+  "ci_failed",
+  "comment",
+  "merge_conflict",
+] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
 interface BaseSourceConfig {

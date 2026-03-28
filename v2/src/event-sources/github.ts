@@ -26,6 +26,8 @@ interface GitHubPrSummary {
   url: string;
   reviewDecision: GitHubReviewDecision;
   repo: string;
+  mergeable: string;
+  mergeStateStatus: string;
 }
 
 interface GitHubCheck {
@@ -83,6 +85,17 @@ function summarizeFailingCi(checks: GitHubCheck[]): string | null {
     : null;
 }
 
+function normalizeGitHubState(value: string | null | undefined): string {
+  return (value ?? "").trim().toUpperCase();
+}
+
+function hasMergeConflict(pr: GitHubPrSummary): boolean {
+  return (
+    normalizeGitHubState(pr.mergeable) === "CONFLICTING" ||
+    normalizeGitHubState(pr.mergeStateStatus) === "DIRTY"
+  );
+}
+
 async function gh(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("gh", args, {
     cwd,
@@ -105,13 +118,15 @@ async function resolvePrSummary(
     "--state",
     "all",
     "--json",
-    "number,title,url,reviewDecision",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
   );
   const prs: Array<{
     number: number;
     title: string;
     url: string;
     reviewDecision?: string | null;
+    mergeable?: string | null;
+    mergeStateStatus?: string | null;
   }> = JSON.parse(raw);
   const pr = prs[0];
   if (!pr) return null;
@@ -121,6 +136,8 @@ async function resolvePrSummary(
     url: pr.url,
     reviewDecision: normalizeReviewDecision(pr.reviewDecision),
     repo: parseRepoFromUrl(pr.url),
+    mergeable: pr.mergeable ?? "",
+    mergeStateStatus: pr.mergeStateStatus ?? "",
   };
 }
 
@@ -219,6 +236,13 @@ async function collectSignals(
       key: "ci_failed",
       kind: "ci_failed",
       text: ciText,
+    });
+  }
+  if (hasMergeConflict(pr)) {
+    snapshot.set("merge_conflict", {
+      key: "merge_conflict",
+      kind: "merge_conflict",
+      text: "Merge conflicts are blocking this PR.",
     });
   }
 

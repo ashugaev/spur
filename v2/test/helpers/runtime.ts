@@ -22,6 +22,8 @@ export interface FakeGhState {
       title: string;
       url: string;
       reviewDecision?: string | null;
+      mergeable?: string | null;
+      mergeStateStatus?: string | null;
       repo?: string;
     }
   >;

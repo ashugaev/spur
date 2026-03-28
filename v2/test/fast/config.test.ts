@@ -142,6 +142,32 @@ projects:
     });
   });
 
+  it("accepts github merge conflict events during config validation", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      notify:
+        source: pr-watch
+        event: github:merge_conflict
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "pr-watch",
+      event: "github:merge_conflict",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
   it("parses service sources with rule defaults and matching trigger events", async () => {
     const configPath = await writeConfig(`
 projects:

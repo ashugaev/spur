@@ -118,7 +118,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 ## Automation
 
 - `cron` emits `cron:tick`
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`
 - `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
@@ -202,6 +202,11 @@ projects:
         send:
           interrupt: true # delivered immediately and retried every 10m (up to 3) while CI still fails
           prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+      pr-watch-merge-conflict:
+        source: pr-watch
+        event: github:merge_conflict
+        send:
+          interrupt: false # one-shot when the PR becomes conflicting; can emit again after the conflict clears and returns
       pr-watch-comment:
         source: pr-watch
         event: github:comment
@@ -257,10 +262,12 @@ Field reference:
 Event surface:
 
 - `cron` sources support only `cron:tick`.
-- `github` sources support only `github:changes_requested`, `github:ci_failed`, and `github:comment`.
+- `github` sources support only `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - `service` sources support `service:<ruleId>` for each configured rule on that source.
 
 `github:ci_failed` keeps one fixed retry policy in Spur: retry every 10 minutes, stop after 3 deliveries, and reset only after the failing CI signal disappears from the latest GitHub snapshot. With `send.interrupt: false`, each delivery waits for the session to return to `waiting`. With `send.interrupt: true`, Spur sends immediately even if the agent is still working.
+
+`github:merge_conflict` is snapshot-based and one-shot: Spur emits it when the tracked PR becomes conflicting, clears it when the PR is mergeable again, and can emit it again later if conflicts return.
 
 `projects.<id>.worktree` defaults to `true`. Set it to `false` to run in the project path instead of creating an owned `git worktree`.
 
