@@ -64,6 +64,45 @@ ${extraProjectYaml}
 `;
 }
 
+function runtimeEnv(context: RuntimeTestContext) {
+  return {
+    HOME: context.env.HOME,
+    PATH: context.env.PATH,
+    SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
+    SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+    SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+  };
+}
+
+async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
+  await syncTmuxEnvironment(runtimeEnv(context));
+}
+
+async function withRuntimeEnv<T>(
+  context: RuntimeTestContext,
+  run: () => Promise<T>,
+): Promise<T> {
+  const originalEnv = {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
+    SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
+    SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
+  };
+  Object.assign(process.env, runtimeEnv(context));
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
@@ -85,13 +124,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-cron-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "cron.yaml",
       automationConfig(
@@ -183,13 +216,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-cron-shared-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "cron-shared.yaml",
       automationConfig(
@@ -242,13 +269,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github.yaml",
       automationConfig(
@@ -281,19 +302,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -386,13 +395,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         abortController.abort();
         handle.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
   });
 
   it("delivers github:ci_failed to a live session through the trigger pipeline", async () => {
@@ -400,13 +403,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-ci-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github-ci.yaml",
       automationConfig(
@@ -440,19 +437,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -553,13 +538,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         handle.stop();
         await controller.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
   });
 
   it("emits GitHub merge conflict events only when the conflict appears and reappears after clear", async () => {
@@ -567,13 +546,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-conflict-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github-conflict.yaml",
       automationConfig(
@@ -603,19 +576,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -740,13 +701,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         abortController.abort();
         handle.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
   });
 
   it("delivers github:merge_conflict to a live session through the trigger pipeline", async () => {
@@ -754,13 +709,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-merge-conflict-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github-merge-conflict.yaml",
       automationConfig(
@@ -795,19 +744,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -900,13 +837,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         handle.stop();
         await controller.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
   });
 
   it("delivers service problem alerts back into the bound session", async () => {
@@ -914,13 +845,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-service-alert-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "service-alert.yaml",
       automationConfig(
