@@ -198,7 +198,6 @@ function resetServiceStore() {
     }
   });
 }
-
 async function advanceSeconds(seconds: number): Promise<void> {
   for (let elapsed = 0; elapsed < seconds; elapsed += 1) {
     await vi.advanceTimersByTimeAsync(1_000);
@@ -591,7 +590,7 @@ describe("SessionService", () => {
     expect(result.id).toBe("api-1");
   });
 
-  it("prefers Claude native waiting state over a stale busy-looking pane", async () => {
+  it("prefers Claude native waiting state without reading the pane", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -610,8 +609,6 @@ describe("SessionService", () => {
       state: "waiting",
       signalAt: new Date("2026-03-18T10:04:40.000Z"),
     });
-    captureTmuxPaneMock.mockResolvedValue("Claude Code\nthinking...");
-
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -619,6 +616,7 @@ describe("SessionService", () => {
 
     expect(result.state).toBe("waiting");
     expect(result.lastActivityAt).toBe("2026-03-18T10:04:40.000Z");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
   it("prefers fresh hook state over a stale native probe", async () => {
@@ -654,6 +652,35 @@ describe("SessionService", () => {
     expect(readAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.state).toBe("working");
     expect(result.lastActivityAt).toBe("2026-03-18T10:04:59.000Z");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
+  });
+
+  it("does not promote status from pane text when the native probe is only waiting", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    probeAgentStateMock.mockResolvedValue({
+      state: "waiting",
+      signalAt: new Date("2026-03-18T10:04:40.000Z"),
+    });
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\nthinking...");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
   });
 
   it("keeps Codex approval prompts in needs_input even when native probe is only waiting", async () => {
@@ -683,6 +710,36 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
+  });
+
+  it("prefers fresh native working signals without reading the pane", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:03:00.000Z"));
+    probeAgentStateMock.mockResolvedValue({
+      state: "working",
+      signalAt: new Date("2026-03-18T10:04:58.000Z"),
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+    expect(result.lastActivityAt).toBe("2026-03-18T10:04:58.000Z");
+    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
   it("prefers fresh native working signals over an idle-looking prompt pane", async () => {

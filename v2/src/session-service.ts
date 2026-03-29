@@ -202,49 +202,8 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-export function classifyRunningState(args: {
-  pane: string;
-  updatedAt: Date;
-  signalAt: Date | null;
-}): SessionState {
-  const lines = normalizePaneLines(args.pane);
-  if (isWaitingInput(lines)) {
-    return "needs_input";
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  if (lastLine && !PROMPT_RE.test(lastLine)) {
-    return "working";
-  }
-  if (isFresh(args.updatedAt, DELIVERY_GRACE_MS)) {
-    return "working";
-  }
-  if (args.signalAt && isFresh(args.signalAt, WORKING_SIGNAL_WINDOW_MS)) {
-    return "working";
-  }
-  return "waiting";
-}
-
-function resolveRunningSessionState(args: {
-  agent: SessionRecord["agent"];
-  agentState: AgentStateProbe | null;
-  paneState: SessionState;
-}): SessionState {
-  if (args.paneState === "needs_input") {
-    return "needs_input";
-  }
-  if (!args.agentState) {
-    return args.paneState;
-  }
-  if (args.agentState.state === "error" || args.agentState.state === "needs_input") {
-    return args.agentState.state;
-  }
-  if (args.agentState.state === "working") {
-    return "working";
-  }
-  if (args.agent === "claude") {
-    return args.agentState.state;
-  }
-  return args.paneState === "working" ? "working" : "waiting";
+function resolveWaitingStateFromPane(pane: string): SessionState {
+  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
 }
 
 function resolveHookAgentState(
@@ -265,6 +224,23 @@ function resolveHookAgentState(
     return null;
   }
   return { state: hookState.state, signalAt };
+}
+
+function resolveRunningSessionState(args: {
+  agentState: AgentStateProbe | null;
+  updatedAt: Date;
+  activityAt: Date | null;
+}): SessionState {
+  if (!args.agentState) {
+    return isFresh(latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt, DELIVERY_GRACE_MS)
+      ? "working"
+      : "waiting";
+  }
+  return args.agentState.state === "working"
+    ? "working"
+    : args.agentState.state === "waiting"
+      ? "waiting"
+      : args.agentState.state;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -1918,17 +1894,13 @@ export class SessionService {
       state = agentState?.state === "error" ? "error" : "stopped";
     } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
       state = agentState.state;
+    } else if (session.agent === "codex" && agentState?.state === "waiting") {
+      state = resolveWaitingStateFromPane(await captureTmuxPane(session.tmuxSession, 80));
     } else {
-      const pane = await captureTmuxPane(session.tmuxSession, 80);
-      const paneSignalAt = latestActivityAt(tmuxActivityAt, agentState?.signalAt ?? null);
       state = resolveRunningSessionState({
-        agent: session.agent,
         agentState,
-        paneState: classifyRunningState({
-          pane,
-          updatedAt,
-          signalAt: paneSignalAt,
-        }),
+        updatedAt,
+        activityAt: tmuxActivityAt,
       });
     }
 

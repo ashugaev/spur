@@ -126,7 +126,7 @@ CLI -> ensure daemon -> POST /sessions
 
 ### Session model
 
-- User-facing session id stays simple: `<prefix>-N`.
+- User-facing session id stays compact: `<prefix>-<hash4>`.
 - Store the real `tmux` target in metadata; it may stay equal to session id in `v2`.
 - Persist flat key-value metadata or one small JSON file per session. Keep the format direct and human-readable.
 - Human `list` reads only the stored session records plus minimal live checks when needed.

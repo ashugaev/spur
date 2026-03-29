@@ -1,17 +1,22 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-interface AgentHookStateRecord {
+export interface AgentHookStateRecord {
   state: "working" | "waiting";
   updatedAt: string;
+  hookEvent?: string;
+  turnId?: string;
 }
 
-function stateFilePath(dataDir: string, sessionId: string): string {
+function hookStateFilePath(dataDir: string, sessionId: string): string {
   return join(dataDir, "session-agent-state", `${sessionId}.json`);
 }
 
-export function readAgentHookState(dataDir: string, sessionId: string): AgentHookStateRecord | null {
-  const path = stateFilePath(dataDir, sessionId);
+export function readAgentHookState(
+  dataDir: string,
+  sessionId: string,
+): AgentHookStateRecord | null {
+  const path = hookStateFilePath(dataDir, sessionId);
   if (!existsSync(path)) {
     return null;
   }
@@ -24,6 +29,8 @@ export function readAgentHookState(dataDir: string, sessionId: string): AgentHoo
       return {
         state: parsed.state,
         updatedAt: parsed.updatedAt,
+        ...(typeof parsed.hookEvent === "string" ? { hookEvent: parsed.hookEvent } : {}),
+        ...(typeof parsed.turnId === "string" ? { turnId: parsed.turnId } : {}),
       };
     }
   } catch {
@@ -33,5 +40,5 @@ export function readAgentHookState(dataDir: string, sessionId: string): AgentHoo
 }
 
 export function deleteAgentHookState(dataDir: string, sessionId: string): void {
-  rmSync(stateFilePath(dataDir, sessionId), { force: true });
+  rmSync(hookStateFilePath(dataDir, sessionId), { force: true });
 }
