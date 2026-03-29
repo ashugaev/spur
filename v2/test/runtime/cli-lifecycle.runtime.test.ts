@@ -337,13 +337,22 @@ projects:
       currentActiveContext().daemonPid = daemon.info.pid;
 
       const extraSpawn = JSON.parse(
-        (await context.execCli(["--config", extraConfigPath, "spawn", "web", "sync project", "--json"]))
-          .stdout,
+        (
+          await context.execCli([
+            "--config",
+            extraConfigPath,
+            "spawn",
+            "web",
+            "sync project",
+            "--json",
+          ])
+        ).stdout,
       ) as SessionView;
       expect(extraSpawn.project).toBe("web");
 
       const restarted = JSON.parse(
-        (await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"])).stdout,
+        (await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"]))
+          .stdout,
       ) as {
         restarted: boolean;
         runtime?: RuntimeInfo;
@@ -1166,8 +1175,16 @@ projects:
     const listed = await pollUntil(
       async () =>
         JSON.parse(
-          (await context.execCli(["--config", configPath, "service", "status", spawned.id, "--json"]))
-            .stdout,
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "service",
+              "status",
+              spawned.id,
+              "--json",
+            ])
+          ).stdout,
         ) as ServiceInstanceView[],
       {
         timeoutMs: 15_000,
@@ -1292,16 +1309,7 @@ projects:
 
     await execFileAsync(
       helperPath,
-      [
-        "service",
-        "run",
-        "web",
-        "--json",
-        "--",
-        "sh",
-        "-lc",
-        `'printf "SERVICE_DONE\\n"; sleep 1'`,
-      ],
+      ["service", "run", "web", "--json", "--", "sh", "-lc", `'printf "SERVICE_DONE\\n"; sleep 1'`],
       {
         cwd: spawned.worktreePath,
         env: {

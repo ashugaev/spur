@@ -78,10 +78,7 @@ async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promi
   await syncTmuxEnvironment(runtimeEnv(context));
 }
 
-async function withRuntimeEnv<T>(
-  context: RuntimeTestContext,
-  run: () => Promise<T>,
-): Promise<T> {
+async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise<T>): Promise<T> {
   const originalEnv = {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
@@ -95,7 +92,7 @@ async function withRuntimeEnv<T>(
   } finally {
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
-        delete process.env[key];
+        Reflect.deleteProperty(process.env, key);
       } else {
         process.env[key] = value;
       }
@@ -909,7 +906,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     );
 
-    const log = await pollUntil(async () => context.readAgentLog(session.id), {
+    await pollUntil(async () => context.readAgentLog(session.id), {
       timeoutMs: 45_000,
       accept: (value) =>
         value.includes('The bound service "web" has a problem.') &&
@@ -927,11 +924,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     );
     expect(events).toEqual(
-      expect.arrayContaining([
-        "source.started",
-        "source.event.emitted",
-        "trigger.send.queued",
-      ]),
+      expect.arrayContaining(["source.started", "source.event.emitted", "trigger.send.queued"]),
     );
   });
 });

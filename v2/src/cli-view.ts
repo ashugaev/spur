@@ -152,7 +152,7 @@ function statusColor(session: SessionView): string {
 
 export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
-  const services = session.services ?? [];
+  const services = session.services;
 
   if (session.status === "paused") {
     facts.push("paused by user");
@@ -200,7 +200,8 @@ export function describeSession(session: SessionView): string {
 }
 
 function formatInlineService(service: ServiceInstanceView): string {
-  const base = service.port !== undefined ? `${service.serviceId}:${service.port}` : service.serviceId;
+  const base =
+    service.port !== undefined ? `${service.serviceId}:${service.port}` : service.serviceId;
   return service.problemRuleIds.length > 0
     ? `${base}:${serviceStateLabel(service.state)}(${service.problemRuleIds.join(",")})`
     : `${base}:${serviceStateLabel(service.state)}`;
@@ -304,7 +305,7 @@ function renderSessionDetailsPane(args: {
   }
 
   const selected = args.selected;
-  const services = selected.services ?? [];
+  const services = selected.services;
   const title = brandLine(`Selected ${selected.id}`);
   if (args.maxDetailLines <= 0) {
     return [title];
@@ -479,7 +480,10 @@ export function renderServiceCard(service: ServiceInstanceView): string {
 
 export function renderServiceList(services: ServiceInstanceView[]): string {
   if (services.length === 0) {
-    return renderEmptyState("No services.", "Run `spur service run <serviceId> -- <command...>` inside the session.");
+    return renderEmptyState(
+      "No services.",
+      "Run `spur service run <serviceId> -- <command...>` inside the session.",
+    );
   }
   return services.map((service) => renderServiceCard(service)).join("\n");
 }

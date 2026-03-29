@@ -223,8 +223,7 @@ function parseProjectPreflight(
   const label = `projects.${projectId}.preflight`;
   const raw = asObject(value, label);
   return {
-    prompt:
-      asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
+    prompt: asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
 }
 

@@ -1,5 +1,10 @@
 import { readGitHubSourceSnapshot } from "./metadata.js";
-import type { GitHubEventData, GitHubSignal, ServiceProblemEventData, SourceType } from "./types.js";
+import type {
+  GitHubEventData,
+  GitHubSignal,
+  ServiceProblemEventData,
+  SourceType,
+} from "./types.js";
 
 export interface SendBatch {
   readonly sessionId: string;
@@ -90,7 +95,9 @@ class GitHubSendBatch implements SendBatch {
     if (kinds.has("comment")) {
       lines.push("Read the latest PR comments and act on them.");
     }
-    lines.push("Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.");
+    lines.push(
+      "Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.",
+    );
     return lines;
   }
 

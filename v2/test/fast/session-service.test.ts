@@ -180,16 +180,22 @@ function resetServiceStore() {
       .filter((service) => service.sessionId === sessionId)
       .map((service) => clone(service)),
   );
-  readServiceInstanceMock.mockImplementation((_dataDir: string, sessionId: string, serviceId: string) => {
-    const service = serviceRecords.get(serviceKey(sessionId, serviceId));
-    return service ? clone(service) : undefined;
-  });
-  writeServiceInstanceMock.mockImplementation((_dataDir: string, service: ServiceInstanceRecord) => {
-    serviceRecords.set(serviceKey(service.sessionId, service.serviceId), clone(service));
-  });
-  deleteServiceInstanceMock.mockImplementation((_dataDir: string, sessionId: string, serviceId: string) => {
-    serviceRecords.delete(serviceKey(sessionId, serviceId));
-  });
+  readServiceInstanceMock.mockImplementation(
+    (_dataDir: string, sessionId: string, serviceId: string) => {
+      const service = serviceRecords.get(serviceKey(sessionId, serviceId));
+      return service ? clone(service) : undefined;
+    },
+  );
+  writeServiceInstanceMock.mockImplementation(
+    (_dataDir: string, service: ServiceInstanceRecord) => {
+      serviceRecords.set(serviceKey(service.sessionId, service.serviceId), clone(service));
+    },
+  );
+  deleteServiceInstanceMock.mockImplementation(
+    (_dataDir: string, sessionId: string, serviceId: string) => {
+      serviceRecords.delete(serviceKey(sessionId, serviceId));
+    },
+  );
   deleteServiceInstancesForSessionMock.mockImplementation((_dataDir: string, sessionId: string) => {
     for (const key of serviceRecords.keys()) {
       if (key.startsWith(`${sessionId}:`)) {

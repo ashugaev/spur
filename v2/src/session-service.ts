@@ -232,7 +232,10 @@ function resolveRunningSessionState(args: {
   activityAt: Date | null;
 }): SessionState {
   if (!args.agentState) {
-    return isFresh(latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt, DELIVERY_GRACE_MS)
+    return isFresh(
+      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
+      DELIVERY_GRACE_MS,
+    )
       ? "working"
       : "waiting";
   }
@@ -419,21 +422,20 @@ export class SessionService {
     this.startedAt = startedAt;
     mkdirSync(initial.config.dataDir, { recursive: true });
     mkdirSync(initial.config.worktreeDir, { recursive: true });
-    this.registryPaths = upsertConfigRegistryPath(initial.config.dataDir, initial.config.configPath);
-    const merged = buildMergedConfig(
-      this.bootstrapConfigPath,
-      this.registryPaths,
-      {
-        skipInvalid: true,
-        warn: (message) => {
-          logSpurEvent(initial.config.dataDir, {
-            event: "daemon.registry.warning",
-            level: "warn",
-            message,
-          });
-        },
-      },
+    this.registryPaths = upsertConfigRegistryPath(
+      initial.config.dataDir,
+      initial.config.configPath,
     );
+    const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
+      skipInvalid: true,
+      warn: (message) => {
+        logSpurEvent(initial.config.dataDir, {
+          event: "daemon.registry.warning",
+          level: "warn",
+          message,
+        });
+      },
+    });
     this.config = initial.config;
     this.registryPaths = [];
     this.applyConfig(merged.config, merged.configPaths);
@@ -595,7 +597,9 @@ export class SessionService {
     const existing = readServiceInstance(this.config.dataDir, sessionId, serviceId);
     if (existing) {
       const existingRuntimeAlive = await tmuxSessionExists(existing.tmuxSession);
-      const existingPaneDead = existingRuntimeAlive ? await tmuxPaneDead(existing.tmuxSession) : true;
+      const existingPaneDead = existingRuntimeAlive
+        ? await tmuxPaneDead(existing.tmuxSession)
+        : true;
       if (existingRuntimeAlive && !existingPaneDead) {
         throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
       }
@@ -646,7 +650,7 @@ export class SessionService {
           tmuxSession,
         },
       });
-      return this.enrichService(record);
+      return await this.enrichService(record);
     } catch (error) {
       await killTmuxSession(tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -1488,7 +1492,10 @@ export class SessionService {
       let restoreLaunchCommand = launchPlan.launchCommand;
       let restoreReadyMarkers = launchPlan.readyMarkers;
       if (current.agent === "claude") {
-        const restoredAgentSessionId = await findAgentSessionId(current.agent, current.worktreePath);
+        const restoredAgentSessionId = await findAgentSessionId(
+          current.agent,
+          current.worktreePath,
+        );
         if (restoredAgentSessionId) {
           const resumePlan = buildAgentResumePlan(
             current.agent,

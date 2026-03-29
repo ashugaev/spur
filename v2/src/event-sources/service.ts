@@ -6,11 +6,7 @@ import {
   deleteServiceSourceState,
 } from "../metadata.js";
 import { captureTmuxPane, tmuxSessionExists } from "../runtime-tmux.js";
-import type {
-  ServiceProblemEventData,
-  ServiceSourceConfig,
-  ServiceSourceState,
-} from "../types.js";
+import type { ServiceProblemEventData, ServiceSourceConfig, ServiceSourceState } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 
 function normalizeLines(content: string): string[] {
@@ -45,7 +41,9 @@ function createInitialState(serviceId: string, ruleIds: string[]): ServiceSource
   };
 }
 
-async function startServiceSource(deps: SourceStartDeps<ServiceSourceConfig>): Promise<SourceHandle> {
+async function startServiceSource(
+  deps: SourceStartDeps<ServiceSourceConfig>,
+): Promise<SourceHandle> {
   const compiledRules = Object.fromEntries(
     Object.entries(deps.config.rules).map(([ruleId, rule]) => [
       ruleId,
@@ -64,7 +62,8 @@ async function startServiceSource(deps: SourceStartDeps<ServiceSourceConfig>): P
     polling = true;
     try {
       const services = listServiceInstances(deps.dataDir).filter(
-        (service) => service.project === deps.projectId && service.serviceId === deps.config.service,
+        (service) =>
+          service.project === deps.projectId && service.serviceId === deps.config.service,
       );
 
       for (const service of services) {

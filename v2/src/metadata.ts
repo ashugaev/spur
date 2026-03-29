@@ -345,7 +345,11 @@ export function listActiveServiceProblems(
   return [...activeRules].sort();
 }
 
-export function deleteServiceSourceStatesForSession(dataDir: string, projectId: string, sessionId: string): void {
+export function deleteServiceSourceStatesForSession(
+  dataDir: string,
+  projectId: string,
+  sessionId: string,
+): void {
   const dir = join(dataDir, "source-state", "service", projectId);
   if (!existsSync(dir)) return;
 

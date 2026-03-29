@@ -1,10 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
@@ -60,16 +54,15 @@ function materializeProjectDefaults(config: AppConfig): AppConfig {
 }
 
 function assertCompatibleConfig(base: AppConfig, candidate: AppConfig): void {
-  if (
-    base.server.host !== candidate.server.host ||
-    base.server.port !== candidate.server.port
-  ) {
+  if (base.server.host !== candidate.server.host || base.server.port !== candidate.server.port) {
     throw new Error(
       `Config ${candidate.configPath} uses ${candidate.server.host}:${candidate.server.port}, expected ${base.server.host}:${base.server.port}`,
     );
   }
   if (base.dataDir !== candidate.dataDir) {
-    throw new Error(`Config ${candidate.configPath} uses dataDir ${candidate.dataDir}, expected ${base.dataDir}`);
+    throw new Error(
+      `Config ${candidate.configPath} uses dataDir ${candidate.dataDir}, expected ${base.dataDir}`,
+    );
   }
   if (base.worktreeDir !== candidate.worktreeDir) {
     throw new Error(
@@ -117,7 +110,9 @@ export function readConfigRegistry(dataDir: string): string[] {
 
   const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<ConfigRegistryFile>;
   return Array.isArray(parsed.configPaths)
-    ? normalizeConfigPaths(parsed.configPaths.filter((value): value is string => typeof value === "string"))
+    ? normalizeConfigPaths(
+        parsed.configPaths.filter((value): value is string => typeof value === "string"),
+      )
     : [];
 }
 

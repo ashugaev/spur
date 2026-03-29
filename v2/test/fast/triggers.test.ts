@@ -241,7 +241,9 @@ describe("startConfiguredTriggers", () => {
       });
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
-        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
+        expect.stringContaining(
+          "Review the latest GitHub updates on the active PR and act on them.",
+        ),
         { interrupt: false },
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
@@ -267,7 +269,8 @@ describe("startConfiguredTriggers", () => {
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
       config: config({
-        prompt: "Run $manager and $github. Address the latest requested review changes on the active PR.",
+        prompt:
+          "Run $manager and $github. Address the latest requested review changes on the active PR.",
       }) as never,
       bus,
       sessionService: {
@@ -289,7 +292,9 @@ describe("startConfiguredTriggers", () => {
       expect(delivered).toContain(
         "Run $manager and $github. Address the latest requested review changes on the active PR.",
       );
-      expect(delivered).not.toContain("Review the latest GitHub updates on the active PR and act on them.");
+      expect(delivered).not.toContain(
+        "Review the latest GitHub updates on the active PR and act on them.",
+      );
     } finally {
       await controller.stop();
     }
@@ -374,7 +379,9 @@ describe("startConfiguredTriggers", () => {
       );
       expect(deliverMock).toHaveBeenLastCalledWith(
         "api-1",
-        expect.stringContaining("Inspect the failing checks, fix them, and rerun the relevant validation."),
+        expect.stringContaining(
+          "Inspect the failing checks, fix them, and rerun the relevant validation.",
+        ),
         { interrupt: true },
       );
 
@@ -444,7 +451,9 @@ describe("startConfiguredTriggers", () => {
       );
       expect(deliverMock).toHaveBeenCalledWith(
         "api-1",
-        expect.stringContaining("Review the latest GitHub updates on the active PR and act on them."),
+        expect.stringContaining(
+          "Review the latest GitHub updates on the active PR and act on them.",
+        ),
         { interrupt: false },
       );
     } finally {

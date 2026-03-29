@@ -214,7 +214,9 @@ async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
   return files;
 }
 
-async function readSessionMeta(filePath: string): Promise<{ cwd: string; threadId: string | null } | null> {
+async function readSessionMeta(
+  filePath: string,
+): Promise<{ cwd: string; threadId: string | null } | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
     const reader = createInterface({ input, crlfDelay: Infinity });
@@ -247,9 +249,15 @@ async function readSessionMeta(filePath: string): Promise<{ cwd: string; threadI
   return null;
 }
 
-async function loadSessionIndexForRoot(sessionRootDir: string): Promise<Map<string, IndexedSessionFile>> {
+async function loadSessionIndexForRoot(
+  sessionRootDir: string,
+): Promise<Map<string, IndexedSessionFile>> {
   const now = Date.now();
-  if (sessionRootDir === CODEX_SESSIONS_DIR && sessionIndexCache && sessionIndexCache.expiresAt > now) {
+  if (
+    sessionRootDir === CODEX_SESSIONS_DIR &&
+    sessionIndexCache &&
+    sessionIndexCache.expiresAt > now
+  ) {
     return sessionIndexCache.byCwd;
   }
 
@@ -418,7 +426,10 @@ function semanticState(line: CodexSessionLine): SessionState | null {
   return ACTIVE_EVENT_TYPES.has(payloadType) ? "working" : null;
 }
 
-async function readSemanticState(filePath: string, fileSize?: number): Promise<SessionState | null> {
+async function readSemanticState(
+  filePath: string,
+  fileSize?: number,
+): Promise<SessionState | null> {
   const lines = await readSessionTail(filePath, fileSize);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index];

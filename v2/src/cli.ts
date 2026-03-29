@@ -77,14 +77,10 @@ function tmuxOutput(args: string[]): string {
 }
 
 function captureTmuxTarget(sessionName: string, lines = 200): string {
-  return execFileSync(
-    "tmux",
-    ["capture-pane", "-t", `=${sessionName}:`, "-p", "-S", `-${lines}`],
-    {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  ).trimEnd();
+  return execFileSync("tmux", ["capture-pane", "-t", `=${sessionName}:`, "-p", "-S", `-${lines}`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trimEnd();
 }
 
 function tryCaptureTmuxTarget(sessionName: string, lines = 200): string | null {
@@ -350,7 +346,9 @@ function buildStateChangeLine(previous: SessionView, next: SessionView): string 
     changes.push(`state ${previous.state} -> ${next.state}`);
   }
   if (previous.runtimeAlive !== next.runtimeAlive) {
-    changes.push(`tmux ${previous.runtimeAlive ? "live" : "dead"} -> ${next.runtimeAlive ? "live" : "dead"}`);
+    changes.push(
+      `tmux ${previous.runtimeAlive ? "live" : "dead"} -> ${next.runtimeAlive ? "live" : "dead"}`,
+    );
   }
   if (previous.workspaceExists !== next.workspaceExists) {
     changes.push(
@@ -560,12 +558,10 @@ async function runInteractiveSessionList(
   let busy = false;
   let refreshing = false;
   let pendingKillConfirmationSessionId: string | null = null;
-  let attachedPane:
-    | {
-        tmuxSession: string;
-        title: string;
-      }
-    | null = null;
+  let attachedPane: {
+    tmuxSession: string;
+    title: string;
+  } | null = null;
   let logView: SessionLogViewState | null = null;
   let attachedPaneContent = "";
   let terminalActive = false;
@@ -629,14 +625,15 @@ async function runInteractiveSessionList(
         logView = {
           ...logView,
           session: nextSession,
-          eventLines: readSessionEventLog(info.dataDir, logView.session.id, SESSION_LOG_EVENT_LIMIT).map(
-            formatEventLine,
-          ),
-          agentPane:
-            nextSession.runtimeAlive
-              ? tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-                dimText("(agent output unavailable)")
-              : "",
+          eventLines: readSessionEventLog(
+            info.dataDir,
+            logView.session.id,
+            SESSION_LOG_EVENT_LIMIT,
+          ).map(formatEventLine),
+          agentPane: nextSession.runtimeAlive
+            ? (tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
+              dimText("(agent output unavailable)"))
+            : "",
         };
         return;
       }
@@ -690,11 +687,10 @@ async function runInteractiveSessionList(
         formatEventLine,
       ),
       localLines: [],
-      agentPane:
-        session.runtimeAlive
-          ? tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-            dimText("(agent output unavailable)")
-          : "",
+      agentPane: session.runtimeAlive
+        ? (tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
+          dimText("(agent output unavailable)"))
+        : "",
     };
     attachedPane = null;
     pendingKillConfirmationSessionId = null;
@@ -1156,7 +1152,9 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-  const service = program.command("service").description("Run and inspect session-bound sidecar services.");
+  const service = program
+    .command("service")
+    .description("Run and inspect session-bound sidecar services.");
 
   service
     .command("run")

@@ -15,14 +15,12 @@ describe("session state detection", () => {
   });
 
   it("detects approval prompts as needs_input", () => {
-    expect(
-      isWaitingInput(["Need approval required before continuing", "(Y)es / (N)o"]),
-    ).toBe(true);
+    expect(isWaitingInput(["Need approval required before continuing", "(Y)es / (N)o"])).toBe(true);
   });
 
   it("does not mark normal output as needs_input", () => {
-    expect(
-      isWaitingInput(["OpenAI Codex", "Working on the task", "No questions for you"]),
-    ).toBe(false);
+    expect(isWaitingInput(["OpenAI Codex", "Working on the task", "No questions for you"])).toBe(
+      false,
+    );
   });
 });
