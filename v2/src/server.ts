@@ -8,6 +8,7 @@ import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   KillSessionRequest,
+  RunServiceRequest,
   SendMessageRequest,
   SpawnSessionRequest,
   SyncProjectsRequest,
@@ -244,6 +245,35 @@ export async function startServer(
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
         sendJson(response, 200, await service.updateSlots(slotsSessionId, body));
+        return;
+      }
+
+      const listServicesSessionId = path.match(/^\/sessions\/([^/]+)\/services$/)?.[1];
+      if (method === "GET" && listServicesSessionId) {
+        sendJson(response, 200, await service.listServices(listServicesSessionId));
+        return;
+      }
+
+      const serviceMatch = path.match(/^\/sessions\/([^/]+)\/services\/([^/]+)$/);
+      if (method === "GET" && serviceMatch) {
+        const sessionId = serviceMatch[1];
+        const serviceId = serviceMatch[2];
+        if (!sessionId || !serviceId) {
+          throw new Error("service route is invalid");
+        }
+        sendJson(response, 200, await service.getService(sessionId, serviceId));
+        return;
+      }
+
+      const runServiceMatch = path.match(/^\/sessions\/([^/]+)\/services\/([^/]+)\/run$/);
+      if (method === "POST" && runServiceMatch) {
+        const sessionId = runServiceMatch[1];
+        const serviceId = runServiceMatch[2];
+        if (!sessionId || !serviceId) {
+          throw new Error("service run route is invalid");
+        }
+        const body = await readJsonBody<RunServiceRequest>(request);
+        sendJson(response, 200, await service.runService(sessionId, serviceId, body));
         return;
       }
 

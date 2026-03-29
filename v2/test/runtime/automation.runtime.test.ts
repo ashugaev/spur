@@ -8,7 +8,7 @@ import { githubSourceModule } from "../../src/event-sources/github.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
 import type { SessionView } from "../../src/types.js";
-import { findFreePort, pollUntil, sleep } from "../helpers/common.js";
+import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
   createRuntimeTestContext,
@@ -64,6 +64,42 @@ ${extraProjectYaml}
 `;
 }
 
+function runtimeEnv(context: RuntimeTestContext) {
+  return {
+    HOME: context.env.HOME,
+    PATH: context.env.PATH,
+    SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
+    SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+    SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+  };
+}
+
+async function syncAutomationTmuxEnvironment(context: RuntimeTestContext): Promise<void> {
+  await syncTmuxEnvironment(runtimeEnv(context));
+}
+
+async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise<T>): Promise<T> {
+  const originalEnv = {
+    HOME: process.env.HOME,
+    PATH: process.env.PATH,
+    SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
+    SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
+    SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
+  };
+  Object.assign(process.env, runtimeEnv(context));
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        Reflect.deleteProperty(process.env, key);
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
 describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
@@ -85,13 +121,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-cron-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "cron.yaml",
       automationConfig(
@@ -183,13 +213,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-cron-shared-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "cron-shared.yaml",
       automationConfig(
@@ -242,13 +266,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github.yaml",
       automationConfig(
@@ -281,19 +299,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -386,13 +392,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         abortController.abort();
         handle.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
   });
 
   it("delivers github:ci_failed to a live session through the trigger pipeline", async () => {
@@ -400,13 +400,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-gh-ci-${port}`;
     activeContexts.push({ context, sessionPrefix });
-    await syncTmuxEnvironment({
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    });
+    await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
       "github-ci.yaml",
       automationConfig(
@@ -440,19 +434,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    const originalEnv = {
-      HOME: process.env.HOME,
-      PATH: process.env.PATH,
-      SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
-      SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
-      SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
-    };
-    process.env.HOME = context.env.HOME;
-    process.env.PATH = context.env.PATH;
-    process.env.SPUR_CLAUDE_BIN = context.env.SPUR_CLAUDE_BIN;
-    process.env.SPUR_FAKE_AGENT_LOG_DIR = context.agentLogDir;
-    process.env.SPUR_FAKE_GH_STATE_FILE = context.ghStateFile;
-    try {
+    await withRuntimeEnv(context, async () => {
       const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
       const session = await service.spawn({
         project: "api",
@@ -553,12 +535,396 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         handle.stop();
         await controller.stop();
       }
-    } finally {
-      process.env.HOME = originalEnv.HOME;
-      process.env.PATH = originalEnv.PATH;
-      process.env.SPUR_CLAUDE_BIN = originalEnv.SPUR_CLAUDE_BIN;
-      process.env.SPUR_FAKE_AGENT_LOG_DIR = originalEnv.SPUR_FAKE_AGENT_LOG_DIR;
-      process.env.SPUR_FAKE_GH_STATE_FILE = originalEnv.SPUR_FAKE_GH_STATE_FILE;
-    }
+    });
+  });
+
+  it("emits GitHub merge conflict events only when the conflict appears and reappears after clear", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "github-conflict.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 1000
+        runOnStart: false
+    triggers: {}
+`,
+      ),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-conflict": {
+          number: 42,
+          title: "Resolve mergeability state",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        },
+      },
+    });
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-conflict",
+        prompt: "initial github merge-conflict runtime prompt",
+      });
+
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial github merge-conflict runtime prompt"),
+      });
+
+      const events: Array<{ name: string; data?: unknown }> = [];
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: {
+          type: "github",
+          intervalMs: 1000,
+          runOnStart: false,
+        },
+        emit(name, data) {
+          events.push({ name, data });
+        },
+        signal: abortController.signal,
+        logger: {
+          warn: () => {},
+        },
+      });
+
+      try {
+        const snapshotPath = join(
+          context.dataDir,
+          "source-state",
+          "github",
+          "api",
+          "pr-watch",
+          `${session.id}.json`,
+        );
+        await pollUntil(async () => existsSync(snapshotPath), {
+          timeoutMs: 15_000,
+          accept: Boolean,
+        });
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const firstEvent = await pollUntil(async () => events[0], {
+          timeoutMs: 20_000,
+          accept: (value) =>
+            value?.name === "github:merge_conflict" &&
+            Array.isArray((value.data as { signals?: unknown[] } | undefined)?.signals),
+        });
+        expect(firstEvent?.data).toMatchObject({
+          sessionId: session.id,
+          prNumber: 42,
+          signals: [
+            expect.objectContaining({
+              text: "Merge conflicts are blocking this PR.",
+            }),
+          ],
+        });
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "MERGEABLE",
+              mergeStateStatus: "CLEAN",
+            },
+          },
+        });
+        await sleep(1_500);
+        expect(events).toHaveLength(1);
+
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-conflict": {
+              number: 42,
+              title: "Resolve mergeability state",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const secondEvent = await pollUntil(async () => events[1], {
+          timeoutMs: 20_000,
+          accept: (value) => value?.name === "github:merge_conflict",
+        });
+        expect(secondEvent?.data).toMatchObject({
+          sessionId: session.id,
+          prNumber: 42,
+          signals: [
+            expect.objectContaining({
+              text: "Merge conflicts are blocking this PR.",
+            }),
+          ],
+        });
+      } finally {
+        abortController.abort();
+        handle.stop();
+      }
+    });
+  });
+
+  it("delivers github:merge_conflict to a live session through the trigger pipeline", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-merge-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "github-merge-conflict.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 1000
+        runOnStart: false
+    triggers:
+      pr-watch-merge-conflict:
+        source: pr-watch
+        event: github:merge_conflict
+        send:
+          interrupt: true
+`,
+      ),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-merge-conflict": {
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        },
+      },
+    });
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-merge-conflict",
+        prompt: "initial github merge conflict runtime prompt",
+      });
+
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial github merge conflict runtime prompt"),
+      });
+
+      const config = loadConfig(configPath);
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config,
+        bus,
+        sessionService: service,
+        logger: {
+          warn: () => {},
+        },
+      });
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: config.projects["api"]?.sources["pr-watch"] as never,
+        emit(name, data) {
+          bus.emit({
+            name,
+            projectId: "api",
+            sourceId: "pr-watch",
+            data,
+          });
+        },
+        signal: abortController.signal,
+        logger: {
+          warn: () => {},
+        },
+      });
+
+      try {
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-merge-conflict": {
+              number: 42,
+              title: "Keep branch mergeable",
+              url: "https://github.com/acme/api/pull/42",
+              repo: "acme/api",
+              reviewDecision: null,
+              mergeable: "CONFLICTING",
+              mergeStateStatus: "DIRTY",
+            },
+          },
+        });
+
+        const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+          timeoutMs: 20_000,
+          accept: (value) => value.includes("Merge conflicts are blocking this PR."),
+        });
+        const normalizedPane = pane.replaceAll(/\s+/g, " ");
+
+        expect(pane).toContain('GitHub updates on PR #42 "Keep branch mergeable":');
+        expect(pane).toContain("Merge conflicts are blocking this PR.");
+        expect(normalizedPane).toContain(
+          "Resolve the active PR merge conflicts, rerun the relevant validation, and push.",
+        );
+
+        const conflictEvents = await pollUntil(
+          async () => readEventLog(context.dataDir).map((entry) => entry.event),
+          {
+            timeoutMs: 20_000,
+            accept: (value) =>
+              value.includes("trigger.send.queued") &&
+              value.includes("trigger.send.delivered") &&
+              value.includes("session.message.sent"),
+          },
+        );
+        expect(conflictEvents).toEqual(
+          expect.arrayContaining([
+            "trigger.send.queued",
+            "trigger.send.delivered",
+            "session.message.sent",
+          ]),
+        );
+      } finally {
+        abortController.abort();
+        handle.stop();
+        await controller.stop();
+      }
+    });
+  });
+
+  it("delivers service problem alerts back into the bound session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-alert-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "service-alert.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        tailLines: 50
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers:
+      web-problem:
+        source: web-watch
+        event: service:crash
+        send: {}
+`,
+      ),
+    );
+
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const session = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "watch the dev service",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", session.id, "spur");
+
+    await execFileAsync(
+      helperPath,
+      [
+        "service",
+        "run",
+        "web",
+        "--port",
+        "3000",
+        "--json",
+        "--",
+        "sh",
+        "-lc",
+        `'printf "SERVICE_BOOT\\nSERVICE_ERROR\\n"; sleep 30'`,
+      ],
+      {
+        cwd: session.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: session.id,
+        },
+      },
+    );
+
+    await pollUntil(async () => context.readAgentLog(session.id), {
+      timeoutMs: 45_000,
+      accept: (value) =>
+        value.includes('The bound service "web" has a problem.') &&
+        value.includes(`select ${session.id} and press l`),
+    });
+
+    const events = await pollUntil(
+      async () => readEventLog(context.dataDir).map((entry) => entry.event),
+      {
+        timeoutMs: 20_000,
+        accept: (value) =>
+          value.includes("source.started") &&
+          value.includes("source.event.emitted") &&
+          value.includes("trigger.send.queued"),
+      },
+    );
+    expect(events).toEqual(
+      expect.arrayContaining(["source.started", "source.event.emitted", "trigger.send.queued"]),
+    );
   });
 });

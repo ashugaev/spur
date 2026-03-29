@@ -18,6 +18,7 @@ describe("spur help", () => {
     expect(help).toContain("pause [options] <sessionId>");
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
+    expect(help).toContain("service");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
     expect(help).not.toContain("daemon");
@@ -48,7 +49,7 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain(
-      "TTY keys: ↑↓ move, Enter attach, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
     );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
@@ -78,5 +79,38 @@ describe("spur help", () => {
     );
     expect(help).toContain("`--branch` bypasses any configured preflight branch suggestion.");
     expect(help).toContain("`--shared` cannot be combined with `--worktree` or `--branch`.");
+  });
+
+  it("documents the session-bound service helper flow", () => {
+    const program = buildProgram();
+    const service = program.commands.find((command) => command.name() === "service");
+
+    expect(service).toBeDefined();
+    if (!service) {
+      throw new Error("Expected service command to be registered");
+    }
+
+    const help = service.helpInformation();
+
+    expect(help).toContain("Run and inspect session-bound sidecar services.");
+    expect(help).toContain("run");
+    expect(help).toContain("status");
+    expect(help).not.toContain("logs");
+    expect(help).not.toContain("attach");
+  });
+
+  it("documents the optional service port flag", () => {
+    const program = buildProgram();
+    const service = program.commands.find((command) => command.name() === "service");
+    const run = service?.commands.find((command) => command.name() === "run");
+
+    expect(run).toBeDefined();
+    if (!run) {
+      throw new Error("Expected service run command to be registered");
+    }
+
+    const help = run.helpInformation();
+
+    expect(help).toContain("--port <number>");
   });
 });

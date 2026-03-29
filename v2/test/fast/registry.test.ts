@@ -6,11 +6,7 @@ import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 
-async function writeConfig(
-  rootDir: string,
-  name: string,
-  body: string,
-): Promise<string> {
+async function writeConfig(rootDir: string, name: string, body: string): Promise<string> {
   const path = join(rootDir, name);
   await writeFile(path, body, "utf8");
   return path;
@@ -158,6 +154,8 @@ describe("registry.buildMergedConfig", () => {
     });
 
     expect(Object.keys(merged.config.projects)).toEqual(["api"]);
-    expect(warnings).toEqual([expect.stringContaining(`Skipping registered config ${duplicatePath}`)]);
+    expect(warnings).toEqual([
+      expect.stringContaining(`Skipping registered config ${duplicatePath}`),
+    ]);
   });
 });

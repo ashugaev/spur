@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -14,18 +14,32 @@ import {
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
-import { listSessions, readSession, writeSession } from "./metadata.js";
+import {
+  deleteServiceInstance,
+  deleteServiceInstancesForSession,
+  deleteServiceSourceStatesForService,
+  deleteServiceSourceStatesForSession,
+  listActiveServiceProblems,
+  listServiceInstancesForSession,
+  listSessions,
+  readServiceInstance,
+  readSession,
+  writeServiceInstance,
+  writeSession,
+} from "./metadata.js";
 import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
   captureTmuxPane,
+  createTmuxCommandSession,
   createTmuxSession,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
   killTmuxSession,
   sendMessageToTmux,
   syncTmuxStatus,
+  tmuxPaneDead,
   tmuxSessionExists,
   waitForTmuxReady,
 } from "./runtime-tmux.js";
@@ -44,7 +58,10 @@ import {
   type BranchSource,
   type KillSessionRequest,
   type ProjectConfig,
+  type RunServiceRequest,
   type RuntimeInfo,
+  type ServiceInstanceRecord,
+  type ServiceInstanceView,
   type SendMessageRequest,
   type SessionRecord,
   type SessionStatus,
@@ -185,17 +202,8 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function resolveRunningSessionState(args: {
-  agentState: AgentStateProbe | null;
-  updatedAt: Date;
-  activityAt: Date | null;
-}): SessionState {
-  if (!args.agentState) {
-    return isFresh(latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt, DELIVERY_GRACE_MS)
-      ? "working"
-      : "waiting";
-  }
-  return args.agentState.state === "working" ? "working" : args.agentState.state === "waiting" ? "waiting" : args.agentState.state;
+function resolveWaitingStateFromPane(pane: string): SessionState {
+  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
 }
 
 function resolveHookAgentState(
@@ -216,6 +224,26 @@ function resolveHookAgentState(
     return null;
   }
   return { state: hookState.state, signalAt };
+}
+
+function resolveRunningSessionState(args: {
+  agentState: AgentStateProbe | null;
+  updatedAt: Date;
+  activityAt: Date | null;
+}): SessionState {
+  if (!args.agentState) {
+    return isFresh(
+      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
+      DELIVERY_GRACE_MS,
+    )
+      ? "working"
+      : "waiting";
+  }
+  return args.agentState.state === "working"
+    ? "working"
+    : args.agentState.state === "waiting"
+      ? "waiting"
+      : args.agentState.state;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -373,6 +401,12 @@ async function resolveSpawnBranch(args: {
   return { branch: currentBranch, branchSource: "shared_workspace" };
 }
 
+function projectHasService(project: ProjectConfig, serviceId: string): boolean {
+  return Object.values(project.sources).some(
+    (source) => source.type === "service" && source.service === serviceId,
+  );
+}
+
 export class SessionService {
   readonly bootstrapConfigPath: string;
   readonly startedAt: string;
@@ -388,21 +422,20 @@ export class SessionService {
     this.startedAt = startedAt;
     mkdirSync(initial.config.dataDir, { recursive: true });
     mkdirSync(initial.config.worktreeDir, { recursive: true });
-    this.registryPaths = upsertConfigRegistryPath(initial.config.dataDir, initial.config.configPath);
-    const merged = buildMergedConfig(
-      this.bootstrapConfigPath,
-      this.registryPaths,
-      {
-        skipInvalid: true,
-        warn: (message) => {
-          logSpurEvent(initial.config.dataDir, {
-            event: "daemon.registry.warning",
-            level: "warn",
-            message,
-          });
-        },
-      },
+    this.registryPaths = upsertConfigRegistryPath(
+      initial.config.dataDir,
+      initial.config.configPath,
     );
+    const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
+      skipInvalid: true,
+      warn: (message) => {
+        logSpurEvent(initial.config.dataDir, {
+          event: "daemon.registry.warning",
+          level: "warn",
+          message,
+        });
+      },
+    });
     this.config = initial.config;
     this.registryPaths = [];
     this.applyConfig(merged.config, merged.configPaths);
@@ -491,6 +524,163 @@ export class SessionService {
     return this.enrich(session);
   }
 
+  async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    const services = listServiceInstancesForSession(this.config.dataDir, sessionId);
+    const views: ServiceInstanceView[] = [];
+    for (const service of services) {
+      views.push(await this.enrichService(service));
+    }
+    return views;
+  }
+
+  async getService(sessionId: string, serviceId: string): Promise<ServiceInstanceView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    const service = readServiceInstance(this.config.dataDir, sessionId, serviceId);
+    if (!service) {
+      throw new Error(`Service not found: ${sessionId}/${serviceId}`);
+    }
+    return this.enrichService(service);
+  }
+
+  async runService(
+    sessionId: string,
+    serviceId: string,
+    request: RunServiceRequest,
+  ): Promise<ServiceInstanceView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (session.status !== "running") {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
+      throw new Error(`Session workspace is not available: ${sessionId}`);
+    }
+    const project = this.getProject(session.project);
+    if (!projectHasService(project, serviceId)) {
+      throw new Error(`Unknown service for ${session.project}: ${serviceId}`);
+    }
+    if (typeof request.command !== "string" || !request.command.trim()) {
+      throw new Error("service command must be a non-empty string");
+    }
+    if (typeof request.cwd !== "string" || !request.cwd.trim()) {
+      throw new Error("service cwd must be a non-empty string");
+    }
+    if (
+      request.port !== undefined &&
+      (!Number.isInteger(request.port) || request.port <= 0 || request.port > 65_535)
+    ) {
+      throw new Error("service port must be an integer between 1 and 65535");
+    }
+    const serviceCwd = request.cwd.trim();
+    if (!existsSync(serviceCwd)) {
+      throw new Error(`Service cwd does not exist: ${serviceCwd}`);
+    }
+    const resolvedWorkspacePath = realpathSync(session.worktreePath);
+    const resolvedServiceCwd = realpathSync(serviceCwd);
+    if (
+      resolvedServiceCwd !== resolvedWorkspacePath &&
+      !resolvedServiceCwd.startsWith(`${resolvedWorkspacePath}/`)
+    ) {
+      throw new Error(`Service cwd must stay inside the session workspace: ${serviceCwd}`);
+    }
+
+    const existing = readServiceInstance(this.config.dataDir, sessionId, serviceId);
+    if (existing) {
+      const existingRuntimeAlive = await tmuxSessionExists(existing.tmuxSession);
+      const existingPaneDead = existingRuntimeAlive
+        ? await tmuxPaneDead(existing.tmuxSession)
+        : true;
+      if (existingRuntimeAlive && !existingPaneDead) {
+        throw new Error(`Service is already running: ${sessionId}/${serviceId}`);
+      }
+      await killTmuxSession(existing.tmuxSession);
+      deleteServiceInstance(this.config.dataDir, sessionId, serviceId);
+    }
+    deleteServiceSourceStatesForService(this.config.dataDir, session.project, sessionId, serviceId);
+
+    const tmuxSession = `${sessionId}--svc--${serviceId}`;
+    const createdAt = nowIso();
+    this.logEvent("service.run.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Starting service ${serviceId} for ${sessionId}`,
+      details: {
+        serviceId,
+        cwd: serviceCwd,
+      },
+    });
+
+    try {
+      await createTmuxCommandSession({
+        sessionName: tmuxSession,
+        cwd: resolvedServiceCwd,
+        launchCommand: request.command.trim(),
+      });
+      const record: ServiceInstanceRecord = {
+        sessionId,
+        project: session.project,
+        serviceId,
+        ...(request.port !== undefined ? { port: request.port } : {}),
+        command: request.command.trim(),
+        cwd: resolvedServiceCwd,
+        tmuxSession,
+        status: "running",
+        createdAt,
+        updatedAt: nowIso(),
+      };
+      writeServiceInstance(this.config.dataDir, record);
+      this.logEvent("service.run.completed", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Started service ${serviceId} for ${sessionId}`,
+        details: {
+          serviceId,
+          tmuxSession,
+        },
+      });
+      return await this.enrichService(record);
+    } catch (error) {
+      await killTmuxSession(tmuxSession);
+      const message = error instanceof Error ? error.message : String(error);
+      const record: ServiceInstanceRecord = {
+        sessionId,
+        project: session.project,
+        serviceId,
+        ...(request.port !== undefined ? { port: request.port } : {}),
+        command: request.command.trim(),
+        cwd: resolvedServiceCwd,
+        tmuxSession,
+        status: "errored",
+        createdAt,
+        updatedAt: nowIso(),
+        error: message,
+      };
+      writeServiceInstance(this.config.dataDir, record);
+      this.logEvent("service.run.failed", {
+        level: "error",
+        sessionId,
+        projectId: session.project,
+        message: `Failed to start service ${serviceId} for ${sessionId}: ${message}`,
+        details: {
+          serviceId,
+        },
+      });
+      return this.enrichService(record);
+    }
+  }
+
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
@@ -503,6 +693,8 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
+    let preflightOutcome: "branch" | "defer" | undefined;
+    let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
       ({ prompt, steps } = normalizeSpawnRequest({
@@ -536,8 +728,12 @@ export class SessionService {
           prompt,
         });
         if (preflight.branch) {
+          preflightOutcome = "branch";
+          preflightBranch = preflight.branch;
           effectiveBranch = preflight.branch;
           effectiveBranchSource = "preflight";
+        } else {
+          preflightOutcome = "defer";
         }
       }
       sessionId = await reserveNextSessionId(
@@ -545,6 +741,22 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      if (preflightOutcome) {
+        this.logEvent("session.preflight.completed", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message:
+            preflightOutcome === "branch"
+              ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
+              : `Spawn preflight deferred branch selection for ${sessionId}`,
+          details: {
+            outcome: preflightOutcome,
+            branch: preflightBranch ?? null,
+            baseBranch: defaultBranch,
+          },
+        });
+      }
       resolvedBranch = await resolveSpawnBranch({
         repoPath: project.path,
         requestBranch: effectiveBranch,
@@ -776,6 +988,16 @@ export class SessionService {
       }
 
       const message = error instanceof Error ? error.message : String(error);
+      if (stage === "preflight") {
+        this.logEvent("session.preflight.failed", {
+          level: "error",
+          projectId: request.project,
+          message: `Spawn preflight failed for ${request.project}: ${message}`,
+          details: {
+            requestedAgent: request.agent ?? null,
+          },
+        });
+      }
       this.logEvent("session.spawn.failed", {
         level: "error",
         projectId: request.project,
@@ -887,6 +1109,14 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+    for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
+      await killTmuxSession(service.tmuxSession);
+    }
+    deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
+    deleteServiceInstancesForSession(this.config.dataDir, session.id);
+  }
+
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
@@ -905,6 +1135,7 @@ export class SessionService {
 
     try {
       await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
         if (session.worktree && session.worktreePath) {
           const project = this.getProject(session.project);
@@ -967,6 +1198,7 @@ export class SessionService {
 
     try {
       await killTmuxSession(session.tmuxSession);
+      await this.cleanupSessionServices(session);
       if (session.worktree && session.worktreePath) {
         const project = this.getProject(session.project);
         await removeWorktree(project.path, session.worktreePath);
@@ -1260,7 +1492,10 @@ export class SessionService {
       let restoreLaunchCommand = launchPlan.launchCommand;
       let restoreReadyMarkers = launchPlan.readyMarkers;
       if (current.agent === "claude") {
-        const restoredAgentSessionId = await findAgentSessionId(current.agent, current.worktreePath);
+        const restoredAgentSessionId = await findAgentSessionId(
+          current.agent,
+          current.worktreePath,
+        );
         if (restoredAgentSessionId) {
           const resumePlan = buildAgentResumePlan(
             current.agent,
@@ -1600,6 +1835,39 @@ export class SessionService {
     });
   }
 
+  private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {
+    const runtimeAlive = await tmuxSessionExists(service.tmuxSession);
+    const paneDead = runtimeAlive ? await tmuxPaneDead(service.tmuxSession) : true;
+    const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(service.tmuxSession) : null;
+    const updatedAt = new Date(service.updatedAt);
+    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
+    const problemRuleIds = listActiveServiceProblems(
+      this.config.dataDir,
+      service.project,
+      service.sessionId,
+      service.serviceId,
+    );
+
+    let state: ServiceInstanceView["state"];
+    if (service.status === "errored") {
+      state = "error";
+    } else if (problemRuleIds.length > 0) {
+      state = "problem";
+    } else if (runtimeAlive && !paneDead) {
+      state = "running";
+    } else {
+      state = "stopped";
+    }
+
+    return {
+      ...service,
+      runtimeAlive,
+      state,
+      lastActivityAt,
+      problemRuleIds,
+    };
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
@@ -1633,6 +1901,8 @@ export class SessionService {
       state = agentState?.state === "error" ? "error" : "stopped";
     } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
       state = agentState.state;
+    } else if (session.agent === "codex" && agentState?.state === "waiting") {
+      state = resolveWaitingStateFromPane(await captureTmuxPane(session.tmuxSession, 80));
     } else {
       state = resolveRunningSessionState({
         agentState,
@@ -1641,12 +1911,18 @@ export class SessionService {
       });
     }
 
+    const services: ServiceInstanceView[] = [];
+    for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
+      services.push(await this.enrichService(service));
+    }
+
     return {
       ...session,
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,
       lastActivityAt,
+      services,
     };
   }
 }
