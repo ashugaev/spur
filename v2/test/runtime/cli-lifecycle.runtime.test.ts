@@ -505,6 +505,66 @@ projects:
     );
   });
 
+  it("keeps kill and complete working for existing sessions after the project id is renamed", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("rename.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const completeSession = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "complete me", "--json"]))
+        .stdout,
+    ) as SessionView;
+    const killSession = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "kill me", "--json"])).stdout,
+    ) as SessionView;
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", completeSession.id, "--json"]))
+        .stdout,
+    ) as SessionView;
+    const killed = JSON.parse(
+      (await context.execCli(["--config", configPath, "kill", killSession.id, "--json"])).stdout,
+    ) as SessionView;
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+
+    expect(completed.status).toBe("completed");
+    expect(completed.workspaceExists).toBe(false);
+    expect(killed.status).toBe("killed");
+    expect(killed.workspaceExists).toBe(false);
+    expect(listed).toEqual([]);
+  });
+
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
