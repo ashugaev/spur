@@ -77,6 +77,7 @@ import {
   hasUnpushedCommits,
   readCurrentBranch,
   removeWorktree,
+  resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
 
@@ -111,6 +112,10 @@ const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
+interface SessionCleanupContext {
+  repoPath: string;
+  symlinks: string[];
+}
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
@@ -124,6 +129,14 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function tryRealpath(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 function normalizeSpawnRequest(request: SpawnSessionRequest): {
@@ -503,6 +516,36 @@ export class SessionService {
       throw new Error(`Unknown project: ${projectId}`);
     }
     return project;
+  }
+
+  private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
+    const resolvedRepoPath = tryRealpath(repoPath);
+    return Object.values(this.config.projects).find(
+      (project) => tryRealpath(project.path) === resolvedRepoPath,
+    );
+  }
+
+  private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
+    const currentProject = this.config.projects[session.project];
+    if (currentProject) {
+      return {
+        repoPath: currentProject.path,
+        symlinks: currentProject.symlinks,
+      };
+    }
+    if (!session.worktree || !session.worktreePath) {
+      throw new Error(`Unknown project: ${session.project}`);
+    }
+    const repoPath = await resolveRepoPathFromWorktree(session.worktreePath);
+    if (!repoPath) {
+      throw new Error(
+        `Cannot resolve repository root for ${session.id} after project rename: ${session.worktreePath}`,
+      );
+    }
+    return {
+      repoPath,
+      symlinks: this.findProjectByRepoPath(repoPath)?.symlinks ?? [],
+    };
   }
 
   async list(): Promise<SessionView[]> {
@@ -1137,9 +1180,9 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
-        if (session.worktree && session.worktreePath) {
-          const project = this.getProject(session.project);
-          await removeWorktree(project.path, session.worktreePath);
+        if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+          const cleanup = await this.resolveCleanupContext(session);
+          await removeWorktree(cleanup.repoPath, session.worktreePath);
         }
         deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
@@ -1183,9 +1226,9 @@ export class SessionService {
     }
 
     if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-      const project = this.getProject(session.project);
+      const cleanup = await this.resolveCleanupContext(session);
       const reasons: string[] = [];
-      if (await hasUncommittedChanges(session.worktreePath, project.symlinks)) {
+      if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
         reasons.push("uncommitted changes in its worktree");
       }
       if (await hasUnpushedCommits(session.worktreePath)) {
@@ -1199,9 +1242,9 @@ export class SessionService {
     try {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
-      if (session.worktree && session.worktreePath) {
-        const project = this.getProject(session.project);
-        await removeWorktree(project.path, session.worktreePath);
+      if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
+        const cleanup = await this.resolveCleanupContext(session);
+        await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
       deleteAgentHookState(this.config.dataDir, sessionId);
       removeSessionSlotTool(this.config.dataDir, sessionId);

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -157,6 +157,20 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   }
 
   rmSync(worktreePath, { recursive: true, force: true });
+}
+
+export async function resolveRepoPathFromWorktree(worktreePath: string): Promise<string | undefined> {
+  try {
+    const gitCommonDir = await git(
+      worktreePath,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    );
+    return basename(gitCommonDir) === ".git" ? dirname(gitCommonDir) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function workspaceExists(worktreePath: string): boolean {

@@ -43,6 +43,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
+- `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
@@ -74,6 +75,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
+- `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path and refreshes `tmux` status hyperlinks without restarting the session.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
