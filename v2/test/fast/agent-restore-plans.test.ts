@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +9,6 @@ const originalHome = process.env.HOME;
 afterEach(async () => {
   vi.restoreAllMocks();
   process.env.HOME = originalHome;
-  delete process.env["SPUR_CODEX_BIN"];
   while (cleanupDirs.length > 0) {
     const current = cleanupDirs.pop();
     if (!current) {
@@ -19,12 +18,11 @@ afterEach(async () => {
   }
 });
 
-describe("agent restore plans", () => {
+describe("agent resume metadata", () => {
   it("keeps scanning Codex session headers when an early JSONL line is malformed", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-home-"));
     cleanupDirs.push(homeDir);
     process.env.HOME = homeDir;
-    process.env.SPUR_CODEX_BIN = "/tmp/fake-codex";
 
     const worktreePath = join(homeDir, "workspace");
     const sessionDir = join(homeDir, ".codex", "sessions", "2026", "03", "18");
@@ -40,20 +38,20 @@ describe("agent restore plans", () => {
     );
 
     vi.resetModules();
-    const { buildCodexRestorePlan } = await import("../../src/agents/codex.js");
+    const { buildCodexResumePlan, findCodexSessionId } = await import("../../src/agents/codex.js");
 
-    const plan = await buildCodexRestorePlan(worktreePath, "restore prompt");
+    const sessionId = await findCodexSessionId(worktreePath);
+    const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
-    expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toContain("'/tmp/fake-codex' resume");
-    expect(plan?.launchCommand).toContain("thread-123");
+    expect(sessionId).toBe("thread-123");
+    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume");
+    expect(plan.launchCommand).toContain("thread-123");
   });
 
   it("accepts the current Codex session_meta payload shape", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-home-"));
     cleanupDirs.push(homeDir);
     process.env.HOME = homeDir;
-    process.env.SPUR_CODEX_BIN = "/tmp/fake-codex";
 
     const worktreePath = join(homeDir, "workspace");
     const sessionDir = join(homeDir, ".codex", "sessions", "2026", "03", "19");
@@ -73,20 +71,20 @@ describe("agent restore plans", () => {
     );
 
     vi.resetModules();
-    const { buildCodexRestorePlan } = await import("../../src/agents/codex.js");
+    const { buildCodexResumePlan, findCodexSessionId } = await import("../../src/agents/codex.js");
 
-    const plan = await buildCodexRestorePlan(worktreePath, "restore prompt");
+    const sessionId = await findCodexSessionId(worktreePath);
+    const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
-    expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toContain("'/tmp/fake-codex' resume");
-    expect(plan?.launchCommand).toContain("session-123");
+    expect(sessionId).toBe("session-123");
+    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume");
+    expect(plan.launchCommand).toContain("session-123");
   });
 
   it("matches a canonical Codex cwd when the requested worktree path uses a symlinked prefix", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-home-"));
     cleanupDirs.push(homeDir);
     process.env.HOME = homeDir;
-    process.env.SPUR_CODEX_BIN = "/tmp/fake-codex";
 
     const worktreePath = join(homeDir, "workspace");
     await mkdir(worktreePath, { recursive: true });
@@ -108,11 +106,12 @@ describe("agent restore plans", () => {
     );
 
     vi.resetModules();
-    const { buildCodexRestorePlan } = await import("../../src/agents/codex.js");
+    const { buildCodexResumePlan, findCodexSessionId } = await import("../../src/agents/codex.js");
 
-    const plan = await buildCodexRestorePlan(worktreePath, "restore prompt");
+    const sessionId = await findCodexSessionId(worktreePath);
+    const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
-    expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toContain("session-456");
+    expect(sessionId).toBe("session-456");
+    expect(plan.launchCommand).toContain("session-456");
   });
 });

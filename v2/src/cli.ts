@@ -342,9 +342,6 @@ function buildStateChangeLine(previous: SessionView, next: SessionView): string 
   if (previous.status !== next.status) {
     changes.push(`status ${previous.status} -> ${next.status}`);
   }
-  if (previous.state !== next.state) {
-    changes.push(`state ${previous.state} -> ${next.state}`);
-  }
   if (previous.runtimeAlive !== next.runtimeAlive) {
     changes.push(
       `tmux ${previous.runtimeAlive ? "live" : "dead"} -> ${next.runtimeAlive ? "live" : "dead"}`,
@@ -368,7 +365,6 @@ function renderSessionLogView(args: SessionLogViewState): string {
   const session = args.session;
   const summary = [
     `status ${session.status}`,
-    `state ${session.state}`,
     session.runtimeAlive ? "tmux live" : "tmux dead",
     session.worktree
       ? session.workspaceExists
@@ -737,7 +733,7 @@ async function runInteractiveSessionList(
     if (!session) return;
     if (!session.runtimeAlive) {
       const message =
-        session.state === "killed"
+        session.status === "killed"
           ? `Session ${session.id} was killed and cannot be restored.`
           : `Session ${session.id} is not live.`;
       statusMessage = brandLine(message);

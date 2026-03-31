@@ -13,8 +13,6 @@ const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
   : fileURLToPath(new URL("./cli.js", import.meta.url));
 
 export const SLOT_TOOL_NAME = "spur-slots";
-export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
-const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
 
 interface NormalizedSlotsUpdate {
@@ -170,7 +168,6 @@ export function ensureSessionSlotTool(args: {
   configPath: string;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
-  const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
   mkdirSync(toolDir, { recursive: true });
   writeFileSync(
     join(toolDir, SPUR_WRAPPER_NAME),
@@ -185,95 +182,6 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} slots --session ${shellEscape(args.sessionId)} "$@"
-`,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  writeFileSync(
-    join(toolDir, AGENT_STATE_UPDATER_NAME),
-    `#!/usr/bin/env node
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
-
-function isRecord(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function readHookPayload() {
-  let input = "";
-  try {
-    input = readFileSync(0, "utf8");
-  } catch {
-    return null;
-  }
-  const trimmed = input.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed);
-    return isRecord(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function mapHookEventToState(eventName) {
-  if (!eventName) {
-    return null;
-  }
-  const normalized = String(eventName).toLowerCase();
-  if (normalized === "userpromptsubmit") {
-    return "working";
-  }
-  if (normalized === "sessionstart" || normalized === "stop") {
-    return "waiting";
-  }
-  return null;
-}
-
-const stateFilePath = process.argv[2];
-if (!stateFilePath) {
-  process.exit(0);
-}
-
-const hookPayload = readHookPayload();
-const eventName = isRecord(hookPayload) && typeof hookPayload.hook_event_name === "string"
-  ? hookPayload.hook_event_name
-  : isRecord(hookPayload) && typeof hookPayload.hookEventName === "string"
-    ? hookPayload.hookEventName
-    : null;
-const state = mapHookEventToState(eventName);
-if (!state) {
-  process.exit(0);
-}
-
-const now = new Date().toISOString();
-const turnId = isRecord(hookPayload) && typeof hookPayload.turn_id === "string"
-  ? hookPayload.turn_id
-  : isRecord(hookPayload) && typeof hookPayload.turnId === "string"
-    ? hookPayload.turnId
-    : undefined;
-const nextRecord = {
-  state,
-  updatedAt: now,
-  ...(eventName ? { hookEvent: eventName } : {}),
-  ...(turnId ? { turnId } : {}),
-};
-
-const tmpPath = \`\${stateFilePath}.tmp.\${process.pid}.\${Date.now()}\`;
-try {
-  writeFileSync(tmpPath, JSON.stringify(nextRecord, null, 2) + "\\n", "utf8");
-  renameSync(tmpPath, stateFilePath);
-} catch {
-  process.exit(0);
-}
-`,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  writeFileSync(
-    join(toolDir, AGENT_STATE_TOOL_NAME),
-    `#!/usr/bin/env bash
-set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UPDATER_NAME))} ${shellEscape(stateFilePath)}
 `,
     { encoding: "utf8", mode: 0o755 },
   );

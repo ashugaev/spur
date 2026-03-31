@@ -296,7 +296,9 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       const sessions = listSessions(deps.dataDir).filter(
         (session) =>
           session.project === deps.projectId &&
-          session.status === "running" &&
+          (session.status === "working" ||
+            session.status === "waiting" ||
+            session.status === "needs_input") &&
           Boolean(session.worktreePath) &&
           existsSync(session.worktreePath),
       );

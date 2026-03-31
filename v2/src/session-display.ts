@@ -1,20 +1,23 @@
-import type { SessionState, SessionView } from "./types.js";
+import type { SessionStatus, SessionView } from "./types.js";
 
-const SESSION_DISPLAY_ORDER: SessionState[] = [
+const SESSION_DISPLAY_ORDER: SessionStatus[] = [
   "needs_input",
   "error",
   "working",
   "waiting",
-  "stopped",
+  "paused",
+  "exited",
+  "spawning",
+  "completed",
   "killed",
 ];
 
 const SESSION_DISPLAY_RANK = new Map(
-  SESSION_DISPLAY_ORDER.map((state, index) => [state, index] satisfies [SessionState, number]),
+  SESSION_DISPLAY_ORDER.map((status, index) => [status, index] satisfies [SessionStatus, number]),
 );
 
 function displayRank(session: SessionView): number {
-  return SESSION_DISPLAY_RANK.get(session.state) ?? SESSION_DISPLAY_ORDER.length;
+  return SESSION_DISPLAY_RANK.get(session.status) ?? SESSION_DISPLAY_ORDER.length;
 }
 
 export function compareSessionsForList(left: SessionView, right: SessionView): number {

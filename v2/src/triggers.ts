@@ -121,11 +121,17 @@ function isSendTrigger(
 }
 
 function isDeliverableState(session: SessionView): boolean {
-  return session.state === "waiting";
+  return session.status === "waiting";
 }
 
 function isClosedState(session: SessionView): boolean {
-  return session.state === "stopped" || session.state === "error" || session.state === "killed";
+  return (
+    session.status === "paused" ||
+    session.status === "completed" ||
+    session.status === "killed" ||
+    session.status === "exited" ||
+    session.status === "error"
+  );
 }
 
 function createQueueKey(projectId: string, triggerId: string, sessionId: string): string {
@@ -312,11 +318,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         message: `Dropped queued trigger update for closed session ${batch.batch.sessionId}`,
         details: {
           reason: "closed_session",
-          sessionState: session.state,
+          sessionStatus: session.status,
         },
       });
       logger.warn(
-        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued updates for ${session.state} session ${batch.batch.sessionId}`,
+        `[trigger:${batch.projectId}/${batch.triggerId}] dropped queued updates for ${session.status} session ${batch.batch.sessionId}`,
       );
       return;
     }
@@ -432,11 +438,11 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         message: `Dropped queued trigger update for closed session ${sendBatch.sessionId}`,
         details: {
           reason: "closed_session",
-          sessionState: session.state,
+          sessionStatus: session.status,
         },
       });
       logger.warn(
-        `[trigger:${projectId}/${triggerId}] dropped queued update for ${session.state} session ${sendBatch.sessionId}`,
+        `[trigger:${projectId}/${triggerId}] dropped queued update for ${session.status} session ${sendBatch.sessionId}`,
       );
       return;
     }
@@ -451,8 +457,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    const isWorking = session.state === "working";
-    const needsInput = session.state === "needs_input";
+    const isWorking = session.status === "working";
+    const needsInput = session.status === "needs_input";
     if (!isWorking && !needsInput) return;
 
     if (needsInput || !trigger.send.interrupt) {

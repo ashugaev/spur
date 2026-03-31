@@ -31,7 +31,7 @@ afterEach(async () => {
   }
 });
 
-describe("agent state probes", () => {
+describe("agent status probes", () => {
   it("maps recent Claude progress entries to working", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-claude-probe-"));
     cleanupDirs.push(homeDir);
@@ -47,15 +47,15 @@ describe("agent state probes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
     vi.resetModules();
-    const { probeClaudeState } = await import("../../src/agents/claude.js");
+    const { observeClaudeStatus } = await import("../../src/agents/claude.js");
 
-    const result = await probeClaudeState(worktreePath, {
+    const result = await observeClaudeStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "working",
+      status: "working",
       signalAt,
     });
   });
@@ -73,20 +73,20 @@ describe("agent state probes", () => {
     );
 
     vi.resetModules();
-    const { probeClaudeState } = await import("../../src/agents/claude.js");
+    const { observeClaudeStatus } = await import("../../src/agents/claude.js");
 
-    const result = await probeClaudeState(worktreePath, {
+    const result = await observeClaudeStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "needs_input",
+      status: "needs_input",
       signalAt,
     });
   });
 
-  it("reads Claude state from the file tail even with large and malformed trailing content", async () => {
+  it("reads Claude status from the file tail even with large and malformed trailing content", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-claude-probe-"));
     cleanupDirs.push(homeDir);
     process.env.HOME = homeDir;
@@ -108,15 +108,15 @@ describe("agent state probes", () => {
     await utimes(sessionFile, signalAt, signalAt);
 
     vi.resetModules();
-    const { probeClaudeState } = await import("../../src/agents/claude.js");
+    const { observeClaudeStatus } = await import("../../src/agents/claude.js");
 
-    const result = await probeClaudeState(worktreePath, {
+    const result = await observeClaudeStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "needs_input",
+      status: "needs_input",
       signalAt,
     });
   });
@@ -134,15 +134,15 @@ describe("agent state probes", () => {
     );
 
     vi.resetModules();
-    const { probeClaudeState } = await import("../../src/agents/claude.js");
+    const { observeClaudeStatus } = await import("../../src/agents/claude.js");
 
-    const result = await probeClaudeState(worktreePath, {
+    const result = await observeClaudeStatus(worktreePath, {
       processAlive: false,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "error",
+      status: "error",
       signalAt,
     });
   });
@@ -162,15 +162,15 @@ describe("agent state probes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
     vi.resetModules();
-    const { probeCodexState } = await import("../../src/agents/codex.js");
+    const { observeCodexStatus } = await import("../../src/agents/codex.js");
 
-    const result = await probeCodexState(worktreePath, {
+    const result = await observeCodexStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "waiting",
+      status: "waiting",
       signalAt,
     });
   });
@@ -193,15 +193,15 @@ describe("agent state probes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
     vi.resetModules();
-    const { probeCodexState } = await import("../../src/agents/codex.js");
+    const { observeCodexStatus } = await import("../../src/agents/codex.js");
 
-    const result = await probeCodexState(worktreePath, {
+    const result = await observeCodexStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "waiting",
+      status: "waiting",
       signalAt,
     });
   });
@@ -224,15 +224,15 @@ describe("agent state probes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
     vi.resetModules();
-    const { probeCodexState } = await import("../../src/agents/codex.js");
+    const { observeCodexStatus } = await import("../../src/agents/codex.js");
 
-    const result = await probeCodexState(worktreePath, {
+    const result = await observeCodexStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "working",
+      status: "working",
       signalAt,
     });
   });
@@ -255,20 +255,20 @@ describe("agent state probes", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-24T10:05:00.000Z"));
     vi.resetModules();
-    const { probeCodexState } = await import("../../src/agents/codex.js");
+    const { observeCodexStatus } = await import("../../src/agents/codex.js");
 
-    const result = await probeCodexState(worktreePath, {
+    const result = await observeCodexStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "waiting",
+      status: "waiting",
       signalAt,
     });
   });
 
-  it("maps stopped Codex processes to stopped even with a matching session file", async () => {
+  it("maps stopped Codex processes to exited even with a matching session file", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-probe-"));
     cleanupDirs.push(homeDir);
     process.env.HOME = homeDir;
@@ -281,15 +281,15 @@ describe("agent state probes", () => {
     );
 
     vi.resetModules();
-    const { probeCodexState } = await import("../../src/agents/codex.js");
+    const { observeCodexStatus } = await import("../../src/agents/codex.js");
 
-    const result = await probeCodexState(worktreePath, {
+    const result = await observeCodexStatus(worktreePath, {
       processAlive: false,
       signalWindowMs: 90_000,
     });
 
     expect(result).toEqual({
-      state: "stopped",
+      status: "exited",
       signalAt,
     });
   });
@@ -314,17 +314,17 @@ describe("agent state probes", () => {
     );
 
     vi.resetModules();
-    const { findCodexSessionId, probeCodexState } = await import("../../src/agents/codex.js");
+    const { findCodexSessionId, observeCodexStatus } = await import("../../src/agents/codex.js");
 
     const sessionId = await findCodexSessionId(worktreePath);
-    const state = await probeCodexState(worktreePath, {
+    const status = await observeCodexStatus(worktreePath, {
       processAlive: true,
       signalWindowMs: 90_000,
     });
 
     expect(sessionId).toBe("thread-new");
-    expect(state).toEqual({
-      state: "working",
+    expect(status).toEqual({
+      status: "working",
       signalAt: newerSignalAt,
     });
   });

@@ -3,15 +3,11 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAgentLaunchPlan,
-  buildAgentRestorePlan,
   buildAgentResumePlan,
   findAgentSessionId,
+  observeAgentStatus,
   parseAgentName,
-  probeAgentState,
-  setupAgentHooks,
-  type AgentStateProbe,
 } from "./agents/index.js";
-import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
@@ -44,7 +40,6 @@ import {
   waitForTmuxReady,
 } from "./runtime-tmux.js";
 import {
-  AGENT_STATE_TOOL_NAME,
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
@@ -65,7 +60,6 @@ import {
   type SendMessageRequest,
   type SessionRecord,
   type SessionStatus,
-  type SessionState,
   type SessionView,
   type SpawnOverrides,
   type SpawnSessionRequest,
@@ -81,7 +75,6 @@ import {
   workspaceExists,
 } from "./workspace.js";
 
-const DELIVERY_GRACE_MS = 30_000;
 const WORKING_SIGNAL_WINDOW_MS = 90_000;
 const WAITING_INPUT_TAIL_LINES = 12;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
@@ -104,15 +97,10 @@ const PERMISSION_PROMPTS = [
 const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
 const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
 const INTERVIEW_OPTION_RE = /^\d+\.\s/;
-const RESTORE_PLAN_WAIT_MS = 5_000;
-const RESTORE_PLAN_POLL_MS = 250;
-const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
-const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
-const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
-interface SessionCleanupContext {
+interface SessionProjectContext {
   repoPath: string;
   symlinks: string[];
 }
@@ -122,7 +110,30 @@ function isTerminalSessionStatus(status: SessionStatus): status is "completed" |
 }
 
 function isRestorableStatus(status: SessionStatus): boolean {
-  return status === "running" || status === "paused";
+  return status === "paused" || status === "exited";
+}
+
+function isLiveSessionStatus(status: SessionStatus): boolean {
+  return status === "working" || status === "waiting" || status === "needs_input";
+}
+
+function isStickySessionStatus(status: SessionStatus): boolean {
+  return status === "paused" || status === "completed" || status === "killed" || status === "error";
+}
+
+function isSendableStatus(status: SessionStatus): boolean {
+  return isLiveSessionStatus(status) || isRestorableStatus(status);
+}
+
+function canRunPipeline(
+  session: Pick<SessionRecord, "status" | "pipeline"> | null | undefined,
+): session is Pick<SessionRecord, "status" | "pipeline"> & {
+  pipeline: NonNullable<SessionRecord["pipeline"]>;
+} {
+  if (!session?.pipeline) {
+    return false;
+  }
+  return isLiveSessionStatus(session.status) && !session.pipeline.error;
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -215,50 +226,6 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function resolveWaitingStateFromPane(pane: string): SessionState {
-  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
-}
-
-function resolveHookAgentState(
-  hookState: { state: "working" | "waiting"; updatedAt: string } | null | undefined,
-  processAlive: boolean,
-): AgentStateProbe | null {
-  if (!hookState) {
-    return null;
-  }
-  const signalAt = new Date(hookState.updatedAt);
-  if (Number.isNaN(signalAt.getTime())) {
-    return null;
-  }
-  if (!processAlive) {
-    return { state: "stopped", signalAt };
-  }
-  if (hookState.state === "working" && !isFresh(signalAt, WORKING_SIGNAL_WINDOW_MS)) {
-    return null;
-  }
-  return { state: hookState.state, signalAt };
-}
-
-function resolveRunningSessionState(args: {
-  agentState: AgentStateProbe | null;
-  updatedAt: Date;
-  activityAt: Date | null;
-}): SessionState {
-  if (!args.agentState) {
-    return isFresh(
-      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
-      DELIVERY_GRACE_MS,
-    )
-      ? "working"
-      : "waiting";
-  }
-  return args.agentState.state === "working"
-    ? "working"
-    : args.agentState.state === "waiting"
-      ? "waiting"
-      : args.agentState.state;
-}
-
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
   if (!nextStepNotBefore) {
     return 0;
@@ -279,7 +246,9 @@ function isPromptReadyState(pane: string): boolean {
   return Boolean(lastLine) && PROMPT_RE.test(lastLine);
 }
 
-function classifyPipelinePaneState(pane: string): SessionState {
+function classifyPipelinePaneState(
+  pane: string,
+): Extract<SessionStatus, "working" | "waiting" | "needs_input"> {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) {
     return "needs_input";
@@ -289,14 +258,9 @@ function classifyPipelinePaneState(pane: string): SessionState {
 }
 
 export function isRestorableSession(
-  session: Pick<SessionView, "status" | "state" | "workspaceExists" | "worktree">,
+  session: Pick<SessionView, "status" | "workspaceExists" | "worktree">,
 ): boolean {
-  return (
-    session.worktree &&
-    isRestorableStatus(session.status) &&
-    session.state === "stopped" &&
-    session.workspaceExists
-  );
+  return session.worktree && isRestorableStatus(session.status) && session.workspaceExists;
 }
 
 function buildRestorePrompt(prompt: string): string {
@@ -336,7 +300,6 @@ function buildSessionEnv(args: {
     SPUR_AGENT: args.agent,
     SPUR_CONFIG: args.configPath,
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
-    SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -347,21 +310,6 @@ function buildSessionEnv(args: {
     env["npm_config_virtual_store_dir"] = join(args.repoPath, "node_modules/.pnpm");
   }
   return env;
-}
-
-async function waitForRestorePlan(
-  agent: SessionRecord["agent"],
-  worktreePath: string,
-  restoreMessage: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string },
-) {
-  const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
-  let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage, options);
-  while (!plan && Date.now() < deadline) {
-    await sleep(RESTORE_PLAN_POLL_MS);
-    plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage, options);
-  }
-  return plan;
 }
 
 function resolveSpawnWorktree(
@@ -525,7 +473,9 @@ export class SessionService {
     );
   }
 
-  private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
+  private async resolveSessionProjectContext(
+    session: SessionRecord,
+  ): Promise<SessionProjectContext> {
     const currentProject = this.config.projects[session.project];
     if (currentProject) {
       return {
@@ -602,7 +552,7 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (session.status !== "running") {
+    if (!isLiveSessionStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
     if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
@@ -889,25 +839,19 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : prompt;
-      const hookSetup = await setupAgentHooks({
-        agent,
-        worktreePath: workspacePath,
-        sessionToolDir,
-      });
-      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, hookSetup);
+      const launchPlan = buildAgentLaunchPlan(agent, initialMessage);
       const pipeline = steps
         ? {
             steps,
             nextStepIndex: 1,
             awaitingStepIndex: 0,
-            status: "running" as const,
           }
         : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
-        status: "running",
+        status: "working",
         updatedAt: nowIso(),
         ...(pipeline ? { pipeline } : {}),
       };
@@ -961,11 +905,7 @@ export class SessionService {
       });
 
       stage = "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
-        runningRecord,
-        AGENT_SESSION_ID_INITIAL_WAIT_MS,
-      );
-      writeSession(this.config.dataDir, persistedRecord);
+      writeSession(this.config.dataDir, runningRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -975,18 +915,16 @@ export class SessionService {
           worktreePath: workspacePath,
           tmuxSession,
           agent,
-          agentSessionId: persistedRecord.agentSessionId ?? null,
         },
       });
-      if (persistedRecord.pipeline?.status === "running") {
-        this.schedulePipelineRunner(persistedRecord.id);
+      if (runningRecord.pipeline) {
+        this.schedulePipelineRunner(runningRecord.id);
       }
 
-      return await this.enrich(persistedRecord);
+      return await this.enrich(runningRecord);
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
-        deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
@@ -1006,7 +944,7 @@ export class SessionService {
           worktreePath: workspacePath,
           tmuxSession: sessionId,
           launchCommand: "",
-          status: "errored",
+          status: "error",
           createdAt: createdAt ?? nowIso(),
           updatedAt: nowIso(),
           error: message,
@@ -1070,7 +1008,7 @@ export class SessionService {
     if (typeof message !== "string" || !message.trim()) {
       throw new Error("message must be a non-empty string");
     }
-    if (!isRestorableStatus(session.status)) {
+    if (!isSendableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
@@ -1084,11 +1022,10 @@ export class SessionService {
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
         ...readySession,
-        status: "running",
+        status: "working",
         updatedAt: nowIso(),
       };
-      const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
-      writeSession(this.config.dataDir, persisted);
+      writeSession(this.config.dataDir, updated);
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
@@ -1097,10 +1034,9 @@ export class SessionService {
         details: {
           interrupt,
           messageLength: message.length,
-          agentSessionId: persisted.agentSessionId ?? null,
         },
       });
-      return await this.enrich(persisted);
+      return await this.enrich(updated);
     } catch (error) {
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
@@ -1181,10 +1117,9 @@ export class SessionService {
       await this.cleanupSessionServices(session);
       if (targetStatus === "completed") {
         if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-          const cleanup = await this.resolveCleanupContext(session);
-          await removeWorktree(cleanup.repoPath, session.worktreePath);
+          const projectContext = await this.resolveSessionProjectContext(session);
+          await removeWorktree(projectContext.repoPath, session.worktreePath);
         }
-        deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
       }
     } catch (error) {
@@ -1226,9 +1161,9 @@ export class SessionService {
     }
 
     if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-      const cleanup = await this.resolveCleanupContext(session);
+      const projectContext = await this.resolveSessionProjectContext(session);
       const reasons: string[] = [];
-      if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
+      if (await hasUncommittedChanges(session.worktreePath, projectContext.symlinks)) {
         reasons.push("uncommitted changes in its worktree");
       }
       if (await hasUnpushedCommits(session.worktreePath)) {
@@ -1243,10 +1178,9 @@ export class SessionService {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
       if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-        const cleanup = await this.resolveCleanupContext(session);
-        await removeWorktree(cleanup.repoPath, session.worktreePath);
+        const projectContext = await this.resolveSessionProjectContext(session);
+        await removeWorktree(projectContext.repoPath, session.worktreePath);
       }
-      deleteAgentHookState(this.config.dataDir, sessionId);
       removeSessionSlotTool(this.config.dataDir, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1287,50 +1221,13 @@ export class SessionService {
     return this.enrich(record);
   }
 
-  private async captureAgentSessionId(
-    session: SessionRecord,
-    timeoutMs: number,
-  ): Promise<SessionRecord> {
-    if (!session.worktreePath) {
-      return session;
-    }
-
-    const deadline = Date.now() + Math.max(timeoutMs, 0);
-    while (Date.now() <= deadline) {
-      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
-      if (agentSessionId) {
-        if (agentSessionId === session.agentSessionId) {
-          return session;
-        }
-        this.logEvent("session.agent_session_id.discovered", {
-          level: "info",
-          sessionId: session.id,
-          projectId: session.project,
-          message: `Discovered native agent session id for ${session.id}`,
-          details: {
-            agent: session.agent,
-            previousAgentSessionId: session.agentSessionId ?? null,
-            agentSessionId,
-          },
-        });
-        return {
-          ...session,
-          agentSessionId,
-        };
-      }
-      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
-    }
-
-    return session;
-  }
-
   private async ensureSessionReadyForSend(session: SessionRecord): Promise<SessionRecord> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
     let processAlive = false;
     if (runtimeAlive) {
       processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
       if (processAlive) {
-        return this.captureAgentSessionId(session, 0);
+        return session;
       }
     }
 
@@ -1347,7 +1244,6 @@ export class SessionService {
         runtimeAlive,
         processAlive,
         workspaceExists: workspacePresent,
-        agentSessionId: session.agentSessionId ?? null,
       },
     });
 
@@ -1357,33 +1253,22 @@ export class SessionService {
     if (session.status === "completed") {
       throw new Error(`Session ${session.id} was completed and cannot be recovered`);
     }
+    if (session.status === "error") {
+      throw new Error(`Session ${session.id} errored and cannot be recovered`);
+    }
     if (!session.worktree || !session.worktreePath || !workspacePresent) {
       throw new Error(`Session ${session.id} cannot be recovered because its worktree is missing`);
     }
 
     await killTmuxSession(session.tmuxSession);
-    const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
-    let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = ensureSessionSlotTool({
-      dataDir: this.config.dataDir,
-      sessionId: session.id,
-      configPath: this.config.configPath,
-    });
-    const hookSetup = await setupAgentHooks({
-      agent: session.agent,
-      worktreePath: session.worktreePath,
-      sessionToolDir,
-    });
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, hookSetup);
+    const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
+    if (!agentSessionId) {
+      throw new Error(`No native resume state found for ${session.agent} session ${session.id}`);
+    }
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt);
     const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
-    const recoveryPlan = sessionWithAgentId.agentSessionId
-      ? buildAgentResumePlan(
-          sessionWithAgentId.agent,
-          sessionWithAgentId.agentSessionId,
-          baseLaunchCommand,
-          hookSetup,
-        )
-      : null;
+    const recoveryPlan = buildAgentResumePlan(session.agent, agentSessionId, baseLaunchCommand);
+    const projectContext = await this.resolveSessionProjectContext(session);
     this.logEvent("session.recover.started", {
       level: "info",
       sessionId: session.id,
@@ -1391,9 +1276,14 @@ export class SessionService {
       message: `Recovering ${session.id}`,
       details: {
         agent: session.agent,
-        recoveryMode: recoveryPlan ? "native_resume" : "fresh_launch",
-        agentSessionId: sessionWithAgentId.agentSessionId ?? null,
+        recoveryMode: "native_resume",
+        agentSessionId,
       },
+    });
+    const sessionToolDir = ensureSessionSlotTool({
+      dataDir: this.config.dataDir,
+      sessionId: session.id,
+      configPath: this.config.configPath,
     });
     const env = buildSessionEnv({
       agent: session.agent,
@@ -1401,66 +1291,31 @@ export class SessionService {
       sessionId: session.id,
       sessionToolDir,
       configPath: this.config.configPath,
-      repoPath: this.getProject(session.project).path,
-      symlinks: this.getProject(session.project).symlinks,
+      repoPath: projectContext.repoPath,
+      symlinks: projectContext.symlinks,
     });
 
     try {
       await createTmuxSession({
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
-        launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+        launchCommand: recoveryPlan.launchCommand,
         env,
       });
       await syncTmuxStatus(session.tmuxSession, session.slots);
-      await waitForTmuxReady(
-        session.tmuxSession,
-        recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
-      );
+      await waitForTmuxReady(session.tmuxSession, recoveryPlan.readyMarkers);
       if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
       }
     } catch (error) {
-      if (!recoveryPlan) {
-        throw error;
-      }
-
-      const failure = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.recover.resume_failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Native resume failed for ${session.id}; falling back to a fresh launch`,
-        details: {
-          agent: session.agent,
-          agentSessionId: sessionWithAgentId.agentSessionId ?? null,
-          launchCommand: recoveryPlan.launchCommand,
-          failure,
-        },
-      });
       await killTmuxSession(session.tmuxSession);
-      recoveredAgentSessionId = undefined;
-      await createTmuxSession({
-        sessionName: session.tmuxSession,
-        cwd: session.worktreePath,
-        launchCommand: baseLaunchCommand,
-        env,
-      });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
-      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
-      if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
-        throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
-          cause: error,
-        });
-      }
+      throw error;
     }
 
-    const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     const recovered: SessionRecord = {
-      ...recoveredBase,
-      ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
+      ...session,
       launchCommand: baseLaunchCommand,
-      status: "running",
+      status: "waiting",
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, recovered);
@@ -1471,7 +1326,7 @@ export class SessionService {
       message: `Recovered ${session.id}`,
       details: {
         agent: session.agent,
-        agentSessionId: recovered.agentSessionId ?? null,
+        agentSessionId,
         tmuxSession: session.tmuxSession,
       },
     });
@@ -1502,78 +1357,49 @@ export class SessionService {
         worktreePath: current.worktreePath,
       },
     });
-    let restoredLaunchCommand: string;
+    const restorePrompt = buildRestorePrompt(current.prompt);
+    const sessionToolDir = ensureSessionSlotTool({
+      dataDir: this.config.dataDir,
+      sessionId: current.id,
+      configPath: this.config.configPath,
+    });
+    const agentSessionId = await findAgentSessionId(current.agent, current.worktreePath);
+    if (!agentSessionId) {
+      this.logEvent("session.restore.failed", {
+        level: "error",
+        sessionId,
+        projectId: current.project,
+        message: `Failed to restore ${sessionId}: no native resume state`,
+      });
+      throw new Error(`No native resume state found for ${current.agent} session ${sessionId}`);
+    }
+    const baseLaunchPlan = buildAgentLaunchPlan(current.agent, current.prompt);
+    const baseLaunchCommand = current.launchCommand || baseLaunchPlan.launchCommand;
+    const resumePlan = buildAgentResumePlan(current.agent, agentSessionId, baseLaunchCommand);
+    const projectContext = await this.resolveSessionProjectContext(current);
 
     try {
-      const sessionToolDir = ensureSessionSlotTool({
-        dataDir: this.config.dataDir,
-        sessionId: current.id,
-        configPath: this.config.configPath,
-      });
-      const hookSetup = await setupAgentHooks({
-        agent: current.agent,
-        worktreePath: current.worktreePath,
-        sessionToolDir,
-      });
-      const restorePrompt = buildRestorePrompt(current.prompt);
-      const launchPlan = await waitForRestorePlan(
-        current.agent,
-        current.worktreePath,
-        restorePrompt,
-        hookSetup,
-      );
-      if (!launchPlan) {
-        this.logEvent("session.restore.failed", {
-          level: "error",
-          sessionId,
-          projectId: current.project,
-          message: `Failed to restore ${sessionId}: no native resume state`,
-        });
-        throw new Error(`No native resume state found for ${current.agent} session ${sessionId}`);
-      }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
-      if (current.agent === "claude") {
-        const restoredAgentSessionId = await findAgentSessionId(
-          current.agent,
-          current.worktreePath,
-        );
-        if (restoredAgentSessionId) {
-          const resumePlan = buildAgentResumePlan(
-            current.agent,
-            restoredAgentSessionId,
-            launchPlan.launchCommand,
-            hookSetup,
-          );
-          restoreLaunchCommand = resumePlan.launchCommand;
-          restoreReadyMarkers = resumePlan.readyMarkers;
-        }
-      }
-      restoredLaunchCommand = restoreLaunchCommand;
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
-        launchCommand: restoreLaunchCommand,
+        launchCommand: resumePlan.launchCommand,
         env: buildSessionEnv({
           agent: current.agent,
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
           configPath: this.config.configPath,
-          repoPath: this.getProject(current.project).path,
-          symlinks: this.getProject(current.project).symlinks,
+          repoPath: projectContext.repoPath,
+          symlinks: projectContext.symlinks,
         }),
       });
       await syncTmuxStatus(current.tmuxSession, current.slots);
-      await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
+      await waitForTmuxReady(current.tmuxSession, resumePlan.readyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      await sendMessageToTmux(
-        current.tmuxSession,
-        withSessionSlotInstructions(launchPlan.initialMessage),
-      );
+      await sendMessageToTmux(current.tmuxSession, withSessionSlotInstructions(restorePrompt));
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -1589,15 +1415,11 @@ export class SessionService {
     const { error: _ignoredError, ...restoredBase } = current;
     const restored: SessionRecord = {
       ...restoredBase,
-      launchCommand: restoredLaunchCommand,
-      status: "running",
+      launchCommand: baseLaunchCommand,
+      status: "working",
       updatedAt: nowIso(),
     };
-    const persistedRestored = await this.captureAgentSessionId(
-      restored,
-      AGENT_SESSION_ID_REFRESH_WAIT_MS,
-    );
-    writeSession(this.config.dataDir, persistedRestored);
+    writeSession(this.config.dataDir, restored);
     this.logEvent("session.restore.completed", {
       level: "info",
       sessionId,
@@ -1605,13 +1427,13 @@ export class SessionService {
       message: `Restored ${sessionId}`,
       details: {
         agent: current.agent,
-        agentSessionId: persistedRestored.agentSessionId ?? null,
+        agentSessionId,
       },
     });
-    if (persistedRestored.pipeline?.status === "running") {
-      this.schedulePipelineRunner(persistedRestored.id);
+    if (restored.pipeline) {
+      this.schedulePipelineRunner(restored.id);
     }
-    return this.enrich(persistedRestored);
+    return this.enrich(restored);
   }
 
   private resumeRunningPipelines(): void {
@@ -1626,11 +1448,7 @@ export class SessionService {
     }
 
     const session = readSession(this.config.dataDir, sessionId);
-    if (
-      !session?.pipeline ||
-      session.status !== "running" ||
-      session.pipeline.status !== "running"
-    ) {
+    if (!canRunPipeline(session)) {
       return;
     }
 
@@ -1644,11 +1462,7 @@ export class SessionService {
     try {
       for (;;) {
         const session = readSession(this.config.dataDir, sessionId);
-        if (
-          !session?.pipeline ||
-          session.status !== "running" ||
-          session.pipeline.status !== "running"
-        ) {
+        if (!canRunPipeline(session)) {
           return;
         }
 
@@ -1659,11 +1473,7 @@ export class SessionService {
           }
           if (waitOutcome === "ready") {
             const latest = readSession(this.config.dataDir, sessionId);
-            if (
-              !latest?.pipeline ||
-              latest.status !== "running" ||
-              latest.pipeline.status !== "running"
-            ) {
+            if (!canRunPipeline(latest)) {
               return;
             }
 
@@ -1679,10 +1489,7 @@ export class SessionService {
             } = latest.pipeline;
             const completedPipeline =
               latest.pipeline.nextStepIndex >= latest.pipeline.steps.length
-                ? {
-                    ...pipelineBase,
-                    status: "completed" as const,
-                  }
+                ? pipelineBase
                 : {
                     ...pipelineBase,
                     nextStepNotBefore: new Date(Date.now() + PIPELINE_STEP_DELAY_MS).toISOString(),
@@ -1692,7 +1499,7 @@ export class SessionService {
               updatedAt: nowIso(),
               pipeline: completedPipeline,
             });
-            if (completedPipeline.status === "completed") {
+            if (latest.pipeline.nextStepIndex >= latest.pipeline.steps.length) {
               this.logEvent("session.pipeline.completed", {
                 level: "info",
                 sessionId,
@@ -1716,16 +1523,14 @@ export class SessionService {
         if (session.pipeline.nextStepIndex >= session.pipeline.steps.length) {
           const {
             awaitingStepIndex: _awaitingStepIndex,
+            nextStepNotBefore: _nextStepNotBefore,
             error: _pipelineError,
             ...pipelineBase
           } = session.pipeline;
           writeSession(this.config.dataDir, {
             ...session,
             updatedAt: nowIso(),
-            pipeline: {
-              ...pipelineBase,
-              status: "completed",
-            },
+            pipeline: pipelineBase,
           });
           this.logEvent("session.pipeline.completed", {
             level: "info",
@@ -1764,11 +1569,7 @@ export class SessionService {
         );
 
         const latest = readSession(this.config.dataDir, sessionId);
-        if (
-          !latest?.pipeline ||
-          latest.status !== "running" ||
-          latest.pipeline.status !== "running"
-        ) {
+        if (!canRunPipeline(latest)) {
           return;
         }
 
@@ -1809,11 +1610,7 @@ export class SessionService {
 
     while (Date.now() < deadline) {
       const session = readSession(this.config.dataDir, sessionId);
-      if (
-        !session?.pipeline ||
-        session.status !== "running" ||
-        session.pipeline.status !== "running"
-      ) {
+      if (!canRunPipeline(session)) {
         return "stopped";
       }
       if (session.pipeline.awaitingStepIndex === undefined) {
@@ -1849,11 +1646,7 @@ export class SessionService {
 
   private markPipelineErrored(sessionId: string, message: string): void {
     const session = readSession(this.config.dataDir, sessionId);
-    if (
-      !session?.pipeline ||
-      session.status !== "running" ||
-      session.pipeline.status !== "running"
-    ) {
+    if (!canRunPipeline(session)) {
       return;
     }
 
@@ -1862,7 +1655,6 @@ export class SessionService {
       updatedAt: nowIso(),
       pipeline: {
         ...session.pipeline,
-        status: "errored",
         error: message,
       },
     });
@@ -1919,51 +1711,63 @@ export class SessionService {
     const processAlive = runtimeAlive
       ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
       : false;
-    const nativeAgentState = workspacePresent
-      ? await probeAgentState(session.agent, session.worktreePath, {
+    const observedStatus = workspacePresent
+      ? await observeAgentStatus(session.agent, session.worktreePath, {
           processAlive,
           signalWindowMs: WORKING_SIGNAL_WINDOW_MS,
         })
       : null;
-    const hookAgentState = readAgentHookState(this.config.dataDir, session.id);
-    const agentState = resolveHookAgentState(hookAgentState, processAlive) ?? nativeAgentState;
     const lastActivityAt = (
-      latestActivityAt(updatedAt, tmuxActivityAt, agentState?.signalAt ?? null) ?? updatedAt
+      latestActivityAt(updatedAt, tmuxActivityAt, observedStatus?.signalAt ?? null) ?? updatedAt
     ).toISOString();
-
-    let state: SessionState;
-    if (session.status === "killed") {
-      state = "killed";
-    } else if (session.status === "paused" || session.status === "completed") {
-      state = "stopped";
-    } else if (session.status === "errored") {
-      state = "error";
-    } else if (session.status === "spawning") {
-      state = "working";
-    } else if (!runtimeAlive || !processAlive) {
-      state = agentState?.state === "error" ? "error" : "stopped";
-    } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
-      state = agentState.state;
-    } else if (session.agent === "codex" && agentState?.state === "waiting") {
-      state = resolveWaitingStateFromPane(await captureTmuxPane(session.tmuxSession, 80));
-    } else {
-      state = resolveRunningSessionState({
-        agentState,
-        updatedAt,
-        activityAt: tmuxActivityAt,
-      });
+    let status = session.status;
+    if (!isStickySessionStatus(status)) {
+      if (observedStatus) {
+        status = observedStatus.status;
+      } else if (!runtimeAlive || !processAlive) {
+        status = "exited";
+      }
+    }
+    const nextSession =
+      status === session.status
+        ? session
+        : {
+            ...session,
+            status,
+            updatedAt: nowIso(),
+          };
+    if (nextSession !== session) {
+      const latest = readSession(this.config.dataDir, session.id);
+      if (
+        latest &&
+        latest.updatedAt !== session.updatedAt &&
+        latest.status !== session.status &&
+        isStickySessionStatus(latest.status)
+      ) {
+        return {
+          ...latest,
+          runtimeAlive,
+          workspaceExists: workspacePresent,
+          lastActivityAt,
+          services: await Promise.all(
+            listServiceInstancesForSession(this.config.dataDir, latest.id).map((service) =>
+              this.enrichService(service),
+            ),
+          ),
+        };
+      }
+      writeSession(this.config.dataDir, nextSession);
     }
 
     const services: ServiceInstanceView[] = [];
-    for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
+    for (const service of listServiceInstancesForSession(this.config.dataDir, nextSession.id)) {
       services.push(await this.enrichService(service));
     }
 
     return {
-      ...session,
+      ...nextSession,
       runtimeAlive,
       workspaceExists: workspacePresent,
-      state,
       lastActivityAt,
       services,
     };

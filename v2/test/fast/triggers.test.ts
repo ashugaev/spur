@@ -211,8 +211,7 @@ describe("startConfiguredTriggers", () => {
   it("delivers GitHub updates immediately when the target session is waiting", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -260,8 +259,7 @@ describe("startConfiguredTriggers", () => {
   it("uses custom send prompt when configured", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -303,8 +301,7 @@ describe("startConfiguredTriggers", () => {
   it("adds built-in merge conflict guidance when no custom prompt is configured", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -347,8 +344,7 @@ describe("startConfiguredTriggers", () => {
   it("retries ci_failed every 10 minutes up to three deliveries even while working when interrupt=true", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "working",
+      status: "working",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -406,14 +402,12 @@ describe("startConfiguredTriggers", () => {
   it("waits for the session to become waiting before sending ci_failed when interrupt=false", async () => {
     const working = {
       id: "api-1",
-      status: "running",
-      state: "working",
+      status: "working",
       workspaceExists: true,
     };
     const waiting = {
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     };
     const getMock = vi
@@ -464,8 +458,7 @@ describe("startConfiguredTriggers", () => {
   it("stops ci_failed retries once the failure disappears from the latest source snapshot", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -543,8 +536,7 @@ describe("startConfiguredTriggers", () => {
   it("delivers service alerts with the list log-view hint for the bound session", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "waiting",
+      status: "waiting",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -582,14 +574,12 @@ describe("startConfiguredTriggers", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "api-1",
-        status: "running",
-        state: "working",
+        status: "working",
         workspaceExists: true,
       })
       .mockResolvedValueOnce({
         id: "api-1",
-        status: "running",
-        state: "waiting",
+        status: "waiting",
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -644,14 +634,12 @@ describe("startConfiguredTriggers", () => {
       .fn()
       .mockResolvedValueOnce({
         id: "api-1",
-        status: "running",
-        state: "working",
+        status: "working",
         workspaceExists: true,
       })
       .mockResolvedValueOnce({
         id: "api-1",
-        status: "running",
-        state: "waiting",
+        status: "waiting",
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -686,8 +674,7 @@ describe("startConfiguredTriggers", () => {
   it("does not repeatedly interrupt the same busy interval", async () => {
     const getMock = vi.fn().mockResolvedValue({
       id: "api-1",
-      status: "running",
-      state: "working",
+      status: "working",
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);

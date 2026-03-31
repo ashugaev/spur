@@ -159,7 +159,9 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
   rmSync(worktreePath, { recursive: true, force: true });
 }
 
-export async function resolveRepoPathFromWorktree(worktreePath: string): Promise<string | undefined> {
+export async function resolveRepoPathFromWorktree(
+  worktreePath: string,
+): Promise<string | undefined> {
   try {
     const gitCommonDir = await git(
       worktreePath,

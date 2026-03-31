@@ -46,9 +46,9 @@ When `steps` are present, Spur sends messages like "step 1/N: research" plus the
 `list` hides `completed` and `killed` sessions by default.
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
 
-`list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
-When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
-Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
+`list` derives the live session `status` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
+When a worktree-backed session is `exited` or `paused`, `send` resumes the same native Claude/Codex conversation in the existing worktree by re-discovering the agent's native resume id. If native resume metadata is missing, `send` fails.
+Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, and pipeline step delivery.
 The `list` log view combines those key session events with a live tail of the main agent tmux pane for the selected session.
 
 Agents run with full access:
@@ -88,7 +88,7 @@ pnpm --dir v2 build
 
 Spur keeps a durable config registry in `dataDir`. Any normal CLI command syncs its current
 `--config` into the running daemon, and daemon boot reloads every registered config path,
-rehydrates durable session state, resumes running pipelines, and restarts configured
+rehydrates durable session metadata, resumes running pipelines, and restarts configured
 sources/triggers.
 
 Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`, and

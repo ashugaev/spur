@@ -13,12 +13,11 @@ function session(overrides: Partial<SessionView>): SessionView {
     worktreePath: "/tmp/worktree",
     tmuxSession: "api-1",
     launchCommand: "claude --dangerously-skip-permissions",
-    status: "running",
+    status: "waiting",
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
     runtimeAlive: true,
     workspaceExists: true,
-    state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
     services: [],
     ...overrides,
@@ -28,9 +27,9 @@ function session(overrides: Partial<SessionView>): SessionView {
 describe("session-display", () => {
   it("keeps needs_input and error sessions above normal waiting sessions", () => {
     const ordered = sortSessionsForList([
-      session({ id: "api-3", state: "waiting" }),
-      session({ id: "api-1", state: "needs_input" }),
-      session({ id: "api-2", state: "error", status: "errored" }),
+      session({ id: "api-3", status: "waiting" }),
+      session({ id: "api-1", status: "needs_input" }),
+      session({ id: "api-2", status: "error" }),
     ]).map((entry) => entry.id);
 
     expect(ordered).toEqual(["api-1", "api-2", "api-3"]);

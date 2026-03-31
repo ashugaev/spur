@@ -104,7 +104,6 @@ function normalizePipelineState(pipeline: SessionPipelineState): SessionPipeline
     ...(pipeline.nextStepNotBefore !== undefined
       ? { nextStepNotBefore: pipeline.nextStepNotBefore }
       : {}),
-    status: pipeline.status,
     ...(pipeline.error !== undefined ? { error: pipeline.error } : {}),
   };
 }
@@ -114,7 +113,6 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: session.id,
     project: session.project,
     agent: session.agent,
-    ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
     prompt: session.prompt,
     branch: session.branch,
     ...(session.branchSource ? { branchSource: session.branchSource } : {}),

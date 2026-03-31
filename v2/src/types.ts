@@ -1,8 +1,16 @@
 export type AgentName = "claude" | "codex";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
-export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SessionStatus =
+  | "spawning"
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "paused"
+  | "completed"
+  | "killed"
+  | "exited"
+  | "error";
 export type BranchSource = "explicit" | "preflight" | "shared_workspace";
 export type ServiceInstanceStatus = "running" | "stopped" | "errored";
 export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
@@ -10,7 +18,6 @@ export interface SessionLink {
   label: string;
   url: string;
 }
-export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
   title?: string;
@@ -147,7 +154,6 @@ export interface SessionPipelineState {
   nextStepIndex: number;
   awaitingStepIndex?: number;
   nextStepNotBefore?: string;
-  status: SessionPipelineStatus;
   error?: string;
 }
 
@@ -155,7 +161,6 @@ export interface SessionRecord {
   id: string;
   project: string;
   agent: AgentName;
-  agentSessionId?: string;
   prompt: string;
   branch: string;
   branchSource?: BranchSource;
@@ -188,7 +193,6 @@ export interface ServiceInstanceRecord {
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
-  state: SessionState;
   lastActivityAt: string;
   services: ServiceInstanceView[];
 }

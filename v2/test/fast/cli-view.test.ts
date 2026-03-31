@@ -17,12 +17,11 @@ function session(overrides: Partial<SessionView>): SessionView {
     worktreePath: "/tmp/worktree",
     tmuxSession: "api-1",
     launchCommand: "claude --dangerously-skip-permissions",
-    status: "running",
+    status: "waiting",
     createdAt: "2026-03-18T10:00:00.000Z",
     updatedAt: "2026-03-18T10:00:00.000Z",
     runtimeAlive: true,
     workspaceExists: true,
-    state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
     services: [],
     ...overrides,
@@ -61,7 +60,6 @@ describe("cli-view.describeSession", () => {
       describeSession(
         session({
           status: "killed",
-          state: "killed",
           runtimeAlive: false,
           workspaceExists: false,
         }),

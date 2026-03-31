@@ -3,7 +3,7 @@ import type {
   RuntimeInfo,
   ServiceInstanceState,
   ServiceInstanceView,
-  SessionState,
+  SessionStatus,
   SessionView,
 } from "./types.js";
 
@@ -39,7 +39,7 @@ const MAX_DETAIL_FIELDS = 8;
 
 interface SessionRow {
   id: string;
-  state: string;
+  status: string;
   project: string;
   agent: string;
   branch: string;
@@ -47,7 +47,7 @@ interface SessionRow {
 
 interface SessionColumnWidths {
   id: number;
-  state: number;
+  status: number;
   project: number;
   agent: number;
 }
@@ -108,45 +108,41 @@ function formatRelativeTime(input: string): string {
 function describeRow(session: SessionView): SessionRow {
   return {
     id: session.id,
-    state: rowLabel(session),
+    status: statusLabel(session.status),
     project: truncate(session.project, MAX_PROJECT_WIDTH),
     agent: session.agent,
     branch: truncate(session.branch, MAX_BRANCH_WIDTH),
   };
 }
 
-function rowLabel(session: SessionView): string {
-  if (session.status === "paused") {
-    return "Paused";
-  }
-  if (session.status === "completed") {
-    return "Completed";
-  }
-  return stateLabel(session.state);
-}
-
-function stateLabel(state: SessionState): string {
-  switch (state) {
+function statusLabel(status: SessionStatus): string {
+  switch (status) {
+    case "spawning":
+      return "Spawning";
     case "working":
       return "Working";
     case "waiting":
       return "Waiting";
     case "needs_input":
       return "Needs Input";
-    case "stopped":
-      return "Stopped";
-    case "error":
-      return "Error";
+    case "paused":
+      return "Paused";
+    case "completed":
+      return "Completed";
     case "killed":
       return "Killed";
+    case "exited":
+      return "Exited";
+    case "error":
+      return "Error";
   }
 }
 
 function statusColor(session: SessionView): string {
-  const state = session.state;
-  if (state === "working") return SUCCESS;
-  if (state === "waiting" || state === "needs_input") return WARNING;
-  if (state === "error") return ACCENT;
+  const status = session.status;
+  if (status === "working") return SUCCESS;
+  if (status === "spawning" || status === "waiting" || status === "needs_input") return WARNING;
+  if (status === "error") return ACCENT;
   return MUTED;
 }
 
@@ -154,20 +150,22 @@ export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
   const services = session.services;
 
-  if (session.status === "paused") {
+  if (session.status === "spawning") {
+    facts.push("starting");
+  } else if (session.status === "working") {
+    facts.push("processing");
+  } else if (session.status === "waiting") {
+    facts.push("waiting for next message");
+  } else if (session.status === "needs_input") {
+    facts.push("waiting for reply or approval");
+  } else if (session.status === "paused") {
     facts.push("paused by user");
+  } else if (session.status === "exited") {
+    facts.push("agent exited");
   } else if (session.status === "completed") {
     facts.push("marked complete");
     facts.push("hidden from list");
-  } else if (session.state === "working") {
-    facts.push("processing");
-  } else if (session.state === "waiting") {
-    facts.push("waiting for next message");
-  } else if (session.state === "needs_input") {
-    facts.push("waiting for reply or approval");
-  } else if (session.state === "stopped") {
-    facts.push("agent exited");
-  } else if (session.state === "killed") {
+  } else if (session.status === "killed") {
     facts.push("killed by user");
     facts.push("not restorable");
   }
@@ -179,7 +177,7 @@ export function describeSession(session: SessionView): string {
     facts.push(session.workspaceExists ? "shared workspace live" : "shared workspace missing");
   }
 
-  if (session.state === "error" && session.error) {
+  if (session.status === "error" && session.error) {
     facts.push(`error ${truncate(session.error, 48)}`);
   }
   const liveServices = services.filter((service) => service.runtimeAlive);
@@ -211,7 +209,7 @@ function measureSessionColumns(sessions: SessionView[]): SessionColumnWidths {
   const rows = sessions.map(describeRow);
   return {
     id: Math.max(MIN_ID_WIDTH, "id".length, ...rows.map((row) => row.id.length)),
-    state: Math.max(MIN_STATE_WIDTH, "state".length, ...rows.map((row) => row.state.length)),
+    status: Math.max(MIN_STATE_WIDTH, "status".length, ...rows.map((row) => row.status.length)),
     project: Math.max(
       MIN_PROJECT_WIDTH,
       "project".length,
@@ -225,7 +223,7 @@ function renderSessionRow(session: SessionView, widths: SessionColumnWidths): st
   const row = describeRow(session);
   return [
     accent(row.id.padEnd(widths.id)),
-    `${renderStatusIndicator(session)}${boldText(row.state.padEnd(widths.state))}`,
+    `${renderStatusIndicator(session)}${boldText(row.status.padEnd(widths.status))}`,
     row.project.padEnd(widths.project),
     row.agent.padEnd(widths.agent),
     row.branch,
@@ -236,7 +234,7 @@ function renderSessionHeader(widths: SessionColumnWidths): string {
   return dimText(
     [
       "id".padEnd(widths.id),
-      "state".padEnd(widths.state + 2),
+      "status".padEnd(widths.status + 2),
       "project".padEnd(widths.project),
       "agent".padEnd(widths.agent),
       "branch",
@@ -245,7 +243,7 @@ function renderSessionHeader(widths: SessionColumnWidths): string {
 }
 
 function renderStatusIndicator(session: SessionView): string {
-  if (session.state === "needs_input") {
+  if (session.status === "needs_input") {
     return colorize("! ", `${BOLD}${WARNING}`);
   }
   return `${colorize("●", statusColor(session))} `;
@@ -347,7 +345,7 @@ export function renderWaitingInputAlert(args: {
   sessions: SessionView[];
   selectedSessionId: string | null;
 }): string | undefined {
-  const waiting = args.sessions.filter((session) => session.state === "needs_input");
+  const waiting = args.sessions.filter((session) => session.status === "needs_input");
   if (waiting.length === 0) {
     return undefined;
   }

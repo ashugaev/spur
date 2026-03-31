@@ -110,7 +110,7 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 15_000,
-      accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+      accept: (value) => value[0]?.status === "exited" && value[0]?.runtimeAlive === true,
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -145,7 +145,7 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 15_000,
-      accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
+      accept: (value) => value[0]?.status !== "exited" && value[0]?.runtimeAlive === true,
     },
   );
 
@@ -452,7 +452,7 @@ projects:
     });
   });
 
-  it("surfaces spawn and lifecycle command errors through the built CLI without leaving session state behind", async () => {
+  it("surfaces spawn and lifecycle command errors through the built CLI without leaving session metadata behind", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-errors-${port}`;
@@ -563,6 +563,81 @@ projects:
     expect(killed.status).toBe("killed");
     expect(killed.workspaceExists).toBe(false);
     expect(listed).toEqual([]);
+  });
+
+  it("keeps paused-session send working after the project id is renamed", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-send-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "rename-send.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "rename send prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.execCli(["--config", configPath, "pause", spawned.id, "--json"]);
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const resumed = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "send",
+          spawned.id,
+          "rename send resume",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("rename send resume"),
+    });
+
+    expect(resumed.id).toBe(spawned.id);
+    expect(resumed.status).toBe("working");
+    expect(pane).toContain("rename send resume");
   });
 
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
@@ -876,7 +951,6 @@ projects:
         accept: (value) =>
           value[0]?.id === spawned.id &&
           value[0]?.status === "paused" &&
-          value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
       },
@@ -1001,7 +1075,6 @@ projects:
         accept: (value) =>
           value[0]?.id === spawned.id &&
           value[0]?.status === "paused" &&
-          value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
       },
@@ -1737,7 +1810,7 @@ projects:
     const sessionsAfterBlock = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
-    expect(sessionsAfterBlock[0]?.status).toBe("running");
+    expect(sessionsAfterBlock[0]?.status).toBe("working");
     expect(sessionsAfterBlock[0]?.runtimeAlive).toBe(true);
     expect(sessionsAfterBlock[0]?.workspaceExists).toBe(true);
 
@@ -1938,7 +2011,7 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 15_000,
-        accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+        accept: (value) => value[0]?.status === "exited" && value[0]?.runtimeAlive === true,
       },
     );
 
@@ -1976,7 +2049,7 @@ projects:
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
     expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.state).toBe("stopped");
+    expect(listed[0]?.status).toBe("exited");
     expect(controllerPane).toContain(
       `No native resume state found for claude session ${spawned.id}`,
     );

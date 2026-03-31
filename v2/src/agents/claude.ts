@@ -1,9 +1,9 @@
-import { open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan, AgentStatusObservation } from "./types.js";
 
 const ACTIVE_ENTRY_TYPES = new Set([
   "user",
@@ -16,7 +16,6 @@ const ACTIVE_ENTRY_TYPES = new Set([
 
 const WAITING_ENTRY_TYPES = new Set(["assistant", "system", "summary", "result"]);
 const MAX_SESSION_TAIL_BYTES = 131_072;
-const CLAUDE_HOOK_SETTINGS_FILE = "claude-hooks.settings.json";
 
 interface ClaudeSessionLine {
   type?: string;
@@ -128,10 +127,10 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
-export async function probeClaudeState(
+export async function observeClaudeStatus(
   worktreePath: string,
   args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStateProbe | null> {
+): Promise<AgentStatusObservation | null> {
   const sessionFile = await findLatestSessionFile(worktreePath);
   if (!sessionFile) {
     return null;
@@ -150,28 +149,28 @@ export async function probeClaudeState(
 
     if (!args.processAlive) {
       return {
-        state: lastType === "error" ? "error" : "stopped",
+        status: lastType === "error" ? "error" : "exited",
         signalAt,
       };
     }
 
     if (lastType === "permission_request") {
-      return { state: "needs_input", signalAt };
+      return { status: "needs_input", signalAt };
     }
     if (lastType === "error") {
-      return { state: "error", signalAt };
+      return { status: "error", signalAt };
     }
     if (WAITING_ENTRY_TYPES.has(lastType)) {
-      return { state: "waiting", signalAt };
+      return { status: "waiting", signalAt };
     }
     if (ACTIVE_ENTRY_TYPES.has(lastType)) {
       return {
-        state: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
+        status: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
         signalAt,
       };
     }
     return {
-      state: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
+      status: signalAgeMs <= args.signalWindowMs ? "working" : "waiting",
       signalAt,
     };
   } catch {
@@ -180,18 +179,8 @@ export async function probeClaudeState(
 }
 
 export function buildClaudePlan(prompt: string): AgentLaunchPlan {
-  return buildClaudePlanWithSettings(prompt);
-}
-
-function buildClaudePlanWithSettings(
-  prompt: string,
-  options?: { settingsPath?: string },
-): AgentLaunchPlan {
-  const settingsArg = options?.settingsPath
-    ? ` --settings ${shellEscape(options.settingsPath)}`
-    : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -200,65 +189,9 @@ function buildClaudePlanWithSettings(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string },
 ): AgentResumePlan {
-  const settingsArg = options?.settingsPath
-    ? ` --settings ${shellEscape(options.settingsPath)}`
-    : "";
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${settingsArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions`,
     readyMarkers: ["❯"],
   };
-}
-
-export async function buildClaudeRestorePlan(
-  worktreePath: string,
-  prompt: string,
-): Promise<AgentLaunchPlan | null> {
-  const sessionId = await findClaudeSessionId(worktreePath);
-  if (!sessionId) {
-    return null;
-  }
-
-  return {
-    ...buildClaudeResumePlan(sessionId),
-    initialMessage: prompt,
-  };
-}
-
-export async function ensureClaudeHookSettings(sessionToolDir: string): Promise<string> {
-  const settingsPath = join(sessionToolDir, CLAUDE_HOOK_SETTINGS_FILE);
-  const hooksConfig = {
-    hooks: {
-      SessionStart: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
-      UserPromptSubmit: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
-    },
-  };
-  await writeFile(settingsPath, JSON.stringify(hooksConfig, null, 2) + "\n", "utf8");
-  return settingsPath;
-}
-
-export function buildClaudePlanWithHooks(prompt: string, settingsPath: string): AgentLaunchPlan {
-  return buildClaudePlanWithSettings(prompt, { settingsPath });
-}
-
-export function buildClaudeResumePlanWithHooks(
-  sessionId: string,
-  settingsPath: string,
-  binary = claudeCommand(),
-): AgentResumePlan {
-  return buildClaudeResumePlan(sessionId, binary, { settingsPath });
 }
