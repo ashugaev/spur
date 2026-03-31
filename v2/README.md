@@ -67,6 +67,9 @@ spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https:/
 spur-slots --link design=https://figma.com/...
 ```
 
+Spur also injects a hidden `spur-session-status` helper for its Claude/Codex hook config.
+That helper is the single live status write path for `working`, `waiting`, and `needs_input`.
+
 Each live session also gets a `spur` wrapper on its shell `PATH`, bound to that session's config.
 Use it from inside the session workspace when the agent needs to start a session-bound sidecar:
 

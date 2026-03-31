@@ -5,9 +5,13 @@ import {
   buildAgentLaunchPlan,
   buildAgentResumePlan,
   findAgentSessionId,
-  observeAgentStatus,
   parseAgentName,
 } from "./agents/index.js";
+import {
+  ensureAgentStatusHooks,
+  removeAgentStatusHooks,
+  STATUS_HOOK_GIT_STATUS_EXCLUDES,
+} from "./agents/status-hooks.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import {
@@ -27,7 +31,6 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
-  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSession,
   getTmuxSessionActivity,
@@ -41,6 +44,7 @@ import {
 } from "./runtime-tmux.js";
 import {
   SLOT_TOOL_NAME,
+  STATUS_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
   removeSessionSlotTool,
@@ -60,9 +64,11 @@ import {
   type SendMessageRequest,
   type SessionRecord,
   type SessionStatus,
+  type SessionStatusUpdateStatus,
   type SessionView,
   type SpawnOverrides,
   type SpawnSessionRequest,
+  type UpdateSessionStatusRequest,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import {
@@ -75,28 +81,9 @@ import {
   workspaceExists,
 } from "./workspace.js";
 
-const WORKING_SIGNAL_WINDOW_MS = 90_000;
-const WAITING_INPUT_TAIL_LINES = 12;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
-const PROMPT_RE = /^[❯›>$#](?:\s.*)?$/;
-const TRAILING_UI_RE = [
-  /^[─━]+$/,
-  /^⏵⏵ /,
-  /^Claude in Chrome enabled\b/,
-  /^Update available!\b/,
-  /^gpt-[\w.-]+\b.*·/,
-];
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
-const PIPELINE_READY_GRACE_MS = 2_000;
-const PERMISSION_PROMPTS = [
-  /approval required/i,
-  /Do you want to proceed\?/i,
-  /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
-];
-const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
-const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
-const INTERVIEW_OPTION_RE = /^\d+\.\s/;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
@@ -194,38 +181,6 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
-export function isWaitingInput(lines: string[]): boolean {
-  const tailLines = lines.slice(-WAITING_INPUT_TAIL_LINES).map((line) => line.trim());
-  const tail = tailLines.join("\n");
-  if (PERMISSION_PROMPTS.some((pattern) => pattern.test(tail))) {
-    return true;
-  }
-  return (
-    tailLines.some((line) => INTERVIEW_ENTER_RE.test(line)) &&
-    tailLines.some((line) => INTERVIEW_ESCAPE_RE.test(line)) &&
-    tailLines.filter((line) => INTERVIEW_OPTION_RE.test(line)).length >= 2
-  );
-}
-
-function normalizePaneLines(pane: string): string[] {
-  const lines = pane
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-  while (lines.length > 0) {
-    const trimmed = lines.at(-1)?.trim() ?? "";
-    if (!TRAILING_UI_RE.some((pattern) => pattern.test(trimmed))) {
-      break;
-    }
-    lines.pop();
-  }
-  return lines;
-}
-
-function isFresh(timestamp: Date, thresholdMs: number): boolean {
-  return Date.now() - timestamp.getTime() <= thresholdMs;
-}
-
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
   if (!nextStepNotBefore) {
     return 0;
@@ -235,26 +190,6 @@ function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number
     return 0;
   }
   return Math.max(0, timestamp - Date.now());
-}
-
-function isPromptReadyState(pane: string): boolean {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) {
-    return false;
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  return Boolean(lastLine) && PROMPT_RE.test(lastLine);
-}
-
-function classifyPipelinePaneState(
-  pane: string,
-): Extract<SessionStatus, "working" | "waiting" | "needs_input"> {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) {
-    return "needs_input";
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
 }
 
 export function isRestorableSession(
@@ -360,6 +295,30 @@ async function resolveSpawnBranch(args: {
     );
   }
   return { branch: currentBranch, branchSource: "shared_workspace" };
+}
+
+function normalizeStatusUpdate(
+  agent: SessionRecord["agent"],
+  request: UpdateSessionStatusRequest,
+): { status: SessionStatusUpdateStatus; error?: string } {
+  const requestedStatus = request.status;
+  if (
+    requestedStatus !== "working" &&
+    requestedStatus !== "waiting" &&
+    requestedStatus !== "needs_input" &&
+    requestedStatus !== "error"
+  ) {
+    throw new Error("status must be one of working, waiting, needs_input, or error");
+  }
+  if (request.error !== undefined && typeof request.error !== "string") {
+    throw new Error("error must be a string");
+  }
+  const status =
+    agent === "codex" && requestedStatus === "needs_input" ? "waiting" : requestedStatus;
+  return {
+    status,
+    ...(status === "error" && request.error ? { error: request.error.trim() || "session error" } : {}),
+  };
 }
 
 function projectHasService(project: ProjectConfig, serviceId: string): boolean {
@@ -684,6 +643,7 @@ export class SessionService {
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
+    let hooksConfigured = false;
     let prompt = "";
     let steps: string[] | undefined;
     let preflightOutcome: "branch" | "defer" | undefined;
@@ -834,6 +794,14 @@ export class SessionService {
         });
       }
 
+      stage = "hooks";
+      ensureAgentStatusHooks({
+        agent,
+        worktreePath: workspacePath,
+        statusCommandPath: join(sessionToolDir, STATUS_TOOL_NAME),
+      });
+      hooksConfigured = true;
+
       const firstStage = steps?.[0];
       const initialMessage =
         steps && firstStage
@@ -847,14 +815,6 @@ export class SessionService {
             awaitingStepIndex: 0,
           }
         : undefined;
-      const runningRecord: SessionRecord = {
-        ...placeholder,
-        worktreePath: workspacePath,
-        launchCommand: launchPlan.launchCommand,
-        status: "working",
-        updatedAt: nowIso(),
-        ...(pipeline ? { pipeline } : {}),
-      };
 
       stage = "tmux.create";
       await createTmuxSession({
@@ -882,7 +842,7 @@ export class SessionService {
       });
 
       stage = "tmux.status";
-      await syncTmuxStatus(tmuxSession, runningRecord.slots);
+      await syncTmuxStatus(tmuxSession, placeholder.slots);
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
       this.logEvent("session.spawn.ready", {
@@ -891,6 +851,17 @@ export class SessionService {
         projectId: request.project,
         message: `Agent prompt is ready for ${sessionId}`,
       });
+
+      stage = "record.write";
+      const runningRecord: SessionRecord = {
+        ...placeholder,
+        worktreePath: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        status: "working",
+        updatedAt: nowIso(),
+        ...(pipeline ? { pipeline } : {}),
+      };
+      writeSession(this.config.dataDir, runningRecord);
 
       stage = "prompt.send";
       await sendMessageToTmux(tmuxSession, withSessionSlotInstructions(launchPlan.initialMessage));
@@ -903,9 +874,6 @@ export class SessionService {
           messageLength: launchPlan.initialMessage.length,
         },
       });
-
-      stage = "record.write";
-      writeSession(this.config.dataDir, runningRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -921,10 +889,18 @@ export class SessionService {
         this.schedulePipelineRunner(runningRecord.id);
       }
 
-      return await this.enrich(runningRecord);
+      return await this.get(sessionId);
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
+        if (hooksConfigured && workspacePath && workspaceExists(workspacePath)) {
+          removeAgentStatusHooks({
+            agent:
+              agent ??
+              parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+            worktreePath: workspacePath,
+          });
+        }
         removeSessionSlotTool(this.config.dataDir, sessionId);
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
@@ -1012,20 +988,17 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
+    const readySession = await this.ensureSessionReadyForSend(session);
+    const interrupt = options?.interrupt === true && readySession.status !== "waiting";
+    const updated: SessionRecord = {
+      ...readySession,
+      status: "working",
+      updatedAt: nowIso(),
+    };
+
     try {
-      const readySession = await this.ensureSessionReadyForSend(session);
-      let interrupt = options?.interrupt === true;
-      if (interrupt) {
-        const pane = await captureTmuxPane(readySession.tmuxSession, 80);
-        interrupt = !isPromptReadyState(pane);
-      }
-      await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
-      const updated: SessionRecord = {
-        ...readySession,
-        status: "working",
-        updatedAt: nowIso(),
-      };
       writeSession(this.config.dataDir, updated);
+      await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
@@ -1036,8 +1009,9 @@ export class SessionService {
           messageLength: message.length,
         },
       });
-      return await this.enrich(updated);
+      return await this.get(sessionId);
     } catch (error) {
+      writeSession(this.config.dataDir, readySession);
       const failure = error instanceof Error ? error.message : String(error);
       this.logEvent("session.message.failed", {
         level: "error",
@@ -1088,6 +1062,48 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  async updateStatus(sessionId: string, request: UpdateSessionStatusRequest): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (isStickySessionStatus(session.status)) {
+      return this.enrich(session);
+    }
+
+    const next = normalizeStatusUpdate(session.agent, request);
+    const updated: SessionRecord = {
+      ...session,
+      status: next.status,
+      updatedAt: nowIso(),
+      ...(next.error
+        ? { error: next.error }
+        : next.status === "error" && session.error
+          ? { error: session.error }
+          : {}),
+    };
+    if (updated.status !== "error" && !next.error) {
+      delete updated.error;
+    }
+    if (updated.status === session.status && (updated.error ?? "") === (session.error ?? "")) {
+      return this.enrich(session);
+    }
+
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.status.updated", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Updated ${sessionId} status to ${updated.status}`,
+      details: {
+        previousStatus: session.status,
+        requestedStatus: request.status,
+        agent: session.agent,
+      },
+    });
+    return this.enrich(updated);
+  }
+
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       await killTmuxSession(service.tmuxSession);
@@ -1115,6 +1131,12 @@ export class SessionService {
     try {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
+      if (session.worktreePath && workspaceExists(session.worktreePath)) {
+        removeAgentStatusHooks({
+          agent: session.agent,
+          worktreePath: session.worktreePath,
+        });
+      }
       if (targetStatus === "completed") {
         if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
           const projectContext = await this.resolveSessionProjectContext(session);
@@ -1163,7 +1185,12 @@ export class SessionService {
     if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
       const projectContext = await this.resolveSessionProjectContext(session);
       const reasons: string[] = [];
-      if (await hasUncommittedChanges(session.worktreePath, projectContext.symlinks)) {
+      if (
+        await hasUncommittedChanges(session.worktreePath, [
+          ...projectContext.symlinks,
+          ...STATUS_HOOK_GIT_STATUS_EXCLUDES,
+        ])
+      ) {
         reasons.push("uncommitted changes in its worktree");
       }
       if (await hasUnpushedCommits(session.worktreePath)) {
@@ -1177,6 +1204,12 @@ export class SessionService {
     try {
       await killTmuxSession(session.tmuxSession);
       await this.cleanupSessionServices(session);
+      if (session.worktreePath && workspaceExists(session.worktreePath)) {
+        removeAgentStatusHooks({
+          agent: session.agent,
+          worktreePath: session.worktreePath,
+        });
+      }
       if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
         const projectContext = await this.resolveSessionProjectContext(session);
         await removeWorktree(projectContext.repoPath, session.worktreePath);
@@ -1285,6 +1318,11 @@ export class SessionService {
       sessionId: session.id,
       configPath: this.config.configPath,
     });
+    ensureAgentStatusHooks({
+      agent: session.agent,
+      worktreePath: session.worktreePath,
+      statusCommandPath: join(sessionToolDir, STATUS_TOOL_NAME),
+    });
     const env = buildSessionEnv({
       agent: session.agent,
       projectId: session.project,
@@ -1377,6 +1415,18 @@ export class SessionService {
     const baseLaunchCommand = current.launchCommand || baseLaunchPlan.launchCommand;
     const resumePlan = buildAgentResumePlan(current.agent, agentSessionId, baseLaunchCommand);
     const projectContext = await this.resolveSessionProjectContext(current);
+    const { error: _ignoredError, ...restoredBase } = current;
+    const restored: SessionRecord = {
+      ...restoredBase,
+      launchCommand: baseLaunchCommand,
+      status: "working",
+      updatedAt: nowIso(),
+    };
+    ensureAgentStatusHooks({
+      agent: current.agent,
+      worktreePath: current.worktreePath,
+      statusCommandPath: join(sessionToolDir, STATUS_TOOL_NAME),
+    });
 
     try {
       await killTmuxSession(current.tmuxSession);
@@ -1399,9 +1449,11 @@ export class SessionService {
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
+      writeSession(this.config.dataDir, restored);
       await sendMessageToTmux(current.tmuxSession, withSessionSlotInstructions(restorePrompt));
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
+      writeSession(this.config.dataDir, current);
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.restore.failed", {
         level: "error",
@@ -1411,15 +1463,6 @@ export class SessionService {
       });
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
-
-    const { error: _ignoredError, ...restoredBase } = current;
-    const restored: SessionRecord = {
-      ...restoredBase,
-      launchCommand: baseLaunchCommand,
-      status: "working",
-      updatedAt: nowIso(),
-    };
-    writeSession(this.config.dataDir, restored);
     this.logEvent("session.restore.completed", {
       level: "info",
       sessionId,
@@ -1433,7 +1476,7 @@ export class SessionService {
     if (restored.pipeline) {
       this.schedulePipelineRunner(restored.id);
     }
-    return this.enrich(restored);
+    return this.get(sessionId);
   }
 
   private resumeRunningPipelines(): void {
@@ -1563,30 +1606,20 @@ export class SessionService {
             `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
           );
         }
+        writeSession(this.config.dataDir, {
+          ...session,
+          status: "working",
+          updatedAt: nowIso(),
+          pipeline: {
+            ...session.pipeline,
+            nextStepIndex: stepIndex + 1,
+            awaitingStepIndex: stepIndex,
+          },
+        });
         await sendMessageToTmux(
           session.tmuxSession,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
         );
-
-        const latest = readSession(this.config.dataDir, sessionId);
-        if (!canRunPipeline(latest)) {
-          return;
-        }
-
-        const {
-          error: _pipelineError,
-          nextStepNotBefore: _nextStepNotBefore,
-          ...pipelineBase
-        } = latest.pipeline;
-        writeSession(this.config.dataDir, {
-          ...latest,
-          updatedAt: nowIso(),
-          pipeline: {
-            ...pipelineBase,
-            nextStepIndex: Math.max(latest.pipeline.nextStepIndex, stepIndex + 1),
-            awaitingStepIndex: stepIndex,
-          },
-        });
         this.logEvent("session.pipeline.step_sent", {
           level: "info",
           sessionId,
@@ -1627,14 +1660,7 @@ export class SessionService {
         return "exited";
       }
 
-      const stepUpdatedAt = new Date(session.updatedAt);
-      const pane = await captureTmuxPane(session.tmuxSession, 80);
-      const paneState = classifyPipelinePaneState(pane);
-      if (paneState === "needs_input") {
-        await sleep(PIPELINE_POLL_INTERVAL_MS);
-        continue;
-      }
-      if (paneState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (session.status === "waiting") {
         return "ready";
       }
 
@@ -1711,22 +1737,10 @@ export class SessionService {
     const processAlive = runtimeAlive
       ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
       : false;
-    const observedStatus = workspacePresent
-      ? await observeAgentStatus(session.agent, session.worktreePath, {
-          processAlive,
-          signalWindowMs: WORKING_SIGNAL_WINDOW_MS,
-        })
-      : null;
-    const lastActivityAt = (
-      latestActivityAt(updatedAt, tmuxActivityAt, observedStatus?.signalAt ?? null) ?? updatedAt
-    ).toISOString();
+    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
     let status = session.status;
-    if (!isStickySessionStatus(status)) {
-      if (observedStatus) {
-        status = observedStatus.status;
-      } else if (!runtimeAlive || !processAlive) {
-        status = "exited";
-      }
+    if (!isStickySessionStatus(status) && (!runtimeAlive || !processAlive)) {
+      status = "exited";
     }
     const nextSession =
       status === session.status

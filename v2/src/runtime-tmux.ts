@@ -33,6 +33,14 @@ function buildEnvArgs(env?: Record<string, string>): string[] {
   return envArgs;
 }
 
+function buildShellCommand(command: string, env?: Record<string, string>): string {
+  const envPrefix = Object.entries(env ?? {})
+    .map(([key, value]) => `${key}=${shellEscape(value)}`)
+    .join(" ");
+  const shellExec = `sh -lc ${shellEscape(`exec ${command}`)}`;
+  return envPrefix ? `env ${envPrefix} ${shellExec}` : shellExec;
+}
+
 function exactSessionTarget(sessionName: string): string {
   return `=${sessionName}`;
 }
@@ -139,6 +147,7 @@ export async function createTmuxSession(input: {
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs = buildEnvArgs(input.env);
+  const shellCommand = buildShellCommand(input.launchCommand, input.env);
 
   await execFileAsync("tmux", [
     "-f",
@@ -150,18 +159,13 @@ export async function createTmuxSession(input: {
     "-c",
     input.cwd,
     ...envArgs,
+    shellCommand,
   ]);
-  await sleep(300);
-
+  await sleep(100);
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand);
-  } catch (error) {
-    try {
-      await tmux("kill-session", "-t", sessionTarget);
-    } catch {
-      // Best effort only.
-    }
-    throw error;
+    await tmux("set-option", "-t", sessionTarget, "remain-on-exit", "on");
+  } catch {
+    // Best effort only. The session is already live at this point.
   }
 }
 
@@ -172,7 +176,7 @@ export async function createTmuxCommandSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
-  const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
+  const shellCommand = buildShellCommand(input.launchCommand, input.env);
   await execFileAsync("tmux", [
     "-f",
     TMUX_CONFIG_PATH,

@@ -13,6 +13,7 @@ const CLI_ENTRYPOINT = existsSync(DIST_CLI_ENTRYPOINT)
   : fileURLToPath(new URL("./cli.js", import.meta.url));
 
 export const SLOT_TOOL_NAME = "spur-slots";
+export const STATUS_TOOL_NAME = "spur-session-status";
 const SPUR_WRAPPER_NAME = "spur";
 
 interface NormalizedSlotsUpdate {
@@ -182,6 +183,14 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} slots --session ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
+    join(toolDir, STATUS_TOOL_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} session-status --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

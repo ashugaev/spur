@@ -38,9 +38,11 @@ import type {
   RunServiceRequest,
   SendMessageRequest,
   SessionLink,
+  SessionStatusUpdateStatus,
   ServiceInstanceView,
   SessionView,
   SpawnSessionRequest,
+  UpdateSessionStatusRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -427,6 +429,13 @@ function parseSlotLink(value: string): SessionLink {
     label: value.slice(0, index),
     url: value.slice(index + 1),
   };
+}
+
+function parseSessionStatus(value: string): SessionStatusUpdateStatus {
+  if (value === "working" || value === "waiting" || value === "needs_input" || value === "error") {
+    return value;
+  }
+  throw new Error("status must be one of working, waiting, needs_input, or error");
 }
 
 function currentSessionId(): string {
@@ -1251,6 +1260,30 @@ export function createProgram(cliEntrypoint: string): Command {
         success: (session) => `Updated slots for ${session.id}.`,
         render: renderSessionCard,
       });
+    });
+
+  program
+    .command("session-status", { hidden: true })
+    .description("Internal session status updates.")
+    .requiredOption("--session <id>", "Session id")
+    .argument("<status>", "Session status")
+    .option("--error <text>", "Optional error text")
+    .option("--json", "Print raw JSON")
+    .action(async (status: string, options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      const payload: UpdateSessionStatusRequest = {
+        status: parseSessionStatus(status),
+        ...(options.error !== undefined ? { error: options.error as string } : {}),
+      };
+      const session = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${options.session as string}/status`,
+        payload,
+        configPath,
+      );
+      if (options.json) {
+        printJson(session);
+      }
     });
 
   const daemon = program

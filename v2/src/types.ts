@@ -11,6 +11,10 @@ export type SessionStatus =
   | "killed"
   | "exited"
   | "error";
+export type SessionStatusUpdateStatus = Extract<
+  SessionStatus,
+  "working" | "waiting" | "needs_input" | "error"
+>;
 export type BranchSource = "explicit" | "preflight" | "shared_workspace";
 export type ServiceInstanceStatus = "running" | "stopped" | "errored";
 export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
@@ -233,6 +237,11 @@ export interface UpdateSessionSlotsRequest {
   clearTitle?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
+}
+
+export interface UpdateSessionStatusRequest {
+  status: SessionStatusUpdateStatus;
+  error?: string;
 }
 
 export interface SyncProjectsRequest {

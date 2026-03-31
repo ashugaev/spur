@@ -1,34 +1,14 @@
 import { createReadStream } from "node:fs";
-import { lstat, open, readFile, readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStatusObservation } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CODEX_SESSIONS_DIR = join(process.env["HOME"] || "", ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
 const SESSION_INDEX_TTL_MS = 30_000;
-const MAX_SESSION_TAIL_BYTES = 131_072;
-
-const ACTIVE_EVENT_TYPES = new Set([
-  "task_started",
-  "agent_message:commentary",
-  "assistant:commentary",
-  "function_call",
-  "function_call_output",
-  "custom_tool_call",
-  "custom_tool_call_output",
-  "web_search_call",
-  "reasoning",
-]);
-
-const WAITING_EVENT_TYPES = new Set([
-  "task_complete",
-  "turn_aborted",
-  "agent_message:final_answer",
-  "assistant:final_answer",
-]);
 
 interface IndexedSessionFile {
   path: string;
@@ -52,9 +32,6 @@ interface CodexSessionLine {
   payload?: {
     cwd?: string;
     id?: string;
-    phase?: string;
-    role?: string;
-    type?: string;
   };
   threadId?: string;
   type?: string;
@@ -204,24 +181,6 @@ function resolveSessionRootDirs(options?: {
   return [...new Set(roots.filter(Boolean))];
 }
 
-async function findSessionFile(
-  worktreePath: string,
-  options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
-): Promise<string | null> {
-  const candidates = await resolveWorktreePathCandidates(worktreePath);
-  let bestMatch: IndexedSessionFile | null = null;
-  for (const sessionRootDir of resolveSessionRootDirs(options)) {
-    const sessionIndex = await loadSessionIndexForRoot(sessionRootDir);
-    for (const candidate of candidates) {
-      const match = sessionIndex.get(candidate);
-      if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
-        bestMatch = match;
-      }
-    }
-  }
-  return bestMatch?.path ?? null;
-}
-
 async function readThreadId(filePath: string): Promise<string | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
@@ -241,106 +200,6 @@ async function readThreadId(filePath: string): Promise<string | null> {
     }
   } catch {
     return null;
-  }
-  return null;
-}
-
-async function readSessionTail(filePath: string, fileSize?: number): Promise<CodexSessionLine[]> {
-  let content: string;
-  let offset: number;
-  try {
-    const size = fileSize ?? (await stat(filePath)).size;
-    offset = Math.max(0, size - MAX_SESSION_TAIL_BYTES);
-    if (offset === 0) {
-      content = await readFile(filePath, "utf-8");
-    } else {
-      const handle = await open(filePath, "r");
-      try {
-        const length = size - offset;
-        const buffer = Buffer.allocUnsafe(length);
-        await handle.read(buffer, 0, length, offset);
-        content = buffer.toString("utf-8");
-      } finally {
-        await handle.close();
-      }
-    }
-  } catch {
-    return [];
-  }
-
-  const firstNewline = content.indexOf("\n");
-  const safeContent = offset > 0 && firstNewline >= 0 ? content.slice(firstNewline + 1) : content;
-  const lines: CodexSessionLine[] = [];
-  for (const line of safeContent.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      lines.push(JSON.parse(trimmed) as CodexSessionLine);
-    } catch {
-      // Ignore malformed lines and keep searching for the latest valid entry.
-    }
-  }
-  return lines;
-}
-
-function semanticStatus(
-  line: CodexSessionLine,
-): Extract<AgentStatusObservation["status"], "working" | "waiting"> | null {
-  if (line.type === "event_msg") {
-    const payload = line.payload;
-    const payloadType = payload?.type;
-    if (!payloadType) {
-      return null;
-    }
-    if (WAITING_EVENT_TYPES.has(payloadType)) {
-      return "waiting";
-    }
-    if (payloadType === "agent_message") {
-      if (WAITING_EVENT_TYPES.has(`agent_message:${payload.phase}`)) {
-        return "waiting";
-      }
-      if (ACTIVE_EVENT_TYPES.has(`agent_message:${payload.phase}`)) {
-        return "working";
-      }
-      return null;
-    }
-    return ACTIVE_EVENT_TYPES.has(payloadType) ? "working" : null;
-  }
-
-  if (line.type !== "response_item") {
-    return null;
-  }
-  const payload = line.payload;
-  const payloadType = payload?.type;
-  if (!payloadType) {
-    return null;
-  }
-  if (payloadType === "message") {
-    if (payload.role === "assistant" && WAITING_EVENT_TYPES.has(`assistant:${payload.phase}`)) {
-      return "waiting";
-    }
-    if (payload.role === "assistant" && ACTIVE_EVENT_TYPES.has(`assistant:${payload.phase}`)) {
-      return "working";
-    }
-    return null;
-  }
-  return ACTIVE_EVENT_TYPES.has(payloadType) ? "working" : null;
-}
-
-async function readSemanticStatus(
-  filePath: string,
-  fileSize?: number,
-): Promise<Extract<AgentStatusObservation["status"], "working" | "waiting"> | null> {
-  const lines = await readSessionTail(filePath, fileSize);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    if (!line) {
-      continue;
-    }
-    const status = semanticStatus(line);
-    if (status) {
-      return status;
-    }
   }
   return null;
 }
@@ -366,43 +225,9 @@ export async function findCodexSessionId(
   return bestMatch.threadId ?? readThreadId(bestMatch.path);
 }
 
-export async function observeCodexStatus(
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStatusObservation | null> {
-  const sessionFile = await findSessionFile(worktreePath);
-  if (!sessionFile) {
-    return null;
-  }
-
-  try {
-    const fileStat = await stat(sessionFile);
-    const signalAt = fileStat.mtime;
-    if (!args.processAlive) {
-      return { status: "exited", signalAt };
-    }
-    const status = await readSemanticStatus(sessionFile, fileStat.size);
-    if (status === "waiting") {
-      return { status, signalAt };
-    }
-    if (status === "working") {
-      return {
-        status: Date.now() - fileStat.mtimeMs <= args.signalWindowMs ? "working" : "waiting",
-        signalAt,
-      };
-    }
-    return {
-      status: Date.now() - fileStat.mtimeMs <= args.signalWindowMs ? "working" : "waiting",
-      signalAt,
-    };
-  } catch {
-    return null;
-  }
-}
-
 export function buildCodexPlan(prompt: string): AgentLaunchPlan {
   return {
-    launchCommand: `${codexCommand()} --dangerously-bypass-approvals-and-sandbox`,
+    launchCommand: `${codexCommand()} -c features.codex_hooks=true --dangerously-bypass-approvals-and-sandbox`,
     initialMessage: prompt,
     readyMarkers: ["OpenAI Codex", "›"],
   };
@@ -410,7 +235,7 @@ export function buildCodexPlan(prompt: string): AgentLaunchPlan {
 
 export function buildCodexResumePlan(threadId: string, binary = codexCommand()): AgentResumePlan {
   return {
-    launchCommand: `${shellEscape(binary)} resume --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+    launchCommand: `${shellEscape(binary)} resume -c features.codex_hooks=true --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
     readyMarkers: ["›"],
   };
 }

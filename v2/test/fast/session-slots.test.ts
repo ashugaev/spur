@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
   SLOT_TOOL_NAME,
+  STATUS_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
@@ -87,6 +88,9 @@ describe("session slots", () => {
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       "slots --session 'api-1'",
+    );
+    expect(readFileSync(join(toolDir, STATUS_TOOL_NAME), "utf8")).toContain(
+      "session-status --session 'api-1'",
     );
   });
 });

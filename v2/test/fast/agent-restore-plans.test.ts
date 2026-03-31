@@ -19,6 +19,16 @@ afterEach(async () => {
 });
 
 describe("agent resume metadata", () => {
+  it("keeps Codex hooks enabled in the interactive launch plan", async () => {
+    vi.resetModules();
+    const { buildCodexPlan } = await import("../../src/agents/codex.js");
+
+    const plan = buildCodexPlan("hello");
+
+    expect(plan.launchCommand).toContain("-c features.codex_hooks=true");
+    expect(plan.launchCommand).toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
   it("keeps scanning Codex session headers when an early JSONL line is malformed", async () => {
     const homeDir = await mkdtemp(join(tmpdir(), "spur-codex-home-"));
     cleanupDirs.push(homeDir);
@@ -44,7 +54,7 @@ describe("agent resume metadata", () => {
     const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
     expect(sessionId).toBe("thread-123");
-    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume");
+    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume -c features.codex_hooks=true");
     expect(plan.launchCommand).toContain("thread-123");
   });
 
@@ -77,7 +87,7 @@ describe("agent resume metadata", () => {
     const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
     expect(sessionId).toBe("session-123");
-    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume");
+    expect(plan.launchCommand).toContain("'/tmp/fake-codex' resume -c features.codex_hooks=true");
     expect(plan.launchCommand).toContain("session-123");
   });
 
@@ -112,6 +122,7 @@ describe("agent resume metadata", () => {
     const plan = buildCodexResumePlan(sessionId ?? "", "/tmp/fake-codex");
 
     expect(sessionId).toBe("session-456");
+    expect(plan.launchCommand).toContain("resume -c features.codex_hooks=true");
     expect(plan.launchCommand).toContain("session-456");
   });
 });

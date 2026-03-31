@@ -4,7 +4,7 @@ import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
 const findAgentSessionIdMock = vi.fn();
-const observeAgentStatusMock = vi.fn();
+const ensureAgentStatusHooksMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const loadConfigMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
@@ -40,6 +40,7 @@ const workspaceExistsMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
+const removeAgentStatusHooksMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
@@ -48,8 +49,13 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
   buildAgentResumePlan: buildAgentResumePlanMock,
   findAgentSessionId: findAgentSessionIdMock,
-  observeAgentStatus: observeAgentStatusMock,
   parseAgentName: parseAgentNameMock,
+}));
+
+vi.mock("../../src/agents/status-hooks.js", () => ({
+  ensureAgentStatusHooks: ensureAgentStatusHooksMock,
+  removeAgentStatusHooks: removeAgentStatusHooksMock,
+  STATUS_HOOK_GIT_STATUS_EXCLUDES: [".claude/", ".codex/"],
 }));
 
 vi.mock("../../src/config.js", () => ({
@@ -98,6 +104,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
 
 vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
+  STATUS_TOOL_NAME: "spur-session-status",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   removeSessionSlotTool: removeSessionSlotToolMock,
@@ -225,7 +232,7 @@ describe("SessionService", () => {
       .mockImplementation((agent: string, initialMessage: string) => ({
         launchCommand:
           agent === "codex"
-            ? "codex --dangerously-bypass-approvals-and-sandbox"
+            ? "codex -c features.codex_hooks=true --dangerously-bypass-approvals-and-sandbox"
             : "claude --dangerously-skip-permissions",
         initialMessage,
         readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
@@ -234,12 +241,12 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation((_agent: string, agentSessionId: string, launchCommand = "") => ({
         launchCommand: launchCommand.includes("codex")
-          ? `codex resume --dangerously-bypass-approvals-and-sandbox ${agentSessionId}`
+          ? `codex resume -c features.codex_hooks=true --dangerously-bypass-approvals-and-sandbox ${agentSessionId}`
           : `claude --resume ${agentSessionId} --dangerously-skip-permissions`,
         readyMarkers: launchCommand.includes("codex") ? ["›"] : ["❯"],
       }));
     findAgentSessionIdMock.mockReset().mockResolvedValue("native-123");
-    observeAgentStatusMock.mockReset().mockResolvedValue(null);
+    ensureAgentStatusHooksMock.mockReset();
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
@@ -264,6 +271,7 @@ describe("SessionService", () => {
     resolveRepoPathFromWorktreeMock.mockReset().mockResolvedValue(undefined);
     workspaceExistsMock.mockReset().mockReturnValue(true);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
+    removeAgentStatusHooksMock.mockReset();
     removeSessionSlotToolMock.mockReset();
     withSessionSlotInstructionsMock
       .mockReset()
@@ -321,11 +329,39 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock.mock.calls[0]?.[0].env).not.toHaveProperty(
       "SPUR_AGENT_STATE_COMMAND",
     );
+    expect(ensureAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      statusCommandPath: "/tmp/spur-tools/api-1/spur-session-status",
+    });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello");
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls.at(-1)?.[1].status).toBe("working");
     expect(result.status).toBe("working");
     expect(sessions.get("api-1")?.status).toBe("working");
+  });
+
+  it("keeps a fresher hook-driven waiting status after the initial prompt send", async () => {
+    sendMessageToTmuxMock.mockImplementationOnce(async () => {
+      const current = sessions.get("api-1");
+      if (current) {
+        sessions.set("api-1", {
+          ...current,
+          status: "waiting",
+          updatedAt: "2026-03-18T10:05:01.000Z",
+        });
+      }
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(result.status).toBe("waiting");
+    expect(sessions.get("api-1")?.status).toBe("waiting");
   });
 
   it("stores pipeline progress without a separate pipeline status layer", async () => {
@@ -362,6 +398,10 @@ describe("SessionService", () => {
     ).rejects.toThrow("Failed to spawn api-1: tmux never ready");
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+    });
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
     expect(sessions.get("api-1")?.status).toBe("error");
@@ -396,6 +436,27 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.status).toBe("working");
   });
 
+  it("does not overwrite a fresher waiting status after sending a follow-up", async () => {
+    sessions.set("api-1", sessionRecord({ status: "waiting" }));
+    sendMessageToTmuxMock.mockImplementationOnce(async () => {
+      const current = sessions.get("api-1");
+      if (current) {
+        sessions.set("api-1", {
+          ...current,
+          status: "waiting",
+          updatedAt: "2026-03-18T10:05:01.000Z",
+        });
+      }
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.deliver("api-1", "follow up");
+
+    expect(result.status).toBe("waiting");
+    expect(sessions.get("api-1")?.status).toBe("waiting");
+  });
+
   it("recovers an exited session through native resume before delivering", async () => {
     sessions.set("api-1", sessionRecord({ status: "exited" }));
     tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
@@ -405,6 +466,11 @@ describe("SessionService", () => {
     const result = await service.deliver("api-1", "follow up");
 
     expect(findAgentSessionIdMock).toHaveBeenCalledWith("claude", "/tmp/worktree");
+    expect(ensureAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/worktree",
+      statusCommandPath: "/tmp/spur-tools/api-1/spur-session-status",
+    });
     expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
       "claude",
       "native-123",
@@ -484,19 +550,33 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
   });
 
-  it("prefers observed live status and persists the flat result", async () => {
+  it("persists hook-driven status updates in the flat session field", async () => {
     sessions.set("api-1", sessionRecord({ status: "working" }));
-    observeAgentStatusMock.mockResolvedValueOnce({
-      status: "needs_input",
-      signalAt: new Date("2026-03-18T10:04:45.000Z"),
-    });
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    const result = await service.get("api-1");
+    const result = await service.updateStatus("api-1", { status: "needs_input" });
 
     expect(result.status).toBe("needs_input");
     expect(sessions.get("api-1")?.status).toBe("needs_input");
+  });
+
+  it("downgrades codex needs_input updates to waiting", async () => {
+    sessions.set(
+      "api-1",
+      sessionRecord({
+        agent: "codex",
+        launchCommand:
+          "codex -c features.codex_hooks=true --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateStatus("api-1", { status: "needs_input" });
+
+    expect(result.status).toBe("waiting");
+    expect(sessions.get("api-1")?.status).toBe("waiting");
   });
 
   it("marks dead non-terminal sessions as exited", async () => {
@@ -511,17 +591,13 @@ describe("SessionService", () => {
     expect(sessions.get("api-1")?.status).toBe("exited");
   });
 
-  it("does not override manual statuses with live observations", async () => {
+  it("ignores hook updates after a manual terminal status takes over", async () => {
     sessions.set("api-1", sessionRecord({ status: "paused" }));
-    observeAgentStatusMock.mockResolvedValueOnce({
-      status: "working",
-      signalAt: new Date("2026-03-18T10:04:45.000Z"),
-    });
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     writeSessionMock.mockClear();
 
-    const result = await service.get("api-1");
+    const result = await service.updateStatus("api-1", { status: "working" });
 
     expect(result.status).toBe("paused");
     expect(writeSessionMock).not.toHaveBeenCalled();
@@ -551,6 +627,10 @@ describe("SessionService", () => {
     const result = await service.pause("api-1");
 
     expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(removeAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/worktree",
+    });
     expect(removeWorktreeMock).not.toHaveBeenCalled();
     expect(removeSessionSlotToolMock).not.toHaveBeenCalled();
     expect(result.status).toBe("paused");
@@ -563,6 +643,10 @@ describe("SessionService", () => {
 
     const result = await service.complete("api-1");
 
+    expect(removeAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/worktree",
+    });
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/worktree");
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.status).toBe("completed");
@@ -579,6 +663,10 @@ describe("SessionService", () => {
 
     const result = await service.kill("api-1", { force: true });
 
+    expect(removeAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/worktree",
+    });
     expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/worktree");
     expect(removeSessionSlotToolMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.status).toBe("killed");
@@ -605,6 +693,11 @@ describe("SessionService", () => {
 
     const result = await service.restore("api-1");
 
+    expect(ensureAgentStatusHooksMock).toHaveBeenCalledWith({
+      agent: "claude",
+      worktreePath: "/tmp/worktree",
+      statusCommandPath: "/tmp/spur-tools/api-1/spur-session-status",
+    });
     expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
       "claude",
       "native-123",

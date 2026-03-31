@@ -1230,6 +1230,84 @@ projects:
     );
   });
 
+  it("updates live session status through the helper command", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-status-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("status.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "status runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-session-status");
+    expect(existsSync(helperPath)).toBe(true);
+
+    const settled = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value[0]?.status === "waiting",
+      },
+    );
+    await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("for any other useful links."),
+    });
+    await sleep(500);
+
+    await execFileAsync(helperPath, ["needs_input"]);
+    const needsInput = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value[0]?.status === "needs_input",
+      },
+    );
+
+    await execFileAsync(helperPath, ["working"]);
+    const working = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value[0]?.status === "working",
+      },
+    );
+
+    expect(settled[0]?.status).toBe("waiting");
+    expect(needsInput[0]?.status).toBe("needs_input");
+    expect(working[0]?.status).toBe("working");
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
+      "session.status.updated",
+    );
+  });
+
   it("runs a session-bound service and opens the live session log view from the TTY list", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -1518,6 +1596,52 @@ projects:
       ]),
     ).rejects.toMatchObject({
       stderr: expect.stringContaining("--link must use label=url"),
+    });
+  });
+
+  it("rejects invalid or missing session status targets through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-status-error-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "status-error.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "session-status",
+        "--session",
+        "api-999",
+        "waiting",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
+    await expect(
+      context.execCli([
+        "--config",
+        configPath,
+        "session-status",
+        "--session",
+        "api-999",
+        "broken",
+      ]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        "status must be one of working, waiting, needs_input, or error",
+      ),
     });
   });
 

@@ -1,18 +1,8 @@
-import {
-  buildClaudePlan,
-  buildClaudeResumePlan,
-  findClaudeSessionId,
-  observeClaudeStatus,
-} from "./claude.js";
-import {
-  buildCodexPlan,
-  buildCodexResumePlan,
-  findCodexSessionId,
-  observeCodexStatus,
-} from "./codex.js";
+import { buildClaudePlan, buildClaudeResumePlan, findClaudeSessionId } from "./claude.js";
+import { buildCodexPlan, buildCodexResumePlan, findCodexSessionId } from "./codex.js";
 import type { AgentName } from "../types.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStatusObservation } from "./types.js";
-export type { AgentLaunchPlan, AgentResumePlan, AgentStatusObservation } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
@@ -69,14 +59,4 @@ export async function findAgentSessionId(
   worktreePath: string,
 ): Promise<string | null> {
   return agent === "claude" ? findClaudeSessionId(worktreePath) : findCodexSessionId(worktreePath);
-}
-
-export async function observeAgentStatus(
-  agent: AgentName,
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStatusObservation | null> {
-  return agent === "claude"
-    ? observeClaudeStatus(worktreePath, args)
-    : observeCodexStatus(worktreePath, args);
 }

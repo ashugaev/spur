@@ -12,6 +12,7 @@ import type {
   SendMessageRequest,
   SpawnSessionRequest,
   SyncProjectsRequest,
+  UpdateSessionStatusRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -245,6 +246,13 @@ export async function startServer(
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
         sendJson(response, 200, await service.updateSlots(slotsSessionId, body));
+        return;
+      }
+
+      const statusSessionId = path.match(/^\/sessions\/([^/]+)\/status$/)?.[1];
+      if (method === "POST" && statusSessionId) {
+        const body = await readJsonBody<UpdateSessionStatusRequest>(request);
+        sendJson(response, 200, await service.updateStatus(statusSessionId, body));
         return;
       }
 

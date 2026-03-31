@@ -138,6 +138,11 @@ set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
 mkdir -p "$log_dir"
 log_file="$log_dir/\${SPUR_SESSION:-no-session}.log"
+set_status() {
+  if command -v spur-session-status >/dev/null 2>&1; then
+    spur-session-status "$1" >/dev/null 2>&1 || true
+  fi
+}
 ${startup}
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 if [[ "$mode" == "launch" ]]; then
@@ -146,6 +151,7 @@ fi
 printf '%s\n' "${prompt}"
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log_file"
+  set_status working
   case "$line" in
     show-waiting-menu)
       printf '%s\n' "Entered plan mode"
@@ -153,11 +159,13 @@ while IFS= read -r line; do
       printf '%s\n' "2. runtime"
       printf '%s\n' "Enter to select"
       printf '%s\n' "Esc to cancel"
+      ${agentName === "claude" ? 'set_status needs_input' : 'set_status waiting'}
       ;;
     simulate-work)
       printf '%s\n' "• Working (simulated)"
       sleep 1
       printf '%s\n' "${prompt}"
+      set_status waiting
       ;;
     exit-now)
       exit 0
@@ -165,6 +173,7 @@ while IFS= read -r line; do
     *)
       printf '%s\n' "ack: $line"
       printf '%s\n' "${prompt}"
+      set_status waiting
       ;;
   esac
 done
