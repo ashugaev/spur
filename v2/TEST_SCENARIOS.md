@@ -19,41 +19,56 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
+- Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
-- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, and `github:comment`.
+- Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
+- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - `spawn` requires one positional `<prompt...>` task.
+- `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
-- Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt.
+- Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
+- Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
-- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can suggest the new worktree branch through the selected agent's one-shot mode, and fails before reserving a session id when preflight output is invalid.
+- Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, accepts either one branch name or the `NO_PROJECT_RULES` sentinel, and fails before reserving a session id when preflight output is invalid.
+- Spawn creates compact session ids in the form `<prefix>-<hash4>` and retries on collisions before failing.
 - Session lifecycle and trigger handling append structured key events to `dataDir/events.jsonl` for spawn, send, slot updates, kill, restore, and trigger match/deliver/drop paths.
+- Successful worktree spawn preflight emits a session-scoped event so the selected session log view shows whether preflight chose a branch or deferred.
 - Spawn captures Claude/Codex native session ids when the agent writes them to disk.
 - Paused and crashed worktree-backed sessions can resume on later `send` by reusing stored native resume state when available, re-discovering it from agent state on disk when missing, and falling back to a fresh launch when native resume is stale.
-- `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-1` never resolves to `spur-11`.
+- `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
+- `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
+- Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
+- `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
+- Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
-- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using native Claude/Codex session signals before the plan-mode menu, permission prompt, and trailing-UI tmux fallbacks.
+- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using fresh native Claude/Codex activity signals before the plan-mode menu, permission prompt, and trailing-UI tmux fallbacks.
+- Codex title-based state: `classifyCodexTitle` maps Ready→waiting, Thinking/Working/Starting/Undoing→working, Waiting→needs_input, returns null for unrecognized titles.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.
 - Busy GitHub updates queue, dedupe, drop entries that vanished from the latest source snapshot, and flush once the session returns to `waiting`.
 - `send.interrupt: true` interrupts immediately while working but does not repeatedly interrupt the same busy interval.
 - `github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.
+- GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
+- GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
+- `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 
 ## Runtime Integration
 
 - `list --json` auto-starts the daemon and returns `[]` on a fresh config, and `ls --json` does the same.
+- Normal CLI session commands sync their current config into the running daemon registry before they hit `/sessions`.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
-- `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session.
+- `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
@@ -61,8 +76,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
+- `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
+- `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, shows the `Ctrl+G detach` hint, and returns to the selector after detach.
 - TTY `list` can pause, complete, and kill the selected live session in place; `completed` or `killed` sessions disappear from the live list without silently retargeting another row, and a killed session is not restorable on `Enter` or `r`, with terminal metadata showing `runtimeAlive: false` and `workspaceExists: false`.
@@ -76,6 +93,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `slots` rejects an unknown session id and malformed `--link label=url` input through the built CLI.
 - Hidden `daemon stop --json` stops a running daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
 - Hidden `daemon restart --json` replaces a live daemon and stays a no-op when it is already down or `/info` is incompatible without a Spur runtime pid.
+- Restarting the daemon from a different compatible config path reloads every registered config from `dataDir`, so previously attached projects remain available after boot.
 - `pnpm build` restarts a running daemon when `SPUR_CONFIG` or a nearby Spur config is available, and stays a no-op when no daemon is running or `/info` is incompatible without a Spur runtime pid.
 - `ls` rejects unknown options through the built CLI.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
@@ -83,6 +101,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.
 - GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a matching PR branch.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR.
+- GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
+- GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
+- Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
 
 ## Real-Agent Smoke
 
@@ -110,6 +131,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `cron` source without `schedule`.
 - Trigger spawn without `prompt`.
 - Trigger referencing an unknown source.
+- `service run` outside a live Spur session.
+- `service status` for an unknown session id.
 
 ## Regression Rule
 

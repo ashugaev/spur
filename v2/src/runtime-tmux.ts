@@ -19,6 +19,22 @@ async function tmux(...args: string[]): Promise<string> {
   return stdout.trimEnd();
 }
 
+function buildEnvArgs(env?: Record<string, string>): string[] {
+  const envArgs: string[] = [];
+  const sessionEnv = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
+      ),
+    ),
+    ...(env ?? {}),
+  };
+  for (const [key, value] of Object.entries(sessionEnv)) {
+    envArgs.push("-e", `${key}=${value}`);
+  }
+  return envArgs;
+}
+
 function exactSessionTarget(sessionName: string): string {
   return `=${sessionName}`;
 }
@@ -100,6 +116,15 @@ export async function getTmuxSessionActivity(sessionName: string): Promise<Date 
   }
 }
 
+export async function getTmuxPaneTitle(sessionName: string): Promise<string> {
+  const target = exactPaneTarget(sessionName);
+  try {
+    return await tmux("display-message", "-t", target, "-p", "#{pane_title}");
+  } catch {
+    return "";
+  }
+}
+
 export async function isProcessRunningInTmux(
   sessionName: string,
   processName: AgentName,
@@ -144,18 +169,7 @@ export async function createTmuxSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
-  const envArgs: string[] = [];
-  const sessionEnv = {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].length > 0,
-      ),
-    ),
-    ...(input.env ?? {}),
-  };
-  for (const [key, value] of Object.entries(sessionEnv)) {
-    envArgs.push("-e", `${key}=${value}`);
-  }
+  const envArgs = buildEnvArgs(input.env);
 
   await execFileAsync("tmux", [
     "-f",
@@ -179,6 +193,34 @@ export async function createTmuxSession(input: {
       // Best effort only.
     }
     throw error;
+  }
+}
+
+export async function createTmuxCommandSession(input: {
+  sessionName: string;
+  cwd: string;
+  launchCommand: string;
+  env?: Record<string, string>;
+}): Promise<void> {
+  const sessionTarget = exactSessionTarget(input.sessionName);
+  const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
+  await execFileAsync("tmux", [
+    "-f",
+    TMUX_CONFIG_PATH,
+    "new-session",
+    "-d",
+    "-s",
+    input.sessionName,
+    "-c",
+    input.cwd,
+    ...buildEnvArgs(input.env),
+    shellCommand,
+  ]);
+  await sleep(100);
+  try {
+    await tmux("set-option", "-t", sessionTarget, "remain-on-exit", "on");
+  } catch {
+    // Best effort only. The service session is already live at this point.
   }
 }
 
@@ -284,5 +326,15 @@ export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
+  const target = exactPaneTarget(sessionName);
+  try {
+    const output = await tmux("display-message", "-t", target, "-p", "#{pane_dead}");
+    return output.trim() === "1";
+  } catch {
+    return true;
   }
 }

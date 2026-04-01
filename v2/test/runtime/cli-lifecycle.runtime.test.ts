@@ -4,11 +4,12 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import type { RuntimeInfo, SessionView } from "../../src/types.js";
+import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
   captureTmuxPane,
+  createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
   isTmuxAvailable,
@@ -298,6 +299,91 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     await expect(context.fetchJson("/info")).rejects.toThrow();
   });
 
+  it("reloads all registered projects after a restart from a different config path", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-registry-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+
+    const extraRepo = await createGitRepo();
+    try {
+      const baseConfigPath = await context.writeConfig(
+        "registry-base.yaml",
+        baseConfig(context, `${sessionPrefix}-api`),
+      );
+      const extraConfigPath = await context.writeConfig(
+        "registry-extra.yaml",
+        `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: codex
+projects:
+  web:
+    path: ${extraRepo.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+`,
+      );
+
+      const daemon = await context.startDaemon(baseConfigPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const extraSpawn = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            extraConfigPath,
+            "spawn",
+            "web",
+            "sync project",
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+      expect(extraSpawn.project).toBe("web");
+
+      const restarted = JSON.parse(
+        (await context.execCli(["--config", extraConfigPath, "daemon", "restart", "--json"]))
+          .stdout,
+      ) as {
+        restarted: boolean;
+        runtime?: RuntimeInfo;
+      };
+      expect(restarted.restarted).toBe(true);
+      const restartedPid = restarted.runtime?.pid;
+      expect(restartedPid).toBeTypeOf("number");
+      if (typeof restartedPid === "number") {
+        currentActiveContext().daemonPid = restartedPid;
+      }
+
+      const apiSpawn = await context.fetchJson<SessionView>("/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          project: "api",
+          prompt: "registry survived restart",
+        }),
+      });
+      expect(apiSpawn.project).toBe("api");
+
+      const listed = await context.fetchJson<SessionView[]>("/sessions");
+      expect(listed.map((session) => session.project)).toEqual(
+        expect.arrayContaining(["api", "web"]),
+      );
+    } finally {
+      await rm(extraRepo.repoDir, { recursive: true, force: true });
+      await rm(extraRepo.originDir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps build as a no-op when /info is incompatible and does not expose a Spur runtime pid", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -417,6 +503,66 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
       expect.arrayContaining(["daemon.started", "session.spawn.failed", "http.request.failed"]),
     );
+  });
+
+  it("keeps kill and complete working for existing sessions after the project id is renamed", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("rename.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const completeSession = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "complete me", "--json"]))
+        .stdout,
+    ) as SessionView;
+    const killSession = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "kill me", "--json"])).stdout,
+    ) as SessionView;
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", completeSession.id, "--json"]))
+        .stdout,
+    ) as SessionView;
+    const killed = JSON.parse(
+      (await context.execCli(["--config", configPath, "kill", killSession.id, "--json"])).stdout,
+    ) as SessionView;
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+
+    expect(completed.status).toBe("completed");
+    expect(completed.workspaceExists).toBe(false);
+    expect(killed.status).toBe("killed");
+    expect(killed.workspaceExists).toBe(false);
+    expect(listed).toEqual([]);
   });
 
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
@@ -1020,6 +1166,251 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     );
   });
 
+  it("runs a session-bound service and opens the live session log view from the TTY list", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers: {}
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "service runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur");
+
+    const runResult = JSON.parse(
+      (
+        await execFileAsync(
+          helperPath,
+          [
+            "service",
+            "run",
+            "web",
+            "--port",
+            "3000",
+            "--json",
+            "--",
+            "sh",
+            "-lc",
+            `'printf "SERVICE_BOOT\\n"; sleep 30'`,
+          ],
+          {
+            cwd: spawned.worktreePath,
+            env: {
+              ...context.env,
+              SPUR_SESSION: spawned.id,
+            },
+          },
+        )
+      ).stdout,
+    ) as ServiceInstanceView;
+
+    expect(runResult.serviceId).toBe("web");
+    expect(runResult.port).toBe(3000);
+
+    const listed = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "service",
+              "status",
+              spawned.id,
+              "--json",
+            ])
+          ).stdout,
+        ) as ServiceInstanceView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value[0]?.serviceId === "web" && value[0]?.runtimeAlive === true,
+      },
+    );
+    expect(listed).toHaveLength(1);
+
+    const detail = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "service",
+          "status",
+          spawned.id,
+          "web",
+          "--json",
+        ])
+      ).stdout,
+    ) as ServiceInstanceView;
+    expect(detail.tmuxSession).toBe(`${spawned.id}--svc--web`);
+    expect(detail.port).toBe(3000);
+    expect(detail.state).toBe("running");
+
+    const controllerSessionName = `${sessionPrefix}-service-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
+
+    const attachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("l logs"),
+    });
+    expect(attachedPane).toContain("service web:3000:running");
+
+    await sendKeysToTmux(controllerSessionName, "l");
+
+    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) =>
+        value.includes(`Logs ${spawned.id}`) &&
+        value.includes("session.spawn.completed") &&
+        value.includes("service.run.completed") &&
+        value.includes("service runtime prompt"),
+    });
+    expect(logPane).toContain("Ctrl+G back");
+
+    await sendKeysToTmux(controllerSessionName, "C-g");
+
+    const detachedPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("l logs"),
+    });
+    expect(detachedPane).toContain("l logs");
+  });
+
+  it("surfaces service command errors through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-errors-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service-errors.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      web-watch:
+        type: service
+        service: web
+        intervalMs: 500
+        rules:
+          crash:
+            match: "SERVICE_ERROR"
+    triggers: {}
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "service error prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur");
+
+    await expect(
+      context.execCli(
+        ["--config", configPath, "service", "run", "web", "--json", "--", "echo", "hi"],
+        { env: { SPUR_SESSION: "" } },
+      ),
+    ).rejects.toThrow("service run requires a live Spur session");
+
+    await expect(
+      context.execCli(["--config", configPath, "service", "status", "api-999", "--json"]),
+    ).rejects.toThrow("Session not found: api-999");
+
+    await execFileAsync(
+      helperPath,
+      ["service", "run", "web", "--json", "--", "sh", "-lc", `'printf "SERVICE_DONE\\n"; sleep 1'`],
+      {
+        cwd: spawned.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: spawned.id,
+        },
+      },
+    );
+
+    const stopped = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "service",
+              "status",
+              spawned.id,
+              "web",
+              "--json",
+            ])
+          ).stdout,
+        ) as ServiceInstanceView,
+      {
+        timeoutMs: 20_000,
+        accept: (value) => value.runtimeAlive === false,
+      },
+    );
+    expect(["stopped", "error"]).toContain(stopped.state);
+  });
+
   it("rejects invalid or missing slot targets through the built CLI", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -1219,6 +1610,77 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     expect(pane).toContain("ship the task");
     expect(log).toContain("ship the task");
+  });
+
+  it("uses project default spawn steps, paces later steps, and lets CLI steps override them", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-pipeline-defaults-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "pipeline-defaults.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - "research"
+        - "test"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const defaultSpawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "ship the task", "--json"]))
+        .stdout,
+    ) as SessionView;
+
+    const defaultPane = await pollUntil(async () => captureTmuxPane(defaultSpawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("[Spur step 1/2: research]"),
+    });
+    expect(defaultPane).toContain("ship the task");
+    expect(defaultPane).toContain("[Spur step 1/2: research]");
+
+    await sleep(5_000);
+    const earlyDefaultLog = await context.readAgentLog(defaultSpawned.id);
+    expect(earlyDefaultLog).not.toContain("[Spur step 2/2: test]");
+
+    const defaultLog = await pollUntil(async () => context.readAgentLog(defaultSpawned.id), {
+      timeoutMs: 45_000,
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
+    });
+    expect(defaultLog).toContain("[Spur step 2/2: test]");
+
+    const overridden = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--step",
+          "review",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const overridePane = await pollUntil(async () => captureTmuxPane(overridden.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("[Spur step 1/1: review]"),
+    });
+    expect(overridePane).toContain("ship the task");
+    expect(overridePane).toContain("[Spur step 1/1: review]");
+    expect(overridePane).not.toContain("[Spur step 1/2: research]");
   });
 
   it("blocks kill from the interactive list when the worktree is dirty", async () => {
@@ -1431,7 +1893,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
 
     expect(detachedPane).toContain(
-      "Enter attach  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
+      "Enter attach  l logs  p pause  c complete  r restore  k kill  Ctrl+G detach  Esc quit",
     );
   });
 

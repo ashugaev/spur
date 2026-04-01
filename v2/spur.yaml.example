@@ -2,7 +2,7 @@ server:
   port: 4310
 
 dataDir: ~/.spur
-worktreeDir: ~/.spur-worktrees
+worktreeDir: ~/.spur/worktrees
 defaultAgent: claude
 
 projects:
@@ -11,8 +11,11 @@ projects:
     defaultBranch: main
     sessionPrefix: api
     worktree: true
-    preflight:
-      prompt: "Suggest a git branch name from the task and repo rules. Prefer tracker or PR identifiers when present."
+    spawn:
+      steps:
+        - "research"
+        - "test"
+    preflight: {} # optional: omit prompt to use Spur's default rule-or-defer prompt
     symlinks:
       - .env
       - .claude
@@ -43,13 +46,16 @@ projects:
         event: github:changes_requested
         send:
           interrupt: false
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
       pr-watch-ci-failed:
         source: pr-watch
         event: github:ci_failed
         send:
           interrupt: true # resend every 10m up to 3 while CI still fails
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       pr-watch-comment:
         source: pr-watch
         event: github:comment
         send:
           interrupt: false
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."

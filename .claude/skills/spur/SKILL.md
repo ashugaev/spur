@@ -19,7 +19,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
-  `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--worktree [defaultBranch] | --shared]`
+  `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]`
 - Supported agents are only `claude` and `codex`.
 - Both agents start with full access by default:
   `claude --dangerously-skip-permissions`
@@ -29,12 +29,13 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - `list` hides `completed` and `killed` sessions by default.
 - Minimal automation is only:
   `sources -> events -> triggers -> spawn|send`
-- Current built-in source types are `cron` and `github`.
+- Current built-in source types are `cron`, `github`, and `service`.
 - Spur supports a lean sequential startup pipeline:
   one task prompt plus optional `steps` phase labels such as `research`, `develop`, and `test`.
+- Project config may define default `spawn.steps`. Manual/API/trigger `steps` override that default.
 - Later phases are sent only after the agent returns to its prompt.
 - `cron` emits `cron:tick`.
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`.
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`.
   `github:comment` covers top-level PR comments and review comments/replies.
 - `runOnStart` defaults to `false`.
 
@@ -53,6 +54,8 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    spawn:
+      steps: [research, test]
     symlinks: [.env, .claude]
     sources:
       weekday-review:

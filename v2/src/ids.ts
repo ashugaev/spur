@@ -8,11 +8,14 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const LOCK_RETRY_MS = 25;
 const LOCK_TIMEOUT_MS = 5_000;
+const SESSION_HASH_BYTES = 2;
+const SESSION_ID_RETRY_LIMIT = 256;
 
 function isProcessAlive(pid: number): boolean {
   try {
@@ -113,25 +116,30 @@ async function withCounterLock<T>(lockPath: string, run: () => T): Promise<T> {
   }
 }
 
+function sessionExists(dataDir: string, projectId: string, sessionId: string): boolean {
+  return existsSync(join(dataDir, "sessions", projectId, `${sessionId}.json`));
+}
+
+function reserveHashedSessionId(dataDir: string, projectId: string, sessionPrefix: string): string {
+  for (let attempt = 0; attempt < SESSION_ID_RETRY_LIMIT; attempt += 1) {
+    const sessionId = `${sessionPrefix}-${randomBytes(SESSION_HASH_BYTES).toString("hex")}`;
+    if (!sessionExists(dataDir, projectId, sessionId)) {
+      return sessionId;
+    }
+  }
+
+  throw new Error(
+    `Failed to reserve a unique session id for ${projectId} after ${String(SESSION_ID_RETRY_LIMIT)} attempts`,
+  );
+}
+
 export async function reserveNextSessionId(
   dataDir: string,
   projectId: string,
   sessionPrefix: string,
 ): Promise<string> {
-  const counterPath = join(dataDir, "counters", `${projectId}.txt`);
-  const lockPath = `${counterPath}.lock`;
-  mkdirSync(dirname(counterPath), { recursive: true });
+  const lockPath = join(dataDir, "counters", `${projectId}.lock`);
+  mkdirSync(dirname(lockPath), { recursive: true });
 
-  return withCounterLock(lockPath, () => {
-    const current = existsSync(counterPath)
-      ? Number.parseInt(readFileSync(counterPath, "utf-8").trim() || "0", 10)
-      : 0;
-    const next = Number.isFinite(current) ? current + 1 : 1;
-    const tmpPath = `${counterPath}.tmp.${process.pid}.${Date.now()}`;
-
-    writeFileSync(tmpPath, `${next}\n`, "utf-8");
-    renameSync(tmpPath, counterPath);
-
-    return `${sessionPrefix}-${next}`;
-  });
+  return withCounterLock(lockPath, () => reserveHashedSessionId(dataDir, projectId, sessionPrefix));
 }

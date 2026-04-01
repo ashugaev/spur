@@ -9,11 +9,15 @@ import {
   type CronSourceConfig,
   type GitHubSourceConfig,
   type ProjectPreflightConfig,
+  type ProjectSpawnConfig,
   type ProjectConfig,
   type SendTriggerConfig,
+  type ServiceRuleConfig,
+  type ServiceSourceConfig,
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
+import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
 const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
@@ -86,6 +90,9 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "cron") {
     return ["cron:tick"];
   }
+  if (source.type === "service") {
+    return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
+  }
   return VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
 }
 
@@ -121,6 +128,53 @@ function parseGitHubSource(
   };
 }
 
+function parseServiceRule(
+  projectId: string,
+  sourceId: string,
+  ruleId: string,
+  value: unknown,
+): ServiceRuleConfig {
+  if (!VALID_ID_RE.test(ruleId)) {
+    throw new Error(
+      `projects.${projectId}.sources.${sourceId}.rules.${ruleId} is invalid: rule ids must match ${VALID_ID_RE.source}`,
+    );
+  }
+
+  const label = `projects.${projectId}.sources.${sourceId}.rules.${ruleId}`;
+  const raw = asObject(value, label);
+  const clear = asOptionalString(raw["clear"], `${label}.clear`);
+  return {
+    match: asString(raw["match"], `${label}.match`),
+    ...(clear !== undefined ? { clear } : {}),
+    cooldownMs: asOptionalNumber(raw["cooldownMs"], `${label}.cooldownMs`) ?? 60_000,
+  };
+}
+
+function parseServiceSource(
+  projectId: string,
+  sourceId: string,
+  raw: Record<string, unknown>,
+): ServiceSourceConfig {
+  const label = `projects.${projectId}.sources.${sourceId}`;
+  const rulesRaw = asObject(raw["rules"], `${label}.rules`);
+  const rules: Record<string, ServiceRuleConfig> = {};
+  for (const [ruleId, ruleValue] of Object.entries(rulesRaw)) {
+    rules[ruleId] = parseServiceRule(projectId, sourceId, ruleId, ruleValue);
+  }
+  if (Object.keys(rules).length === 0) {
+    throw new Error(`${label}.rules must define at least one rule`);
+  }
+
+  return {
+    type: "service",
+    runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
+    service: asString(raw["service"], `${label}.service`),
+    intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 2_000,
+    tailLines: asOptionalNumber(raw["tailLines"], `${label}.tailLines`) ?? 200,
+    rules,
+  };
+}
+
 function parseSource(projectId: string, sourceId: string, value: unknown): SourceConfig {
   if (!VALID_ID_RE.test(sourceId)) {
     throw new Error(
@@ -137,6 +191,9 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "github") {
     return parseGitHubSource(projectId, sourceId, raw);
   }
+  if (type === "service") {
+    return parseServiceSource(projectId, sourceId, raw);
+  }
 
   throw new Error(`${label}.type uses unsupported source type "${type}"`);
 }
@@ -148,8 +205,10 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
+    ...(prompt !== undefined ? { prompt } : {}),
   };
 }
 
@@ -164,8 +223,19 @@ function parseProjectPreflight(
   const label = `projects.${projectId}.preflight`;
   const raw = asObject(value, label);
   return {
-    prompt: asString(raw["prompt"], `${label}.prompt`),
+    prompt: asOptionalString(raw["prompt"], `${label}.prompt`) ?? DEFAULT_PROJECT_PREFLIGHT_PROMPT,
   };
+}
+
+function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.spawn`;
+  const raw = asObject(value, label);
+  const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
+  return steps !== undefined ? { steps } : {};
 }
 
 function parseTrigger(
@@ -242,6 +312,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
+  const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
   const sourcesRaw = raw["sources"]
@@ -270,6 +341,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sessionPrefix,
     worktree,
     symlinks,
+    ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
@@ -308,7 +380,7 @@ export function loadConfig(input?: string): AppConfig {
   const dataDir = resolveFrom(configDir, asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur");
   const worktreeDir = resolveFrom(
     configDir,
-    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur-worktrees",
+    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur/worktrees",
   );
 
   const normalizedProjects: Record<string, ProjectConfig> = {};

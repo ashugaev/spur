@@ -17,7 +17,7 @@ vi.mock("node:fs", () => ({
 
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { createWorktree } from "../../src/workspace.js";
+import { createWorktree, resolveRepoPathFromWorktree } from "../../src/workspace.js";
 
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
 
@@ -157,5 +157,33 @@ describe("createWorktree", () => {
           call[1][1] === "add",
       ),
     ).toBe(false);
+  });
+});
+
+describe("resolveRepoPathFromWorktree", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the repo root from the worktree git common dir", async () => {
+    mockGitSuccess("/repo/api/.git");
+
+    await expect(resolveRepoPathFromWorktree("/tmp/spur-worktrees/api/api-1")).resolves.toBe(
+      "/repo/api",
+    );
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { cwd: "/tmp/spur-worktrees/api/api-1" },
+    );
+  });
+
+  it("returns undefined when the worktree repo root cannot be resolved", async () => {
+    mockGitFailure("missing worktree");
+
+    await expect(resolveRepoPathFromWorktree("/tmp/spur-worktrees/api/api-1")).resolves.toBe(
+      undefined,
+    );
   });
 });

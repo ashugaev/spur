@@ -2,19 +2,19 @@ import {
   buildClaudePlan,
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
+  ensureClaudeHookSettings,
   findClaudeSessionId,
-  probeClaudeState,
 } from "./claude.js";
 import {
   buildCodexPlan,
   buildCodexRestorePlan,
   buildCodexResumePlan,
+  ensureCodexHooksConfig,
   findCodexSessionId,
-  probeCodexState,
 } from "./codex.js";
 import type { AgentName } from "../types.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
-export type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
@@ -24,22 +24,29 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(agent: AgentName, prompt: string) {
+export function buildAgentLaunchPlan(
+  agent: AgentName,
+  prompt: string,
+  options?: { claudeSettingsPath?: string; codexHomePath?: string },
+) {
   if (agent === "claude") {
-    return buildClaudePlan(prompt);
+    return options?.claudeSettingsPath
+      ? buildClaudePlan(prompt, { settingsPath: options.claudeSettingsPath })
+      : buildClaudePlan(prompt);
   }
-  return buildCodexPlan(prompt);
+  return buildCodexPlan(prompt, options);
 }
 
 export async function buildAgentRestorePlan(
   agent: AgentName,
   worktreePath: string,
   prompt: string,
+  options?: { claudeSettingsPath?: string; codexHomePath?: string },
 ): Promise<AgentLaunchPlan | null> {
   if (agent === "claude") {
     return buildClaudeRestorePlan(worktreePath, prompt);
   }
-  return buildCodexRestorePlan(worktreePath, prompt);
+  return buildCodexRestorePlan(worktreePath, prompt, options);
 }
 
 function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
@@ -47,31 +54,43 @@ function extractCommandBinary(launchCommand: string, fallbackBinary: string): st
   if (!trimmed) {
     return fallbackBinary;
   }
-  if (trimmed.startsWith("'")) {
-    const closing = trimmed.indexOf("'", 1);
-    if (closing > 1) {
-      return trimmed.slice(1, closing);
+  const tokens = trimmed.split(/\s+/).filter(Boolean);
+  for (const token of tokens) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      continue;
     }
-  }
-  if (trimmed.startsWith('"')) {
-    const closing = trimmed.indexOf('"', 1);
-    if (closing > 1) {
-      return trimmed.slice(1, closing);
+    if (token.startsWith("'")) {
+      const closing = token.indexOf("'", 1);
+      if (closing > 1) {
+        return token.slice(1, closing);
+      }
     }
+    if (token.startsWith('"')) {
+      const closing = token.indexOf('"', 1);
+      if (closing > 1) {
+        return token.slice(1, closing);
+      }
+    }
+    return token;
   }
-  return trimmed.split(/\s+/, 1)[0] || fallbackBinary;
+  return fallbackBinary;
 }
 
 export function buildAgentResumePlan(
   agent: AgentName,
   agentSessionId: string,
   launchCommand = "",
+  options?: { claudeSettingsPath?: string; codexHomePath?: string },
 ): AgentResumePlan {
   const binary = extractCommandBinary(launchCommand, agent);
   if (agent === "claude") {
-    return buildClaudeResumePlan(agentSessionId, binary);
+    return options?.claudeSettingsPath
+      ? buildClaudeResumePlan(agentSessionId, binary, {
+          settingsPath: options.claudeSettingsPath,
+        })
+      : buildClaudeResumePlan(agentSessionId, binary);
   }
-  return buildCodexResumePlan(agentSessionId, binary);
+  return buildCodexResumePlan(agentSessionId, binary, options);
 }
 
 export async function findAgentSessionId(
@@ -84,13 +103,13 @@ export async function findAgentSessionId(
   return findCodexSessionId(worktreePath);
 }
 
-export async function probeAgentState(
-  agent: AgentName,
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStateProbe | null> {
-  if (agent === "claude") {
-    return probeClaudeState(worktreePath, args);
+export async function setupAgentHooks(args: {
+  agent: AgentName;
+  worktreePath: string;
+  sessionToolDir: string;
+}): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
+  if (args.agent === "claude") {
+    return { claudeSettingsPath: await ensureClaudeHookSettings(args.sessionToolDir) };
   }
-  return probeCodexState(worktreePath, args);
+  return { codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir) };
 }

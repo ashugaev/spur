@@ -469,7 +469,12 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     for (const [triggerId, trigger] of Object.entries(project.triggers)) {
       const source = project.sources[trigger.source];
       if (!source) continue;
-      const parseSendBatch = createSendBatchParser(source.type, projectId, trigger.source);
+      const parseSendBatch = createSendBatchParser(
+        source.type,
+        projectId,
+        trigger.source,
+        "send" in trigger ? trigger.send.prompt : undefined,
+      );
       const unsubscribe = deps.bus.subscribe((event) => {
         if (stopped) return;
         if (event.projectId !== projectId) return;

@@ -3,6 +3,7 @@ import { logSpurEvent } from "../event-log.js";
 import type { AppConfig, SourceType } from "../types.js";
 import { cronSourceModule } from "./cron.js";
 import { githubSourceModule } from "./github.js";
+import { serviceSourceModule } from "./service.js";
 import type { SourceGroupController, SourceHandle, SourceLogger, SourceModule } from "./types.js";
 
 interface StartConfiguredSourcesDeps {
@@ -22,6 +23,7 @@ interface StartedSource {
 const SOURCE_MODULES = {
   cron: cronSourceModule,
   github: githubSourceModule,
+  service: serviceSourceModule,
 } satisfies Record<SourceType, SourceModule>;
 
 function stopAll(sources: StartedSource[]): void {
@@ -57,6 +59,7 @@ export async function startConfiguredSources(
           projectId,
           dataDir: deps.config.dataDir,
           config: source,
+          deferInitialSync: true,
           emit(name: string, data?: unknown): void {
             const sessionId = extractSessionId(data);
             logSpurEvent(deps.config.dataDir, {

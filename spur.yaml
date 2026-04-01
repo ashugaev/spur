@@ -2,45 +2,36 @@ server:
   host: 127.0.0.1
   port: 4311
 
-dataDir: ~/.spur/spur-repo/local-test
-worktreeDir: ~/.spur/spur-repo/local-test-worktrees
 defaultAgent: codex
 
 projects:
-  spur-local:
-    path: /Users/alek/projects/agent-orchestrator
+  sp:
+    path: .
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: []
+    symlinks: [node_modules, .env]
+    spawn:
+      steps:
+        - "run $manager"
+        - "run $reviewer"
+        - "run $code-simplifier"
+        - "run $self-verify"
     sources:
-      local-cron:
-        type: cron
-        schedule: "0 0 1 1 *"
-        # Intentionally omitted:
-        # runOnStart defaults to false.
       gh:
         type: github
     triggers:
-      local-cron-spawn:
-        source: local-cron
-        event: cron:tick
-        spawn:
-          agent: claude
-          prompt: "Review this repo."
-          steps:
-            - "research"
-            - "develop"
-            - "test"
       gh-changes-requested:
         source: gh
         event: github:changes_requested
-        send: {}
-      # gh-ci-failed:
-      #   source: gh
-      #   event: github:ci_failed
-      #   send:
-      #     interrupt: true
+        send:
+          prompt: "Run $manager and $github. Address the latest requested review changes on the active PR."
+      gh-ci-failed:
+        source: gh
+        event: github:ci_failed
+        send:
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
       gh-comment:
         source: gh
         event: github:comment
-        send: {}
+        send:
+          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."

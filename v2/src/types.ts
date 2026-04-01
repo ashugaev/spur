@@ -4,6 +4,8 @@ export const SPUR_DAEMON_API_VERSION = 2;
 export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type BranchSource = "explicit" | "preflight" | "shared_workspace";
+export type ServiceInstanceStatus = "running" | "stopped" | "errored";
+export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
 export interface SessionLink {
   label: string;
   url: string;
@@ -15,10 +17,15 @@ export interface SessionSlots {
   links: SessionLink[];
 }
 
-export type SourceType = "cron" | "github";
+export type SourceType = "cron" | "github" | "service";
 
 export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
-export const GITHUB_SIGNAL_KINDS = ["changes_requested", "ci_failed", "comment"] as const;
+export const GITHUB_SIGNAL_KINDS = [
+  "changes_requested",
+  "ci_failed",
+  "comment",
+  "merge_conflict",
+] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
 interface BaseSourceConfig {
@@ -35,7 +42,21 @@ export interface GitHubSourceConfig extends BaseSourceConfig {
   intervalMs: number;
 }
 
-export type SourceConfig = CronSourceConfig | GitHubSourceConfig;
+export interface ServiceRuleConfig {
+  match: string;
+  clear?: string;
+  cooldownMs: number;
+}
+
+export interface ServiceSourceConfig extends BaseSourceConfig {
+  type: "service";
+  service: string;
+  intervalMs: number;
+  tailLines: number;
+  rules: Record<string, ServiceRuleConfig>;
+}
+
+export type SourceConfig = CronSourceConfig | GitHubSourceConfig | ServiceSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -44,6 +65,10 @@ export interface SpawnOverrides {
 
 export interface ProjectPreflightConfig {
   prompt: string;
+}
+
+export interface ProjectSpawnConfig {
+  steps?: string[];
 }
 
 export interface TriggerSpawnConfig {
@@ -56,6 +81,7 @@ export interface TriggerSpawnConfig {
 
 export interface TriggerSendConfig {
   interrupt: boolean;
+  prompt?: string;
 }
 
 export interface SpawnTriggerConfig {
@@ -85,12 +111,19 @@ export interface GitHubEventData {
   signals: GitHubSignal[];
 }
 
+export interface ServiceProblemEventData {
+  sessionId: string;
+  serviceId: string;
+  ruleId: string;
+}
+
 export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
   sources: Record<string, SourceConfig>;
@@ -113,6 +146,7 @@ export interface SessionPipelineState {
   steps: string[];
   nextStepIndex: number;
   awaitingStepIndex?: number;
+  nextStepNotBefore?: string;
   status: SessionPipelineStatus;
   error?: string;
 }
@@ -137,11 +171,33 @@ export interface SessionRecord {
   error?: string;
 }
 
+export interface ServiceInstanceRecord {
+  sessionId: string;
+  project: string;
+  serviceId: string;
+  port?: number;
+  command: string;
+  cwd: string;
+  tmuxSession: string;
+  status: ServiceInstanceStatus;
+  createdAt: string;
+  updatedAt: string;
+  error?: string;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
   lastActivityAt: string;
+  services: ServiceInstanceView[];
+}
+
+export interface ServiceInstanceView extends ServiceInstanceRecord {
+  runtimeAlive: boolean;
+  state: ServiceInstanceState;
+  lastActivityAt: string;
+  problemRuleIds: string[];
 }
 
 export interface SpawnSessionRequest {
@@ -151,10 +207,17 @@ export interface SpawnSessionRequest {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  configPath?: string;
 }
 
 export interface SendMessageRequest {
   message: string;
+}
+
+export interface RunServiceRequest {
+  command: string;
+  cwd: string;
+  port?: number;
 }
 
 export interface KillSessionRequest {
@@ -168,6 +231,10 @@ export interface UpdateSessionSlotsRequest {
   unlinkLabels?: string[];
 }
 
+export interface SyncProjectsRequest {
+  configPath: string;
+}
+
 export interface RuntimeInfo {
   ok: true;
   apiVersion: number;
@@ -178,4 +245,15 @@ export interface RuntimeInfo {
   worktreeDir: string;
   configPath: string;
   startedAt: string;
+}
+
+export interface ServiceSourceRuleState {
+  active: boolean;
+  lastAlertAt?: string;
+}
+
+export interface ServiceSourceState {
+  serviceId: string;
+  lastTailLines: string[];
+  rules: Record<string, ServiceSourceRuleState>;
 }

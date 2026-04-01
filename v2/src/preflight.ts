@@ -1,25 +1,16 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { codexCommand } from "./agents/codex.js";
+import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
-const PREFLIGHT_SCHEMA = {
-  type: "object",
-  properties: {
-    branch: {
-      anyOf: [{ type: "string" }, { type: "null" }],
-    },
-  },
-  required: ["branch"],
-  additionalProperties: false,
-};
 
 export interface SpawnPreflightResult {
   branch?: string;
@@ -48,11 +39,10 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 
   return [
     "You are running a Spur spawn preflight before worktree creation.",
-    "Return a JSON object only. Do not include markdown fences or prose.",
-    'Current recognized key: "branch".',
-    'Return {"branch":"<git-branch-name>"} to suggest a branch, or {"branch":null} to defer to Spur default naming.',
-    "If you set branch, make it a concise git branch name and follow the project instructions below.",
-    "Prefer task, tracker, or PR identifiers when they appear in the task context.",
+    `Return exactly one line: either a git branch name or the exact token ${PREFLIGHT_DEFER_SENTINEL}.`,
+    `Return ${PREFLIGHT_DEFER_SENTINEL} when the project instructions do not define branch-naming rules and Spur should use its default naming.`,
+    "Do not include JSON, markdown, quotes, or prose.",
+    "If you return a branch, return only the branch name.",
     "",
     "Project instructions:",
     args.project.preflight?.prompt ?? "",
@@ -67,54 +57,22 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   if (!trimmed) {
     throw new Error("Spawn preflight returned empty output");
   }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed);
-  } catch (error) {
-    throw new Error(`Spawn preflight returned invalid JSON: ${trimmed}`, {
-      cause: error,
-    });
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Spawn preflight must return a JSON object");
-  }
-
-  const root = parsed as {
-    structured_output?: unknown;
-    branch?: unknown;
-  };
-  const payload =
-    root.structured_output &&
-    typeof root.structured_output === "object" &&
-    !Array.isArray(root.structured_output)
-      ? (root.structured_output as { branch?: unknown })
-      : root;
-  const branch = payload.branch;
-  if (branch === undefined || branch === null) {
+  if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
     return {};
   }
-  if (typeof branch !== "string" || !branch.trim()) {
-    throw new Error('Spawn preflight field "branch" must be a non-empty string when provided');
+  if (trimmed.includes("\n") || /\s/.test(trimmed)) {
+    throw new Error(
+      `Spawn preflight must return exactly one branch name or ${PREFLIGHT_DEFER_SENTINEL}: ${trimmed}`,
+    );
   }
 
-  return { branch: branch.trim() };
+  return { branch: trimmed };
 }
 
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
   const { stdout } = await execFileAsync(
     claudeCommand(),
-    [
-      "--print",
-      "--output-format",
-      "json",
-      "--json-schema",
-      JSON.stringify(PREFLIGHT_SCHEMA),
-      "--no-session-persistence",
-      "--dangerously-skip-permissions",
-      prompt,
-    ],
+    ["--print", "--no-session-persistence", "--dangerously-skip-permissions", prompt],
     {
       cwd,
       env: {
@@ -130,9 +88,7 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<string> 
 
 async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
-  const schemaPath = join(tempDir, "schema.json");
-  const outputPath = join(tempDir, "output.json");
-  await writeFile(schemaPath, JSON.stringify(PREFLIGHT_SCHEMA), "utf8");
+  const outputPath = join(tempDir, "output.txt");
 
   try {
     const { stdout } = await execFileAsync(
@@ -140,9 +96,9 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
       [
         "exec",
         "--ephemeral",
+        "--disable",
+        "codex_hooks",
         "--dangerously-bypass-approvals-and-sandbox",
-        "--output-schema",
-        schemaPath,
         "--output-last-message",
         outputPath,
         prompt,
