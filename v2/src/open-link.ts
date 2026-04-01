@@ -8,7 +8,7 @@ type SpawnLike = (
 ) => Pick<ChildProcess, "unref">;
 
 function defaultOpeners(): string[] {
-  return process.platform === "darwin" ? ["open", "xdg-open", "wslview"] : ["xdg-open", "wslview"];
+  return process.platform === "darwin" ? ["open"] : ["xdg-open", "wslview"];
 }
 
 export function openExternalUrl(
