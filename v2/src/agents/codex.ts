@@ -1,36 +1,15 @@
 import { createReadStream, existsSync } from "node:fs";
-import { cp, lstat, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
-import type { SessionState } from "../types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CODEX_SESSIONS_DIR = join(homedir(), ".codex", "sessions");
 const MAX_SESSION_SCAN_DEPTH = 4;
 const SESSION_INDEX_TTL_MS = 30_000;
-const MAX_SESSION_TAIL_BYTES = 131_072;
-
-const ACTIVE_EVENT_TYPES = new Set([
-  "task_started",
-  "agent_message:commentary",
-  "assistant:commentary",
-  "function_call",
-  "function_call_output",
-  "custom_tool_call",
-  "custom_tool_call_output",
-  "web_search_call",
-  "reasoning",
-]);
-
-const WAITING_EVENT_TYPES = new Set([
-  "task_complete",
-  "turn_aborted",
-  "agent_message:final_answer",
-  "assistant:final_answer",
-]);
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
@@ -305,24 +284,6 @@ function resolveSessionRootDirs(options?: {
   return [...new Set(roots.filter(Boolean))];
 }
 
-async function findSessionFile(
-  worktreePath: string,
-  options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
-): Promise<string | null> {
-  const candidates = await resolveWorktreePathCandidates(worktreePath);
-  let bestMatch: IndexedSessionFile | null = null;
-  for (const sessionRootDir of resolveSessionRootDirs(options)) {
-    const sessionIndex = await loadSessionIndexForRoot(sessionRootDir);
-    for (const candidate of candidates) {
-      const match = sessionIndex.get(candidate);
-      if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
-        bestMatch = match;
-      }
-    }
-  }
-  return bestMatch?.path ?? null;
-}
-
 async function readThreadId(filePath: string): Promise<string | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });
@@ -346,104 +307,6 @@ async function readThreadId(filePath: string): Promise<string | null> {
   return null;
 }
 
-async function readSessionTail(filePath: string, fileSize?: number): Promise<CodexSessionLine[]> {
-  let content: string;
-  let offset: number;
-  try {
-    const size = fileSize ?? (await stat(filePath)).size;
-    offset = Math.max(0, size - MAX_SESSION_TAIL_BYTES);
-    if (offset === 0) {
-      content = await readFile(filePath, "utf-8");
-    } else {
-      const handle = await open(filePath, "r");
-      try {
-        const length = size - offset;
-        const buffer = Buffer.allocUnsafe(length);
-        await handle.read(buffer, 0, length, offset);
-        content = buffer.toString("utf-8");
-      } finally {
-        await handle.close();
-      }
-    }
-  } catch {
-    return [];
-  }
-
-  const firstNewline = content.indexOf("\n");
-  const safeContent = offset > 0 && firstNewline >= 0 ? content.slice(firstNewline + 1) : content;
-  const lines: CodexSessionLine[] = [];
-  for (const line of safeContent.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      lines.push(JSON.parse(trimmed) as CodexSessionLine);
-    } catch {
-      // Ignore malformed lines and keep searching for the latest valid entry.
-    }
-  }
-  return lines;
-}
-
-function semanticState(line: CodexSessionLine): SessionState | null {
-  if (line.type === "event_msg") {
-    const payload = line.payload;
-    const payloadType = payload?.type;
-    if (!payloadType) {
-      return null;
-    }
-    if (WAITING_EVENT_TYPES.has(payloadType)) {
-      return "waiting";
-    }
-    if (payloadType === "agent_message") {
-      if (WAITING_EVENT_TYPES.has(`agent_message:${payload.phase}`)) {
-        return "waiting";
-      }
-      if (ACTIVE_EVENT_TYPES.has(`agent_message:${payload.phase}`)) {
-        return "working";
-      }
-      return null;
-    }
-    return ACTIVE_EVENT_TYPES.has(payloadType) ? "working" : null;
-  }
-
-  if (line.type !== "response_item") {
-    return null;
-  }
-  const payload = line.payload;
-  const payloadType = payload?.type;
-  if (!payloadType) {
-    return null;
-  }
-  if (payloadType === "message") {
-    if (payload.role === "assistant" && WAITING_EVENT_TYPES.has(`assistant:${payload.phase}`)) {
-      return "waiting";
-    }
-    if (payload.role === "assistant" && ACTIVE_EVENT_TYPES.has(`assistant:${payload.phase}`)) {
-      return "working";
-    }
-    return null;
-  }
-  return ACTIVE_EVENT_TYPES.has(payloadType) ? "working" : null;
-}
-
-async function readSemanticState(
-  filePath: string,
-  fileSize?: number,
-): Promise<SessionState | null> {
-  const lines = await readSessionTail(filePath, fileSize);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index];
-    if (!line) {
-      continue;
-    }
-    const state = semanticState(line);
-    if (state) {
-      return state;
-    }
-  }
-  return null;
-}
-
 export async function findCodexSessionId(
   worktreePath: string,
   options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
@@ -463,40 +326,6 @@ export async function findCodexSessionId(
     return null;
   }
   return bestMatch.threadId ?? readThreadId(bestMatch.path);
-}
-
-export async function probeCodexState(
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStateProbe | null> {
-  const sessionFile = await findSessionFile(worktreePath);
-  if (!sessionFile) {
-    return null;
-  }
-
-  try {
-    const fileStat = await stat(sessionFile);
-    const signalAt = fileStat.mtime;
-    if (!args.processAlive) {
-      return { state: "stopped", signalAt };
-    }
-    const state = await readSemanticState(sessionFile, fileStat.size);
-    if (state === "waiting") {
-      return { state, signalAt };
-    }
-    if (state === "working") {
-      return {
-        state: Date.now() - fileStat.mtimeMs <= args.signalWindowMs ? "working" : "waiting",
-        signalAt,
-      };
-    }
-    return {
-      state: Date.now() - fileStat.mtimeMs <= args.signalWindowMs ? "working" : "waiting",
-      signalAt,
-    };
-  } catch {
-    return null;
-  }
 }
 
 function withCodexHome(command: string, codexHomePath: string | undefined): string {

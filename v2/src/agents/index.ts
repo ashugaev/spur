@@ -1,12 +1,9 @@
 import {
   buildClaudePlan,
-  buildClaudePlanWithHooks,
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
-  buildClaudeResumePlanWithHooks,
   ensureClaudeHookSettings,
   findClaudeSessionId,
-  probeClaudeState,
 } from "./claude.js";
 import {
   buildCodexPlan,
@@ -14,11 +11,10 @@ import {
   buildCodexResumePlan,
   ensureCodexHooksConfig,
   findCodexSessionId,
-  probeCodexState,
 } from "./codex.js";
 import type { AgentName } from "../types.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
-export type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
@@ -35,7 +31,7 @@ export function buildAgentLaunchPlan(
 ) {
   if (agent === "claude") {
     return options?.claudeSettingsPath
-      ? buildClaudePlanWithHooks(prompt, options.claudeSettingsPath)
+      ? buildClaudePlan(prompt, { settingsPath: options.claudeSettingsPath })
       : buildClaudePlan(prompt);
   }
   return buildCodexPlan(prompt, options);
@@ -89,7 +85,9 @@ export function buildAgentResumePlan(
   const binary = extractCommandBinary(launchCommand, agent);
   if (agent === "claude") {
     return options?.claudeSettingsPath
-      ? buildClaudeResumePlanWithHooks(agentSessionId, options.claudeSettingsPath, binary)
+      ? buildClaudeResumePlan(agentSessionId, binary, {
+          settingsPath: options.claudeSettingsPath,
+        })
       : buildClaudeResumePlan(agentSessionId, binary);
   }
   return buildCodexResumePlan(agentSessionId, binary, options);
@@ -103,17 +101,6 @@ export async function findAgentSessionId(
     return findClaudeSessionId(worktreePath);
   }
   return findCodexSessionId(worktreePath);
-}
-
-export async function probeAgentState(
-  agent: AgentName,
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStateProbe | null> {
-  if (agent === "claude") {
-    return probeClaudeState(worktreePath, args);
-  }
-  return probeCodexState(worktreePath, args);
 }
 
 export async function setupAgentHooks(args: {

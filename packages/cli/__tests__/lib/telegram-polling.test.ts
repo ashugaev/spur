@@ -1535,10 +1535,15 @@ describe("maybeStartTelegramLongPolling", () => {
       healthReporter,
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(sm.send).toHaveBeenCalledWith(
-      "app-7",
-      expect.stringContaining("[Telegram voice transcription failed] transcript exceeds 10000 characters"),
+    await vi.waitFor(
+      () =>
+        expect(sm.send).toHaveBeenCalledWith(
+          "app-7",
+          expect.stringContaining(
+            "[Telegram voice transcription failed] transcript exceeds 10000 characters",
+          ),
+        ),
+      { timeout: 2000 },
     );
     controller?.stop();
   });

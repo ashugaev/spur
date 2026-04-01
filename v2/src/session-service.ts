@@ -7,9 +7,7 @@ import {
   buildAgentResumePlan,
   findAgentSessionId,
   parseAgentName,
-  probeAgentState,
   setupAgentHooks,
-  type AgentStateProbe,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
@@ -34,6 +32,7 @@ import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSession,
+  getTmuxPaneTitle,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
   killTmuxSession,
@@ -81,8 +80,6 @@ import {
   workspaceExists,
 } from "./workspace.js";
 
-const DELIVERY_GRACE_MS = 30_000;
-const WORKING_SIGNAL_WINDOW_MS = 90_000;
 const WAITING_INPUT_TAIL_LINES = 12;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PROMPT_RE = /^[❯›>$#](?:\s.*)?$/;
@@ -96,6 +93,7 @@ const TRAILING_UI_RE = [
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
+const HOOK_FRESHNESS_MS = 2_000;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -215,50 +213,6 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function resolveWaitingStateFromPane(pane: string): SessionState {
-  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
-}
-
-function resolveHookAgentState(
-  hookState: { state: "working" | "waiting"; updatedAt: string } | null | undefined,
-  processAlive: boolean,
-): AgentStateProbe | null {
-  if (!hookState) {
-    return null;
-  }
-  const signalAt = new Date(hookState.updatedAt);
-  if (Number.isNaN(signalAt.getTime())) {
-    return null;
-  }
-  if (!processAlive) {
-    return { state: "stopped", signalAt };
-  }
-  if (hookState.state === "working" && !isFresh(signalAt, WORKING_SIGNAL_WINDOW_MS)) {
-    return null;
-  }
-  return { state: hookState.state, signalAt };
-}
-
-function resolveRunningSessionState(args: {
-  agentState: AgentStateProbe | null;
-  updatedAt: Date;
-  activityAt: Date | null;
-}): SessionState {
-  if (!args.agentState) {
-    return isFresh(
-      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
-      DELIVERY_GRACE_MS,
-    )
-      ? "working"
-      : "waiting";
-  }
-  return args.agentState.state === "working"
-    ? "working"
-    : args.agentState.state === "waiting"
-      ? "waiting"
-      : args.agentState.state;
-}
-
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
   if (!nextStepNotBefore) {
     return 0;
@@ -270,22 +224,30 @@ function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number
   return Math.max(0, timestamp - Date.now());
 }
 
-function isPromptReadyState(pane: string): boolean {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) {
-    return false;
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  return Boolean(lastLine) && PROMPT_RE.test(lastLine);
-}
-
-function classifyPipelinePaneState(pane: string): SessionState {
+function classifyLivePaneState(pane: string): SessionState {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) {
     return "needs_input";
   }
   const lastLine = lines.at(-1)?.trim() ?? "";
   return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
+}
+
+export function classifyCodexTitle(title: string): SessionState | null {
+  if (/\bReady\b/i.test(title)) return "waiting";
+  if (/\b(?:Thinking|Working|Starting|Undoing)\b/i.test(title)) return "working";
+  if (/\bWaiting\b/i.test(title)) return "needs_input";
+  return null;
+}
+
+async function classifyAgentState(agent: string, tmuxSession: string): Promise<SessionState> {
+  if (agent === "codex") {
+    const title = await getTmuxPaneTitle(tmuxSession);
+    const titleState = classifyCodexTitle(title);
+    if (titleState !== null) return titleState;
+  }
+  const pane = await captureTmuxPane(tmuxSession, 80);
+  return classifyLivePaneState(pane);
 }
 
 export function isRestorableSession(
@@ -1078,8 +1040,8 @@ export class SessionService {
       const readySession = await this.ensureSessionReadyForSend(session);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
-        const pane = await captureTmuxPane(readySession.tmuxSession, 80);
-        interrupt = !isPromptReadyState(pane);
+        const sendState = await classifyAgentState(readySession.agent, readySession.tmuxSession);
+        interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
@@ -1831,8 +1793,7 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
-      const pane = await captureTmuxPane(session.tmuxSession, 80);
-      const paneState = classifyPipelinePaneState(pane);
+      const paneState = await classifyAgentState(session.agent, session.tmuxSession);
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
@@ -1919,17 +1880,7 @@ export class SessionService {
     const processAlive = runtimeAlive
       ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
       : false;
-    const nativeAgentState = workspacePresent
-      ? await probeAgentState(session.agent, session.worktreePath, {
-          processAlive,
-          signalWindowMs: WORKING_SIGNAL_WINDOW_MS,
-        })
-      : null;
-    const hookAgentState = readAgentHookState(this.config.dataDir, session.id);
-    const agentState = resolveHookAgentState(hookAgentState, processAlive) ?? nativeAgentState;
-    const lastActivityAt = (
-      latestActivityAt(updatedAt, tmuxActivityAt, agentState?.signalAt ?? null) ?? updatedAt
-    ).toISOString();
+    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
 
     let state: SessionState;
     if (session.status === "killed") {
@@ -1941,17 +1892,17 @@ export class SessionService {
     } else if (session.status === "spawning") {
       state = "working";
     } else if (!runtimeAlive || !processAlive) {
-      state = agentState?.state === "error" ? "error" : "stopped";
-    } else if (agentState?.state === "error" || agentState?.state === "needs_input") {
-      state = agentState.state;
-    } else if (session.agent === "codex" && agentState?.state === "waiting") {
-      state = resolveWaitingStateFromPane(await captureTmuxPane(session.tmuxSession, 80));
+      state = "stopped";
     } else {
-      state = resolveRunningSessionState({
-        agentState,
-        updatedAt,
-        activityAt: tmuxActivityAt,
-      });
+      const hookState = readAgentHookState(this.config.dataDir, session.id);
+      const hookFresh =
+        hookState?.state === "working" &&
+        Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS;
+      if (hookFresh) {
+        state = "working";
+      } else {
+        state = await classifyAgentState(session.agent, session.tmuxSession);
+      }
     }
 
     const services: ServiceInstanceView[] = [];
