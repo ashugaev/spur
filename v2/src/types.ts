@@ -174,7 +174,6 @@ export interface SessionRecord {
   updatedAt: string;
   slots?: SessionSlots;
   pipeline?: SessionPipelineState;
-  devServerRunning?: boolean;
   error?: string;
 }
 

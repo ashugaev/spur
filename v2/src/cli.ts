@@ -32,6 +32,7 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import { devServerTmuxSession } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
   RuntimeInfo,
@@ -781,7 +782,7 @@ async function runInteractiveSessionList(
     statusMessage = brandLine(`Starting dev server for ${session.id}...`);
     render();
 
-    const devTmuxSession = `${session.id}--dev`;
+    const devTmuxSession = devServerTmuxSession(session.id);
     try {
       if (!session.devServerAlive) {
         await postJson<SessionView>(

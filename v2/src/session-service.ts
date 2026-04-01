@@ -218,6 +218,58 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
+function resolveWaitingStateFromPane(pane: string): SessionState {
+  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
+}
+
+function buildInitialMessage(initialMessage: string, hasDevServer: boolean): string {
+  const base = withSessionSlotInstructions(initialMessage);
+  return hasDevServer
+    ? `${base}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
+    : base;
+}
+
+function resolveHookAgentState(
+  hookState: { state: "working" | "waiting"; updatedAt: string } | null | undefined,
+  processAlive: boolean,
+): AgentStateProbe | null {
+  if (!hookState) {
+    return null;
+  }
+  const signalAt = new Date(hookState.updatedAt);
+  if (Number.isNaN(signalAt.getTime())) {
+    return null;
+  }
+  if (!processAlive) {
+    return { state: "stopped", signalAt };
+  }
+  if (hookState.state === "working" && !isFresh(signalAt, WORKING_SIGNAL_WINDOW_MS)) {
+    return null;
+  }
+  return { state: hookState.state, signalAt };
+}
+
+function resolveRunningSessionState(args: {
+  agentState: AgentStateProbe | null;
+  updatedAt: Date;
+  activityAt: Date | null;
+}): SessionState {
+  if (!args.agentState) {
+    return isFresh(
+      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
+      DELIVERY_GRACE_MS,
+    )
+      ? "working"
+      : "waiting";
+  }
+  return args.agentState.state === "working"
+    ? "working"
+    : args.agentState.state === "waiting"
+      ? "waiting"
+      : args.agentState.state;
+}
+
+
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
   if (!nextStepNotBefore) {
     return 0;
@@ -929,9 +981,10 @@ export class SessionService {
       });
 
       stage = "prompt.send";
-      const spawnInitialMessage = project.devServer
-        ? `${withSessionSlotInstructions(launchPlan.initialMessage)}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
-        : withSessionSlotInstructions(launchPlan.initialMessage);
+      const spawnInitialMessage = buildInitialMessage(
+        launchPlan.initialMessage,
+        !!project.devServer,
+      );
       await sendMessageToTmux(tmuxSession, spawnInitialMessage);
       this.logEvent("session.spawn.initial_prompt_sent", {
         level: "info",
@@ -956,7 +1009,6 @@ export class SessionService {
             cwd: workspacePath,
             command: project.devServer.command,
           });
-          persistedRecord = { ...persistedRecord, devServerRunning: true };
           this.logEvent("session.devserver.started", {
             level: "info",
             sessionId,
@@ -1184,9 +1236,7 @@ export class SessionService {
     }
 
     if (await devServerTmuxAlive(sessionId)) {
-      const updated: SessionRecord = { ...session, devServerRunning: true };
-      writeSession(this.config.dataDir, updated);
-      return this.enrich(updated);
+      return this.enrich(session);
     }
 
     await createTmuxDevServerSession({
@@ -1195,7 +1245,7 @@ export class SessionService {
       command: devServer.command,
     });
 
-    const updated: SessionRecord = { ...session, devServerRunning: true, updatedAt: nowIso() };
+    const updated: SessionRecord = { ...session, updatedAt: nowIso() };
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.devserver.started", {
       level: "info",
@@ -1630,9 +1680,10 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreProject = this.config.projects[current.project];
-      const restoreInitialMessage = restoreProject?.devServer
-        ? `${withSessionSlotInstructions(launchPlan.initialMessage)}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
-        : withSessionSlotInstructions(launchPlan.initialMessage);
+      const restoreInitialMessage = buildInitialMessage(
+        launchPlan.initialMessage,
+        !!restoreProject?.devServer,
+      );
       await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
