@@ -1146,12 +1146,14 @@ projects:
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusRight).toContain("tracker");
-    expect(statusRight).toContain("pr");
+    expect(statusRight).toContain("tracker TASK-9");
+    expect(statusRight).toContain("pr ##9");
     expect(statusRight).toContain(
-      "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
+      "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
-    expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
+    expect(statusRight).toContain(
+      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
+    );
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );

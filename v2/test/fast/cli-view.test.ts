@@ -4,6 +4,7 @@ import {
   renderInteractiveSessionList,
   renderRuntimeSummary,
 } from "../../src/cli-view.js";
+import { formatSessionLinkDisplay } from "../../src/session-link-display.js";
 import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SessionView } from "../../src/types.js";
 
 function session(overrides: Partial<SessionView>): SessionView {
@@ -68,6 +69,38 @@ describe("cli-view.describeSession", () => {
         }),
       ),
     ).toContain("not restorable");
+  });
+
+  it("shows compact persisted link ids instead of full URLs", () => {
+    const output = describeSession(
+      session({
+        slots: {
+          links: [
+            { label: "pr", url: "https://github.com/acme/api/pull/42" },
+            { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
+          ],
+        },
+      }),
+    );
+
+    expect(output).toContain("pr #42");
+    expect(output).toContain("tracker API-7");
+    expect(output).not.toContain("https://github.com/acme/api/pull/42");
+    expect(output).not.toContain("https://tracker.example.com/browse/API-7");
+  });
+});
+
+describe("session-link-display", () => {
+  it("formats pr and tracker links as compact ids", () => {
+    expect(
+      formatSessionLinkDisplay({ label: "pr", url: "https://github.com/acme/api/pull/42" }).text,
+    ).toBe("pr #42");
+    expect(
+      formatSessionLinkDisplay({
+        label: "tracker",
+        url: "https://tracker.example.com/browse/API-7",
+      }).text,
+    ).toBe("tracker API-7");
   });
 });
 
@@ -136,5 +169,25 @@ describe("cli-view.renderInteractiveSessionList", () => {
     });
 
     expect(output).toContain("Use ↑↓ to reselect before acting.");
+  });
+
+  it("shows compact link ids in selected session details", () => {
+    const output = renderInteractiveSessionList({
+      info: runtimeInfo(),
+      sessions: [
+        session({
+          slots: {
+            links: [{ label: "jira", url: "https://jira.example.com/browse/OPS-9" }],
+          },
+        }),
+      ],
+      selectedSessionId: "api-1",
+      totalSessions: 1,
+      windowStart: 0,
+      maxDetailLines: 3,
+    });
+
+    expect(output).toContain("jira OPS-9");
+    expect(output).not.toContain("https://jira.example.com/browse/OPS-9");
   });
 });

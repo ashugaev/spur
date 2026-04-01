@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { shellEscape } from "./agents/shell-escape.js";
+import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -64,9 +65,10 @@ function renderStatusRight(slots: SessionSlots | undefined): string {
   const links = slots?.links ?? [];
   return links
     .map((link) => {
-      const label = truncateStatusText(escapeStatusText(link.label), 18);
-      const url = escapeHyperlinkUrl(link.url);
-      return `#[fg=cyan]#[hyperlink=${url}]${label}#[hyperlink=]#[default]`;
+      const display = formatSessionLinkDisplay(link);
+      const text = truncateStatusText(escapeStatusText(display.text), 18);
+      const url = escapeHyperlinkUrl(display.url);
+      return `#[fg=cyan]#[hyperlink=${url}]${text}#[hyperlink=]#[default]`;
     })
     .join(" | ");
 }
