@@ -35,3 +35,8 @@ projects:
         event: github:comment
         send:
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      gh-merge-conflict:
+        source: gh
+        event: github:merge_conflict
+        send:
+          prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
