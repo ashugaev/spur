@@ -1,4 +1,5 @@
 import { spinner } from "@clack/prompts";
+import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type {
   RuntimeInfo,
   ServiceInstanceState,
@@ -85,6 +86,28 @@ function truncate(text: string, maxWidth: number): string {
   if (text.length <= maxWidth) return text;
   if (maxWidth <= 1) return "…";
   return `${text.slice(0, maxWidth - 1)}…`;
+}
+
+function supportsHyperlinks(): boolean {
+  if (!process.stdout.isTTY) {
+    return false;
+  }
+  const term = process.env["TERM"] ?? "";
+  return term !== "dumb";
+}
+
+function hyperlink(text: string, url: string): string {
+  if (!supportsHyperlinks()) {
+    return text;
+  }
+  return `\u001B]8;;${url}\u0007${text}\u001B]8;;\u0007`;
+}
+
+function formatSessionAssociations(session: SessionView): string[] {
+  return (session.slots?.links ?? []).map((link) => {
+    const display = formatSessionLinkDisplay(link);
+    return hyperlink(display.text, display.url);
+  });
 }
 
 function renderWidth(): number {
@@ -195,6 +218,7 @@ export function describeSession(session: SessionView): string {
   } else if (liveServices.length > 1) {
     facts.push(`${liveServices.length} services live`);
   }
+  facts.push(...formatSessionAssociations(session));
 
   return facts.join(" • ");
 }
@@ -322,6 +346,7 @@ function renderSessionDetailsPane(args: {
       "branch",
       selected.branchSource ? `${selected.branch} (${selected.branchSource})` : selected.branch,
     ),
+    ...formatSessionAssociations(selected).map((value) => renderField("link", value)),
     renderField("prompt", selected.prompt),
     renderField("tmux", selected.tmuxSession),
     renderField("workspace", selected.worktreePath),

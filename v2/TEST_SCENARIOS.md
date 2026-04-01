@@ -45,6 +45,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
+- `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
