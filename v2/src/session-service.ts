@@ -1999,12 +1999,19 @@ export class SessionService {
       state = "stopped";
     } else {
       const hookState = readAgentHookState(this.config.dataDir, session.id);
-      const hookFresh =
+      if (
         hookState?.state === "working" &&
-        Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS;
-      if (hookFresh) {
+        Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS
+      ) {
+        // Fresh UserPromptSubmit hook — definitively working.
         state = "working";
+      } else if (hookState?.state === "waiting") {
+        // Stop/SessionStart hook fired — trust it, but still check pane for needs_input
+        // since that requires terminal interaction the agent can't signal via hooks.
+        const paneState = await classifyAgentState(session.agent, session.tmuxSession);
+        state = paneState === "needs_input" ? "needs_input" : "waiting";
       } else {
+        // No hook state (hooks not installed or stale working) — full pane classification.
         state = await classifyAgentState(session.agent, session.tmuxSession);
       }
     }

@@ -801,7 +801,7 @@ describe("SessionService", () => {
     expect(result.runtimeAlive).toBe(false);
   });
 
-  it("uses pane classification when hook waiting state is present but process is alive", async () => {
+  it("trusts hook waiting state — returns waiting even if pane looks like working", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -816,7 +816,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // Hook state is "waiting" — not "working", so hookFresh = false
+    // Stop hook fired — hookState is "waiting". Pane still shows stale working content.
     readAgentHookStateMock.mockReturnValue({
       state: "waiting",
       updatedAt: "2026-03-18T10:04:59.000Z",
@@ -828,8 +828,8 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("working");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
+    // Hook "waiting" wins over pane — prevents working→waiting flicker on Stop hook race.
+    expect(result.state).toBe("waiting");
   });
 
   it("reports needs_input from pane when interview options are visible", async () => {
