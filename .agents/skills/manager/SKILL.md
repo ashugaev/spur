@@ -35,62 +35,73 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 - Score `<= 1`: skip research unless the codebase is unclear.
 - Score `>= 2`: run the full loop.
 
-3. Research
+3. Granular checklist
+- Build a run-specific checklist from applicable manager steps.
+- Mark each checklist item `required` or `skipped` with reason.
+- Define expected evidence for each `required` item.
+- Execute the run against this checklist and update item status as steps complete.
+
+4. Research
 - Run `researcher` and `critic` in parallel when score `>= 2`.
 - Keep one selected approach.
 - Batch unresolved questions and defaults into one clarify pass.
 - Skip this step only when the change is obvious from local code.
 
-4. Clarify
+5. Clarify
 - Skip when there is no ambiguity that changes the implementation.
 - Ask one batched clarification round.
 - Continue with stated defaults if the user accepts them or does not answer.
 
-5. Planning
+6. Planning
 - Run `architect` for every non-trivial task.
 - Require touched files, concrete steps, acceptance criteria, risks, and the cheapest validation tier that still crosses the changed boundary.
 - Reject vague plans.
 
-6. Implementation
+7. Implementation
 - Run one or more `developer` agents.
 - Split write scopes only when parallel work is clearly independent.
 - Keep one implementation path.
 - Require local self-checks before handoff.
 
-7. Simplification review
+8. Simplification review
 - Run `code-simplifier`.
 - This pass is mandatory when the skill exists.
 - Simplifier focuses on deletions, merged paths, narrower types, and shorter instructions.
 - If it requests changes, fix with `developer` and rerun it.
 - Stop after 3 simplify-fix cycles. Then report `BLOCKED_SIMPLIFY`.
 
-8. Review
+9. Review
 - Run `reviewer`.
 - Reviewer focuses on correctness, regressions, uncovered acceptance criteria, and missing validation.
 - If it requests changes, fix with `developer` and rerun it.
 - Stop after 3 review-fix cycles. Then report `BLOCKED_REVIEW`.
 
-9. Design review
+10. Design review
 - UI only.
 - Run `designer`.
 - Stop after 2 design-fix cycles. Then report `BLOCKED_DESIGN`.
 
-10. Validation
+11. Validation
 - Run `tester` for every code, config, CLI, workflow, or behavior change. Skip only for wording-only docs.
 - Always run the relevant package `build` command(s) before completion.
 - Require positive path, negative or error path, and cleanup verification at the cheapest tier that still crosses the changed boundary.
 - `v2/` changes: follow `AGENTS.md` and `CLAUDE.md` tier rules, rerun impacted `v2/TEST_SCENARIOS.md` scenarios, and include `pnpm --dir v2 build`.
 - Stop after 2 test-fix cycles. Then report `BLOCKED_VALIDATION`.
 
-11. Recheck
-- After any code or config fix made after step 7, rerun every downstream gate touched by that fix.
+12. Recheck
+- After any code or config fix made after step 8, rerun every downstream gate touched by that fix.
 - Minimum:
   - post-simplifier fix -> rerun `code-simplifier`, `reviewer`, and `tester` when validation was required
   - post-review fix -> rerun `reviewer`, `code-simplifier`, and `tester`
   - post-tester fix -> rerun the failed check, one adjacent impacted scenario, and the relevant build
 - Never report complete on stale review or stale test evidence.
 
-12. Final audit
+13. Self evaluation
+- Verify every `required` checklist item is complete with fresh evidence.
+- If any `required` item is missing or stale, return to the missing step and rerun required downstream gates.
+
+14. Final audit
+- Require `self evaluation = PASS` before close-out.
 - Verify each acceptance criterion has evidence.
 - Verify required mirrors and prompt/skill sync updates landed when applicable.
 - Default close-out unless the user opts out:
@@ -127,6 +138,7 @@ Acceptance criteria:
 
 Execution:
 - scoring: <N>/5
+- checklist: DONE | BLOCKED
 - research: DONE | SKIPPED
 - clarify: DONE | SKIPPED
 - architect: DONE | SKIPPED
@@ -136,6 +148,7 @@ Execution:
 - designer: APPROVED | SKIPPED
 - tester: PASS | FAIL | SKIPPED
 - recheck: DONE | SKIPPED
+- self-evaluation: PASS | FAIL
 
 Checks:
 - <command or scenario> — OK|FAIL
