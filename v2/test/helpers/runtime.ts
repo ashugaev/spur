@@ -97,7 +97,8 @@ else
   session_dir="$HOME/.claude/projects/$encoded_path"
   session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
   mkdir -p "$session_dir"
-  printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
+  session_file="$session_dir/$session_uuid.jsonl"
+  printf '{"type":"session"}\n' > "$session_file"
 fi`
       : `if [[ "\${1:-}" == "exec" ]]; then
   output_file=""
@@ -157,6 +158,9 @@ while IFS= read -r line; do
     simulate-work)
       printf '%s\n' "• Working (simulated)"
       sleep 1
+      if [[ -n "\${session_file:-}" ]]; then
+        printf '{"type":"result"}\n' >> "$session_file"
+      fi
       printf '%s\n' "${prompt}"
       ;;
     exit-now)
@@ -164,6 +168,9 @@ while IFS= read -r line; do
       ;;
     *)
       printf '%s\n' "ack: $line"
+      if [[ -n "\${session_file:-}" ]]; then
+        printf '{"type":"result"}\n' >> "$session_file"
+      fi
       printf '%s\n' "${prompt}"
       ;;
   esac

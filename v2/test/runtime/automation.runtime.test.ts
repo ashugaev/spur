@@ -906,12 +906,14 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     );
 
-    await pollUntil(async () => context.readAgentLog(session.id), {
+    const agentLog = await pollUntil(async () => context.readAgentLog(session.id), {
       timeoutMs: 45_000,
       accept: (value) =>
         value.includes('The bound service "web" has a problem.') &&
         value.includes(`select ${session.id} and press l`),
     });
+    expect(agentLog).toContain('The bound service "web" has a problem.');
+    expect(agentLog).toContain(`select ${session.id} and press l`);
 
     const events = await pollUntil(
       async () => readEventLog(context.dataDir).map((entry) => entry.event),
