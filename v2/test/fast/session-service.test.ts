@@ -857,6 +857,77 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
+  it("detects needs_input from line-wrapped @clack interview prompt", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    // Real Claude pane: "Esc to cancel" wraps across lines in narrow terminals
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "Pick an option:",
+        "  1. First option",
+        "  2. Second option",
+        "  3. Third option",
+        "Enter to select · ↑/↓ to navigate · Esc to",
+        "cancel",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("detects needs_input for Codex interactive question UI", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("⠏ api-1");
+    // Codex question prompt: has "esc to interrupt" AND "enter to submit answer"
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "Which approach?",
+        "› 1. Option A",
+        "  2. Option B",
+        "  3. Option C",
+        "tab to add notes | enter to submit answer",
+        "esc to interrupt",
+      ].join("\n"),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
   it("runs a bound service and persists its optional port", async () => {
     const workspacePath = resolve(".");
     loadConfigMock.mockReturnValue({
@@ -2368,9 +2439,19 @@ describe("classifyCodexTitle", () => {
     expect(classifyCodexTitle("")).toBeNull();
   });
 
-  it("returns null for unrecognized title", async () => {
+  it("returns null for spinner-only title (falls through to pane)", async () => {
     const { classifyCodexTitle } = await loadSessionServiceModule();
     expect(classifyCodexTitle("⠋ proj")).toBeNull();
+  });
+
+  it("maps plain session name (no spinner) to waiting", async () => {
+    const { classifyCodexTitle } = await loadSessionServiceModule();
+    expect(classifyCodexTitle("spur-2442")).toBe("waiting");
+  });
+
+  it('maps "Exploring" title to working', async () => {
+    const { classifyCodexTitle } = await loadSessionServiceModule();
+    expect(classifyCodexTitle("⠋ proj · Exploring")).toBe("working");
   });
 });
 
