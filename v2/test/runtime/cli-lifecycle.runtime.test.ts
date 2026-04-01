@@ -1146,12 +1146,14 @@ projects:
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusRight).toContain("tracker");
-    expect(statusRight).toContain("pr");
+    expect(statusRight).toContain("tracker TASK-9");
+    expect(statusRight).toContain("pr ##9");
     expect(statusRight).toContain(
-      "#[hyperlink=https://tracker.example.com/TASK-9]tracker#[hyperlink=]",
+      "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
-    expect(statusRight).toContain("#[hyperlink=https://github.com/org/repo/pull/9]pr#[hyperlink=]");
+    expect(statusRight).toContain(
+      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
+    );
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
@@ -1980,5 +1982,197 @@ projects:
     expect(controllerPane).toContain(
       `No native resume state found for claude session ${spawned.id}`,
     );
+  });
+
+  it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-start-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-start.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dev server start test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/dev-server/start`, {
+      method: "POST",
+    });
+
+    const devSessionName = `${spawned.id}--dev`;
+    const devSessionAlive = await pollUntil(
+      () =>
+        execFileAsync("tmux", ["has-session", "-t", devSessionName])
+          .then(() => true)
+          .catch(() => false),
+      { timeoutMs: 10_000, accept: (v) => v === true },
+    );
+    expect(devSessionAlive).toBe(true);
+  });
+
+  it("spawn with autoStart: true creates the --dev tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-autostart-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-autostart.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+      autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dev server autostart test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${spawned.id}--dev`;
+    const devSessionAlive = await pollUntil(
+      () =>
+        execFileAsync("tmux", ["has-session", "-t", devSessionName])
+          .then(() => true)
+          .catch(() => false),
+      { timeoutMs: 15_000, accept: (v) => v === true },
+    );
+    const devServerEvents = readEventLog(context.dataDir)
+      .map((e) => e.event)
+      .filter((ev) => typeof ev === "string" && ev.startsWith("session.devserver"));
+    expect(devServerEvents).toContain("session.devserver.started");
+    expect(devSessionAlive).toBe(true);
+  });
+
+  it("kill cleans up the --dev tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-kill-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-kill.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+      autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dev server kill test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${spawned.id}--dev`;
+
+    await pollUntil(
+      () =>
+        execFileAsync("tmux", ["has-session", "-t", devSessionName])
+          .then(() => true)
+          .catch(() => false),
+      { timeoutMs: 15_000, accept: (v) => v === true },
+    );
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/kill`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+
+    const devSessionGone = await execFileAsync("tmux", ["has-session", "-t", devSessionName])
+      .then(() => false)
+      .catch(() => true);
+    expect(devSessionGone).toBe(true);
   });
 });

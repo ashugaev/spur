@@ -45,6 +45,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
+- `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
@@ -62,6 +63,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
+
+- Config parses `devServer` with `command` and `autoStart`; absent key returns `undefined`.
+- `startDevServer` rejects sessions without `devServer` config, inactive sessions, and missing workspace.
+- `startDevServer` is idempotent when the dev server tmux session is already alive.
+- Cleanup (`kill`, `complete`, `pause`) kills the dev server tmux session alongside the main session.
 
 ## Runtime Integration
 
@@ -104,6 +110,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
+
+- `POST /sessions/:id/dev-server/start` creates the `${sessionId}--dev` tmux session for the configured dev server command.
+- `spawn --json` with `autoStart: true` creates the dev server tmux session alongside the agent session.
+- `kill --json` cleans up both the agent tmux and the `--dev` tmux session.
+- Agent `spur-dev-server` tool starts the dev server from inside a live session.
 
 ## Real-Agent Smoke
 

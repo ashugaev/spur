@@ -32,6 +32,7 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import { devServerTmuxSession } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
   RuntimeInfo,
@@ -475,7 +476,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -773,6 +774,52 @@ async function runInteractiveSessionList(
     }
   };
 
+  const startOrAttachDevServer = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+
+    busy = true;
+    statusMessage = brandLine(`Starting dev server for ${session.id}...`);
+    render();
+
+    const devTmuxSession = devServerTmuxSession(session.id);
+    try {
+      if (!session.devServerAlive) {
+        await postJson<SessionView>(
+          cliEntrypoint,
+          `/sessions/${session.id}/dev-server/start`,
+          {},
+          configPath,
+        );
+      }
+
+      pendingKillConfirmationSessionId = null;
+      statusMessage = undefined;
+
+      if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
+        busy = false;
+        openAttachedPane(devTmuxSession, `Dev Server ${session.id}`);
+        return;
+      }
+
+      disableTerminal();
+      try {
+        attachTmuxTargetFromList(devTmuxSession);
+      } finally {
+        if (!closed) {
+          enableTerminal();
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
   const pauseSelectedSession = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
@@ -917,6 +964,11 @@ async function runInteractiveSessionList(
       if (key.name === "l" || key.sequence === "l") {
         pendingKillConfirmationSessionId = null;
         openSelectedSessionLogs();
+        return;
+      }
+      if (key.name === "d" || key.sequence === "d") {
+        pendingKillConfirmationSessionId = null;
+        void startOrAttachDevServer().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
@@ -1253,6 +1305,28 @@ export function createProgram(cliEntrypoint: string): Command {
             configPath,
           ),
         success: (session) => `Updated slots for ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("dev-server", { hidden: true })
+    .description("Internal dev server management.")
+    .requiredOption("--session <id>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = getConfigPath(command.parent as Command);
+      await outputResult({
+        json: Boolean(options.json),
+        label: "starting dev server",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${options.session as string}/dev-server/start`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Started dev server for ${session.id}.`,
         render: renderSessionCard,
       });
     });
