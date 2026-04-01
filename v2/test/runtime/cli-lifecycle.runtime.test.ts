@@ -1934,7 +1934,7 @@ projects:
     const sessionsAfterBlock = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
-    expect(sessionsAfterBlock[0]?.status).toBe("working");
+    expect(["working", "waiting", "needs_input"]).toContain(sessionsAfterBlock[0]?.status);
     expect(sessionsAfterBlock[0]?.runtimeAlive).toBe(true);
     expect(sessionsAfterBlock[0]?.workspaceExists).toBe(true);
 

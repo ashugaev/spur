@@ -7,7 +7,7 @@ import { EventBus } from "../../src/event-bus.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { SessionService } from "../../src/session-service.js";
 import { startConfiguredTriggers } from "../../src/triggers.js";
-import type { SessionView } from "../../src/types.js";
+import type { SessionView, SpawnSessionRequest } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   captureTmuxPane,
@@ -434,108 +434,76 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     });
 
-    await withRuntimeEnv(context, async () => {
-      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
-      const session = await service.spawn({
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const session = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
         project: "api",
         agent: "claude",
         branch: "feature-runtime-ci",
         prompt: "initial github ci runtime prompt",
-      });
-
-      await pollUntil(async () => captureTmuxPane(session.id), {
-        timeoutMs: 15_000,
-        accept: (value) => value.includes("initial github ci runtime prompt"),
-      });
-
-      const config = loadConfig(configPath);
-      const bus = new EventBus();
-      const controller = startConfiguredTriggers({
-        config,
-        bus,
-        sessionService: service,
-        logger: {
-          warn: () => {},
-        },
-      });
-      const abortController = new AbortController();
-      const handle = await githubSourceModule.start({
-        sourceId: "pr-watch",
-        projectId: "api",
-        dataDir: context.dataDir,
-        config: config.projects["api"]?.sources["pr-watch"] as never,
-        emit(name, data) {
-          bus.emit({
-            name,
-            projectId: "api",
-            sourceId: "pr-watch",
-            data,
-          });
-        },
-        signal: abortController.signal,
-        logger: {
-          warn: () => {},
-        },
-      });
-
-      try {
-        await context.writeGhState({
-          prsByBranch: {
-            "feature-runtime-ci": {
-              number: 42,
-              title: "Keep CI green",
-              url: "https://github.com/acme/api/pull/42",
-              repo: "acme/api",
-              reviewDecision: null,
-            },
-          },
-          checksByPr: {
-            "42": [
-              {
-                name: "test suite",
-                state: "FAILURE",
-              },
-            ],
-          },
-        });
-
-        const pane = await pollUntil(async () => captureTmuxPane(session.id), {
-          timeoutMs: 20_000,
-          accept: (value) => value.includes("CI is failing: test suite."),
-        });
-        const normalizedPane = pane.replaceAll(/\s+/g, " ");
-
-        expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
-        expect(pane).toContain("CI is failing: test suite.");
-        expect(normalizedPane).toContain(
-          "Run $manager and $github. Check failing CI on the active PR",
-        );
-        expect(pane).not.toContain(
-          "Inspect the failing checks, fix them, and rerun the relevant validation.",
-        );
-        const ciEvents = await pollUntil(
-          async () => readEventLog(context.dataDir).map((entry) => entry.event),
-          {
-            timeoutMs: 20_000,
-            accept: (value) =>
-              value.includes("trigger.send.queued") &&
-              value.includes("trigger.send.delivered") &&
-              value.includes("session.message.sent"),
-          },
-        );
-        expect(ciEvents).toEqual(
-          expect.arrayContaining([
-            "trigger.send.queued",
-            "trigger.send.delivered",
-            "session.message.sent",
-          ]),
-        );
-      } finally {
-        abortController.abort();
-        handle.stop();
-        await controller.stop();
-      }
+      } satisfies SpawnSessionRequest),
     });
+
+    await pollUntil(async () => captureTmuxPane(session.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("initial github ci runtime prompt"),
+    });
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-ci": {
+          number: 42,
+          title: "Keep CI green",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+        },
+      },
+      checksByPr: {
+        "42": [
+          {
+            name: "test suite",
+            state: "FAILURE",
+          },
+        ],
+      },
+    });
+
+    const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+      timeoutMs: 20_000,
+      accept: (value) => value.includes("CI is failing: test suite."),
+    });
+    const normalizedPane = pane.replaceAll(/\s+/g, " ");
+
+    expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
+    expect(pane).toContain("CI is failing: test suite.");
+    expect(normalizedPane).toContain(
+      "Run $manager and $github. Check failing CI on the active PR",
+    );
+    expect(pane).not.toContain(
+      "Inspect the failing checks, fix them, and rerun the relevant validation.",
+    );
+    const ciEvents = await pollUntil(
+      async () => readEventLog(context.dataDir).map((entry) => entry.event),
+      {
+        timeoutMs: 20_000,
+        accept: (value) =>
+          value.includes("trigger.send.queued") &&
+          value.includes("trigger.send.delivered") &&
+          value.includes("session.message.sent"),
+      },
+    );
+    expect(ciEvents).toEqual(
+      expect.arrayContaining([
+        "trigger.send.queued",
+        "trigger.send.delivered",
+        "session.message.sent",
+      ]),
+    );
   });
 
   it("emits GitHub merge conflict events only when the conflict appears and reappears after clear", async () => {
