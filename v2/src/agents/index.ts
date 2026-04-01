@@ -6,7 +6,6 @@ import {
   buildClaudeResumePlanWithHooks,
   ensureClaudeHookSettings,
   findClaudeSessionId,
-  probeClaudeState,
 } from "./claude.js";
 import {
   buildCodexPlan,
@@ -14,11 +13,10 @@ import {
   buildCodexResumePlan,
   ensureCodexHooksConfig,
   findCodexSessionId,
-  probeCodexState,
 } from "./codex.js";
 import type { AgentName } from "../types.js";
-import type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
-export type { AgentLaunchPlan, AgentResumePlan, AgentStateProbe } from "./types.js";
+import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
@@ -103,17 +101,6 @@ export async function findAgentSessionId(
     return findClaudeSessionId(worktreePath);
   }
   return findCodexSessionId(worktreePath);
-}
-
-export async function probeAgentState(
-  agent: AgentName,
-  worktreePath: string,
-  args: { processAlive: boolean; signalWindowMs: number },
-): Promise<AgentStateProbe | null> {
-  if (agent === "claude") {
-    return probeClaudeState(worktreePath, args);
-  }
-  return probeCodexState(worktreePath, args);
 }
 
 export async function setupAgentHooks(args: {
