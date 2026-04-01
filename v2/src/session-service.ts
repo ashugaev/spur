@@ -218,57 +218,12 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function resolveWaitingStateFromPane(pane: string): SessionState {
-  return isWaitingInput(normalizePaneLines(pane)) ? "needs_input" : "waiting";
-}
-
 function buildInitialMessage(initialMessage: string, hasDevServer: boolean): string {
   const base = withSessionSlotInstructions(initialMessage);
   return hasDevServer
     ? `${base}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
     : base;
 }
-
-function resolveHookAgentState(
-  hookState: { state: "working" | "waiting"; updatedAt: string } | null | undefined,
-  processAlive: boolean,
-): AgentStateProbe | null {
-  if (!hookState) {
-    return null;
-  }
-  const signalAt = new Date(hookState.updatedAt);
-  if (Number.isNaN(signalAt.getTime())) {
-    return null;
-  }
-  if (!processAlive) {
-    return { state: "stopped", signalAt };
-  }
-  if (hookState.state === "working" && !isFresh(signalAt, WORKING_SIGNAL_WINDOW_MS)) {
-    return null;
-  }
-  return { state: hookState.state, signalAt };
-}
-
-function resolveRunningSessionState(args: {
-  agentState: AgentStateProbe | null;
-  updatedAt: Date;
-  activityAt: Date | null;
-}): SessionState {
-  if (!args.agentState) {
-    return isFresh(
-      latestActivityAt(args.updatedAt, args.activityAt) ?? args.updatedAt,
-      DELIVERY_GRACE_MS,
-    )
-      ? "working"
-      : "waiting";
-  }
-  return args.agentState.state === "working"
-    ? "working"
-    : args.agentState.state === "waiting"
-      ? "waiting"
-      : args.agentState.state;
-}
-
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
   if (!nextStepNotBefore) {
