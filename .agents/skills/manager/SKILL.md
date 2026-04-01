@@ -94,8 +94,9 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 - Verify each acceptance criterion has evidence.
 - Verify required mirrors and prompt/skill sync updates landed when applicable.
 - Default close-out unless the user opts out:
-  - if the current branch already has an open PR, commit and push to that branch
+  - if the current branch already has an open PR, commit and push every update to that branch
   - if no PR exists, create one after local validation
+  - enable auto-merge on new PRs when repository settings allow it
 - Prepare a short activity summary for the final report:
   - activations: every skill and agent activated, with count
   - loops: every looped gate run count

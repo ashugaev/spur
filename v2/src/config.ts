@@ -7,6 +7,7 @@ import {
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
+  type DevServerConfig,
   type GitHubSourceConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
@@ -227,6 +228,19 @@ function parseProjectPreflight(
   };
 }
 
+function parseDevServer(projectId: string, value: unknown): DevServerConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.devServer`;
+  const raw = asObject(value, label);
+  return {
+    command: asString(raw["command"], `${label}.command`),
+    autoStart: asOptionalBoolean(raw["autoStart"], `${label}.autoStart`) ?? false,
+  };
+}
+
 function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfig | undefined {
   if (value === undefined) {
     return undefined;
@@ -314,6 +328,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
+  const devServer = parseDevServer(projectId, raw["devServer"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
   const sourcesRaw = raw["sources"]
     ? asObject(raw["sources"], `projects.${projectId}.sources`)
@@ -343,6 +358,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     symlinks,
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
+    ...(devServer !== undefined ? { devServer } : {}),
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
     triggers,

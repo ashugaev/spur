@@ -364,6 +364,36 @@ projects:
     );
   });
 
+  it("parses devServer command and autoStart", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    devServer:
+      command: "pnpm dev"
+      autoStart: true
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.devServer).toEqual({
+      command: "pnpm dev",
+      autoStart: true,
+    });
+  });
+
+  it("returns undefined for devServer when the key is absent", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.devServer).toBeUndefined();
+  });
+
   it("rejects non-boolean project worktree values", async () => {
     const configPath = await writeConfig(`
 projects:

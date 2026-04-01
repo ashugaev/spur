@@ -85,4 +85,28 @@ describe("runtime-tmux", () => {
     expect(bindCall?.[1]?.[6]).toContain("open-link.js");
     expect(bindCall?.[1]?.[6]).toContain("q:mouse_hyperlink");
   });
+
+  it("renders compact link ids in tmux status", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
+
+    await syncTmuxStatus("api-1", {
+      links: [
+        { label: "pr", url: "https://github.com/acme/api/pull/42" },
+        { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
+      ],
+    });
+
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    );
+    if (!statusRightCall) {
+      throw new Error("Expected syncTmuxStatus to set status-right");
+    }
+    const [, args] = statusRightCall;
+    const rendered = args.at(-1);
+    expect(rendered).toContain("]pr ##42#[");
+    expect(rendered).toContain("tracker API-7");
+  });
 });

@@ -26,6 +26,10 @@ const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
+const createTmuxDevServerSessionMock = vi.fn();
+const devServerTmuxAliveMock = vi.fn();
+const devServerTmuxSessionMock = vi.fn((id: string) => `${id}--dev`);
+const killDevServerTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
@@ -97,6 +101,10 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSession: createTmuxSessionMock,
   createTmuxCommandSession: createTmuxCommandSessionMock,
+  createTmuxDevServerSession: createTmuxDevServerSessionMock,
+  devServerTmuxAlive: devServerTmuxAliveMock,
+  devServerTmuxSession: devServerTmuxSessionMock,
+  killDevServerTmux: killDevServerTmuxMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
@@ -261,6 +269,10 @@ describe("SessionService", () => {
     resetServiceStore();
     createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
+    createTmuxDevServerSessionMock.mockReset().mockResolvedValue(undefined);
+    devServerTmuxAliveMock.mockReset().mockResolvedValue(false);
+    devServerTmuxSessionMock.mockReset().mockImplementation((id: string) => `${id}--dev`);
+    killDevServerTmuxMock.mockReset().mockResolvedValue(undefined);
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
@@ -789,7 +801,7 @@ describe("SessionService", () => {
     expect(result.runtimeAlive).toBe(false);
   });
 
-  it("uses pane classification when hook waiting state is present but process is alive", async () => {
+  it("trusts hook waiting state — returns waiting even if pane looks like working", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -804,7 +816,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // Hook state is "waiting" — not "working", so hookFresh = false
+    // Stop hook fired — hookState is "waiting". Pane still shows stale working content.
     readAgentHookStateMock.mockReturnValue({
       state: "waiting",
       updatedAt: "2026-03-18T10:04:59.000Z",
@@ -816,8 +828,8 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("working");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
+    // Hook "waiting" wins over pane — prevents working→waiting flicker on Stop hook race.
+    expect(result.state).toBe("waiting");
   });
 
   it("reports needs_input from pane when interview options are visible", async () => {
@@ -2118,6 +2130,205 @@ describe("SessionService", () => {
     await expect(service.restore("api-1")).rejects.toThrow("Session is not restorable: api-1");
     expect(buildAgentRestorePlanMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startDevServer rejects when project has no devServer configured", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startDevServer("api-1")).rejects.toThrow(
+      "Project api has no devServer configured",
+    );
+    expect(createTmuxDevServerSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startDevServer rejects for an inactive (killed) session", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          devServer: { command: "pnpm dev", autoStart: false },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "killed",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startDevServer("api-1")).rejects.toThrow("Session is not running: api-1");
+    expect(createTmuxDevServerSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startDevServer rejects when session workspace is not available", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          devServer: { command: "pnpm dev", autoStart: false },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startDevServer("api-1")).rejects.toThrow(
+      "Session workspace is not available: api-1",
+    );
+    expect(createTmuxDevServerSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("startDevServer is idempotent when the dev server tmux session is already alive", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          devServer: { command: "pnpm dev", autoStart: false },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    devServerTmuxAliveMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.startDevServer("api-1");
+
+    expect(createTmuxDevServerSessionMock).not.toHaveBeenCalled();
+    expect(result.id).toBe("api-1");
+  });
+
+  it("kill calls killDevServerTmux to clean up the dev server session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1", { force: true });
+
+    expect(killDevServerTmuxMock).toHaveBeenCalledWith("api-1");
+  });
+
+  it("complete calls killDevServerTmux to clean up the dev server session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.complete("api-1");
+
+    expect(killDevServerTmuxMock).toHaveBeenCalledWith("api-1");
+  });
+
+  it("pause calls killDevServerTmux to clean up the dev server session", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.pause("api-1");
+
+    expect(killDevServerTmuxMock).toHaveBeenCalledWith("api-1");
   });
 });
 

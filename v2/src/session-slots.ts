@@ -191,7 +191,8 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
   writeFileSync(
     join(toolDir, AGENT_STATE_UPDATER_NAME),
     `#!/usr/bin/env node
-import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -261,6 +262,7 @@ const nextRecord = {
 
 const tmpPath = \`\${stateFilePath}.tmp.\${process.pid}.\${Date.now()}\`;
 try {
+  mkdirSync(dirname(stateFilePath), { recursive: true });
   writeFileSync(tmpPath, JSON.stringify(nextRecord, null, 2) + "\\n", "utf8");
   renameSync(tmpPath, stateFilePath);
 } catch {
@@ -274,6 +276,14 @@ try {
     `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UPDATER_NAME))} ${shellEscape(stateFilePath)}
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
+    join(toolDir, "spur-dev-server"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} dev-server --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

@@ -248,6 +248,12 @@ export async function startServer(
         return;
       }
 
+      const devServerStartId = path.match(/^\/sessions\/([^/]+)\/dev-server\/start$/)?.[1];
+      if (method === "POST" && devServerStartId) {
+        sendJson(response, 200, await service.startDevServer(devServerStartId));
+        return;
+      }
+
       const listServicesSessionId = path.match(/^\/sessions\/([^/]+)\/services$/)?.[1];
       if (method === "GET" && listServicesSessionId) {
         sendJson(response, 200, await service.listServices(listServicesSessionId));
