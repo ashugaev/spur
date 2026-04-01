@@ -103,10 +103,13 @@ const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
   /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
+  /Would you like to (?:run|grant|make|approve)\b/i,
 ];
 const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
 const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
-const INTERVIEW_OPTION_RE = /^\d+\.\s/;
+const INTERVIEW_OPTION_RE = /^\d+[.:]\s/;
+// Codex interactive question UI: "tab to add notes | enter to submit answer"
+const CODEX_QUESTION_RE = /\benter to submit\b/i;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
@@ -188,13 +191,15 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
 
 export function isWaitingInput(lines: string[]): boolean {
   const tailLines = lines.slice(-WAITING_INPUT_TAIL_LINES).map((line) => line.trim());
-  const tail = tailLines.join("\n");
+  // Join with space so patterns work across line-wrapped text
+  // (e.g. "Esc to\ncancel" in narrow terminals).
+  const tail = tailLines.join(" ");
   if (PERMISSION_PROMPTS.some((pattern) => pattern.test(tail))) {
     return true;
   }
   return (
-    tailLines.some((line) => INTERVIEW_ENTER_RE.test(line)) &&
-    tailLines.some((line) => INTERVIEW_ESCAPE_RE.test(line)) &&
+    INTERVIEW_ENTER_RE.test(tail) &&
+    INTERVIEW_ESCAPE_RE.test(tail) &&
     tailLines.filter((line) => INTERVIEW_OPTION_RE.test(line)).length >= 2
   );
 }
@@ -245,20 +250,30 @@ function classifyLivePaneState(pane: string): SessionState {
   return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
 }
 
+// Braille spinner chars used by Codex in terminal title when active.
+const CODEX_BRAILLE_SPINNER_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+
 export function classifyCodexTitle(title: string): SessionState | null {
+  // Codex title format: "⠋ session-name" (Braille spinner) when active,
+  // or "⠋ session-name · Thinking" / "· Ready" if status items configured.
   if (/\bReady\b/i.test(title)) return "waiting";
-  if (/\b(?:Thinking|Working|Starting|Undoing)\b/i.test(title)) return "working";
+  if (/\b(?:Thinking|Working|Starting|Undoing|Exploring)\b/i.test(title)) return "working";
   if (/\bWaiting\b/i.test(title)) return "needs_input";
+  // Braille spinner = active but could be working OR question prompt — fall through to pane.
+  // No spinner and no status word = idle (title is just "session-name").
+  if (!CODEX_BRAILLE_SPINNER_RE.test(title) && title.trim().length > 0) return "waiting";
   return null;
 }
 
 // Codex TUI always renders `›` in the input area, even while working.
-// The "esc to interrupt" hint appears in all active-state widgets (Working, Thinking, Starting, Undoing).
+// "esc to interrupt" appears in BOTH active-state widgets AND interactive question UIs.
+// Check question/approval patterns first to avoid misclassifying questions as working.
 const CODEX_PANE_WORKING_RE = /esc to interrupt/i;
 
 function classifyCodexPane(pane: string): SessionState {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) return "needs_input";
+  if (CODEX_QUESTION_RE.test(pane)) return "needs_input";
   if (CODEX_PANE_WORKING_RE.test(pane)) return "working";
   return "waiting";
 }
