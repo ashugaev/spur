@@ -233,15 +233,21 @@ function classifyLivePaneState(pane: string): SessionState {
   return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
 }
 
-const CODEX_TITLE_READY_RE = /\bReady\b/i;
-const CODEX_TITLE_WORKING_RE = /\b(?:Thinking|Working|Starting|Undoing)\b/i;
-const CODEX_TITLE_WAITING_RE = /\bWaiting\b/i;
-
 export function classifyCodexTitle(title: string): SessionState | null {
-  if (CODEX_TITLE_READY_RE.test(title)) return "waiting";
-  if (CODEX_TITLE_WORKING_RE.test(title)) return "working";
-  if (CODEX_TITLE_WAITING_RE.test(title)) return "needs_input";
+  if (/\bReady\b/i.test(title)) return "waiting";
+  if (/\b(?:Thinking|Working|Starting|Undoing)\b/i.test(title)) return "working";
+  if (/\bWaiting\b/i.test(title)) return "needs_input";
   return null;
+}
+
+async function classifyAgentState(agent: string, tmuxSession: string): Promise<SessionState> {
+  if (agent === "codex") {
+    const title = await getTmuxPaneTitle(tmuxSession);
+    const titleState = classifyCodexTitle(title);
+    if (titleState !== null) return titleState;
+  }
+  const pane = await captureTmuxPane(tmuxSession, 80);
+  return classifyLivePaneState(pane);
 }
 
 export function isRestorableSession(
@@ -1034,13 +1040,7 @@ export class SessionService {
       const readySession = await this.ensureSessionReadyForSend(session);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
-        let sendState: SessionState;
-        if (readySession.agent === "codex") {
-          const title = await getTmuxPaneTitle(readySession.tmuxSession);
-          sendState = classifyCodexTitle(title) ?? classifyLivePaneState(await captureTmuxPane(readySession.tmuxSession, 80));
-        } else {
-          sendState = classifyLivePaneState(await captureTmuxPane(readySession.tmuxSession, 80));
-        }
+        const sendState = await classifyAgentState(readySession.agent, readySession.tmuxSession);
         interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
@@ -1793,13 +1793,7 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
-      let paneState: SessionState;
-      if (session.agent === "codex") {
-        const title = await getTmuxPaneTitle(session.tmuxSession);
-        paneState = classifyCodexTitle(title) ?? classifyLivePaneState(await captureTmuxPane(session.tmuxSession, 80));
-      } else {
-        paneState = classifyLivePaneState(await captureTmuxPane(session.tmuxSession, 80));
-      }
+      const paneState = await classifyAgentState(session.agent, session.tmuxSession);
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
@@ -1906,18 +1900,8 @@ export class SessionService {
         Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS;
       if (hookFresh) {
         state = "working";
-      } else if (session.agent === "codex") {
-        const title = await getTmuxPaneTitle(session.tmuxSession);
-        const titleState = classifyCodexTitle(title);
-        if (titleState !== null) {
-          state = titleState;
-        } else {
-          const pane = await captureTmuxPane(session.tmuxSession, 80);
-          state = classifyLivePaneState(pane);
-        }
       } else {
-        const pane = await captureTmuxPane(session.tmuxSession, 80);
-        state = classifyLivePaneState(pane);
+        state = await classifyAgentState(session.agent, session.tmuxSession);
       }
     }
 
