@@ -315,3 +315,29 @@ export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
     return true;
   }
 }
+
+export function devServerTmuxSession(sessionId: string): string {
+  return `${sessionId}--dev`;
+}
+
+export async function createTmuxDevServerSession(input: {
+  sessionId: string;
+  cwd: string;
+  command: string;
+  env?: Record<string, string>;
+}): Promise<void> {
+  await createTmuxCommandSession({
+    sessionName: devServerTmuxSession(input.sessionId),
+    cwd: input.cwd,
+    launchCommand: input.command,
+    ...(input.env ? { env: input.env } : {}),
+  });
+}
+
+export async function devServerTmuxAlive(sessionId: string): Promise<boolean> {
+  return tmuxSessionExists(devServerTmuxSession(sessionId));
+}
+
+export async function killDevServerTmux(sessionId: string): Promise<void> {
+  await killTmuxSession(devServerTmuxSession(sessionId));
+}
