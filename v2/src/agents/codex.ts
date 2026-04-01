@@ -284,7 +284,6 @@ function resolveSessionRootDirs(options?: {
   return [...new Set(roots.filter(Boolean))];
 }
 
-
 async function readThreadId(filePath: string): Promise<string | null> {
   try {
     const input = createReadStream(filePath, { encoding: "utf-8" });

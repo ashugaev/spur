@@ -92,6 +92,7 @@ const TRAILING_UI_RE = [
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
+const HOOK_FRESHNESS_MS = 2_000;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -220,15 +221,6 @@ function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number
     return 0;
   }
   return Math.max(0, timestamp - Date.now());
-}
-
-function isPromptReadyState(pane: string): boolean {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) {
-    return false;
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  return Boolean(lastLine) && PROMPT_RE.test(lastLine);
 }
 
 function classifyLivePaneState(pane: string): SessionState {
@@ -1031,7 +1023,7 @@ export class SessionService {
       let interrupt = options?.interrupt === true;
       if (interrupt) {
         const pane = await captureTmuxPane(readySession.tmuxSession, 80);
-        interrupt = !isPromptReadyState(pane);
+        interrupt = classifyLivePaneState(pane) !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
@@ -1888,7 +1880,7 @@ export class SessionService {
       const hookState = readAgentHookState(this.config.dataDir, session.id);
       const hookFresh =
         hookState?.state === "working" &&
-        Date.now() - new Date(hookState.updatedAt).getTime() <= 2_000;
+        Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS;
       if (hookFresh) {
         state = "working";
       } else {

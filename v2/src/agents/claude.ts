@@ -61,11 +61,7 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
   return findLatestSessionId(worktreePath);
 }
 
-export function buildClaudePlan(prompt: string): AgentLaunchPlan {
-  return buildClaudePlanWithSettings(prompt);
-}
-
-function buildClaudePlanWithSettings(
+export function buildClaudePlan(
   prompt: string,
   options?: { settingsPath?: string },
 ): AgentLaunchPlan {
@@ -110,37 +106,14 @@ export async function buildClaudeRestorePlan(
 
 export async function ensureClaudeHookSettings(sessionToolDir: string): Promise<string> {
   const settingsPath = join(sessionToolDir, CLAUDE_HOOK_SETTINGS_FILE);
+  const hookEntry = { hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }] };
   const hooksConfig = {
     hooks: {
-      SessionStart: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
-      UserPromptSubmit: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
-      Stop: [
-        {
-          hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }],
-        },
-      ],
+      SessionStart: [hookEntry],
+      UserPromptSubmit: [hookEntry],
+      Stop: [hookEntry],
     },
   };
   await writeFile(settingsPath, JSON.stringify(hooksConfig, null, 2) + "\n", "utf8");
   return settingsPath;
-}
-
-export function buildClaudePlanWithHooks(prompt: string, settingsPath: string): AgentLaunchPlan {
-  return buildClaudePlanWithSettings(prompt, { settingsPath });
-}
-
-export function buildClaudeResumePlanWithHooks(
-  sessionId: string,
-  settingsPath: string,
-  binary = claudeCommand(),
-): AgentResumePlan {
-  return buildClaudeResumePlan(sessionId, binary, { settingsPath });
 }

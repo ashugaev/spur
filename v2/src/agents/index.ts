@@ -1,9 +1,7 @@
 import {
   buildClaudePlan,
-  buildClaudePlanWithHooks,
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
-  buildClaudeResumePlanWithHooks,
   ensureClaudeHookSettings,
   findClaudeSessionId,
 } from "./claude.js";
@@ -33,7 +31,7 @@ export function buildAgentLaunchPlan(
 ) {
   if (agent === "claude") {
     return options?.claudeSettingsPath
-      ? buildClaudePlanWithHooks(prompt, options.claudeSettingsPath)
+      ? buildClaudePlan(prompt, { settingsPath: options.claudeSettingsPath })
       : buildClaudePlan(prompt);
   }
   return buildCodexPlan(prompt, options);
@@ -87,7 +85,9 @@ export function buildAgentResumePlan(
   const binary = extractCommandBinary(launchCommand, agent);
   if (agent === "claude") {
     return options?.claudeSettingsPath
-      ? buildClaudeResumePlanWithHooks(agentSessionId, options.claudeSettingsPath, binary)
+      ? buildClaudeResumePlan(agentSessionId, binary, {
+          settingsPath: options.claudeSettingsPath,
+        })
       : buildClaudeResumePlan(agentSessionId, binary);
   }
   return buildCodexResumePlan(agentSessionId, binary, options);

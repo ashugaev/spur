@@ -832,9 +832,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue(
-      "Do you want to proceed?\n(Y)es / (N)o",
-    );
+    captureTmuxPaneMock.mockResolvedValue("Do you want to proceed?\n(Y)es / (N)o");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
