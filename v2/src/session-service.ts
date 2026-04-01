@@ -997,7 +997,7 @@ export class SessionService {
       });
 
       stage = "record.write";
-      let persistedRecord = await this.captureAgentSessionId(
+      const persistedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
