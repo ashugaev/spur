@@ -240,11 +240,24 @@ export function classifyCodexTitle(title: string): SessionState | null {
   return null;
 }
 
+// Codex TUI always renders `›` in the input area, even while working.
+// The "esc to interrupt" hint appears in all active-state widgets (Working, Thinking, Starting, Undoing).
+const CODEX_PANE_WORKING_RE = /esc to interrupt/i;
+
+function classifyCodexPane(pane: string): SessionState {
+  const lines = normalizePaneLines(pane);
+  if (isWaitingInput(lines)) return "needs_input";
+  if (CODEX_PANE_WORKING_RE.test(pane)) return "working";
+  return "waiting";
+}
+
 async function classifyAgentState(agent: string, tmuxSession: string): Promise<SessionState> {
   if (agent === "codex") {
     const title = await getTmuxPaneTitle(tmuxSession);
     const titleState = classifyCodexTitle(title);
     if (titleState !== null) return titleState;
+    const pane = await captureTmuxPane(tmuxSession, 80);
+    return classifyCodexPane(pane);
   }
   const pane = await captureTmuxPane(tmuxSession, 80);
   return classifyLivePaneState(pane);

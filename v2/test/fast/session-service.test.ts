@@ -669,7 +669,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\nthinking...");
+    captureTmuxPaneMock.mockResolvedValue("• Thinking (5s • esc to interrupt)\n\n›");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -2240,7 +2240,7 @@ describe("codex title-based state", () => {
     expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to pane on empty title", async () => {
+  it("falls back to pane on empty title — idle pane → waiting", async () => {
     readSessionMock.mockReturnValue(runningCodexSession());
     getTmuxPaneTitleMock.mockResolvedValue("");
     captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
@@ -2253,6 +2253,37 @@ describe("codex title-based state", () => {
     expect(result.state).toBe("waiting");
     expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
   });
+
+  it("falls back to pane on empty title — 'esc to interrupt' pane → working", async () => {
+    readSessionMock.mockReturnValue(runningCodexSession());
+    getTmuxPaneTitleMock.mockResolvedValue("");
+    captureTmuxPaneMock.mockResolvedValue(
+      "• Working (15s • esc to interrupt)\n\n› Find and fix a bug\n\n  gpt-5.4 medium · 73% left",
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+  });
+
+  it("falls back to pane on empty title — 'Starting ...' pane → working", async () => {
+    readSessionMock.mockReturnValue(runningCodexSession());
+    getTmuxPaneTitleMock.mockResolvedValue("");
+    captureTmuxPaneMock.mockResolvedValue(
+      "• Starting MCP servers (3/4): atlassian (1m 17s • esc to interrupt)\n\n›",
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+  });
+
 
   it("does not call getTmuxPaneTitle for claude sessions", async () => {
     readSessionMock.mockReturnValue({
