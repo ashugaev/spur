@@ -1137,6 +1137,12 @@ projects:
 
     const statusLeft = await readTmuxOption(spawned.id, "status-left");
     const statusRight = await readTmuxOption(spawned.id, "status-right");
+    const { stdout: mouseBinding } = await execFileAsync("tmux", [
+      "list-keys",
+      "-T",
+      "root",
+      "MouseUp1StatusRight",
+    ]);
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
@@ -1154,6 +1160,9 @@ projects:
     expect(statusRight).toContain(
       "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
     );
+    expect(mouseBinding).toContain("MouseUp1StatusRight");
+    expect(mouseBinding).toContain("open-link.js");
+    expect(mouseBinding).toContain("q:mouse_hyperlink");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );

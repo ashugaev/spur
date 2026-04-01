@@ -12,6 +12,7 @@ import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
+const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
 
 async function tmux(...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("tmux", args);
@@ -52,6 +53,10 @@ function truncateStatusText(text: string, max: number): string {
 
 function escapeHyperlinkUrl(url: string): string {
   return encodeURI(url).replaceAll("#", "%23").replaceAll(",", "%2C").replaceAll("]", "%5D");
+}
+
+function buildOpenLinkTmuxCommand(): string {
+  return `run-shell -b "${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)} #{q:mouse_hyperlink}"`;
 }
 
 function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
@@ -207,6 +212,11 @@ export async function createTmuxCommandSession(input: {
 export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
   const target = exactPaneTarget(sessionName);
   try {
+    await tmux(
+      "bind-key", "-n", "MouseUp1StatusRight",
+      "if-shell", "-F", "#{mouse_hyperlink}",
+      buildOpenLinkTmuxCommand(),
+    );
     await tmux("set-option", "-t", target, "status", "on");
     await tmux("set-option", "-t", target, "status-left-length", "120");
     await tmux("set-option", "-t", target, "status-right-length", "160");
