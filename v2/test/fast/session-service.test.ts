@@ -26,6 +26,10 @@ const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
+const createTmuxDevServerSessionMock = vi.fn();
+const devServerTmuxAliveMock = vi.fn();
+const devServerTmuxSessionMock = vi.fn((id: string) => `${id}--dev`);
+const killDevServerTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
@@ -97,6 +101,10 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSession: createTmuxSessionMock,
   createTmuxCommandSession: createTmuxCommandSessionMock,
+  createTmuxDevServerSession: createTmuxDevServerSessionMock,
+  devServerTmuxAlive: devServerTmuxAliveMock,
+  devServerTmuxSession: devServerTmuxSessionMock,
+  killDevServerTmux: killDevServerTmuxMock,
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: killTmuxSessionMock,
@@ -261,6 +269,10 @@ describe("SessionService", () => {
     resetServiceStore();
     createTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
+    createTmuxDevServerSessionMock.mockReset().mockResolvedValue(undefined);
+    devServerTmuxAliveMock.mockReset().mockResolvedValue(false);
+    devServerTmuxSessionMock.mockReset().mockImplementation((id: string) => `${id}--dev`);
+    killDevServerTmuxMock.mockReset().mockResolvedValue(undefined);
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);

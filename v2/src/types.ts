@@ -67,6 +67,11 @@ export interface ProjectPreflightConfig {
   prompt: string;
 }
 
+export interface DevServerConfig {
+  command: string;
+  autoStart: boolean;
+}
+
 export interface ProjectSpawnConfig {
   steps?: string[];
 }
@@ -126,6 +131,7 @@ export interface ProjectConfig {
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
+  devServer?: DevServerConfig;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
 }
@@ -168,6 +174,7 @@ export interface SessionRecord {
   updatedAt: string;
   slots?: SessionSlots;
   pipeline?: SessionPipelineState;
+  devServerRunning?: boolean;
   error?: string;
 }
 
@@ -191,6 +198,7 @@ export interface SessionView extends SessionRecord {
   state: SessionState;
   lastActivityAt: string;
   services: ServiceInstanceView[];
+  devServerAlive: boolean;
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {

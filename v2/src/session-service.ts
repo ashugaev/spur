@@ -31,10 +31,14 @@ import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.
 import {
   captureTmuxPane,
   createTmuxCommandSession,
+  createTmuxDevServerSession,
   createTmuxSession,
+  devServerTmuxAlive,
+  devServerTmuxSession,
   getTmuxPaneTitle,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
+  killDevServerTmux,
   killTmuxSession,
   sendMessageToTmux,
   syncTmuxStatus,
@@ -55,6 +59,7 @@ import {
   SPUR_DAEMON_API_VERSION,
   type AppConfig,
   type BranchSource,
+  type DevServerConfig,
   type KillSessionRequest,
   type ProjectConfig,
   type RunServiceRequest,
@@ -924,7 +929,10 @@ export class SessionService {
       });
 
       stage = "prompt.send";
-      await sendMessageToTmux(tmuxSession, withSessionSlotInstructions(launchPlan.initialMessage));
+      const spawnInitialMessage = project.devServer
+        ? `${withSessionSlotInstructions(launchPlan.initialMessage)}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
+        : withSessionSlotInstructions(launchPlan.initialMessage);
+      await sendMessageToTmux(tmuxSession, spawnInitialMessage);
       this.logEvent("session.spawn.initial_prompt_sent", {
         level: "info",
         sessionId,
@@ -936,10 +944,40 @@ export class SessionService {
       });
 
       stage = "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let persistedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
+
+      if (project.devServer?.autoStart) {
+        try {
+          await createTmuxDevServerSession({
+            sessionId,
+            cwd: workspacePath,
+            command: project.devServer.command,
+          });
+          persistedRecord = { ...persistedRecord, devServerRunning: true };
+          this.logEvent("session.devserver.started", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-started dev server for ${sessionId}`,
+            details: {
+              command: project.devServer.command,
+              tmuxSession: devServerTmuxSession(sessionId),
+            },
+          });
+        } catch (devError) {
+          const devMessage = devError instanceof Error ? devError.message : String(devError);
+          this.logEvent("session.devserver.autostart.failed", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-start dev server failed for ${sessionId}: ${devMessage}`,
+          });
+        }
+      }
+
       writeSession(this.config.dataDir, persistedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
@@ -961,6 +999,7 @@ export class SessionService {
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
+        await killDevServerTmux(sessionId);
         deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
         if (worktree && workspacePath) {
@@ -1127,7 +1166,52 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  async startDevServer(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
+      throw new Error(`Session workspace is not available: ${sessionId}`);
+    }
+    const project = this.getProject(session.project);
+    const devServer: DevServerConfig | undefined = project.devServer;
+    if (!devServer) {
+      throw new Error(`Project ${session.project} has no devServer configured`);
+    }
+
+    if (await devServerTmuxAlive(sessionId)) {
+      const updated: SessionRecord = { ...session, devServerRunning: true };
+      writeSession(this.config.dataDir, updated);
+      return this.enrich(updated);
+    }
+
+    await createTmuxDevServerSession({
+      sessionId,
+      cwd: session.worktreePath,
+      command: devServer.command,
+    });
+
+    const updated: SessionRecord = { ...session, devServerRunning: true, updatedAt: nowIso() };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.devserver.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Started dev server for ${sessionId}`,
+      details: {
+        command: devServer.command,
+        tmuxSession: devServerTmuxSession(sessionId),
+      },
+    });
+    return this.enrich(updated);
+  }
+
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
+    await killDevServerTmux(session.id);
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       await killTmuxSession(service.tmuxSession);
     }
@@ -1545,10 +1629,11 @@ export class SessionService {
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      await sendMessageToTmux(
-        current.tmuxSession,
-        withSessionSlotInstructions(launchPlan.initialMessage),
-      );
+      const restoreProject = this.config.projects[current.project];
+      const restoreInitialMessage = restoreProject?.devServer
+        ? `${withSessionSlotInstructions(launchPlan.initialMessage)}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
+        : withSessionSlotInstructions(launchPlan.initialMessage);
+      await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -1923,6 +2008,8 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
+    const devServerAlive = await devServerTmuxAlive(session.id);
+
     return {
       ...session,
       runtimeAlive,
@@ -1930,6 +2017,7 @@ export class SessionService {
       state,
       lastActivityAt,
       services,
+      devServerAlive,
     };
   }
 }

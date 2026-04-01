@@ -277,6 +277,14 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
 `,
     { encoding: "utf8", mode: 0o755 },
   );
+  writeFileSync(
+    join(toolDir, "spur-dev-server"),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} dev-server --session ${shellEscape(args.sessionId)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
   return toolDir;
 }
 
