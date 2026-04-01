@@ -213,12 +213,8 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   const target = exactPaneTarget(sessionName);
   try {
     await tmux(
-      "bind-key",
-      "-n",
-      "MouseUp1StatusRight",
-      "if-shell",
-      "-F",
-      "#{mouse_hyperlink}",
+      "bind-key", "-n", "MouseUp1StatusRight",
+      "if-shell", "-F", "#{mouse_hyperlink}",
       buildOpenLinkTmuxCommand(),
     );
     await tmux("set-option", "-t", target, "status", "on");

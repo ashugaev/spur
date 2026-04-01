@@ -84,7 +84,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
-- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path and refreshes `tmux` status hyperlinks without restarting the session.
+- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, shows the `Ctrl+G detach` hint, and returns to the selector after detach.

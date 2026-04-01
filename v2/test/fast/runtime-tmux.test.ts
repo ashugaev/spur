@@ -59,6 +59,33 @@ describe("runtime-tmux", () => {
     ]);
   });
 
+  it("registers status-right link click handling when syncing tmux status", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
+
+    const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
+
+    await syncTmuxStatus("api-1", {
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    });
+
+    const bindCall = execFileAsyncMock.mock.calls.find(
+      (call) => call[1]?.[0] === "bind-key" && call[1]?.[2] === "MouseUp1StatusRight",
+    );
+    expect(bindCall?.[0]).toBe("tmux");
+    expect(bindCall?.[1]?.slice(0, 6)).toEqual([
+      "bind-key",
+      "-n",
+      "MouseUp1StatusRight",
+      "if-shell",
+      "-F",
+      "#{mouse_hyperlink}",
+    ]);
+    expect(bindCall?.[1]?.[6]).toContain("run-shell -b");
+    expect(bindCall?.[1]?.[6]).toContain(process.execPath);
+    expect(bindCall?.[1]?.[6]).toContain("open-link.js");
+    expect(bindCall?.[1]?.[6]).toContain("q:mouse_hyperlink");
+  });
+
   it("renders compact link ids in tmux status", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
