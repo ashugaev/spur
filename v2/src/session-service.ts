@@ -32,6 +32,7 @@ import {
   captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSession,
+  getTmuxPaneTitle,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
   killTmuxSession,
@@ -230,6 +231,17 @@ function classifyLivePaneState(pane: string): SessionState {
   }
   const lastLine = lines.at(-1)?.trim() ?? "";
   return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
+}
+
+const CODEX_TITLE_READY_RE = /\bReady\b/i;
+const CODEX_TITLE_WORKING_RE = /\b(?:Thinking|Working|Starting|Undoing)\b/i;
+const CODEX_TITLE_WAITING_RE = /\bWaiting\b/i;
+
+export function classifyCodexTitle(title: string): SessionState | null {
+  if (CODEX_TITLE_READY_RE.test(title)) return "waiting";
+  if (CODEX_TITLE_WORKING_RE.test(title)) return "working";
+  if (CODEX_TITLE_WAITING_RE.test(title)) return "needs_input";
+  return null;
 }
 
 export function isRestorableSession(
@@ -1022,8 +1034,14 @@ export class SessionService {
       const readySession = await this.ensureSessionReadyForSend(session);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
-        const pane = await captureTmuxPane(readySession.tmuxSession, 80);
-        interrupt = classifyLivePaneState(pane) !== "waiting";
+        let sendState: SessionState;
+        if (readySession.agent === "codex") {
+          const title = await getTmuxPaneTitle(readySession.tmuxSession);
+          sendState = classifyCodexTitle(title) ?? classifyLivePaneState(await captureTmuxPane(readySession.tmuxSession, 80));
+        } else {
+          sendState = classifyLivePaneState(await captureTmuxPane(readySession.tmuxSession, 80));
+        }
+        interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
       const updated: SessionRecord = {
@@ -1775,8 +1793,13 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
-      const pane = await captureTmuxPane(session.tmuxSession, 80);
-      const paneState = classifyLivePaneState(pane);
+      let paneState: SessionState;
+      if (session.agent === "codex") {
+        const title = await getTmuxPaneTitle(session.tmuxSession);
+        paneState = classifyCodexTitle(title) ?? classifyLivePaneState(await captureTmuxPane(session.tmuxSession, 80));
+      } else {
+        paneState = classifyLivePaneState(await captureTmuxPane(session.tmuxSession, 80));
+      }
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
@@ -1883,6 +1906,15 @@ export class SessionService {
         Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS;
       if (hookFresh) {
         state = "working";
+      } else if (session.agent === "codex") {
+        const title = await getTmuxPaneTitle(session.tmuxSession);
+        const titleState = classifyCodexTitle(title);
+        if (titleState !== null) {
+          state = titleState;
+        } else {
+          const pane = await captureTmuxPane(session.tmuxSession, 80);
+          state = classifyLivePaneState(pane);
+        }
       } else {
         const pane = await captureTmuxPane(session.tmuxSession, 80);
         state = classifyLivePaneState(pane);
