@@ -2284,7 +2284,6 @@ describe("codex title-based state", () => {
     expect(result.state).toBe("working");
   });
 
-
   it("does not call getTmuxPaneTitle for claude sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
