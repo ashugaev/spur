@@ -2032,6 +2032,9 @@ export class SessionService {
     } else {
       const hookState = readAgentHookState(this.config.dataDir, session.id);
       if (hookState) {
+        // Hooks are authoritative. Trust the last hook event until the next one
+        // overwrites it. Process liveness (checked above) is the crash guard.
+        // Always overlay pane check for needs_input — hooks cannot signal it.
         const paneState = await classifyAgentState(session.agent, session.tmuxSession);
         if (paneState === "needs_input") {
           state = "needs_input";
@@ -2040,6 +2043,8 @@ export class SessionService {
           session.agent === "codex" &&
           paneState === "waiting"
         ) {
+          // Codex title spinner is a reliable working indicator — if title says
+          // waiting (no spinner), trust it over a potentially stale hook.
           state = "waiting";
         } else {
           state = hookState.state;
@@ -2051,6 +2056,7 @@ export class SessionService {
           message: `State: ${state} (hook=${hookState.state}, pane=${paneState}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
+        // No hook state (first poll, hooks not installed). Full pane classification.
         state = await classifyAgentState(session.agent, session.tmuxSession);
         this.logEvent("session.state.classified", {
           level: "info",
