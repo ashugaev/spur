@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AttentionZone } from "@/components/AttentionZone";
 import { EmptyState } from "@/components/EmptyState";
+import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
 import {
@@ -65,8 +66,8 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
   const [spawning, setSpawning] = useState(false);
-  const [attachingSessionId, setAttachingSessionId] = useState<string | null>(null);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
     if (!silent) {
@@ -225,24 +226,9 @@ export function Dashboard() {
     }
   };
 
-  const openTerminal = async (sessionId: string) => {
-    setAttachingSessionId(sessionId);
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attach`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        const message = await response.text();
-        throw new Error(message || "Failed to open session terminal");
-      }
-      setError(null);
-    } catch (attachError) {
-      setError(
-        attachError instanceof Error ? attachError.message : "Failed to open session terminal",
-      );
-    } finally {
-      setAttachingSessionId((current) => (current === sessionId ? null : current));
-    }
+  const openTerminal = (session: DashboardSession) => {
+    setTerminalSession(session);
+    setError(null);
   };
 
   return (
@@ -380,10 +366,9 @@ export function Dashboard() {
             {LANE_ORDER.map((level) => (
               <AttentionZone
                 key={level}
-                attachingSessionId={attachingSessionId}
                 collapsed={expandedLevel !== level}
                 level={level}
-                onAttach={openTerminal}
+                onOpenTerminal={openTerminal}
                 onToggle={(nextLevel) =>
                   setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
                 }
@@ -396,14 +381,17 @@ export function Dashboard() {
             {LANE_ORDER.map((level) => (
               <AttentionZone
                 key={level}
-                attachingSessionId={attachingSessionId}
                 level={level}
-                onAttach={openTerminal}
+                onOpenTerminal={openTerminal}
                 sessions={grouped[level]}
               />
             ))}
           </section>
         )
+      ) : null}
+
+      {terminalSession ? (
+        <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
       ) : null}
     </main>
   );

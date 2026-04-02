@@ -6,6 +6,12 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(""),
 }));
 
+vi.mock("@/components/DirectTerminal", () => ({
+  DirectTerminal: ({ label, sessionId }: { label?: string; sessionId: string }) => (
+    <div>{`Direct terminal ${label ?? sessionId}`}</div>
+  ),
+}));
+
 function sessionsPayload() {
   return {
     projects: [{ id: "api", name: "API" }],
@@ -50,24 +56,22 @@ describe("Dashboard", () => {
   });
 
   it("renders compact cards with a direct terminal action", async () => {
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-
-      if (url === "/api/sessions/api-a1/attach") {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
 
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
 
-      throw new Error(`Unexpected fetch: ${url} (${JSON.stringify(init)})`);
+      throw new Error(`Unexpected fetch: ${url}`);
     });
 
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open terminal" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
 
     expect(screen.queryByText("Send message")).not.toBeInTheDocument();
@@ -75,11 +79,17 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: "Pause" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute(
+      "href",
+      "/sessions/api-a1?project=api",
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: "Open terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/attach", { method: "POST" });
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
     });
   });
 });

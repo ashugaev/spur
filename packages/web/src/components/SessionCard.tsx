@@ -13,8 +13,7 @@ import {
 
 interface SessionCardProps {
   session: DashboardSession;
-  onAttach?: (sessionId: string) => Promise<void>;
-  attaching?: boolean;
+  onOpenTerminal?: (session: DashboardSession) => void;
 }
 
 const toneClasses = {
@@ -33,42 +32,7 @@ const toneLabels = {
   done: "Done",
 } as const;
 
-function CardButton({
-  children,
-  disabled,
-  href,
-  onClick,
-  tone = "default",
-}: {
-  children: React.ReactNode;
-  disabled?: boolean;
-  href?: string;
-  onClick?: () => void;
-  tone?: "default" | "accent";
-}) {
-  const className = cn(
-    "inline-flex items-center justify-center rounded-xl border px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-    tone === "accent"
-      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
-      : "border-[var(--color-border-default)] text-[var(--color-text-primary)] hover:bg-white/5",
-  );
-
-  if (href) {
-    return (
-      <a className={className} href={href}>
-        {children}
-      </a>
-    );
-  }
-
-  return (
-    <button className={className} disabled={disabled} onClick={onClick} type="button">
-      {children}
-    </button>
-  );
-}
-
-export function SessionCard({ session, onAttach, attaching = false }: SessionCardProps) {
+export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
   const level = getAttentionLevel(session);
   const title = getSessionTitle(session);
   const subtitle = getSessionSubtitle(session);
@@ -141,16 +105,31 @@ export function SessionCard({ session, onAttach, attaching = false }: SessionCar
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <CardButton href={buildSessionPath(session.id, session.projectId)}>Details</CardButton>
-          <CardButton
-            disabled={!canAttach || attaching}
-            onClick={() => void onAttach?.(session.id)}
-            tone="accent"
+        <button
+          aria-label={`Open web terminal for ${session.id}`}
+          className={cn(
+            "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition",
+            canAttach
+              ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
+              : "border-[var(--color-border-default)] text-[var(--color-text-tertiary)] opacity-50",
+          )}
+          disabled={!canAttach}
+          onClick={() => onOpenTerminal?.(session)}
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            viewBox="0 0 24 24"
           >
-            {attaching ? "Opening..." : "Open terminal"}
-          </CardButton>
-        </div>
+            <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
+            <path d="m8 10 2.5 2L8 14.5" />
+            <path d="M13 15h3" />
+          </svg>
+        </button>
       </div>
     </article>
   );

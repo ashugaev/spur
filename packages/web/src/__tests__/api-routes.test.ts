@@ -10,28 +10,22 @@ vi.mock("@/lib/spur-daemon", () => ({
   })),
 }));
 
-vi.mock("@/lib/open-tmux-terminal", () => ({
-  openTmuxTerminal: vi.fn(),
-}));
-
 vi.mock("@/lib/spur-projects", () => ({
   readSpurProjectOptions: vi.fn(() => [{ id: "sp", name: "Spur Core" }]),
 }));
 
 import { spurRequestJson } from "@/lib/spur-daemon";
-import { openTmuxTerminal } from "@/lib/open-tmux-terminal";
 import { readSpurProjectOptions } from "@/lib/spur-projects";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
+import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
-import { POST as attachSession } from "@/app/api/sessions/[id]/attach/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
-const mockedOpenTmuxTerminal = vi.mocked(openTmuxTerminal);
 const mockedReadSpurProjectOptions = vi.mocked(readSpurProjectOptions);
 
 function sessionFixture(overrides: Record<string, unknown> = {}) {
@@ -59,9 +53,9 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
 describe("Spur web API routes", () => {
   beforeEach(() => {
     mockedSpurRequestJson.mockReset();
-    mockedOpenTmuxTerminal.mockReset();
     mockedReadSpurProjectOptions.mockReset();
     mockedReadSpurProjectOptions.mockReturnValue([{ id: "sp", name: "Spur Core" }]);
+    delete process.env["DIRECT_TERMINAL_PORT"];
   });
 
   it("GET /api/sessions filters by project", async () => {
@@ -180,34 +174,13 @@ describe("Spur web API routes", () => {
     );
   });
 
-  it("POST /api/sessions/:id/attach opens a live tmux terminal", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+  it("GET /api/runtime/terminal returns the direct terminal port", async () => {
+    process.env["DIRECT_TERMINAL_PORT"] = "14999";
 
-    const response = await attachSession(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/attach", { method: "POST" }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
+    const response = await runtimeTerminalConfig();
+    const payload = (await response.json()) as { directTerminalPort: string };
 
     expect(response.status).toBe(200);
-    expect(mockedOpenTmuxTerminal).toHaveBeenCalledWith({
-      tmuxSession: "api-a1",
-      worktreePath: "/tmp/api-a1",
-    });
-  });
-
-  it("POST /api/sessions/:id/attach rejects sessions without live tmux", async () => {
-    mockedSpurRequestJson.mockResolvedValue(
-      sessionFixture({
-        runtimeAlive: false,
-      }),
-    );
-
-    const response = await attachSession(
-      new NextRequest("http://localhost:3000/api/sessions/api-a1/attach", { method: "POST" }),
-      { params: Promise.resolve({ id: "api-a1" }) },
-    );
-
-    expect(response.status).toBe(409);
-    expect(mockedOpenTmuxTerminal).not.toHaveBeenCalled();
+    expect(payload).toEqual({ directTerminalPort: "14999" });
   });
 });

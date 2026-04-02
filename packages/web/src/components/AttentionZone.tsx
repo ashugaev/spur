@@ -9,8 +9,7 @@ interface AttentionZoneProps {
   sessions: DashboardSession[];
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
-  onAttach?: (sessionId: string) => Promise<void>;
-  attachingSessionId?: string | null;
+  onOpenTerminal?: (session: DashboardSession) => void;
 }
 
 const zoneConfig: Record<AttentionLevel, { label: string; color: string; border: string }> = {
@@ -46,8 +45,7 @@ export function AttentionZone({
   sessions,
   collapsed,
   onToggle,
-  onAttach,
-  attachingSessionId,
+  onOpenTerminal,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
   const isAccordion = typeof onToggle === "function";
@@ -77,12 +75,7 @@ export function AttentionZone({
             <div className="space-y-2.5">
               {sessions.length > 0 ? (
                 sessions.map((session) => (
-                  <SessionCard
-                    key={session.id}
-                    attaching={attachingSessionId === session.id}
-                    onAttach={onAttach}
-                    session={session}
-                  />
+                  <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />
                 ))
               ) : (
                 <div className="rounded-xl border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
@@ -116,12 +109,7 @@ export function AttentionZone({
       <div className="flex-1 space-y-2.5">
         {sessions.length > 0 ? (
           sessions.map((session) => (
-            <SessionCard
-              key={session.id}
-              attaching={attachingSessionId === session.id}
-              onAttach={onAttach}
-              session={session}
-            />
+            <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />
           ))
         ) : (
           <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
