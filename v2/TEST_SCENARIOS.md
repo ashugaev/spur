@@ -34,6 +34,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, accepts either one branch name or the `NO_PROJECT_RULES` sentinel, and fails before reserving a session id when preflight output is invalid.
+- `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
+- `SessionService.preflight()` returns null when worktree is disabled or the project has no preflight config.
+- `SessionService.preflight()` rejects an empty prompt.
 - Spawn creates compact session ids in the form `<prefix>-<hash4>` and retries on collisions before failing.
 - Session lifecycle and trigger handling append structured key events to `dataDir/events.jsonl` for spawn, send, slot updates, kill, restore, and trigger match/deliver/drop paths.
 - Successful worktree spawn preflight emits a session-scoped event so the selected session log view shows whether preflight chose a branch or deferred.
@@ -78,6 +81,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
+- Interactive spawn with preflight-enabled project calls `/projects/:id/preflight`, shows branch confirmation, and passes the confirmed branch in the spawn request.
+- Non-TTY and `--json` spawn skip the preflight endpoint call.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.

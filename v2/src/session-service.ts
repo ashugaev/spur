@@ -818,6 +818,9 @@ export class SessionService {
   }
 
   async preflight(request: PreflightRequest): Promise<PreflightResponse> {
+    if (typeof request.prompt !== "string" || !request.prompt.trim()) {
+      throw new Error("prompt must be a non-empty string");
+    }
     const project = this.getProject(request.project);
     const agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
     const overrides = parseSpawnOverrides(request.overrides, "overrides");

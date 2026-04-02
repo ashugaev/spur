@@ -2681,6 +2681,97 @@ describe("SessionService", () => {
 
     expect(killDevServerTmuxMock).toHaveBeenCalledWith("api-1");
   });
+
+  describe("preflight()", () => {
+    it("returns branch when project has preflight config and worktree enabled", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            preflight: {
+              prompt: "Suggest a branch name from the task context.",
+            },
+          },
+        },
+      });
+      runSpawnPreflightMock.mockResolvedValue({ branch: "feature/suggested" });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.preflight({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
+      });
+
+      expect(result).toEqual({ branch: "feature/suggested" });
+      expect(runSpawnPreflightMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agent: "claude",
+          projectId: "api",
+          prompt: "Fix runtime regression from PR #42",
+          worktree: true,
+        }),
+      );
+    });
+
+    it("returns null when worktree is disabled", async () => {
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            worktree: false,
+            preflight: {
+              prompt: "Suggest a branch name from the task context.",
+            },
+          },
+        },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.preflight({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
+      });
+
+      expect(result).toEqual({ branch: null });
+      expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+    });
+
+    it("returns null when project has no preflight config", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.preflight({
+        project: "api",
+        prompt: "Fix runtime regression from PR #42",
+      });
+
+      expect(result).toEqual({ branch: null });
+      expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects empty prompt", async () => {
+      loadConfigMock.mockReturnValue(baseConfig());
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.preflight({ project: "api", prompt: "" }),
+      ).rejects.toThrow("prompt must be a non-empty string");
+
+      await expect(
+        service.preflight({ project: "api", prompt: "   " }),
+      ).rejects.toThrow("prompt must be a non-empty string");
+    });
+  });
 });
 
 describe("classifyCodexTitle", () => {
