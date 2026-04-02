@@ -928,6 +928,153 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
+  it("debounce: holds previous state when new state disagrees within hold window", async () => {
+    const runningCodexSession = {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockReturnValue(runningCodexSession);
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // First call: classifies as "waiting" (no spinner = idle).
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    // Second call immediately after: pane now shows "esc to interrupt" (transient).
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+    const second = await service.get("api-1");
+
+    // Debounce holds "waiting" — the transient "working" is suppressed.
+    expect(second.state).toBe("waiting");
+  });
+
+  it("debounce: accepts new state after hold window expires", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // First call: "waiting".
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    // Advance time past STATE_HOLD_MS (4s).
+    vi.advanceTimersByTime(5_000);
+
+    // Second call: pane now shows working.
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+    const second = await service.get("api-1");
+
+    // Hold expired — new state accepted.
+    expect(second.state).toBe("working");
+  });
+
+  it("debounce: transitions to needs_input bypass hold window", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // First call: "working".
+    const first = await service.get("api-1");
+    expect(first.state).toBe("working");
+
+    // Immediately: pane shows needs_input (question prompt).
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "Which approach?",
+        "› 1. Option A",
+        "  2. Option B",
+        "  3. Option C",
+        "tab to add notes | enter to submit answer",
+        "esc to interrupt",
+      ].join("\n"),
+    );
+    const second = await service.get("api-1");
+
+    // needs_input bypasses hold — accepted immediately.
+    expect(second.state).toBe("needs_input");
+  });
+
+  it("debounce: transition to stopped bypasses hold window", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    // First call: "waiting".
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    // Immediately: tmux dies.
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const second = await service.get("api-1");
+
+    // "stopped" bypasses hold — accepted immediately.
+    expect(second.state).toBe("stopped");
+  });
+
   it("runs a bound service and persists its optional port", async () => {
     const workspacePath = resolve(".");
     loadConfigMock.mockReturnValue({
