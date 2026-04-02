@@ -58,6 +58,8 @@ interface CodexHooksDocument {
   hooks: {
     SessionStart: HookMatcherGroup[];
     UserPromptSubmit: HookMatcherGroup[];
+    PreToolUse: HookMatcherGroup[];
+    PostToolUse: HookMatcherGroup[];
     Stop: HookMatcherGroup[];
   };
 }
@@ -138,6 +140,8 @@ function parseCodexHooksDocument(content: string): CodexHooksDocument {
       hooks: {
         SessionStart: ensureHookEventGroup([]),
         UserPromptSubmit: ensureHookEventGroup([]),
+        PreToolUse: ensureHookEventGroup([]),
+        PostToolUse: ensureHookEventGroup([]),
         Stop: ensureHookEventGroup([]),
       },
     };
@@ -148,6 +152,8 @@ function parseCodexHooksDocument(content: string): CodexHooksDocument {
     hooks: {
       SessionStart: ensureHookEventGroup(parseHookGroups(hooksRecord["SessionStart"])),
       UserPromptSubmit: ensureHookEventGroup(parseHookGroups(hooksRecord["UserPromptSubmit"])),
+      PreToolUse: ensureHookEventGroup(parseHookGroups(hooksRecord["PreToolUse"])),
+      PostToolUse: ensureHookEventGroup(parseHookGroups(hooksRecord["PostToolUse"])),
       Stop: ensureHookEventGroup(parseHookGroups(hooksRecord["Stop"])),
     },
   };
