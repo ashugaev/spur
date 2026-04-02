@@ -65,4 +65,4 @@ agent-orchestrator.yaml
 # Runtime PID file
 .ao-start-runtime.json
 
-.idea/
+.idea/dev/
