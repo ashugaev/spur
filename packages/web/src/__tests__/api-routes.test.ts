@@ -1,1216 +1,158 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import {
-  SessionNotRestorableError,
-  type Session,
-  type SessionManager,
-  type OrchestratorConfig,
-  type PluginRegistry,
-  type SCM,
-} from "@composio/ao-core";
 
-// ── Mock Data ─────────────────────────────────────────────────────────
-// Provides test sessions covering the key states the dashboard needs.
-
-function makeSession(overrides: Partial<Session> & { id: string }): Session {
-  return {
-    projectId: "my-app",
-    status: "working",
-    activity: "active",
-    branch: null,
-    issueId: null,
-    pr: null,
-    workspacePath: null,
-    runtimeHandle: null,
-    agentInfo: null,
-    createdAt: new Date(),
-    lastActivityAt: new Date(),
-    metadata: {},
-    ...overrides,
-  };
-}
-
-const testSessions: Session[] = [
-  makeSession({ id: "backend-3", status: "needs_input", activity: "waiting_input" }),
-  makeSession({
-    id: "backend-7",
-    status: "mergeable",
-    activity: "idle",
-    pr: {
-      number: 432,
-      url: "https://github.com/acme/my-app/pull/432",
-      title: "feat: health check",
-      owner: "acme",
-      repo: "my-app",
-      branch: "health-check",
-      baseBranch: "main",
-      isDraft: false,
-    },
-  }),
-  makeSession({ id: "backend-9", status: "working", activity: "active" }),
-  makeSession({
-    id: "frontend-1",
-    status: "killed",
-    activity: "exited",
-    projectId: "my-app",
-    issueId: "INT-1270",
-    branch: "INT-1270-table",
-  }),
-];
-
-// ── Mock Services ─────────────────────────────────────────────────────
-
-const mockSessionManager: SessionManager = {
-  list: vi.fn(async () => testSessions),
-  get: vi.fn(async (id: string) => testSessions.find((s) => s.id === id) ?? null),
-  spawn: vi.fn(async (config) =>
-    makeSession({
-      id: `session-${Date.now()}`,
-      projectId: config.projectId,
-      issueId: config.issueId ?? null,
-      status: "spawning",
-    }),
-  ),
-  kill: vi.fn(async (id: string) => {
-    if (!testSessions.find((s) => s.id === id)) {
-      throw new Error(`Session ${id} not found`);
-    }
-  }),
-  send: vi.fn(async (id: string) => {
-    if (!testSessions.find((s) => s.id === id)) {
-      throw new Error(`Session ${id} not found`);
-    }
-  }),
-  cleanup: vi.fn(async () => ({ killed: [], skipped: [], errors: [] })),
-  spawnOrchestrator: vi.fn(),
-  restore: vi.fn(async (id: string) => {
-    const session = testSessions.find((s) => s.id === id);
-    if (!session) {
-      throw new Error(`Session ${id} not found`);
-    }
-    // Simulate SessionNotRestorableError for non-terminal sessions
-    if (session.status === "working" && session.activity !== "exited") {
-      throw new SessionNotRestorableError(id, "session is not in a terminal state");
-    }
-    return { ...session, status: "spawning" as const, activity: "active" as const };
-  }),
-};
-
-const mockSCM: SCM = {
-  name: "github",
-  detectPR: vi.fn(async () => null),
-  getPRState: vi.fn(async () => "open" as const),
-  mergePR: vi.fn(async () => {}),
-  closePR: vi.fn(async () => {}),
-  getCIChecks: vi.fn(async () => []),
-  getCISummary: vi.fn(async () => "passing" as const),
-  getReviews: vi.fn(async () => []),
-  getReviewDecision: vi.fn(async () => "approved" as const),
-  getPendingComments: vi.fn(async () => []),
-  getAutomatedComments: vi.fn(async () => []),
-  getMergeability: vi.fn(async () => ({
-    mergeable: true,
-    ciPassing: true,
-    approved: true,
-    noConflicts: true,
-    blockers: [],
-  })),
-};
-
-const mockRegistry: PluginRegistry = {
-  register: vi.fn(),
-  get: vi.fn(() => mockSCM) as PluginRegistry["get"],
-  list: vi.fn(() => []),
-  loadBuiltins: vi.fn(async () => {}),
-  loadFromConfig: vi.fn(async () => {}),
-};
-
-const mockConfig: OrchestratorConfig = {
-  configPath: "/tmp/ao-test/agent-orchestrator.yaml",
-  port: 3000,
-  readyThresholdMs: 300_000,
-  defaults: { runtime: "tmux", agent: "claude-code", workspace: "worktree", notifiers: [] },
-  projects: {
-    "my-app": {
-      name: "My App",
-      repo: "acme/my-app",
-      path: "/tmp/my-app",
-      defaultBranch: "main",
-      sessionPrefix: "my-app",
-      scm: { plugin: "github" },
-    },
-  },
-  notifiers: {},
-  notificationRouting: { urgent: [], action: [], warning: [], info: [] },
-  reactions: {},
-};
-
-vi.mock("@/lib/services", () => ({
-  getServices: vi.fn(async () => ({
-    config: mockConfig,
-    registry: mockRegistry,
-    sessionManager: mockSessionManager,
-    audioTranscriber: null,
-  })),
-  getSCM: vi.fn(() => mockSCM),
-}));
-
-vi.mock("@/lib/jira-sprint-tasks", () => ({
-  buildJiraSprintTasksSnapshot: vi.fn(async () => ({
-    updatedAt: "2026-03-06T14:00:00.000Z",
-    projectId: null,
-    listeners: [],
-    tasks: [],
-  })),
-  startJiraSprintTask: vi.fn(async () => ({
-    kind: "spawned",
-    issueKey: "MYAPP-101",
-    projectId: "my-app",
-    listenerId: "jira-my-app",
-    session: makeSession({
-      id: "my-app-101",
-      projectId: "my-app",
-      issueId: "MYAPP-101",
-      status: "spawning",
-      activity: "active",
-    }),
+vi.mock("@/lib/spur-daemon", () => ({
+  spurRequestJson: vi.fn(),
+  spurJsonInit: vi.fn((method: string, body?: unknown) => ({
+    method,
+    headers: { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   })),
 }));
 
-// ── Import routes after mocking ───────────────────────────────────────
+import { spurRequestJson } from "@/lib/spur-daemon";
+import { GET as listSessions } from "@/app/api/sessions/route";
+import { POST as spawnSession } from "@/app/api/spawn/route";
+import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { POST as pauseSession } from "@/app/api/sessions/[id]/stop/route";
+import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
+import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
+import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 
-import { GET as sessionsGET } from "@/app/api/sessions/route";
-import { POST as spawnPOST } from "@/app/api/spawn/route";
-import { POST as sendPOST } from "@/app/api/sessions/[id]/send/route";
-import { POST as killPOST } from "@/app/api/sessions/[id]/kill/route";
-import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
-import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
-import { GET as eventsGET } from "@/app/api/events/route";
-import { GET as integrationsStatusGET } from "@/app/api/integrations/status/route";
-import { GET as jiraSprintTasksGET, POST as jiraSprintTasksPOST } from "@/app/api/jira/sprint-tasks/route";
-import { POST as jiraSprintTasksStartPOST } from "@/app/api/jira/sprint-tasks/start/route";
-import { POST as jiraSprintTaskByKeyStartPOST } from "@/app/api/jira/sprint-tasks/[issueKey]/start/route";
-import { GET as trackerTasksGET, POST as trackerTasksPOST } from "@/app/api/tracker/tasks/route";
-import { POST as trackerTasksStartPOST } from "@/app/api/tracker/tasks/start/route";
-import { POST as trackerTaskByKeyStartPOST } from "@/app/api/tracker/tasks/[issueKey]/start/route";
-import { buildJiraSprintTasksSnapshot, startJiraSprintTask } from "@/lib/jira-sprint-tasks";
+const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 
-const originalIntegrationsSnapshotPath = process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
-const originalHealthSnapshotPath = process.env.AO_HEALTH_SNAPSHOT_PATH;
-const originalIntegrationsStatusPath = process.env.AO_INTEGRATIONS_STATUS_PATH;
-const originalConfigPath = process.env.AO_CONFIG_PATH;
-const originalProjectId = process.env.AO_PROJECT_ID;
-const mockBuildJiraSprintTasksSnapshot = buildJiraSprintTasksSnapshot as ReturnType<typeof vi.fn>;
-const mockStartJiraSprintTask = startJiraSprintTask as ReturnType<typeof vi.fn>;
-
-function makeRequest(url: string, init?: RequestInit): NextRequest {
-  return new NextRequest(
-    new URL(url, "http://localhost:3000"),
-    init as ConstructorParameters<typeof NextRequest>[1],
-  );
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  if (originalIntegrationsSnapshotPath === undefined) {
-    delete process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH;
-  } else {
-    process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = originalIntegrationsSnapshotPath;
-  }
-  if (originalHealthSnapshotPath === undefined) {
-    delete process.env.AO_HEALTH_SNAPSHOT_PATH;
-  } else {
-    process.env.AO_HEALTH_SNAPSHOT_PATH = originalHealthSnapshotPath;
-  }
-  if (originalIntegrationsStatusPath === undefined) {
-    delete process.env.AO_INTEGRATIONS_STATUS_PATH;
-  } else {
-    process.env.AO_INTEGRATIONS_STATUS_PATH = originalIntegrationsStatusPath;
-  }
-  if (originalConfigPath === undefined) {
-    delete process.env.AO_CONFIG_PATH;
-  } else {
-    process.env.AO_CONFIG_PATH = originalConfigPath;
-  }
-  if (originalProjectId === undefined) {
-    delete process.env.AO_PROJECT_ID;
-  } else {
-    process.env.AO_PROJECT_ID = originalProjectId;
-  }
-
-  // Re-set default return values
-  (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValue(testSessions);
-  (mockSessionManager.get as ReturnType<typeof vi.fn>).mockImplementation(
-    async (id: string) => testSessions.find((s) => s.id === id) ?? null,
-  );
-  mockBuildJiraSprintTasksSnapshot.mockResolvedValue({
-    updatedAt: "2026-03-06T14:00:00.000Z",
-    projectId: null,
-    listeners: [],
-    tasks: [],
-  });
-  mockStartJiraSprintTask.mockResolvedValue({
-    kind: "spawned",
-    issueKey: "MYAPP-101",
-    projectId: "my-app",
-    listenerId: "jira-my-app",
-    session: makeSession({
-      id: "my-app-101",
-      projectId: "my-app",
-      issueId: "MYAPP-101",
-      status: "spawning",
-      activity: "active",
-    }),
-  });
-});
-
-describe("API Routes", () => {
-  // ── GET /api/sessions ──────────────────────────────────────────────
-
-  describe("GET /api/sessions", () => {
-    it("returns sessions array and stats", async () => {
-      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions"));
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.sessions).toBeDefined();
-      expect(Array.isArray(data.sessions)).toBe(true);
-      expect(data.sessions.length).toBe(testSessions.length);
-      expect(data.stats).toBeDefined();
-      expect(data.stats.totalSessions).toBe(data.sessions.length);
-    });
-
-    it("stats include expected fields", async () => {
-      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions"));
-      const data = await res.json();
-      expect(data.stats).toHaveProperty("totalSessions");
-      expect(data.stats).toHaveProperty("workingSessions");
-      expect(data.stats).toHaveProperty("openPRs");
-      expect(data.stats).toHaveProperty("needsReview");
-    });
-
-    it("sessions have expected shape", async () => {
-      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions"));
-      const data = await res.json();
-      const session = data.sessions[0];
-      expect(session).toHaveProperty("id");
-      expect(session).toHaveProperty("projectId");
-      expect(session).toHaveProperty("status");
-      expect(session).toHaveProperty("activity");
-      expect(session).toHaveProperty("createdAt");
-    });
-
-    it("passes projectId filter to session manager and echoes projectId", async () => {
-      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions?projectId=my-app"));
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.projectId).toBe("my-app");
-      expect(mockSessionManager.list).toHaveBeenCalledWith("my-app");
-    });
-
-    it("returns 400 for unknown projectId filter", async () => {
-      const res = await sessionsGET(makeRequest("http://localhost:3000/api/sessions?projectId=unknown"));
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/Unknown projectId/);
-    });
+describe("Spur web API routes", () => {
+  beforeEach(() => {
+    mockedSpurRequestJson.mockReset();
   });
 
-  // ── POST /api/spawn ────────────────────────────────────────────────
+  it("GET /api/sessions filters by projectId", async () => {
+    mockedSpurRequestJson.mockResolvedValue([
+      {
+        id: "api-a1",
+        project: "api",
+        agent: "claude",
+        prompt: "Fix auth",
+        branch: "feat/auth",
+        worktree: true,
+        status: "running",
+        state: "working",
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+        lastActivityAt: "2026-04-02T10:00:00.000Z",
+        runtimeAlive: true,
+        workspaceExists: true,
+        worktreePath: "/tmp/api-a1",
+        services: [],
+      },
+      {
+        id: "web-b2",
+        project: "web",
+        agent: "codex",
+        prompt: "Polish UI",
+        branch: "feat/ui",
+        worktree: true,
+        status: "paused",
+        state: "waiting",
+        createdAt: "2026-04-02T10:00:00.000Z",
+        updatedAt: "2026-04-02T10:00:00.000Z",
+        lastActivityAt: "2026-04-02T10:00:00.000Z",
+        runtimeAlive: true,
+        workspaceExists: true,
+        worktreePath: "/tmp/web-b2",
+        services: [],
+      },
+    ]);
 
-  describe("POST /api/spawn", () => {
-    it("creates a session with valid input", async () => {
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "my-app", issueId: "INT-100" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(201);
-      const data = await res.json();
-      expect(data.session).toBeDefined();
-      expect(data.session.projectId).toBe("my-app");
-      expect(data.session.status).toBe("spawning");
-    });
+    const response = await listSessions(
+      new NextRequest("http://localhost:3000/api/sessions?projectId=api"),
+    );
+    const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
 
-    it("returns 400 when projectId is missing", async () => {
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/projectId/);
-    });
-
-    it("returns 400 with invalid JSON", async () => {
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: "not json",
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(400);
-    });
-
-    it("handles missing issueId gracefully", async () => {
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(201);
-      const data = await res.json();
-      expect(data.session.issueId).toBeNull();
-    });
-
-    it("returns 500 when session creation fails", async () => {
-      (mockSessionManager.spawn as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error("Failed to create Jira task session"),
-      );
-
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "my-app", issueId: "INT-999" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(500);
-      const data = await res.json();
-      expect(data.error).toMatch(/Failed to create Jira task session/);
-    });
-
-    it("returns generic 500 when non-Error is thrown during spawn", async () => {
-      (mockSessionManager.spawn as ReturnType<typeof vi.fn>).mockRejectedValueOnce("unexpected");
-
-      const req = makeRequest("/api/spawn", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "my-app", issueId: "INT-999" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await spawnPOST(req);
-      expect(res.status).toBe(500);
-      const data = await res.json();
-      expect(data.error).toBe("Failed to spawn session");
-    });
+    expect(response.status).toBe(200);
+    expect(payload.sessions).toHaveLength(1);
+    expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
   });
 
-  // ── POST /api/sessions/:id/send ────────────────────────────────────
-
-  describe("POST /api/sessions/:id/send", () => {
-    it("sends a message to a valid session", async () => {
-      const req = makeRequest("/api/sessions/backend-3/send", {
-        method: "POST",
-        body: JSON.stringify({ message: "Fix the tests" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await sendPOST(req, { params: Promise.resolve({ id: "backend-3" }) });
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.ok).toBe(true);
-      expect(data.message).toBe("Fix the tests");
+  it("POST /api/spawn validates body and proxies to Spur", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      id: "api-a1",
+      project: "api",
+      agent: "claude",
+      prompt: "Fix auth",
+      branch: "feat/auth",
+      worktree: true,
+      status: "running",
+      state: "working",
+      createdAt: "2026-04-02T10:00:00.000Z",
+      updatedAt: "2026-04-02T10:00:00.000Z",
+      lastActivityAt: "2026-04-02T10:00:00.000Z",
+      runtimeAlive: true,
+      workspaceExists: true,
+      worktreePath: "/tmp/api-a1",
+      services: [],
     });
 
-    it("returns 404 for unknown session", async () => {
-      (mockSessionManager.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error("Session nonexistent not found"),
-      );
-      const req = makeRequest("/api/sessions/nonexistent/send", {
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
-        body: JSON.stringify({ message: "hello" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await sendPOST(req, { params: Promise.resolve({ id: "nonexistent" }) });
-      expect(res.status).toBe(404);
-    });
+        body: JSON.stringify({ projectId: "api", prompt: "Fix auth", agent: "claude" }),
+      }),
+    );
 
-    it("returns 400 when message is missing", async () => {
-      const req = makeRequest("/api/sessions/backend-3/send", {
-        method: "POST",
-        body: JSON.stringify({}),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await sendPOST(req, { params: Promise.resolve({ id: "backend-3" }) });
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/message/);
-    });
-
-    it("returns 400 for invalid JSON body", async () => {
-      const req = makeRequest("/api/sessions/backend-3/send", {
-        method: "POST",
-        body: "not json",
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await sendPOST(req, { params: Promise.resolve({ id: "backend-3" }) });
-      expect(res.status).toBe(400);
-    });
-
-    it("returns 400 for control-char-only message", async () => {
-      const req = makeRequest("/api/sessions/backend-3/send", {
-        method: "POST",
-        body: JSON.stringify({ message: "\x00\x01\x02" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      const res = await sendPOST(req, { params: Promise.resolve({ id: "backend-3" }) });
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/empty/);
-    });
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
-  // ── POST /api/sessions/:id/kill ────────────────────────────────────
+  it("POST /api/sessions/:id/send rejects empty messages", async () => {
+    const response = await sendMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
+        method: "POST",
+        body: JSON.stringify({ message: "   " }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
 
-  describe("POST /api/sessions/:id/kill", () => {
-    it("kills a valid session", async () => {
-      const req = makeRequest("/api/sessions/backend-3/kill", { method: "POST" });
-      const res = await killPOST(req, { params: Promise.resolve({ id: "backend-3" }) });
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.ok).toBe(true);
-      expect(data.sessionId).toBe("backend-3");
-    });
-
-    it("returns 404 for unknown session", async () => {
-      (mockSessionManager.kill as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error("Session nonexistent not found"),
-      );
-      const req = makeRequest("/api/sessions/nonexistent/kill", { method: "POST" });
-      const res = await killPOST(req, { params: Promise.resolve({ id: "nonexistent" }) });
-      expect(res.status).toBe(404);
-    });
+    expect(response.status).toBe(400);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalled();
   });
 
-  // ── POST /api/sessions/:id/restore ─────────────────────────────────
+  it("POST lifecycle actions proxy to Spur daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ ok: true });
 
-  describe("POST /api/sessions/:id/restore", () => {
-    it("restores a killed session", async () => {
-      const req = makeRequest("/api/sessions/frontend-1/restore", { method: "POST" });
-      const res = await restorePOST(req, { params: Promise.resolve({ id: "frontend-1" }) });
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.ok).toBe(true);
-      expect(data.sessionId).toBe("frontend-1");
-    });
+    const routes = [
+      [pauseSession, "pause"],
+      [completeSession, "complete"],
+      [killSession, "kill"],
+      [restoreSession, "restore"],
+    ] as const;
 
-    it("returns 404 for unknown session", async () => {
-      const req = makeRequest("/api/sessions/nonexistent/restore", { method: "POST" });
-      const res = await restorePOST(req, { params: Promise.resolve({ id: "nonexistent" }) });
-      expect(res.status).toBe(404);
-    });
-
-    it("returns 409 for active session", async () => {
-      const req = makeRequest("/api/sessions/backend-9/restore", { method: "POST" });
-      const res = await restorePOST(req, { params: Promise.resolve({ id: "backend-9" }) });
-      expect(res.status).toBe(409);
-      const data = await res.json();
-      expect(data.error).toMatch(/not in a terminal state/);
-    });
-  });
-
-  // ── POST /api/prs/:id/merge ────────────────────────────────────────
-
-  describe("POST /api/prs/:id/merge", () => {
-    it("merges a mergeable PR", async () => {
-      const req = makeRequest("/api/prs/432/merge", { method: "POST" });
-      const res = await mergePOST(req, { params: Promise.resolve({ id: "432" }) });
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.ok).toBe(true);
-      expect(data.prNumber).toBe(432);
-    });
-
-    it("returns 404 for unknown PR", async () => {
-      const req = makeRequest("/api/prs/99999/merge", { method: "POST" });
-      const res = await mergePOST(req, { params: Promise.resolve({ id: "99999" }) });
-      expect(res.status).toBe(404);
-    });
-
-    it("returns 422 for non-mergeable PR", async () => {
-      (mockSCM.getMergeability as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-        mergeable: false,
-        ciPassing: false,
-        approved: false,
-        noConflicts: true,
-        blockers: ["CI checks failing", "Needs review"],
-      });
-      const req = makeRequest("/api/prs/432/merge", { method: "POST" });
-      const res = await mergePOST(req, { params: Promise.resolve({ id: "432" }) });
-      expect(res.status).toBe(422);
-      const data = await res.json();
-      expect(data.error).toMatch(/not mergeable/);
-      expect(data.blockers).toBeDefined();
-    });
-
-    it("returns 400 for non-numeric PR id", async () => {
-      const req = makeRequest("/api/prs/abc/merge", { method: "POST" });
-      const res = await mergePOST(req, { params: Promise.resolve({ id: "abc" }) });
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/Invalid PR number/);
-    });
-
-    it("returns 409 for merged PR", async () => {
-      (mockSCM.getPRState as ReturnType<typeof vi.fn>).mockResolvedValueOnce("merged");
-      const req = makeRequest("/api/prs/432/merge", { method: "POST" });
-      const res = await mergePOST(req, { params: Promise.resolve({ id: "432" }) });
-      expect(res.status).toBe(409);
-      const data = await res.json();
-      expect(data.error).toMatch(/merged/);
-    });
-  });
-
-  // ── GET /api/integrations/status ───────────────────────────────────
-
-  describe("GET /api/integrations/status", () => {
-    it("returns integration listener snapshot from file", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-"));
-      const snapshotPath = join(tmp, "snapshot.json");
-      writeFileSync(
-        snapshotPath,
-        JSON.stringify({
-          version: 1,
-          projectId: "my-app",
-          updatedAt: "2026-03-06T11:22:33.000Z",
-          entries: [
-            {
-              id: "telegram-polling",
-              service: "telegram",
-              kind: "polling",
-              active: true,
-              connected: true,
-              ok: true,
-              state: "healthy",
-              message: "Polling active",
-            },
-            {
-              id: "jira-comment-polling",
-              service: "jira",
-              kind: "polling",
-              active: true,
-              connected: true,
-              ok: false,
-              state: "degraded",
-              message: "Auth needs refresh",
-            },
-            {
-              id: "listener:jira-broai",
-              service: "jira",
-              kind: "listener",
-              active: true,
-              connected: true,
-              ok: true,
-              state: "healthy",
-              message: "Listener running",
-            },
-            {
-              id: "reaction-engine",
-              service: "orchestrator",
-              kind: "reaction",
-              active: true,
-              connected: true,
-              ok: true,
-              state: "healthy",
-              message: "Lifecycle poll completed (3 session(s) checked, 1 active)",
-              lastCheckAt: "2026-03-06T11:22:40.000Z",
-            },
-          ],
-        }),
-        "utf-8",
+    for (const [route, action] of routes) {
+      const response = await route(
+        new NextRequest(`http://localhost:3000/api/sessions/api-a1/${action}`, { method: "POST" }),
+        { params: Promise.resolve({ id: "api-a1" }) },
       );
+      expect(response.status).toBe(200);
+    }
 
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("snapshot");
-        expect(data.updatedAt).toBe("2026-03-06T11:22:33.000Z");
-        expect(data.integrations.telegramInboundPolling.active).toBe(true);
-        expect(data.integrations.telegramInboundPolling.connected).toBe(true);
-        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
-        expect(data.integrations.jiraCommentPolling.ok).toBe(false);
-        expect(data.integrations.jiraCommentPolling.message).toMatch(/Auth needs refresh/);
-        expect(data.integrations.trackerTriggerListeners.state).toBe("healthy");
-        expect(data.integrations.trackerTriggerListeners.ok).toBe(true);
-        expect(data.integrations.reactionEngine.state).toBe("healthy");
-        expect(Array.isArray(data.entries)).toBe(true);
-        expect(data.entries.some((entry: { id?: string }) => entry.id === "reaction-engine")).toBe(true);
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-
-    it("returns inactive/unknown fallback when snapshot is missing", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-missing-"));
-      delete process.env.AO_CONFIG_PATH;
-      delete process.env.AO_PROJECT_ID;
-      delete process.env.AO_HEALTH_SNAPSHOT_PATH;
-      delete process.env.AO_INTEGRATIONS_STATUS_PATH;
-      process.env.AO_CONFIG_PATH = join(tmp, "agent-orchestrator.yaml");
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = join(tmp, "missing-integrations.json");
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("fallback");
-        expect(data.integrations.telegramInboundPolling.active).toBe(false);
-        expect(data.integrations.jiraCommentPolling.active).toBe(false);
-        expect(data.integrations.trackerTriggerListeners.active).toBe(false);
-        expect(data.integrations.telegramInboundPolling.state).toBe("unknown");
-        expect(data.integrations.jiraCommentPolling.state).toBe("unknown");
-        expect(data.integrations.trackerTriggerListeners.state).toBe("unknown");
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-
-    it("normalizes legacy integration payload shape to canonical contract", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-legacy-"));
-      const snapshotPath = join(tmp, "snapshot.json");
-      writeFileSync(
-        snapshotPath,
-        JSON.stringify({
-          updatedAt: "2026-03-06T12:00:00.000Z",
-          integrations: {
-            telegramInboundPolling: { state: "starting" },
-            jiraCommentPolling: { state: "degraded", detail: "Rate limit reached" },
-            jiraTriggerListeners: true,
-          },
-        }),
-        "utf-8",
-      );
-
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("snapshot");
-        expect(data.integrations.telegramInboundPolling.state).toBe("starting");
-        expect(data.integrations.telegramInboundPolling.active).toBe(true);
-        expect(data.integrations.telegramInboundPolling.connected).toBe(false);
-        expect(data.integrations.telegramInboundPolling.ok).toBe(false);
-        expect(data.integrations.jiraCommentPolling.state).toBe("degraded");
-        expect(data.integrations.jiraCommentPolling.message).toMatch(/Rate limit reached/);
-        expect(data.integrations.trackerTriggerListeners.state).toBe("healthy");
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-
-    it("returns fallback when snapshot JSON is invalid", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-invalid-"));
-      const snapshotPath = join(tmp, "snapshot.json");
-      writeFileSync(snapshotPath, "{ this is not valid json", "utf-8");
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = snapshotPath;
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("fallback");
-        expect(data.snapshotPath).toBe(snapshotPath);
-        expect(data.integrations.telegramInboundPolling.message).toMatch(/invalid JSON/);
-        expect(data.integrations.telegramInboundPolling.state).toBe("unknown");
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-
-    it("falls back from missing explicit env snapshot to config-dir default snapshot path", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-default-fallback-"));
-      const configPath = join(tmp, "agent-orchestrator.yaml");
-      const fallbackSnapshotPath = join(tmp, ".ao-integrations-health.json");
-
-      writeFileSync(
-        fallbackSnapshotPath,
-        JSON.stringify({
-          version: 1,
-          projectId: "default-fallback",
-          updatedAt: "2026-03-06T13:00:00.000Z",
-          entries: [
-            {
-              id: "telegram-polling",
-              service: "telegram",
-              kind: "polling",
-              active: true,
-              connected: true,
-              ok: true,
-              state: "healthy",
-              message: "Polling active",
-            },
-          ],
-        }),
-        "utf-8",
-      );
-
-      process.env.AO_CONFIG_PATH = configPath;
-      delete process.env.AO_PROJECT_ID;
-      delete process.env.AO_HEALTH_SNAPSHOT_PATH;
-      delete process.env.AO_INTEGRATIONS_STATUS_PATH;
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = join(tmp, "missing-snapshot.json");
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("snapshot");
-        expect(data.snapshotPath).toBe(fallbackSnapshotPath);
-        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
-      } finally {
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-
-    it("resolves relative snapshot env path from AO_CONFIG_PATH directory", async () => {
-      const tmp = mkdtempSync(join(tmpdir(), "ao-integrations-status-relative-"));
-      const configPath = join(tmp, "agent-orchestrator.yaml");
-      const relativeSnapshotPath = join(".ao", "integration-health.json");
-      const absoluteSnapshotPath = join(tmp, relativeSnapshotPath);
-      const originalConfigPath = process.env.AO_CONFIG_PATH;
-
-      mkdirSync(join(tmp, ".ao"), { recursive: true });
-      writeFileSync(
-        absoluteSnapshotPath,
-        JSON.stringify({
-          updatedAt: "2026-03-06T12:22:00.000Z",
-          integrations: {
-            telegramInboundPolling: { active: true, connected: true, ok: true, state: "healthy" },
-            jiraCommentPolling: { active: false, connected: false, ok: false, state: "inactive" },
-            trackerTriggerListeners: { active: false, connected: false, ok: false, state: "inactive" },
-          },
-        }),
-        "utf-8",
-      );
-
-      process.env.AO_CONFIG_PATH = configPath;
-      process.env.AO_INTEGRATIONS_HEALTH_SNAPSHOT_PATH = relativeSnapshotPath;
-
-      try {
-        const res = await integrationsStatusGET();
-        expect(res.status).toBe(200);
-        const data = await res.json();
-        expect(data.source).toBe("snapshot");
-        expect(data.snapshotPath).toBe(absoluteSnapshotPath);
-        expect(data.integrations.telegramInboundPolling.ok).toBe(true);
-      } finally {
-        if (originalConfigPath === undefined) {
-          delete process.env.AO_CONFIG_PATH;
-        } else {
-          process.env.AO_CONFIG_PATH = originalConfigPath;
-        }
-        rmSync(tmp, { recursive: true, force: true });
-      }
-    });
-  });
-
-  // ── GET /api/jira/sprint-tasks ────────────────────────────────────
-
-  describe("GET /api/jira/sprint-tasks", () => {
-    it("returns jira sprint tasks snapshot", async () => {
-      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
-        updatedAt: "2026-03-06T14:10:00.000Z",
-        projectId: "my-app",
-        listeners: [
-          {
-            listenerId: "jira-my-app",
-            projectId: "my-app",
-            projectName: "My App",
-            filters: { state: "open", labels: ["ao"], limit: 100 },
-          },
-        ],
-        tasks: [
-          {
-            issueKey: "MYAPP-101",
-            issueUrl: "https://acme.atlassian.net/browse/MYAPP-101",
-            summary: "Add endpoint",
-            status: "Backlog",
-            statusCategory: "new",
-            listenerIds: ["jira-my-app"],
-            relatedActiveSessions: [],
-            spawnAvailable: true,
-          },
-        ],
-      });
-
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
-      expect(res.status).toBe(200);
-      expect(res.headers.get("Cache-Control")).toBe("no-store");
-      const data = await res.json();
-      expect(data.projectId).toBe("my-app");
-      expect(data.listeners).toHaveLength(1);
-      expect(data.tasks).toHaveLength(1);
-      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
-        expect.objectContaining({
-          projectId: "my-app",
-        }),
-      );
-    });
-
-    it("maps related active sessions into task payloads", async () => {
-      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
-        updatedAt: "2026-03-06T14:12:00.000Z",
-        projectId: "my-app",
-        listeners: [
-          {
-            listenerId: "jira-my-app",
-            projectId: "my-app",
-            projectName: "My App",
-            filters: { state: "open", labels: ["ao"], limit: 100 },
-          },
-        ],
-        tasks: [
-          {
-            issueKey: "MYAPP-202",
-            issueUrl: "https://acme.atlassian.net/browse/MYAPP-202",
-            summary: "Wire sprint session mapping",
-            status: "Backlog",
-            statusCategory: "new",
-            listenerIds: ["jira-my-app"],
-            relatedActiveSessions: [
-              {
-                id: "my-app-15",
-                projectId: "my-app",
-                status: "working",
-                activity: "active",
-                branch: "MYAPP-202-session-linking",
-                lastActivityAt: "2026-03-06T14:11:30.000Z",
-              },
-            ],
-            spawnAvailable: false,
-          },
-        ],
-      });
-
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.tasks).toHaveLength(1);
-      expect(data.tasks[0].issueKey).toBe("MYAPP-202");
-      expect(data.tasks[0].relatedActiveSessions).toHaveLength(1);
-      expect(data.tasks[0].relatedActiveSessions[0]).toEqual(
-        expect.objectContaining({
-          id: "my-app-15",
-          projectId: "my-app",
-          status: "working",
-          activity: "active",
-          branch: "MYAPP-202-session-linking",
-        }),
-      );
-      expect(data.tasks[0].spawnAvailable).toBe(false);
-      expect(data.tasks[0].listenerIds).toEqual(["jira-my-app"]);
-    });
-
-    it("returns an empty snapshot when no sprint tasks are available", async () => {
-      mockBuildJiraSprintTasksSnapshot.mockResolvedValueOnce({
-        updatedAt: "2026-03-06T14:15:00.000Z",
-        projectId: "my-app",
-        listeners: [],
-        tasks: [],
-      });
-
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=my-app"));
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.listeners).toEqual([]);
-      expect(data.tasks).toEqual([]);
-      expect(data.projectId).toBe("my-app");
-    });
-
-    it("trims projectId query before building snapshot", async () => {
-      const res = await jiraSprintTasksGET(
-        makeRequest("/api/jira/sprint-tasks?projectId=%20my-app%20"),
-      );
-      expect(res.status).toBe(200);
-      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config: mockConfig,
-          sessionManager: mockSessionManager,
-          projectId: "my-app",
-        }),
-      );
-    });
-
-    it("treats whitespace-only projectId as undefined", async () => {
-      delete process.env.AO_PROJECT_ID;
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks?projectId=%20%20%20"));
-      expect(res.status).toBe(200);
-      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
-        expect.objectContaining({
-          projectId: undefined,
-        }),
-      );
-    });
-
-    it("falls back to AO_PROJECT_ID when projectId query is omitted", async () => {
-      process.env.AO_PROJECT_ID = "my-app";
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
-      expect(res.status).toBe(200);
-      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
-        expect.objectContaining({
-          projectId: "my-app",
-        }),
-      );
-    });
-
-    it("returns 500 when snapshot generation fails", async () => {
-      mockBuildJiraSprintTasksSnapshot.mockRejectedValueOnce(new Error("jira CLI unavailable"));
-
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
-      expect(res.status).toBe(500);
-      const data = await res.json();
-      expect(data.error).toMatch(/jira CLI unavailable/);
-    });
-
-    it("returns generic 500 error when non-Error is thrown", async () => {
-      mockBuildJiraSprintTasksSnapshot.mockRejectedValueOnce("unexpected");
-
-      const res = await jiraSprintTasksGET(makeRequest("/api/jira/sprint-tasks"));
-      expect(res.status).toBe(500);
-      const data = await res.json();
-      expect(data.error).toBe("Failed to load tracker tasks");
-    });
-  });
-
-  // ── POST /api/jira/sprint-tasks ───────────────────────────────────
-
-  describe("POST /api/jira/sprint-tasks", () => {
-    it("starts a task and returns created session", async () => {
-      const req = makeRequest("/api/jira/sprint-tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          issueKey: "MYAPP-200",
-          projectId: "my-app",
-          listenerId: "jira-my-app",
-        }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksPOST(req);
-      expect(res.status).toBe(201);
-      const data = await res.json();
-      expect(data.started).toBe(true);
-      expect(data.duplicate).toBe(false);
-      expect(data.issueKey).toBe("MYAPP-101");
-      expect(data.session).toBeDefined();
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({
-          issueKey: "MYAPP-200",
-          projectId: "my-app",
-          listenerId: "jira-my-app",
-        }),
-      );
-    });
-
-    it("returns 409 with duplicate=true when active session already exists", async () => {
-      mockStartJiraSprintTask.mockResolvedValueOnce({
-        kind: "already-active",
-        issueKey: "MYAPP-201",
-        projectId: "my-app",
-        listenerId: "jira-my-app",
-        session: makeSession({
-          id: "my-app-201",
-          projectId: "my-app",
-          issueId: "MYAPP-201",
-          status: "working",
-          activity: "active",
-        }),
-      });
-
-      const req = makeRequest("/api/jira/sprint-tasks", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-201", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksPOST(req);
-      expect(res.status).toBe(409);
-      const data = await res.json();
-      expect(data.started).toBe(false);
-      expect(data.duplicate).toBe(true);
-      expect(data.session.id).toBe("my-app-201");
-    });
-
-    it("returns 409 when start is already in progress", async () => {
-      mockStartJiraSprintTask.mockResolvedValueOnce({
-        kind: "start-in-progress",
-        issueKey: "MYAPP-202",
-        projectId: "my-app",
-        listenerId: "jira-my-app",
-      });
-
-      const req = makeRequest("/api/jira/sprint-tasks", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-202", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksPOST(req);
-      expect(res.status).toBe(409);
-      const data = await res.json();
-      expect(data.started).toBe(false);
-      expect(data.duplicate).toBe(false);
-      expect(data.error).toMatch(/already in progress/i);
-    });
-
-    it("returns 400 when issueKey is missing", async () => {
-      const req = makeRequest("/api/jira/sprint-tasks", {
-        method: "POST",
-        body: JSON.stringify({ projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksPOST(req);
-      expect(res.status).toBe(400);
-      const data = await res.json();
-      expect(data.error).toMatch(/issueKey/i);
-    });
-
-    it("propagates structured task-start errors", async () => {
-      mockStartJiraSprintTask.mockRejectedValueOnce({
-        message: "Issue is outside listener scope",
-        status: 409,
-        code: "out_of_scope",
-        details: { issueKey: "MYAPP-203" },
-      });
-
-      const req = makeRequest("/api/jira/sprint-tasks", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-203", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksPOST(req);
-      expect(res.status).toBe(409);
-      const data = await res.json();
-      expect(data.code).toBe("out_of_scope");
-      expect(data.error).toMatch(/outside listener scope/i);
-      expect(data.details).toEqual(expect.objectContaining({ issueKey: "MYAPP-203" }));
-    });
-
-    it("supports legacy /start alias endpoint", async () => {
-      const req = makeRequest("/api/jira/sprint-tasks/start", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-204", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTasksStartPOST(req);
-      expect(res.status).toBe(201);
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({ issueKey: "MYAPP-204" }),
-      );
-    });
-
-    it("supports /:issueKey/start endpoint", async () => {
-      const req = makeRequest("/api/jira/sprint-tasks/MYAPP-205/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await jiraSprintTaskByKeyStartPOST(req, {
-        params: Promise.resolve({ issueKey: "MYAPP-205" }),
-      });
-      expect(res.status).toBe(201);
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({ issueKey: "MYAPP-205" }),
-      );
-    });
-  });
-
-  describe("tracker task route aliases", () => {
-    it("GET /api/tracker/tasks proxies to tracker snapshot", async () => {
-      const res = await trackerTasksGET(makeRequest("/api/tracker/tasks?projectId=my-app"));
-      expect(res.status).toBe(200);
-      expect(mockBuildJiraSprintTasksSnapshot).toHaveBeenCalledWith(
-        expect.objectContaining({ projectId: "my-app" }),
-      );
-    });
-
-    it("POST /api/tracker/tasks starts task via shared handler", async () => {
-      const req = makeRequest("/api/tracker/tasks", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-300", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await trackerTasksPOST(req);
-      expect(res.status).toBe(201);
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({ issueKey: "MYAPP-300", projectId: "my-app" }),
-      );
-    });
-
-    it("POST /api/tracker/tasks/start keeps legacy start alias behavior", async () => {
-      const req = makeRequest("/api/tracker/tasks/start", {
-        method: "POST",
-        body: JSON.stringify({ issueKey: "MYAPP-301", projectId: "my-app" }),
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await trackerTasksStartPOST(req);
-      expect(res.status).toBe(201);
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({ issueKey: "MYAPP-301", projectId: "my-app" }),
-      );
-    });
-
-    it("POST /api/tracker/tasks/:issueKey/start supports key-scoped endpoint", async () => {
-      const req = makeRequest("/api/tracker/tasks/MYAPP-302/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-
-      const res = await trackerTaskByKeyStartPOST(req, {
-        params: Promise.resolve({ issueKey: "MYAPP-302" }),
-      });
-      expect(res.status).toBe(201);
-      expect(mockStartJiraSprintTask).toHaveBeenCalledWith(
-        expect.objectContaining({ issueKey: "MYAPP-302" }),
-      );
-    });
-  });
-
-  // ── GET /api/events (SSE) ──────────────────────────────────────────
-
-  describe("GET /api/events", () => {
-    it("returns SSE content type", async () => {
-      const res = await eventsGET(makeRequest("/api/events"));
-      expect(res.headers.get("Content-Type")).toBe("text/event-stream");
-      expect(res.headers.get("Cache-Control")).toBe("no-cache");
-    });
-
-    it("streams initial snapshot event", async () => {
-      const res = await eventsGET(makeRequest("/api/events"));
-      const reader = res.body!.getReader();
-      const { value } = await reader.read();
-      reader.cancel();
-      const text = new TextDecoder().decode(value);
-      expect(text).toContain("data: ");
-      const jsonStr = text.replace("data: ", "").trim();
-      const event = JSON.parse(jsonStr);
-      expect(event.type).toBe("snapshot");
-      expect(Array.isArray(event.sessions)).toBe(true);
-      expect(event.sessions.length).toBeGreaterThan(0);
-      expect(event.sessions[0]).toHaveProperty("id");
-      expect(event.sessions[0]).toHaveProperty("attentionLevel");
-    });
-
-    it("returns 400 for unknown projectId stream filter", async () => {
-      const res = await eventsGET(makeRequest("/api/events?projectId=unknown"));
-      expect(res.status).toBe(400);
-      expect(res.headers.get("Content-Type")).toContain("application/json");
-    });
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/pause",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/complete",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/kill",
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/restore",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });

@@ -9,13 +9,12 @@ export async function POST(_: Request, context: RouteContext) {
   const { id } = await context.params;
   try {
     const result = await spurRequestJson<{ ok: true }>(
-      `/sessions/${encodeURIComponent(id)}/pause`,
+      `/sessions/${encodeURIComponent(id)}/complete`,
       spurJsonInit("POST"),
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to pause Spur session";
+    const message = error instanceof Error ? error.message : "Failed to complete Spur session";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
-
