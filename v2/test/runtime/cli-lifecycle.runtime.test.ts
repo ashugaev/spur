@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { rm, writeFile } from "node:fs/promises";
+import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
@@ -66,6 +66,21 @@ projects:
       - .env
 ${extraProjectYaml}
 `;
+}
+
+async function installFakeDesktopNotifier(context: RuntimeTestContext): Promise<string> {
+  const logPath = join(context.rootDir, "desktop-notify.log");
+  const binary = process.platform === "darwin" ? "osascript" : "notify-send";
+  await writeFile(
+    join(context.fakeBinDir, binary),
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
+`,
+    "utf8",
+  );
+  await chmod(join(context.fakeBinDir, binary), 0o755);
+  return logPath;
 }
 
 async function runRestoreScenario(args: {
@@ -245,6 +260,49 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     });
     await expect(context.fetchJson("/info")).rejects.toThrow();
   });
+
+  it.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
+    "sends one desktop notification when a live session transitions to needs_input",
+    async () => {
+      const port = await findFreePort();
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-notify-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      const logPath = await installFakeDesktopNotifier(context);
+      await syncTmuxEnvironment({
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      });
+      const configPath = await context.writeConfig(
+        "desktop-notify.yaml",
+        baseConfig(context, sessionPrefix),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (await context.execCli(["--config", configPath, "spawn", "api", "notify me", "--json"]))
+          .stdout,
+      ) as SessionView;
+
+      await context.execCli(["--config", configPath, "send", spawned.id, "show-waiting-menu"]);
+
+      const firstNotification = await pollUntil(
+        async () => (existsSync(logPath) ? readFile(logPath, "utf8") : ""),
+        {
+          timeoutMs: 15_000,
+          accept: (value) => value.includes(`Spur needs input [${spawned.id}]`),
+        },
+      );
+      expect(firstNotification).toContain(`Spur needs input [${spawned.id}]`);
+
+      await sleep(6_000);
+      const log = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
+      expect(log.match(new RegExp(`Spur needs input \\[${spawned.id}\\]`, "g"))).toHaveLength(1);
+    },
+  );
 
   it("restarts the daemon through the built CLI and keeps restart as a no-op once it is down", async () => {
     const port = await findFreePort();

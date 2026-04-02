@@ -53,6 +53,7 @@ const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const sendDesktopNotificationMock = vi.fn();
 
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -73,6 +74,10 @@ vi.mock("../../src/preflight.js", () => ({
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
+}));
+
+vi.mock("../../src/desktop-notify.js", () => ({
+  sendDesktopNotification: sendDesktopNotificationMock,
 }));
 
 vi.mock("../../src/ids.js", () => ({
@@ -291,6 +296,7 @@ describe("SessionService", () => {
     workspaceExistsMock.mockReset().mockReturnValue(true);
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
+    sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
@@ -926,6 +932,133 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
+  });
+
+  it("uses startup attention state as a baseline without notifying immediately", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    captureTmuxPaneMock.mockResolvedValue("Do you want to proceed?\n(Y)es / (N)o");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    await advanceSeconds(5);
+
+    expect(sendDesktopNotificationMock).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("notifies once per attention transition and re-notifies only after the session clears", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    captureTmuxPaneMock
+      .mockResolvedValueOnce("Claude Code\n❯")
+      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o")
+      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o")
+      .mockResolvedValueOnce("Claude Code\n❯")
+      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+    expect(sendDesktopNotificationMock).toHaveBeenLastCalledWith({
+      title: "Spur needs input [api-1]",
+      message: "Agent is waiting for a reply or approval.\nRun `spur list` to respond.",
+      urgent: false,
+    });
+
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
+
+    await advanceSeconds(5);
+    expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it("sends an urgent desktop notification when a session enters errored state", async () => {
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    captureTmuxPaneMock.mockResolvedValue("Claude Code\n❯");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await vi.advanceTimersByTimeAsync(0);
+    const session = sessions.get("api-1");
+    expect(session).toBeDefined();
+    sessions.set(
+      "api-1",
+      clone({
+        ...session!,
+        status: "errored",
+        updatedAt: "2026-03-18T10:05:05.000Z",
+        error: "tmux crashed",
+      }),
+    );
+
+    await advanceSeconds(5);
+
+    expect(sendDesktopNotificationMock).toHaveBeenCalledWith({
+      title: "Spur error [api-1]",
+      message: "tmux crashed\nRun `spur list` for details.",
+      urgent: true,
+    });
+    service.dispose();
   });
 
   it("runs a bound service and persists its optional port", async () => {

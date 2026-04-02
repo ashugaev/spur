@@ -12,6 +12,7 @@ import {
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteServiceInstance,
   deleteServiceInstancesForSession,
@@ -115,9 +116,11 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
+type AttentionState = "needs_input" | "error";
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -428,6 +431,9 @@ export class SessionService {
   config: AppConfig;
   private registryPaths: string[];
   private readonly pipelineRuns = new Map<string, Promise<void>>();
+  private readonly attentionStates = new Map<string, AttentionState>();
+  private attentionMonitorTimer: NodeJS.Timeout | null = null;
+  private attentionMonitorRunning = false;
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
@@ -454,6 +460,14 @@ export class SessionService {
     this.config = initial.config;
     this.registryPaths = [];
     this.applyConfig(merged.config, merged.configPaths);
+    this.startAttentionMonitor();
+  }
+
+  dispose(): void {
+    if (this.attentionMonitorTimer) {
+      clearInterval(this.attentionMonitorTimer);
+      this.attentionMonitorTimer = null;
+    }
   }
 
   previewConfigSync(configPath: string): {
@@ -510,6 +524,67 @@ export class SessionService {
 
   private schedulePipelineRunner(sessionId: string): void {
     this.ensurePipelineRunner(sessionId);
+  }
+
+  private startAttentionMonitor(): void {
+    if (this.attentionMonitorTimer) {
+      return;
+    }
+    void this.pollAttentionStates(true);
+    this.attentionMonitorTimer = setInterval(() => {
+      void this.pollAttentionStates(false);
+    }, ATTENTION_POLL_INTERVAL_MS);
+    this.attentionMonitorTimer.unref?.();
+  }
+
+  private async pollAttentionStates(baseline: boolean): Promise<void> {
+    if (this.attentionMonitorRunning) {
+      return;
+    }
+    this.attentionMonitorRunning = true;
+
+    try {
+      const nextStates = new Map<string, AttentionState>();
+      const sessions = listSessions(this.config.dataDir).filter(
+        (session) => !isTerminalSessionStatus(session.status),
+      );
+      for (const session of sessions) {
+        const view = await this.enrich(session);
+        const attention =
+          view.state === "needs_input" ? "needs_input" : view.state === "error" ? "error" : null;
+        if (!attention) {
+          continue;
+        }
+        nextStates.set(view.id, attention);
+        if (!baseline && this.attentionStates.get(view.id) !== attention) {
+          await this.notifyAttention(view, attention);
+        }
+      }
+      this.attentionStates.clear();
+      for (const [sessionId, attention] of nextStates) {
+        this.attentionStates.set(sessionId, attention);
+      }
+    } finally {
+      this.attentionMonitorRunning = false;
+    }
+  }
+
+  private async notifyAttention(
+    session: Pick<SessionView, "id" | "project" | "slots" | "error">,
+    attention: AttentionState,
+  ): Promise<void> {
+    const summary = session.slots?.title ? `${session.slots.title}\n` : "";
+    const title =
+      attention === "error" ? `Spur error [${session.id}]` : `Spur needs input [${session.id}]`;
+    const message =
+      attention === "error"
+        ? `${summary}${session.error ?? "Session errored."}\nRun \`spur list\` for details.`
+        : `${summary}Agent is waiting for a reply or approval.\nRun \`spur list\` to respond.`;
+    await sendDesktopNotification({
+      title,
+      message,
+      urgent: attention === "error",
+    });
   }
 
   private getProject(projectId: string): ProjectConfig {
