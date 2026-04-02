@@ -3,11 +3,12 @@
 import { execFileSync } from "node:child_process";
 import { emitKeypressEvents } from "node:readline";
 import { pathToFileURL } from "node:url";
-import { log } from "@clack/prompts";
+import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
   getJson,
   postJson,
+  postPreflight,
   restartDaemonIfRunning,
   stopDaemonIfRunning,
   type RestartDaemonResult,
@@ -1087,12 +1088,40 @@ export function createProgram(cliEntrypoint: string): Command {
         throw new Error("spawn requires a non-empty prompt");
       }
       const configPath = getConfigPath(command.parent as Command);
+
+      let branch: string | undefined = options.branch;
+
+      // Interactive branch confirmation: TTY, no --json, no explicit --branch
+      const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
+      if (interactive) {
+        const preflight = await withSpinner("running preflight", () =>
+          postPreflight(
+            cliEntrypoint,
+            project,
+            { prompt, agent: options.agent, ...(overrides !== undefined ? { overrides } : {}) },
+            configPath,
+          ),
+        );
+        if (preflight.branch) {
+          const confirmed = await text({
+            message: "Branch name",
+            defaultValue: preflight.branch,
+            placeholder: preflight.branch,
+          });
+          if (isCancel(confirmed)) {
+            cancel("spawn cancelled");
+            process.exit(0);
+          }
+          branch = confirmed.trim() || preflight.branch;
+        }
+      }
+
       const payload: SpawnSessionRequest = {
         project,
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
-        branch: options.branch,
+        ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
       };
       await outputResult({

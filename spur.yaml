@@ -10,6 +10,8 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     symlinks: [node_modules, .env]
+    preflight:
+      prompt: "Choose a branch name based on the project's branch naming conventions."
     spawn:
       steps:
         - "run $manager"
