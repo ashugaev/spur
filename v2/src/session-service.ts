@@ -536,7 +536,7 @@ export class SessionService {
     this.attentionMonitorTimer = setInterval(() => {
       void this.runAttentionMonitor(false);
     }, ATTENTION_POLL_INTERVAL_MS);
-    this.attentionMonitorTimer.unref?.();
+    this.attentionMonitorTimer.unref();
   }
 
   private async runAttentionMonitor(baseline: boolean): Promise<void> {

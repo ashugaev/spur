@@ -1083,11 +1083,13 @@ describe("SessionService", () => {
 
     await vi.advanceTimersByTimeAsync(0);
     const session = sessions.get("api-1");
-    expect(session).toBeDefined();
+    if (!session) {
+      throw new Error("Expected api-1 session to exist");
+    }
     sessions.set(
       "api-1",
       clone({
-        ...session!,
+        ...session,
         status: "errored",
         updatedAt: "2026-03-18T10:05:05.000Z",
         error: "tmux crashed",
