@@ -18,6 +18,7 @@
     "format:check": "prettier --check .",
     "typecheck": "pnpm --dir packages/web typecheck && pnpm --dir v2 typecheck",
     "test": "pnpm --dir packages/web test && pnpm --dir v2 test",
+    "test:integration": "pnpm --dir v2 test:runtime",
     "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
     "changeset": "changeset",
     "version-packages": "changeset version",
