@@ -371,7 +371,11 @@ describe("SessionService", () => {
     expect(result.worktree).toBe(true);
     expect(result.branch).toBe("api-1");
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
-    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toEqual([
+    expect(
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((e) => e !== "session.state.classified"),
+    ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
       "session.spawn.tmux_created",
