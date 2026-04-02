@@ -1,80 +1,19 @@
-import { ACTIVITY_STATE } from "@composio/ao-core";
-import { NextResponse } from "next/server";
-import { getServices, getSCM } from "@/lib/services";
-import {
-  sessionToDashboard,
-  resolveProject,
-  enrichSessionPR,
-  enrichSessionsMetadata,
-  computeStats,
-} from "@/lib/serialize";
+import { NextResponse, type NextRequest } from "next/server";
+import { spurRequestJson } from "@/lib/spur-daemon";
+import type { SpurSessionView, SpurSessionsResponse } from "@/lib/spur-types";
+import { readSpurProjectOptions } from "@/lib/spur-projects";
 
-/** GET /api/sessions — List all sessions with full state
- * Query params:
- * - active=true: Only return non-exited sessions
- * - projectId=<id>: Limit to a single project
- */
-export async function GET(request: Request) {
+export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const activeOnly = searchParams.get("active") === "true";
-    const requestedProjectIdRaw = searchParams.get("projectId");
-    const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
-
-    const { config, registry, sessionManager } = await getServices();
-    if (requestedProjectId && !config.projects[requestedProjectId]) {
-      return NextResponse.json(
-        { error: `Unknown projectId: ${requestedProjectId}` },
-        { status: 400 },
-      );
-    }
-
-    const coreSessions = await sessionManager.list(requestedProjectId);
-
-    // Find orchestrator session ID (if running) and expose to clients
-    const orchSession = coreSessions.find((s) => s.id.endsWith("-orchestrator"));
-    const orchestratorId = orchSession ? orchSession.id : null;
-
-    // Filter out orchestrator sessions — they get their own button, not a card
-    let workerSessions = coreSessions.filter((s) => !s.id.endsWith("-orchestrator"));
-
-    // Convert to dashboard format
-    let dashboardSessions = workerSessions.map(sessionToDashboard);
-
-    // Filter to active sessions only if requested (keep workerSessions in sync)
-    if (activeOnly) {
-      const activeIndices = dashboardSessions
-        .map((s, i) => (s.activity !== ACTIVITY_STATE.EXITED ? i : -1))
-        .filter((i) => i !== -1);
-      workerSessions = activeIndices.map((i) => workerSessions[i]);
-      dashboardSessions = activeIndices.map((i) => dashboardSessions[i]);
-    }
-
-    // Enrich metadata (issue labels, agent summaries, issue titles) — cap at 3s
-    const metaTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3_000));
-    await Promise.race([enrichSessionsMetadata(workerSessions, dashboardSessions, config, registry), metaTimeout]);
-
-    // Enrich sessions that have PRs with live SCM data (CI, reviews, mergeability)
-    const enrichPromises = workerSessions.map((core, i) => {
-      if (!core.pr) return Promise.resolve();
-      const project = resolveProject(core, config.projects);
-      const scm = getSCM(registry, project);
-      if (!scm) return Promise.resolve();
-      return enrichSessionPR(dashboardSessions[i], scm, core.pr);
-    });
-    const enrichTimeout = new Promise<void>((resolve) => setTimeout(resolve, 4_000));
-    await Promise.race([Promise.allSettled(enrichPromises), enrichTimeout]);
-
+    const projectId = request.nextUrl.searchParams.get("projectId")?.trim();
+    const sessions = await spurRequestJson<SpurSessionView[]>("/sessions");
+    const filtered = projectId ? sessions.filter((session) => session.project === projectId) : sessions;
     return NextResponse.json({
-      sessions: dashboardSessions,
-      stats: computeStats(dashboardSessions),
-      orchestratorId,
-      projectId: requestedProjectId ?? null,
-    });
-  } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to list sessions" },
-      { status: 500 },
-    );
+      sessions: filtered,
+      projects: readSpurProjectOptions(),
+    } satisfies SpurSessionsResponse);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to list Spur sessions";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }

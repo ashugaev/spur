@@ -1,22 +1,25 @@
-import { type NextRequest, NextResponse } from "next/server";
-import { validateIdentifier } from "@/lib/validation";
-import { getServices } from "@/lib/services";
+import { NextResponse, type NextRequest } from "next/server";
+import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 
-/** POST /api/sessions/:id/kill — Kill a session */
-export async function POST(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  const idErr = validateIdentifier(id, "id");
-  if (idErr) {
-    return NextResponse.json({ error: idErr }, { status: 400 });
-  }
+interface RouteContext {
+  params: Promise<{ id: string }>;
+}
 
+interface KillBody {
+  force?: boolean;
+}
+
+export async function POST(request: NextRequest, context: RouteContext) {
+  const { id } = await context.params;
   try {
-    const { sessionManager } = await getServices();
-    await sessionManager.kill(id);
-    return NextResponse.json({ ok: true, sessionId: id });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Failed to kill session";
-    const status = msg.includes("not found") ? 404 : 500;
-    return NextResponse.json({ error: msg }, { status });
+    const body = (await request.json().catch(() => ({}))) as KillBody;
+    const result = await spurRequestJson<{ ok: true }>(
+      `/sessions/${encodeURIComponent(id)}/kill`,
+      spurJsonInit("POST", { force: body.force === true }),
+    );
+    return NextResponse.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to kill Spur session";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }
