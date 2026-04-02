@@ -207,6 +207,17 @@ export interface ServiceInstanceView extends ServiceInstanceRecord {
   problemRuleIds: string[];
 }
 
+export interface PreflightRequest {
+  project: string;
+  prompt: string;
+  agent?: AgentName;
+  overrides?: SpawnOverrides;
+}
+
+export interface PreflightResponse {
+  branch: string | null;
+}
+
 export interface SpawnSessionRequest {
   project: string;
   prompt: string;

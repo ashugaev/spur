@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./config.js";
-import { SPUR_DAEMON_API_VERSION, type RuntimeInfo, type SyncProjectsRequest } from "./types.js";
+import {
+  SPUR_DAEMON_API_VERSION,
+  type PreflightRequest,
+  type PreflightResponse,
+  type RuntimeInfo,
+  type SyncProjectsRequest,
+} from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
 const DAEMON_STOP_RETRY_DELAY_MS = 100;
@@ -325,4 +331,18 @@ export async function postJson<T>(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export async function postPreflight(
+  cliEntrypoint: string,
+  projectId: string,
+  body: Omit<PreflightRequest, "project">,
+  configPath?: string,
+): Promise<PreflightResponse> {
+  return postJson<PreflightResponse>(
+    cliEntrypoint,
+    `/projects/${encodeURIComponent(projectId)}/preflight`,
+    body,
+    configPath,
+  );
 }
