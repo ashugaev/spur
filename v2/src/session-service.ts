@@ -2044,7 +2044,12 @@ export class SessionService {
     const cached = this.stateCache.get(session.id);
     const now = Date.now();
     if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
-      if (state !== "needs_input" && state !== "stopped" && state !== "killed" && state !== "error") {
+      if (
+        state !== "needs_input" &&
+        state !== "stopped" &&
+        state !== "killed" &&
+        state !== "error"
+      ) {
         state = cached.state;
       }
     }
