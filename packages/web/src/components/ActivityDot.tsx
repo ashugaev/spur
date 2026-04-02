@@ -75,7 +75,7 @@ export function ActivityDot({ activity, dotOnly = false, size = 6 }: ActivityDot
 
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2 py-1"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-sm border px-2 py-1"
       style={{
         background: config.bg,
         borderColor: "color-mix(in srgb, var(--color-border-default) 85%, transparent)",

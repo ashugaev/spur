@@ -243,7 +243,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
+            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >

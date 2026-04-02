@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import YAML from "yaml";
 
 export interface SpurProjectOption {
@@ -14,7 +14,10 @@ interface SpurConfigShape {
 function configCandidates(): string[] {
   const envPath = process.env["SPUR_CONFIG_PATH"]?.trim() ?? process.env["SPUR_CONFIG"]?.trim();
   if (envPath) {
-    return [resolve(envPath)];
+    if (isAbsolute(envPath)) {
+      return [envPath];
+    }
+    return [resolve(process.cwd(), envPath), resolve(process.cwd(), "..", "..", envPath)];
   }
   return [
     resolve(process.cwd(), "spur.yaml"),

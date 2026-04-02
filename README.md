@@ -12,11 +12,22 @@ The old AO/v1 backend, mobile app, plugin tree, example configs, and parallel do
 ```bash
 bash scripts/setup.sh
 cp v2/spur.yaml.example spur.yaml
-spur daemon start --config spur.yaml
-pnpm --dir packages/web dev
+SPUR_CONFIG=./spur.yaml spur daemon start
+SPUR_CONFIG=./spur.yaml pnpm dev
 ```
 
 If the daemon is not running on `http://127.0.0.1:4310`, set `SPUR_DAEMON_URL` before starting the web UI.
+
+For a production-like UI server:
+
+```bash
+pnpm ui:build
+SPUR_CONFIG=./spur.yaml \
+SPUR_DAEMON_URL=http://127.0.0.1:4310 \
+DIRECT_TERMINAL_PORT=14801 \
+PORT=3011 \
+pnpm ui:start
+```
 
 The web package also reads `SPUR_CONFIG` (or `SPUR_CONFIG_PATH`) to populate project filters and branding from a real Spur config.
 

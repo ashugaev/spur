@@ -52,7 +52,7 @@ export function AttentionZone({
 
   if (isAccordion) {
     return (
-      <section className="overflow-hidden rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+      <section className="overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
         <button
           type="button"
           className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
@@ -62,7 +62,7 @@ export function AttentionZone({
           <span className="text-sm font-semibold text-[var(--color-text-primary)]">
             {config.label}
           </span>
-          <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+          <span className="rounded-sm border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
             {sessions.length}
           </span>
           <span className="ml-auto text-[11px] text-[var(--color-text-tertiary)]">
@@ -78,7 +78,7 @@ export function AttentionZone({
                   <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />
                 ))
               ) : (
-                <div className="rounded-xl border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
+                <div className="rounded-sm border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
                   No sessions
                 </div>
               )}
@@ -92,7 +92,7 @@ export function AttentionZone({
   return (
     <section
       className={cn(
-        "flex min-h-[14rem] flex-col rounded-2xl border bg-[var(--color-bg-surface)] p-3",
+        "flex min-h-[14rem] flex-col rounded-sm border bg-[var(--color-bg-surface)] p-3",
         config.border,
       )}
     >
@@ -101,7 +101,7 @@ export function AttentionZone({
           <span className="h-2 w-2 rounded-full" style={{ background: config.color }} />
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">{config.label}</h2>
         </div>
-        <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+        <span className="rounded-sm border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           {sessions.length}
         </span>
       </header>
@@ -112,7 +112,7 @@ export function AttentionZone({
             <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />
           ))
         ) : (
-          <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
+          <div className="flex h-full items-center justify-center rounded-sm border border-dashed border-[var(--color-border-default)] px-3 py-6 text-center text-sm text-[var(--color-text-tertiary)]">
             No sessions
           </div>
         )}

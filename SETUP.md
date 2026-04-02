@@ -50,7 +50,18 @@ SPUR_CONFIG=./spur.yaml spur list
 ```bash
 SPUR_CONFIG=./spur.yaml \
 SPUR_DAEMON_URL=http://127.0.0.1:4310 \
-pnpm --dir packages/web dev
+pnpm dev
+```
+
+For a production-like UI server:
+
+```bash
+pnpm ui:build
+SPUR_CONFIG=./spur.yaml \
+SPUR_DAEMON_URL=http://127.0.0.1:4310 \
+DIRECT_TERMINAL_PORT=14801 \
+PORT=3011 \
+pnpm ui:start
 ```
 
 The UI is optional. It does not own runtime logic or persistence; it proxies to the daemon.

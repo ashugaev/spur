@@ -42,7 +42,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
   return (
     <article
       className={cn(
-        "session-card rounded-2xl border px-3 py-3 shadow-[0_12px_36px_rgba(0,0,0,0.2)]",
+        "session-card rounded-sm border px-3 py-3 shadow-[0_12px_36px_rgba(0,0,0,0.2)]",
         toneClasses[level],
       )}
     >
@@ -68,28 +68,28 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
           ) : null}
         </div>
 
-        <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-primary)]">
+        <span className="rounded-sm border border-white/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-primary)]">
           {toneLabels[level]}
         </span>
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-1.5">
         <ActivityDot activity={session.state} />
-        <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+        <span className="rounded-sm border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           {session.status}
         </span>
         {session.branch ? (
-          <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-secondary)]">
+          <span className="rounded-sm border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[10px] text-[var(--color-text-secondary)]">
             {session.branch}
           </span>
         ) : null}
         {hasServiceProblems(session) ? (
-          <span className="rounded-full border border-orange-400/30 px-2 py-0.5 text-[10px] text-orange-200">
+          <span className="rounded-sm border border-orange-400/30 px-2 py-0.5 text-[10px] text-orange-200">
             service issue
           </span>
         ) : null}
         {!session.runtimeAlive && !isTerminalSession(session) ? (
-          <span className="rounded-full border border-red-500/30 px-2 py-0.5 text-[10px] text-red-200">
+          <span className="rounded-sm border border-red-500/30 px-2 py-0.5 text-[10px] text-red-200">
             offline
           </span>
         ) : null}
@@ -108,7 +108,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
         <button
           aria-label={`Open web terminal for ${session.id}`}
           className={cn(
-            "inline-flex h-8 w-8 items-center justify-center rounded-lg border transition",
+            "inline-flex h-8 w-8 items-center justify-center rounded-sm border transition",
             canAttach
               ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
               : "border-[var(--color-border-default)] text-[var(--color-text-tertiary)] opacity-50",

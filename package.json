@@ -12,6 +12,8 @@
   "scripts": {
     "build": "pnpm --dir packages/web build && pnpm --dir v2 build",
     "dev": "pnpm --dir packages/web dev",
+    "ui:build": "pnpm --dir packages/web build",
+    "ui:start": "pnpm --dir packages/web start",
     "setup": "bash scripts/setup.sh",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

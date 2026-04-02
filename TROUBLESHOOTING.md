@@ -22,7 +22,7 @@ The UI reads project labels from a Spur config file. Set one of:
 Example:
 
 ```bash
-SPUR_CONFIG=./spur.yaml pnpm --dir packages/web dev
+SPUR_CONFIG=./spur.yaml pnpm dev
 ```
 
 ## Web UI cannot reach the daemon
@@ -38,7 +38,7 @@ curl http://127.0.0.1:4310/info
 If your config uses another port, start the UI with the matching daemon URL:
 
 ```bash
-SPUR_DAEMON_URL=http://127.0.0.1:4311 pnpm --dir packages/web dev
+SPUR_DAEMON_URL=http://127.0.0.1:4311 pnpm dev
 ```
 
 ## `tmux` is missing

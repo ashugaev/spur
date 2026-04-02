@@ -32,7 +32,7 @@ interface SessionDetailProps {
 
 function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-3xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-5 shadow-[0_18px_60px_rgba(0,0,0,0.26)]">
+    <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-5 shadow-[0_18px_60px_rgba(0,0,0,0.26)]">
       <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
         {title}
       </h2>
@@ -58,7 +58,7 @@ function ActionButton({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "rounded-full border px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+        "rounded-sm border px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
         tone === "danger"
           ? "border-red-500/40 text-red-200 hover:bg-red-500/10"
           : "border-[var(--color-border-default)] text-[var(--color-text-primary)] hover:bg-white/5",
@@ -147,14 +147,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       </a>
 
       {error ? (
-        <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-100">
+        <div className="mt-5 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-100">
           {error}
         </div>
       ) : null}
 
       {session ? (
         <>
-          <header className="relative mt-5 overflow-hidden rounded-[2rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-6 shadow-[0_28px_90px_rgba(0,0,0,0.32)]">
+          <header className="relative mt-5 overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-6 shadow-[0_28px_90px_rgba(0,0,0,0.32)]">
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.14),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.1),transparent_38%)]" />
 
             <div className="relative">
@@ -177,21 +177,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
               <div className="mt-5 flex flex-wrap items-center gap-2">
                 <ActivityDot activity={session.state} />
-                <span className="rounded-full border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
+                <span className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
                   status: {session.status}
                 </span>
                 {session.branch ? (
-                  <span className="rounded-full border border-[var(--color-border-default)] px-2.5 py-1 font-mono text-[11px] text-[var(--color-text-secondary)]">
+                  <span className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 font-mono text-[11px] text-[var(--color-text-secondary)]">
                     {session.branch}
                   </span>
                 ) : null}
                 {!session.runtimeAlive && !isTerminalSession(session) ? (
-                  <span className="rounded-full border border-red-500/30 px-2.5 py-1 text-[11px] text-red-200">
+                  <span className="rounded-sm border border-red-500/30 px-2.5 py-1 text-[11px] text-red-200">
                     agent offline
                   </span>
                 ) : null}
                 {hasServiceProblems(session) ? (
-                  <span className="rounded-full border border-orange-400/30 px-2.5 py-1 text-[11px] text-orange-200">
+                  <span className="rounded-sm border border-orange-400/30 px-2.5 py-1 text-[11px] text-orange-200">
                     service issues detected
                   </span>
                 ) : null}
@@ -205,7 +205,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {canSendMessage(session) ? (
                   <div className="space-y-3">
                     <textarea
-                      className="min-h-32 w-full rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                      className="min-h-32 w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
                       onChange={(event) => setMessage(event.target.value)}
                       placeholder="Message to the running agent"
                       value={message}
@@ -233,7 +233,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {session.links.map((link) => (
                       <a
                         key={`${session.id}-${link.label}-${link.url}`}
-                        className="rounded-full border border-[var(--color-border-default)] px-3 py-1.5 text-sm text-[var(--color-accent)] hover:no-underline"
+                        className="rounded-sm border border-[var(--color-border-default)] px-3 py-1.5 text-sm text-[var(--color-accent)] hover:no-underline"
                         href={link.url}
                         rel="noreferrer"
                         target="_blank"
@@ -251,7 +251,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     {session.services.map((service) => (
                       <article
                         key={`${session.id}-${service.serviceId}`}
-                        className="rounded-2xl border border-[var(--color-border-default)] bg-black/10 p-4"
+                        className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-4"
                       >
                         <div className="flex flex-wrap items-center justify-between gap-3">
                           <div>
@@ -262,7 +262,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               {service.command}
                             </div>
                           </div>
-                          <div className="rounded-full border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
+                          <div className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
                             {service.state}
                             {typeof service.port === "number" ? ` • :${service.port}` : ""}
                           </div>
@@ -344,7 +344,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 </dl>
 
-                <div className="mt-4 rounded-2xl border border-[var(--color-border-default)] bg-black/10 px-3 py-3">
+                <div className="mt-4 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-3 py-3">
                   <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Worktree path
                   </div>
@@ -354,7 +354,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
 
                 {session.error ? (
-                  <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/[0.08] px-3 py-3 text-sm text-red-100">
+                  <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-3 text-sm text-red-100">
                     {session.error}
                   </div>
                 ) : null}

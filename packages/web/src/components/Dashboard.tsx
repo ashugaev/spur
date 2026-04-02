@@ -38,7 +38,7 @@ function StatCard({
   return (
     <div
       className={cn(
-        "rounded-2xl border px-3 py-3",
+        "rounded-sm border px-3 py-3",
         tone === "respond" && "border-red-500/25 bg-red-500/[0.06]",
         tone === "review" && "border-orange-400/25 bg-orange-400/[0.06]",
         tone === "pending" && "border-amber-400/25 bg-amber-400/[0.06]",
@@ -253,13 +253,13 @@ export function Dashboard() {
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <section className="relative overflow-hidden rounded-[1.75rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)] sm:p-5">
+      <section className="relative overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)] sm:p-5">
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.12),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.08),transparent_34%)]" />
 
         <div className="relative">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+              <div className="inline-flex items-center gap-2 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
                 <span className="text-sm text-[var(--color-accent)]">𖤓</span>
                 Spur UI
               </div>
@@ -280,12 +280,12 @@ export function Dashboard() {
           </div>
 
           <div className="mt-4 grid gap-3 xl:grid-cols-[16rem_minmax(0,1fr)]">
-            <section className="rounded-2xl border border-[var(--color-border-default)] bg-black/10 p-3">
+            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
               <label className="block text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                 Project filter
               </label>
               <select
-                className="mt-2.5 w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                className="mt-2.5 w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                 onChange={(event) => {
                   syncProjectFilter(event.target.value);
                 }}
@@ -299,7 +299,7 @@ export function Dashboard() {
                 ))}
               </select>
 
-              <div className="mt-3 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
+              <div className="mt-3 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
                 <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   Visible sessions
                 </div>
@@ -309,14 +309,14 @@ export function Dashboard() {
               </div>
             </section>
 
-            <section className="rounded-2xl border border-[var(--color-border-default)] bg-black/10 p-3">
+            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
               <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                 Spawn session
               </div>
 
               <div className="mt-3 grid gap-2.5 md:grid-cols-[minmax(11rem,14rem)_minmax(9rem,11rem)_1fr_auto]">
                 <select
-                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnProjectId(event.target.value)}
                   value={spawnProjectId}
                 >
@@ -329,7 +329,7 @@ export function Dashboard() {
                 </select>
 
                 <select
-                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                   value={spawnAgent}
                 >
@@ -338,14 +338,14 @@ export function Dashboard() {
                 </select>
 
                 <input
-                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnPrompt(event.target.value)}
                   placeholder="Prompt for the new session"
                   value={spawnPrompt}
                 />
 
                 <button
-                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-sm bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
                   onClick={() => void handleSpawn()}
                   type="button"
@@ -359,7 +359,7 @@ export function Dashboard() {
       </section>
 
       {error ? (
-        <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
+        <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
           {error}
         </div>
       ) : null}
