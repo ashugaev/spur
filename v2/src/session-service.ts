@@ -99,7 +99,7 @@ const TRAILING_UI_RE = [
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
-const HOOK_FRESHNESS_MS = 2_000;
+const STATE_HOLD_MS = 4_000;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -276,7 +276,8 @@ const CODEX_PANE_WORKING_RE = /esc to interrupt/i;
 function classifyCodexPane(pane: string): SessionState {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) return "needs_input";
-  if (CODEX_QUESTION_RE.test(pane)) return "needs_input";
+  const tail = lines.slice(-WAITING_INPUT_TAIL_LINES).join(" ");
+  if (CODEX_QUESTION_RE.test(tail)) return "needs_input";
   if (CODEX_PANE_WORKING_RE.test(pane)) return "working";
   return "waiting";
 }
@@ -434,6 +435,7 @@ export class SessionService {
   private readonly attentionStates = new Map<string, AttentionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
+  private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
@@ -530,11 +532,23 @@ export class SessionService {
     if (this.attentionMonitorTimer) {
       return;
     }
-    void this.pollAttentionStates(true);
+    void this.runAttentionMonitor(true);
     this.attentionMonitorTimer = setInterval(() => {
-      void this.pollAttentionStates(false);
+      void this.runAttentionMonitor(false);
     }, ATTENTION_POLL_INTERVAL_MS);
     this.attentionMonitorTimer.unref?.();
+  }
+
+  private async runAttentionMonitor(baseline: boolean): Promise<void> {
+    try {
+      await this.pollAttentionStates(baseline);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.attention_monitor.failed", {
+        level: "warn",
+        message: `Attention monitor failed: ${message}`,
+      });
+    }
   }
 
   private async pollAttentionStates(baseline: boolean): Promise<void> {
@@ -570,7 +584,7 @@ export class SessionService {
   }
 
   private async notifyAttention(
-    session: Pick<SessionView, "id" | "project" | "slots" | "error">,
+    session: Pick<SessionView, "id" | "slots" | "error">,
     attention: AttentionState,
   ): Promise<void> {
     const summary = session.slots?.title ? `${session.slots.title}\n` : "";
@@ -1193,6 +1207,7 @@ export class SessionService {
         interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
+      this.stateCache.delete(sessionId);
       const updated: SessionRecord = {
         ...readySession,
         status: "running",
@@ -1352,6 +1367,7 @@ export class SessionService {
       throw error;
     }
 
+    this.stateCache.delete(sessionId);
     const record: SessionRecord = {
       ...session,
       status: targetStatus,
@@ -1412,6 +1428,8 @@ export class SessionService {
       });
       throw error;
     }
+
+    this.stateCache.delete(sessionId);
 
     if (session.status === "killed") {
       this.logEvent("session.kill.noop", {
@@ -1609,6 +1627,7 @@ export class SessionService {
       }
     }
 
+    this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     const recovered: SessionRecord = {
       ...recoveredBase,
@@ -1764,6 +1783,7 @@ export class SessionService {
         agentSessionId: persistedRestored.agentSessionId ?? null,
       },
     });
+    this.stateCache.delete(sessionId);
     if (persistedRestored.pipeline?.status === "running") {
       this.schedulePipelineRunner(persistedRestored.id);
     }
@@ -1987,6 +2007,15 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
+
+      // Hook state is the primary readiness signal — if it says "working",
+      // the agent is mid-turn and not ready for the next step.
+      const hookState = readAgentHookState(this.config.dataDir, sessionId);
+      if (hookState?.state === "working") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+
       const paneState = await classifyAgentState(session.agent, session.tmuxSession);
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
@@ -2089,22 +2118,56 @@ export class SessionService {
       state = "stopped";
     } else {
       const hookState = readAgentHookState(this.config.dataDir, session.id);
-      if (
-        hookState?.state === "working" &&
-        Date.now() - new Date(hookState.updatedAt).getTime() <= HOOK_FRESHNESS_MS
-      ) {
-        // Fresh UserPromptSubmit hook — definitively working.
-        state = "working";
-      } else if (hookState?.state === "waiting") {
-        // Stop/SessionStart hook fired — trust it, but still check pane for needs_input
-        // since that requires terminal interaction the agent can't signal via hooks.
+      if (hookState) {
+        // Hooks are authoritative. Trust the last hook event until the next one
+        // overwrites it. Process liveness (checked above) is the crash guard.
+        // Always overlay pane check for needs_input — hooks cannot signal it.
         const paneState = await classifyAgentState(session.agent, session.tmuxSession);
-        state = paneState === "needs_input" ? "needs_input" : "waiting";
+        if (paneState === "needs_input") {
+          state = "needs_input";
+        } else if (
+          hookState.state === "working" &&
+          session.agent === "codex" &&
+          paneState === "waiting"
+        ) {
+          // Codex title spinner is a reliable working indicator — if title says
+          // waiting (no spinner), trust it over a potentially stale hook.
+          state = "waiting";
+        } else {
+          state = hookState.state;
+        }
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (hook=${hookState.state}, pane=${paneState}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
+        });
       } else {
-        // No hook state (hooks not installed or stale working) — full pane classification.
+        // No hook state (first poll, hooks not installed). Full pane classification.
         state = await classifyAgentState(session.agent, session.tmuxSession);
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (no hook, pane-only)`,
+        });
       }
     }
+
+    // State debounce: suppress single-poll flicker for running sessions.
+    const cached = this.stateCache.get(session.id);
+    const now = Date.now();
+    if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
+      if (
+        state !== "needs_input" &&
+        state !== "stopped" &&
+        state !== "killed" &&
+        state !== "error"
+      ) {
+        state = cached.state;
+      }
+    }
+    this.stateCache.set(session.id, { state, classifiedAt: now });
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {

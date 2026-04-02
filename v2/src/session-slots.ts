@@ -222,7 +222,7 @@ function mapHookEventToState(eventName) {
     return null;
   }
   const normalized = String(eventName).toLowerCase();
-  if (normalized === "userpromptsubmit") {
+  if (normalized === "userpromptsubmit" || normalized === "pretooluse" || normalized === "posttooluse") {
     return "working";
   }
   if (normalized === "sessionstart" || normalized === "stop") {

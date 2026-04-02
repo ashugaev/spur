@@ -1,8 +1,8 @@
 {
-  "name": "agent-orchestrator",
+  "name": "spur-workspace",
   "version": "0.1.0",
   "private": true,
-  "description": "Orchestrate parallel AI coding agents across any runtime, any repo, any issue tracker",
+  "description": "Spur dashboard UI plus lean v2 orchestrator",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
@@ -10,23 +10,20 @@
   "packageManager": "pnpm@9.15.4",
   "type": "module",
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm --filter @composio/ao-web dev",
+    "build": "pnpm --dir packages/web build && pnpm --dir v2 build",
+    "dev": "pnpm --dir packages/web dev",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r --filter '!@composio/ao-web' test",
-    "test:integration": "pnpm --filter @composio/ao-integration-tests test:integration",
-    "clean": "pnpm -r clean",
+    "typecheck": "pnpm --dir packages/web typecheck && pnpm --dir v2 typecheck",
+    "test": "pnpm --dir packages/web test && pnpm --dir v2 test",
+    "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "pnpm -r --filter '!@composio/ao-web' build && changeset publish",
+    "release": "pnpm build && changeset publish",
     "prepare": "husky",
-    "postinstall": "node scripts/rebuild-node-pty.js",
-    "dev:auto-pull": "bash scripts/dev-autoupdate.sh",
-    "start:auto-pull": "bash scripts/start-autoupdate.sh"
+    "dev:auto-pull": "bash scripts/dev-autoupdate.sh"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",

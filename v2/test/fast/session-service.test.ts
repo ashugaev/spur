@@ -377,7 +377,11 @@ describe("SessionService", () => {
     expect(result.worktree).toBe(true);
     expect(result.branch).toBe("api-1");
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
-    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toEqual([
+    expect(
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((e) => e !== "session.state.classified"),
+    ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
       "session.spawn.tmux_created",
@@ -642,7 +646,7 @@ describe("SessionService", () => {
     expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
   });
 
-  it("skips pane capture when hook working state is within 2s", async () => {
+  it("trusts hook working state indefinitely and checks pane for needs_input", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -661,6 +665,9 @@ describe("SessionService", () => {
       state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
     });
+    // Codex title has spinner — confirms working.
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -669,7 +676,6 @@ describe("SessionService", () => {
 
     expect(readAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
     expect(result.state).toBe("working");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
   });
 
   it("classifies working state from non-prompt pane content", async () => {
@@ -721,7 +727,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
-  it("skips pane capture when hook working state is fresh and uses pane otherwise", async () => {
+  it("Codex: title overrides stale working hook when no spinner present", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -736,40 +742,13 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // Hook working, 1s ago — fresh
-    readAgentHookStateMock.mockReturnValue({
-      state: "working",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-    const result = await service.get("api-1");
-
-    expect(result.state).toBe("working");
-    expect(captureTmuxPaneMock).not.toHaveBeenCalled();
-  });
-
-  it("falls back to pane classification when hook working state is older than 2s", async () => {
-    readSessionMock.mockReturnValue({
-      id: "api-1",
-      project: "api",
-      agent: "codex",
-      prompt: "hello",
-      branch: "api-1",
-      worktree: true,
-      worktreePath: "/tmp/spur-worktrees/api/api-1",
-      tmuxSession: "api-1",
-      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-      status: "running",
-      createdAt: "2026-03-18T10:00:00.000Z",
-      updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    // Hook working but stale (3s ago)
+    // Hook says working but is stale (agent hit API error and got stuck).
     readAgentHookStateMock.mockReturnValue({
       state: "working",
       updatedAt: "2026-03-18T10:04:57.000Z",
     });
+    // Codex title has no spinner — agent is actually idle.
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
     captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
 
     const { SessionService } = await loadSessionServiceModule();
@@ -777,8 +756,40 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
+    // Codex title says waiting (no spinner) → overrides stale working hook.
     expect(result.state).toBe("waiting");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
+  });
+
+  it("Claude: trusts working hook indefinitely without pane override", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    // Hook says working — even if it's old, trust it for Claude.
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    // Claude pane shows ❯ (always visible), which would be "waiting" via pane.
+    captureTmuxPaneMock.mockResolvedValue("✻ Baking…\n───\n❯\n───\n⏵⏵ bypass");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    // Hook is authoritative for Claude — pane cannot override working.
+    expect(result.state).toBe("working");
   });
 
   it("reports stopped when the runtime is gone", async () => {
@@ -965,6 +976,38 @@ describe("SessionService", () => {
     service.dispose();
   });
 
+  it("debounce: holds previous state when new state disagrees within hold window", async () => {
+    const runningCodexSession = {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockReturnValue(runningCodexSession);
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+    const second = await service.get("api-1");
+
+    expect(second.state).toBe("waiting");
+  });
+
   it("notifies once per attention transition and re-notifies only after the session clears", async () => {
     const sessions = createSessionStore();
     sessions.set(
@@ -1059,6 +1102,108 @@ describe("SessionService", () => {
       urgent: true,
     });
     service.dispose();
+  });
+
+  it("debounce: accepts new state after hold window expires", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    vi.advanceTimersByTime(5_000);
+
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+    const second = await service.get("api-1");
+
+    expect(second.state).toBe("working");
+  });
+
+  it("debounce: transitions to needs_input bypass hold window", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("⠋ api-1");
+    captureTmuxPaneMock.mockResolvedValue("Working on something...\nesc to interrupt");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("working");
+
+    captureTmuxPaneMock.mockResolvedValue(
+      [
+        "Which approach?",
+        "› 1. Option A",
+        "  2. Option B",
+        "  3. Option C",
+        "tab to add notes | enter to submit answer",
+        "esc to interrupt",
+      ].join("\n"),
+    );
+    const second = await service.get("api-1");
+
+    expect(second.state).toBe("needs_input");
+  });
+
+  it("debounce: transition to stopped bypasses hold window", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    getTmuxPaneTitleMock.mockResolvedValue("api-1");
+    captureTmuxPaneMock.mockResolvedValue("OpenAI Codex\n›");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const second = await service.get("api-1");
+
+    expect(second.state).toBe("stopped");
   });
 
   it("runs a bound service and persists its optional port", async () => {
