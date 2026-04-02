@@ -329,6 +329,7 @@ export async function startServer(
       level: "error",
       message: `Spur daemon failed during startup: ${message}`,
     });
+    service.dispose();
     await closeServer();
     throw error;
   }
@@ -352,6 +353,7 @@ export async function startServer(
       level: "info",
       message: "Stopping Spur daemon",
     });
+    service.dispose();
     const closePromise = closeServer();
     sources?.stop();
     const triggerController = triggers;

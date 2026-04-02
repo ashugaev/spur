@@ -92,6 +92,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
+- Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
 - `send` rejects a `completed` or `killed` session through the built CLI.
