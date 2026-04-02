@@ -2763,13 +2763,13 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(
-        service.preflight({ project: "api", prompt: "" }),
-      ).rejects.toThrow("prompt must be a non-empty string");
+      await expect(service.preflight({ project: "api", prompt: "" })).rejects.toThrow(
+        "prompt must be a non-empty string",
+      );
 
-      await expect(
-        service.preflight({ project: "api", prompt: "   " }),
-      ).rejects.toThrow("prompt must be a non-empty string");
+      await expect(service.preflight({ project: "api", prompt: "   " })).rejects.toThrow(
+        "prompt must be a non-empty string",
+      );
     });
   });
 });

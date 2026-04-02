@@ -36,7 +36,6 @@ import { isKillConfirmationRequiredMessage, isRestorableSession } from "./sessio
 import { devServerTmuxSession } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
-  PreflightResponse,
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
@@ -1095,8 +1094,13 @@ export function createProgram(cliEntrypoint: string): Command {
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
       const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
       if (interactive) {
-        const preflight: PreflightResponse = await withSpinner("running preflight", () =>
-          postPreflight(cliEntrypoint, project, { prompt, agent: options.agent, ...(overrides !== undefined ? { overrides } : {}) }, configPath),
+        const preflight = await withSpinner("running preflight", () =>
+          postPreflight(
+            cliEntrypoint,
+            project,
+            { prompt, agent: options.agent, ...(overrides !== undefined ? { overrides } : {}) },
+            configPath,
+          ),
         );
         if (preflight.branch) {
           const confirmed = await text({
