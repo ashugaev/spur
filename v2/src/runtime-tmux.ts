@@ -81,7 +81,7 @@ function renderStatusRight(slots: SessionSlots | undefined): string {
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
   const target = exactPaneTarget(sessionName);
   try {
-    return await tmux("capture-pane", "-t", target, "-p", "-S", `-${lines}`);
+    return await tmux("capture-pane", "-t", target, "-p", "-J", "-S", `-${lines}`);
   } catch {
     return "";
   }

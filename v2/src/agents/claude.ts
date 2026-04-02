@@ -111,6 +111,8 @@ export async function ensureClaudeHookSettings(sessionToolDir: string): Promise<
     hooks: {
       SessionStart: [hookEntry],
       UserPromptSubmit: [hookEntry],
+      PreToolUse: [hookEntry],
+      PostToolUse: [hookEntry],
       Stop: [hookEntry],
     },
   };
