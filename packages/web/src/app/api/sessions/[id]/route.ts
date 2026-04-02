@@ -1,49 +1,19 @@
-import { NextResponse, type NextRequest } from "next/server";
-import { getServices, getSCM } from "@/lib/services";
-import {
-  sessionToDashboard,
-  resolveProject,
-  enrichSessionPR,
-  enrichSessionsMetadata,
-} from "@/lib/serialize";
+import { NextResponse } from "next/server";
+import { spurRequestJson } from "@/lib/spur-daemon";
+import type { SpurSessionView } from "@/lib/spur-types";
 
-export async function GET(_request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+interface RouteContext {
+  params: Promise<{ id: string }>;
+}
+
+export async function GET(_: Request, context: RouteContext) {
+  const { id } = await context.params;
   try {
-    const { id } = await params;
-    const url = new URL(_request.url);
-    const requestedProjectIdRaw = url.searchParams.get("projectId");
-    const requestedProjectId = requestedProjectIdRaw?.trim() || undefined;
-    const { config, registry, sessionManager } = await getServices();
-
-    const coreSession = await sessionManager.get(id);
-    if (!coreSession) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-    if (requestedProjectId && coreSession.projectId !== requestedProjectId) {
-      return NextResponse.json({ error: "Session not found in requested project" }, { status: 404 });
-    }
-
-    const dashboardSession = sessionToDashboard(coreSession);
-
-    // Enrich metadata (issue labels, agent summaries, issue titles)
-    await enrichSessionsMetadata([coreSession], [dashboardSession], config, registry);
-
-    // Enrich PR — serve cache immediately, refresh in background if stale
-    if (coreSession.pr) {
-      const project = resolveProject(coreSession, config.projects);
-      const scm = getSCM(registry, project);
-      if (scm) {
-        const cached = await enrichSessionPR(dashboardSession, scm, coreSession.pr, { cacheOnly: true });
-        if (!cached) {
-          // Nothing cached yet — block once to populate, then future calls use cache
-          await enrichSessionPR(dashboardSession, scm, coreSession.pr);
-        }
-      }
-    }
-
-    return NextResponse.json(dashboardSession);
+    const session = await spurRequestJson<SpurSessionView>(`/sessions/${encodeURIComponent(id)}`);
+    return NextResponse.json(session);
   } catch (error) {
-    console.error("Failed to fetch session:", error);
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    const message = error instanceof Error ? error.message : "Failed to read Spur session";
+    return NextResponse.json({ error: message }, { status: 502 });
   }
 }
+

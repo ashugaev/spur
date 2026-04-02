@@ -15,7 +15,6 @@ function stringToHue(s: string): number {
 
 export default function Icon() {
   const name = getProjectName();
-  const initial = (name.charAt(0) || "A").toUpperCase();
   const hue = stringToHue(name);
 
   return new ImageResponse(
@@ -30,12 +29,12 @@ export default function Icon() {
           alignItems: "center",
           justifyContent: "center",
           color: "white",
-          fontSize: "20px",
+          fontSize: "18px",
           fontWeight: 700,
           fontFamily: "sans-serif",
         }}
       >
-        {initial}
+        𖤓
       </div>
     ),
     { ...size },
