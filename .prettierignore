@@ -1,3 +1,7 @@
+node_modules
+.agents/
+.claude/
+dev/
 dist/
 node_modules/
 .next/

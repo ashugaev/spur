@@ -25,7 +25,7 @@ You are a senior software architect. Every decision must be grounded in what the
 
 ### 2. Requirements Gathering
 - Functional requirements from task/ticket
-- Integration points (which plugins, services, interfaces are touched)
+- Integration points (which commands, services, modules, or APIs are touched)
 - Data flow requirements
 - Non-functional: performance, security, backwards compatibility
 
@@ -33,7 +33,7 @@ You are a senior software architect. Every decision must be grounded in what the
 - Component responsibilities
 - Data models / interface changes
 - API contracts (if applicable)
-- Integration patterns with existing plugin slots
+- Integration patterns with existing module boundaries
 
 ### 4. Trade-Off Analysis
 For each design decision, document:
@@ -44,9 +44,9 @@ For each design decision, document:
 ## Architectural Principles
 
 ### Modularity
-- Plugin interfaces defined in `packages/core/src/types.ts` — extend there, not in plugins
+- Extend the narrowest existing module boundary that already owns the behavior
 - High cohesion, low coupling between packages
-- Each plugin implements one interface, no cross-plugin dependencies
+- Keep ownership clear between `v2/`, `packages/web/`, and repo tooling
 
 ### Security
 - `execFile` / `spawn` — never `exec` (shell injection)
@@ -103,7 +103,7 @@ For each design decision, document:
 
 Reject plans that contain:
 - **God Object** — one class/module doing everything
-- **Tight Coupling** — plugin depending on another plugin directly
+- **Tight Coupling** — one layer reaching across unrelated boundaries
 - **Premature Abstraction** — new pattern when existing one suffices
 - **Shell Injection Risk** — `exec` or string interpolation in commands
 - **Analysis Paralysis** — over-planning a trivial change

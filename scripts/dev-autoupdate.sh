@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dev server with automatic git pull and rebuild every 5 minutes.
+# Web UI dev server with automatic git pull and rebuild every 5 minutes.
 # Usage: bash scripts/dev-autoupdate.sh
-#
-# STATUS: Active — referenced in package.json "dev:auto-pull"
-# PLAN: Keep; wraps pnpm dev with auto-pull, no TS equivalent needed
 
 POLL_INTERVAL=300 # seconds (5 minutes)
 DEV_PID=""

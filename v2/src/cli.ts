@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { emitKeypressEvents } from "node:readline";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
@@ -163,6 +164,22 @@ function attachTmuxTargetFromList(targetSession: string): void {
 
 function printJson(value: unknown): void {
   writeStdout(JSON.stringify(value, null, 2));
+}
+
+export function matchesCliEntrypoint(importMetaUrl: string, argvPath: string | undefined): boolean {
+  if (!argvPath) {
+    return false;
+  }
+  const normalizePath = (value: string): string => {
+    try {
+      return realpathSync(value);
+    } catch {
+      return value;
+    }
+  };
+  const resolvedArgvPath = normalizePath(argvPath);
+  const resolvedImportPath = normalizePath(fileURLToPath(importMetaUrl));
+  return pathToFileURL(resolvedImportPath).href === pathToFileURL(resolvedArgvPath).href;
 }
 
 function renderStoppedDaemon(baseUrl: string): string {
@@ -1436,6 +1453,6 @@ export async function run(argv = process.argv): Promise<void> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (matchesCliEntrypoint(import.meta.url, process.argv[1])) {
   void run();
 }

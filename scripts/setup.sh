@@ -1,15 +1,12 @@
 #!/bin/bash
-# Agent Orchestrator setup script
-# Validates prerequisites, installs dependencies, builds packages, and links the CLI globally
-#
-# STATUS: Active — referenced in README.md and CI workflow
-# PLAN: Keep; consider `ao setup` CLI command long-term
+# Spur setup script
+# Validates prerequisites, installs dependencies, builds packages, and links the CLI globally.
 
 set -e  # Exit on error
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Agent Orchestrator Setup"
+echo "Spur Setup"
 echo ""
 
 # ─── Hard requirements (exit 1 if missing) ────────────────────────────────────
@@ -139,18 +136,28 @@ pnpm build
 
 echo ""
 echo "Linking CLI globally..."
-cd packages/cli
-npm link
+cd v2
+env -u npm_config_prefix -u npm_config_dir -u npm_config_virtual_store_dir npm link
 cd "$REPO_ROOT"
+NPM_PREFIX="$(
+  env -u npm_config_prefix -u npm_config_dir -u npm_config_virtual_store_dir \
+    npm prefix -g 2>/dev/null || true
+)"
+if [ -n "$NPM_PREFIX" ] && [ -d "$NPM_PREFIX/bin" ]; then
+  export PATH="$NPM_PREFIX/bin:$PATH"
+fi
 
-# ─── Verify ao is in PATH ────────────────────────────────────────────────────
+# ─── Verify spur is in PATH ──────────────────────────────────────────────────
 
 echo ""
-if command -v ao &> /dev/null; then
-  echo "[ok] 'ao' command is available in PATH"
+if command -v spur &> /dev/null; then
+  echo "[ok] 'spur' command is available in PATH"
 else
-  NPM_BIN="$(npm bin -g 2>/dev/null || npm config get prefix)/bin"
-  echo "WARNING: 'ao' is not in your PATH."
+  NPM_BIN="${NPM_PREFIX:-$(
+    env -u npm_config_prefix -u npm_config_dir -u npm_config_virtual_store_dir \
+      npm config get prefix 2>/dev/null
+  )}/bin"
+  echo "WARNING: 'spur' is not in your PATH."
   echo "  Add this to your shell profile (~/.zshrc or ~/.bashrc):"
   echo ""
   echo "    export PATH=\"$NPM_BIN:\$PATH\""
@@ -164,7 +171,7 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. cd /path/to/your-project"
-echo "  2. ao init --auto"
-echo "  3. ao start"
+echo "  1. Copy v2/spur.yaml.example to spur.yaml and edit it"
+echo "  2. SPUR_CONFIG=./spur.yaml spur daemon start"
+echo "  3. SPUR_CONFIG=./spur.yaml pnpm --dir packages/web dev"
 echo ""

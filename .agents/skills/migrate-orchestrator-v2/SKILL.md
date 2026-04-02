@@ -37,7 +37,7 @@ description: "Use when planning or implementing the lean migration to Spur in `v
 - No UI, dashboard, SSE, mobile, or terminal-web layer.
 - No tracker, PR, SCM, notifier, reaction, rich pipeline state machine, or event-driven step automation yet.
 - No PluginRegistry, LifecycleManager, or current SessionManager carry-over.
-- No compatibility bridge to the current `agent-orchestrator.yaml`.
+- No compatibility bridge to removed AO config surfaces.
 - No `postCreate` hooks in milestone 1.
 
 ## Target shape
@@ -157,12 +157,8 @@ CLI -> ensure daemon -> POST /sessions
 Port behavior, not architecture.
 
 - Use `docs/architecture-v2.md` as product intent only.
-- Use `packages/core/src/session-manager.ts` only as reference for spawn ordering and cleanup expectations.
-- Use `packages/core/src/metadata.ts` for flat metadata ideas, especially atomic id reservation.
-- Use `packages/plugins/workspace-worktree/src/index.ts` for `git fetch`, `git worktree add/remove`, and symlink behavior.
-- Use `packages/plugins/runtime-tmux/src/index.ts` for `tmux new-session`, `send-keys`, `paste-buffer`, `capture-pane`, and `kill-session`.
-- Use `packages/plugins/agent-claude-code/src/index.ts` only for launch command and environment shaping.
-- Use `packages/plugins/agent-codex/src/index.ts` only for launch command and environment shaping.
+- Legacy AO/v1 backend code no longer lives in this repo. Do not search for `packages/core` or `packages/plugins` here.
+- If historical behavior matters, infer only the minimum needed from current Spur tests, git history, or external upstream references, then reimplement it directly in `v2/`.
 
 ## What not to port yet
 

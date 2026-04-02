@@ -1,81 +1,226 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import type { SpurSessionView, SpurSessionsResponse } from "@/lib/spur-types";
-import { buildSessionPath } from "@/lib/project-routes";
-import { formatRelativeTime } from "@/lib/time";
+import { AttentionZone } from "@/components/AttentionZone";
+import { EmptyState } from "@/components/EmptyState";
+import { TerminalModal } from "@/components/TerminalModal";
+import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import { cn } from "@/lib/cn";
+import {
+  getAttentionLevel,
+  toDashboardSession,
+  type AttentionLevel,
+  type DashboardSession,
+  type ProjectInfo,
+  type SpurSessionView,
+  type SpurSessionsResponse,
+} from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5_000;
+const LANE_ORDER: AttentionLevel[] = ["respond", "review", "pending", "working", "done"];
+
+function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
+  return Array.from(new Set(sessions.map((session) => session.project)))
+    .sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+    .map((id) => ({ id, name: id }));
+}
+
+function StatCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "respond" | "review" | "pending" | "working";
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-sm border px-3 py-3",
+        tone === "respond" && "border-red-500/25 bg-red-500/[0.06]",
+        tone === "review" && "border-orange-400/25 bg-orange-400/[0.06]",
+        tone === "pending" && "border-amber-400/25 bg-amber-400/[0.06]",
+        tone === "working" && "border-sky-400/25 bg-sky-400/[0.06]",
+      )}
+    >
+      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        {label}
+      </div>
+      <div className="mt-1.5 text-xl font-semibold text-[var(--color-text-primary)]">{value}</div>
+    </div>
+  );
+}
 
 export function Dashboard() {
   const searchParams = useSearchParams();
-  const [sessions, setSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<Array<{ id: string; label: string }>>([]);
-  const [projectId, setProjectId] = useState(() => searchParams.get("projectId")?.trim() ?? "");
+  const requestedProject = searchParams.get("project")?.trim() ?? "";
+  const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
+  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [projectId, setProjectId] = useState(requestedProject);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
   const [spawning, setSpawning] = useState(false);
-  const [completingId, setCompletingId] = useState<string | null>(null);
+  const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
-  const loadSessions = async (activeProjectId?: string) => {
-    const selectedProject = activeProjectId ?? projectId;
-    const query = selectedProject ? `?projectId=${encodeURIComponent(selectedProject)}` : "";
+  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
+
     try {
+      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
       const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as SpurSessionsResponse;
-      setSessions(payload.sessions);
+      setRawSessions(payload.sessions);
       setProjects(payload.projects ?? []);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    void loadSessions(projectId);
-    const timer = setInterval(() => {
-      void loadSessions(projectId);
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [projectId]);
+    setProjectId(requestedProject);
+  }, [requestedProject]);
 
-  const projectOptions = useMemo(() => {
-    if (projects.length > 0) {
-      return [...projects].sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
-    }
-    return Array.from(new Set(sessions.map((session) => session.project)))
-      .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-      .map((id) => ({ id, label: id }));
-  }, [projects, sessions]);
+  useEffect(() => {
+    let cancelled = false;
 
-  const groupedSessions = useMemo(() => {
-    return {
-      needsInput: sessions.filter((session) => session.status === "errored" || session.state === "needs_input"),
-      active: sessions.filter(
-        (session) => session.status === "running" && (session.state === "working" || session.state === "waiting"),
-      ),
-      paused: sessions.filter((session) => session.status === "paused"),
-      done: sessions.filter((session) => session.status === "completed" || session.status === "killed"),
+    const run = async (silent = false) => {
+      if (cancelled) return;
+      await fetchSessions(projectId, silent);
     };
+
+    void run(false);
+    const timer = setInterval(() => {
+      void run(true);
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [fetchSessions, projectId]);
+
+  const filterProjectOptions = useMemo(() => {
+    const merged = new Map(projects.map((project) => [project.id, project]));
+    for (const project of deriveProjects(rawSessions)) {
+      if (!merged.has(project.id)) {
+        merged.set(project.id, project);
+      }
+    }
+
+    return [...merged.values()].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+    );
+  }, [projects, rawSessions]);
+
+  const spawnProjectOptions = useMemo(
+    () =>
+      [...projects].sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+      ),
+    [projects],
+  );
+
+  const projectNameMap = useMemo(
+    () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
+    [filterProjectOptions],
+  );
+
+  const sessions = useMemo(
+    () =>
+      rawSessions.map((session) =>
+        toDashboardSession(session, projectNameMap.get(session.project)),
+      ),
+    [projectNameMap, rawSessions],
+  );
+
+  const grouped = useMemo(() => {
+    const lanes: Record<AttentionLevel, DashboardSession[]> = {
+      respond: [],
+      review: [],
+      pending: [],
+      working: [],
+      done: [],
+    };
+
+    for (const session of sessions) {
+      lanes[getAttentionLevel(session)].push(session);
+    }
+
+    return lanes;
   }, [sessions]);
 
+  const stats = useMemo(
+    () => ({
+      respond: grouped.respond.length,
+      review: grouped.review.length,
+      pending: grouped.pending.length,
+      working: grouped.working.length,
+      total: sessions.length,
+    }),
+    [grouped, sessions.length],
+  );
+
+  const activeProjectName = projectId
+    ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
+    : "All projects";
+
   useEffect(() => {
-    if (!spawnProjectId) {
-      setSpawnProjectId(projectId || projectOptions[0]?.id || "");
+    if (spawnProjectId && spawnProjectOptions.some((project) => project.id === spawnProjectId)) {
+      return;
     }
-  }, [projectId, projectOptions, spawnProjectId]);
+
+    const nextProjectId =
+      spawnProjectOptions.find((project) => project.id === projectId)?.id ??
+      spawnProjectOptions[0]?.id ??
+      "";
+
+    if (nextProjectId !== spawnProjectId) {
+      setSpawnProjectId(nextProjectId);
+    }
+  }, [projectId, spawnProjectId, spawnProjectOptions]);
+
+  useEffect(() => {
+    if (!isMobile) return;
+    setExpandedLevel((current) => {
+      if (current && grouped[current].length > 0) return current;
+      return LANE_ORDER.find((level) => grouped[level].length > 0) ?? null;
+    });
+  }, [grouped, isMobile]);
+
+  const syncProjectFilter = (nextProjectId: string) => {
+    setProjectId(nextProjectId);
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    if (nextProjectId) {
+      params.set("project", nextProjectId);
+    } else {
+      params.delete("project");
+    }
+
+    const query = params.toString();
+    window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+  };
 
   const handleSpawn = async () => {
-    const nextProject = spawnProjectId.trim();
+    const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProject || !nextPrompt) return;
+    if (!nextProjectId || !nextPrompt) return;
 
     setSpawning(true);
     try {
@@ -83,15 +228,17 @@ export function Dashboard() {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          projectId: nextProject,
+          projectId: nextProjectId,
           prompt: nextPrompt,
           agent: spawnAgent,
         }),
       });
       if (!response.ok) throw new Error(await response.text());
       setSpawnPrompt("");
-      await loadSessions(nextProject);
-      setProjectId(nextProject);
+      syncProjectFilter(nextProjectId);
+      setSpawnProjectId(nextProjectId);
+      await fetchSessions(nextProjectId, true);
+      setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
@@ -99,218 +246,173 @@ export function Dashboard() {
     }
   };
 
-  const handleAction = async (sessionId: string, action: "stop" | "kill" | "restore" | "complete") => {
-    try {
-      if (
-        action === "kill" &&
-        !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
-      ) {
-        return;
-      }
-      if (action === "complete") {
-        setCompletingId(sessionId);
-      }
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
-        method: "POST",
-        headers: action === "kill" ? { "content-type": "application/json" } : undefined,
-        body: action === "kill" ? JSON.stringify({ force: true }) : undefined,
-      });
-      if (!response.ok) throw new Error(await response.text());
-      await loadSessions(projectId);
-    } catch (actionError) {
-      setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
-    } finally {
-      if (action === "complete") {
-        setCompletingId(null);
-      }
-    }
+  const openTerminal = (session: DashboardSession) => {
+    setTerminalSession(session);
+    setError(null);
   };
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
-      <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-semibold tracking-tight">Spur Dashboard</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
-            UI-only view on top of the Spur daemon.
-          </p>
-        </div>
-        <div className="min-w-[220px]">
-          <label className="mb-1 block text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">
-            Project filter
-          </label>
-          <select
-            className="w-full rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm"
-            value={projectId}
-            onChange={(event) => {
-              setProjectId(event.target.value);
-            }}
-          >
-            <option value="">All projects</option>
-            {projectOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </header>
+    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+      <section className="relative overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)] sm:p-5">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.12),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.08),transparent_34%)]" />
 
-      <section className="mb-8 rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[var(--color-text-secondary)]">
-          Spawn Session
-        </h2>
-        <div className="grid gap-3 md:grid-cols-[minmax(180px,220px)_minmax(180px,220px)_1fr_auto]">
-          <select
-            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-sm"
-            value={spawnProjectId}
-            onChange={(event) => setSpawnProjectId(event.target.value)}
-          >
-            <option value="">Select project</option>
-            {projectOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <select
-            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-sm"
-            value={spawnAgent}
-            onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
-          >
-            <option value="claude">claude</option>
-            <option value="codex">codex</option>
-          </select>
-          <input
-            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2 text-sm"
-            placeholder="Prompt"
-            value={spawnPrompt}
-            onChange={(event) => setSpawnPrompt(event.target.value)}
-          />
-          <button
-            className="rounded bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white disabled:opacity-60"
-            disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
-            onClick={() => void handleSpawn()}
-          >
-            {spawning ? "Spawning..." : "Spawn"}
-          </button>
+        <div className="relative">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+            <div className="max-w-3xl">
+              <div className="inline-flex items-center gap-2 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+                <span className="text-sm text-[var(--color-accent)]">𖤓</span>
+                Spur UI
+              </div>
+              <h1 className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-[var(--color-text-primary)] sm:text-3xl">
+                {activeProjectName}
+              </h1>
+              <p className="mt-2 max-w-2xl text-sm text-[var(--color-text-secondary)]">
+                Compact board for the current Spur v2 daemon.
+              </p>
+            </div>
+
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+              <StatCard label="Needs Input" tone="respond" value={stats.respond} />
+              <StatCard label="Needs Review" tone="review" value={stats.review} />
+              <StatCard label="Pending" tone="pending" value={stats.pending} />
+              <StatCard label="Working" tone="working" value={stats.working} />
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 xl:grid-cols-[16rem_minmax(0,1fr)]">
+            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
+              <label className="block text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                Project filter
+              </label>
+              <select
+                className="mt-2.5 w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                onChange={(event) => {
+                  syncProjectFilter(event.target.value);
+                }}
+                value={projectId}
+              >
+                <option value="">All projects</option>
+                {filterProjectOptions.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+
+              <div className="mt-3 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  Visible sessions
+                </div>
+                <div className="mt-1.5 text-xl font-semibold text-[var(--color-text-primary)]">
+                  {stats.total}
+                </div>
+              </div>
+            </section>
+
+            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                Spawn session
+              </div>
+
+              <div className="mt-3 grid gap-2.5 md:grid-cols-[minmax(11rem,14rem)_minmax(9rem,11rem)_1fr_auto]">
+                <select
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnProjectId(event.target.value)}
+                  value={spawnProjectId}
+                >
+                  <option value="">Select project</option>
+                  {spawnProjectOptions.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                  value={spawnAgent}
+                >
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
+                </select>
+
+                <input
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnPrompt(event.target.value)}
+                  placeholder="Prompt for the new session"
+                  value={spawnPrompt}
+                />
+
+                <button
+                  className="rounded-sm bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                  onClick={() => void handleSpawn()}
+                  type="button"
+                >
+                  {spawning ? "Spawning..." : "Spawn"}
+                </button>
+              </div>
+            </section>
+          </div>
         </div>
       </section>
 
       {error ? (
-        <p className="mb-4 rounded border border-red-600/50 bg-red-900/20 px-3 py-2 text-sm text-red-300">
+        <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
           {error}
-        </p>
+        </div>
       ) : null}
 
-      {loading ? <p className="text-sm text-[var(--color-text-secondary)]">Loading sessions...</p> : null}
+      {loading ? (
+        <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+      ) : null}
 
-      <section className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">Needs Input</div>
-          <div className="mt-2 text-2xl font-semibold">{groupedSessions.needsInput.length}</div>
-        </div>
-        <div className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">Active</div>
-          <div className="mt-2 text-2xl font-semibold">{groupedSessions.active.length}</div>
-        </div>
-        <div className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">Paused</div>
-          <div className="mt-2 text-2xl font-semibold">{groupedSessions.paused.length}</div>
-        </div>
-        <div className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4">
-          <div className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">Done</div>
-          <div className="mt-2 text-2xl font-semibold">{groupedSessions.done.length}</div>
-        </div>
-      </section>
+      {!loading && sessions.length === 0 ? (
+        <section className="mt-5">
+          <EmptyState
+            message={
+              projectId
+                ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
+                : undefined
+            }
+          />
+        </section>
+      ) : null}
 
-      <section className="grid gap-4">
-        {sessions.map((session) => (
-          <article
-            key={session.id}
-            className="rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-4"
-          >
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <a className="font-mono text-sm text-[var(--color-accent)] hover:underline" href={buildSessionPath(session.id, session.project)}>
-                {session.id}
-              </a>
-              <span className="rounded border border-[var(--color-border-default)] px-2 py-0.5 text-xs">
-                {session.project}
-              </span>
-              <span className="rounded border border-[var(--color-border-default)] px-2 py-0.5 text-xs">
-                {session.agent}
-              </span>
-              <span className="rounded border border-[var(--color-border-default)] px-2 py-0.5 text-xs">
-                {session.status} / {session.state}
-              </span>
-            </div>
-            <p className="mb-2 text-sm text-[var(--color-text-secondary)]">{session.prompt}</p>
-            <div className="mb-3 text-xs text-[var(--color-text-tertiary)]">
-              <span>branch: {session.branch}</span>
-              <span className="mx-2">•</span>
-              <span>last activity: {formatRelativeTime(session.lastActivityAt)}</span>
-            </div>
-            {session.slots?.links?.length ? (
-              <div className="mb-3 flex flex-wrap gap-2">
-                {session.slots.links.map((link) => (
-                  <a
-                    key={`${session.id}-${link.label}`}
-                    className="rounded border border-[var(--color-border-default)] px-2 py-1 text-xs text-[var(--color-accent)] hover:no-underline"
-                    href={link.url}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {link.label}
-                  </a>
-                ))}
-              </div>
-            ) : null}
-            {session.services.length ? (
-              <div className="mb-3 flex flex-wrap gap-2 text-xs text-[var(--color-text-secondary)]">
-                {session.services.map((service) => (
-                  <span
-                    key={`${session.id}-${service.serviceId}`}
-                    className="rounded border border-[var(--color-border-default)] px-2 py-1"
-                  >
-                    {service.serviceId}: {service.state}
-                    {typeof service.port === "number" ? ` :${service.port}` : ""}
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              <button
-                className="rounded border border-[var(--color-border-default)] px-3 py-1.5 text-xs"
-                onClick={() => void handleAction(session.id, "stop")}
-              >
-                Pause
-              </button>
-              <button
-                className="rounded border border-[var(--color-border-default)] px-3 py-1.5 text-xs"
-                onClick={() => void handleAction(session.id, "restore")}
-              >
-                Restore
-              </button>
-              <button
-                className="rounded border border-[var(--color-border-default)] px-3 py-1.5 text-xs"
-                disabled={completingId === session.id}
-                onClick={() => void handleAction(session.id, "complete")}
-              >
-                {completingId === session.id ? "Completing..." : "Complete"}
-              </button>
-              <button
-                className="rounded border border-red-700/70 px-3 py-1.5 text-xs text-red-300"
-                onClick={() => void handleAction(session.id, "kill")}
-              >
-                Kill
-              </button>
-            </div>
-          </article>
-        ))}
-        {!loading && sessions.length === 0 ? (
-          <p className="text-sm text-[var(--color-text-secondary)]">No sessions found.</p>
-        ) : null}
-      </section>
+      {!loading && sessions.length > 0 ? (
+        isMobile ? (
+          <section className="mt-5 space-y-3">
+            {LANE_ORDER.map((level) => (
+              <AttentionZone
+                key={level}
+                collapsed={expandedLevel !== level}
+                level={level}
+                onOpenTerminal={openTerminal}
+                onToggle={(nextLevel) =>
+                  setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
+                }
+                sessions={grouped[level]}
+              />
+            ))}
+          </section>
+        ) : (
+          <section className="mt-5 grid gap-3 xl:grid-cols-5">
+            {LANE_ORDER.map((level) => (
+              <AttentionZone
+                key={level}
+                level={level}
+                onOpenTerminal={openTerminal}
+                sessions={grouped[level]}
+              />
+            ))}
+          </section>
+        )
+      ) : null}
+
+      {terminalSession ? (
+        <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
+      ) : null}
     </main>
   );
 }

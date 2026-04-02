@@ -18,4 +18,3 @@ export async function POST(_: Request, context: RouteContext) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
-

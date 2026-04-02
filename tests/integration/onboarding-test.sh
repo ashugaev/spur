@@ -1,8 +1,11 @@
 #!/bin/bash
-# Integration test: Fresh developer onboarding experience
-# Measures time and verifies each step of the onboarding flow
+# Integration test: fresh Spur onboarding experience
 
 set -e
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+DAEMON_PORT=$((4310 + ($$ % 200)))
+WEB_PORT=$((9000 + ($$ % 200)))
 
 # Colors for output
 RED='\033[0;31m'
@@ -33,13 +36,13 @@ fail_step() {
 
 # Test starts here
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║  Agent Orchestrator - Onboarding Integration Test     ║${NC}"
+echo -e "${BLUE}║  Spur - Onboarding Integration Test                   ║${NC}"
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
 echo ""
 
 # Step 1: Simulate git clone (already done by Docker COPY, but we cd into it)
 start_step "Step 1: Navigate to repository"
-cd /workspace/agent-orchestrator || fail_step "Repository not found"
+cd "$REPO_ROOT" || fail_step "Repository not found"
 end_step "Step 1: Repository accessible"
 
 # Step 2: Run setup script
@@ -49,149 +52,150 @@ if ! ./scripts/setup.sh; then
 fi
 end_step "Step 2: Setup completed"
 
-# Step 3: Verify ao command is available
-start_step "Step 3: Verify ao command"
-if ! command -v ao &> /dev/null; then
-    fail_step "Step 3: ao command not found (npm link failed?)"
+# Step 3: Verify spur command is available
+start_step "Step 3: Verify spur command"
+NPM_PREFIX="$(
+    env -u npm_config_prefix -u npm_config_dir -u npm_config_virtual_store_dir \
+        npm prefix -g 2>/dev/null || true
+)"
+SPUR_BIN="${NPM_PREFIX}/bin/spur"
+if [ -n "$NPM_PREFIX" ] && [ -x "$SPUR_BIN" ]; then
+    export PATH="$NPM_PREFIX/bin:$PATH"
 fi
-ao --version || fail_step "Step 3: ao --version failed"
-end_step "Step 3: ao command available"
+if [ ! -x "$SPUR_BIN" ]; then
+    fail_step "Step 3: spur command not found (npm link failed?)"
+fi
+"$SPUR_BIN" --version || fail_step "Step 3: spur --version failed"
+end_step "Step 3: spur command available"
 
 # Step 4: Create minimal test config
 start_step "Step 4: Create test configuration"
-mkdir -p /tmp/ao-test-project
-cd /tmp/ao-test-project
+mkdir -p /tmp/spur-test-project
+cd /tmp/spur-test-project
 git init
 git config user.email "test@example.com"
 git config user.name "Test User"
 
-cat > agent-orchestrator.yaml << 'EOF'
-dataDir: /tmp/ao-test-data
-worktreeDir: /tmp/ao-test-worktrees
-port: 9000
+cat > spur.yaml << 'EOF'
+server:
+  host: 127.0.0.1
+  port: __DAEMON_PORT__
+
+dataDir: /tmp/spur-test-data
+worktreeDir: /tmp/spur-test-worktrees
+defaultAgent: codex
 
 projects:
   test-project:
-    repo: test/repo
-    path: /tmp/ao-test-project
+    path: /tmp/spur-test-project
     defaultBranch: main
+    sessionPrefix: test
 EOF
+sed -i.bak "s/__DAEMON_PORT__/${DAEMON_PORT}/" spur.yaml
+rm -f spur.yaml.bak
 
 end_step "Step 4: Configuration created"
 
 # Step 5: Verify config is valid
 start_step "Step 5: Validate configuration"
-# ao init would fail if run again, so we just verify the file is readable
-if [ ! -f agent-orchestrator.yaml ]; then
+# Spur reads the config directly; verify the file is readable
+if [ ! -f spur.yaml ]; then
     fail_step "Step 5: Config file not found"
 fi
 end_step "Step 5: Configuration validated"
 
-# Step 6: Start orchestrator (in background)
-start_step "Step 6: Start orchestrator"
-# Start in background and capture PID
-ao start --no-orchestrator &  # Only start dashboard, not the orchestrator session
-DASHBOARD_PID=$!
+# Step 6: Start Spur daemon
+start_step "Step 6: Start Spur daemon"
+SPUR_CONFIG=/tmp/spur-test-project/spur.yaml "$SPUR_BIN" daemon start > /tmp/spur-daemon.log 2>&1 &
+DAEMON_PID=$!
 
-# Wait for dashboard to be ready (max 30 seconds)
-echo "  Waiting for dashboard to start..."
+echo "  Waiting for daemon to start..."
 for i in {1..30}; do
-    if curl -s http://localhost:9000 > /dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${DAEMON_PORT}/info" > /dev/null 2>&1; then
         break
     fi
-    if ! kill -0 $DASHBOARD_PID 2>/dev/null; then
-        fail_step "Step 6: Dashboard process died"
+    if ! kill -0 $DAEMON_PID 2>/dev/null; then
+        cat /tmp/spur-daemon.log
+        fail_step "Step 6: Daemon process died"
     fi
     sleep 1
 done
 
-if ! curl -s http://localhost:9000 > /dev/null 2>&1; then
-    fail_step "Step 6: Dashboard not responding after 30s"
+if ! curl -sf "http://127.0.0.1:${DAEMON_PORT}/info" > /dev/null 2>&1; then
+    cat /tmp/spur-daemon.log
+    fail_step "Step 6: Daemon not responding after 30s"
 fi
 
-end_step "Step 6: Dashboard started successfully"
+end_step "Step 6: Spur daemon started successfully"
 
-# Step 7: Verify dashboard endpoints
-start_step "Step 7: Verify dashboard API"
+# Step 7: Verify Spur CLI against daemon
+start_step "Step 7: Verify Spur CLI"
+if ! SPUR_CONFIG=/tmp/spur-test-project/spur.yaml "$SPUR_BIN" list --json > /tmp/spur-list.json; then
+    cat /tmp/spur-list.json 2>/dev/null || true
+    fail_step "Step 7: spur list --json failed"
+fi
+if ! grep -q "^\[" /tmp/spur-list.json; then
+    cat /tmp/spur-list.json
+    fail_step "Step 7: spur list --json did not return a JSON array"
+fi
+end_step "Step 7: Spur CLI responding"
+
+# Step 8: Start web UI dev server
+start_step "Step 8: Start web UI"
+cd "$REPO_ROOT"
+PORT="$WEB_PORT" \
+SPUR_CONFIG=/tmp/spur-test-project/spur.yaml \
+SPUR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}" \
+pnpm --dir packages/web dev > /tmp/spur-web.log 2>&1 &
+WEB_PID=$!
+
+echo "  Waiting for web UI to start..."
+for i in {1..30}; do
+    if curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
+        break
+    fi
+    if ! kill -0 $WEB_PID 2>/dev/null; then
+        cat /tmp/spur-web.log
+        fail_step "Step 8: Web UI process died"
+    fi
+    sleep 1
+done
+
+if ! curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
+    cat /tmp/spur-web.log
+    fail_step "Step 8: Web UI not responding after 30s"
+fi
+
+end_step "Step 8: Web UI started successfully"
+
+# Step 9: Verify web UI endpoints
+start_step "Step 9: Verify web UI API"
 
 # Test /api/sessions endpoint
-if ! curl -sf http://localhost:9000/api/sessions > /dev/null; then
-    fail_step "Step 7: /api/sessions endpoint failed"
+if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
+    fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
-# Test SSE events endpoint (just verify it responds, don't wait for events)
-if ! timeout 2 curl -sf http://localhost:9000/api/events > /dev/null 2>&1; then
-    # SSE might timeout, that's ok - we just want to verify it exists
-    :
+# Verify the configured project filter resolves on the dashboard
+if ! curl -sf "http://127.0.0.1:${WEB_PORT}/?project=test-project" > /dev/null; then
+    fail_step "Step 9: project dashboard filter failed"
 fi
 
-end_step "Step 7: Dashboard API responding"
-
-# Step 8: Verify WebSocket terminal servers
-start_step "Step 8: Verify WebSocket servers"
-
-# The DirectTerminal WebSocket runs on the same port as the dashboard (unified server).
-# Verify it's reachable by checking that the dashboard responds to a WebSocket upgrade
-# on /terminal/ws (HTTP 426 or 101 means the endpoint exists).
-DASHBOARD_PORT="${DASHBOARD_PORT:-9000}"
-echo "  Checking DirectTerminal WebSocket endpoint on dashboard port $DASHBOARD_PORT..."
-max_retries=10
-for i in $(seq 1 $max_retries); do
-    # curl --include shows HTTP headers; 426 (Upgrade Required) or 101 (Switching Protocols)
-    # both confirm the /terminal/ws route is handled by the server.
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-        -H "Connection: Upgrade" -H "Upgrade: websocket" \
-        "http://localhost:$DASHBOARD_PORT/terminal/ws" 2>/dev/null || echo "000")
-    if [ "$HTTP_CODE" != "000" ]; then
-        echo "  ✓ WebSocket endpoint reachable (HTTP $HTTP_CODE)"
-        break
-    fi
-    if [ $i -eq $max_retries ]; then
-        fail_step "Step 8: WebSocket terminal endpoint not reachable on dashboard port"
-    fi
-    sleep 1
-done
-
-end_step "Step 8: WebSocket servers verified"
-
-# Step 9: Verify orchestrator terminal page (end-to-end test)
-start_step "Step 9: Verify orchestrator terminal feature"
-
-# Create orchestrator session first (so we have something to test)
-echo "  Creating test orchestrator session..."
-tmux new-session -d -s test-project-orchestrator || true
-
-# Write minimal metadata
-mkdir -p /tmp/ao-test-data
-cat > /tmp/ao-test-data/test-project-orchestrator << 'EOF'
-worktree=/tmp/ao-test-project
-branch=main
-status=working
-project=test-project
-EOF
-
-# Test that the session detail page loads (where terminal would be)
-# Route is /projects/[projectId]/sessions/[id]
-if ! curl -sf http://localhost:9000/projects/test-project/sessions/test-project-orchestrator > /dev/null; then
-    fail_step "Step 9: Orchestrator session page failed to load"
-fi
-
-# Cleanup test session
-tmux kill-session -t test-project-orchestrator 2>/dev/null || true
-
-end_step "Step 9: Orchestrator terminal page accessible"
+end_step "Step 9: Web UI API responding"
 
 # Step 10: Cleanup
 start_step "Step 10: Cleanup"
-kill $DASHBOARD_PID 2>/dev/null || true
+kill $WEB_PID 2>/dev/null || true
+kill $DAEMON_PID 2>/dev/null || true
 # Wait for process to exit
 sleep 2
 # Force kill if still running
-kill -9 $DASHBOARD_PID 2>/dev/null || true
+kill -9 $WEB_PID 2>/dev/null || true
+kill -9 $DAEMON_PID 2>/dev/null || true
 
-# Kill any remaining Node processes (dashboard, websocket servers)
+# Kill any remaining Node processes
 pkill -f "node.*next.*dev" || true
-pkill -f "tsx.*terminal" || true
+pkill -f "dist/cli.js daemon start" || true
 
 end_step "Step 10: Cleanup completed"
 

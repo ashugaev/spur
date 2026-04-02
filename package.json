@@ -2,7 +2,7 @@
   "name": "spur-workspace",
   "version": "0.1.0",
   "private": true,
-  "description": "Spur dashboard UI plus lean v2 orchestrator",
+  "description": "Spur daemon and CLI with an optional web UI",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
@@ -12,6 +12,9 @@
   "scripts": {
     "build": "pnpm --dir packages/web build && pnpm --dir v2 build",
     "dev": "pnpm --dir packages/web dev",
+    "ui:build": "pnpm --dir packages/web build",
+    "ui:start": "pnpm --dir packages/web start",
+    "setup": "bash scripts/setup.sh",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -20,14 +23,10 @@
     "test": "pnpm --dir packages/web test && pnpm --dir v2 test",
     "test:integration": "pnpm --dir v2 test:runtime",
     "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
-    "changeset": "changeset",
-    "version-packages": "changeset version",
-    "release": "pnpm build && changeset publish",
     "prepare": "husky",
     "dev:auto-pull": "bash scripts/dev-autoupdate.sh"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.29.8",
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.2.3",
     "eslint": "^10.0.0",

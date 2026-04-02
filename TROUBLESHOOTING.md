@@ -1,61 +1,60 @@
 # Troubleshooting
 
-## DirectTerminal: posix_spawnp failed error
+## `spur` not found after setup
 
-**Symptom**: Terminal in browser shows "Connected" but blank. WebSocket logs show:
+`scripts/setup.sh` uses `npm link` from `v2/`. If your global npm bin directory is not on `PATH`, the link succeeds but the shell cannot find `spur`.
 
-```
-[DirectTerminal] Failed to spawn PTY: Error: posix_spawnp failed.
-```
-
-**Root Cause**: node-pty prebuilt binaries are incompatible with your system.
-
-**Fix**: Rebuild node-pty from source:
+Check the prefix:
 
 ```bash
-# From the repository root
-cd node_modules/.pnpm/node-pty@1.1.0/node_modules/node-pty
-npx node-gyp rebuild
+npm prefix -g
 ```
 
-**Verification**:
+Then add its `bin/` directory to your shell profile.
+
+## Web UI shows no projects
+
+The UI reads project labels from a Spur config file. Set one of:
+
+- `SPUR_CONFIG`
+- `SPUR_CONFIG_PATH`
+
+Example:
 
 ```bash
-# Test node-pty works
-node -e "const pty = require('./node_modules/.pnpm/node-pty@1.1.0/node_modules/node-pty'); \
-  const shell = pty.spawn('/bin/zsh', [], {name: 'xterm-256color', cols: 80, rows: 24, \
-  cwd: process.env.HOME, env: process.env}); \
-  shell.onData((d) => console.log('✅ OK')); \
-  setTimeout(() => process.exit(0), 1000);"
+SPUR_CONFIG=./spur.yaml pnpm dev
 ```
 
-**When this happens**:
+## Web UI cannot reach the daemon
 
-- After `pnpm install` (uses cached prebuilts)
-- After copying the repo to a new location
-- On some macOS configurations with Homebrew Node
+By default the UI calls `http://127.0.0.1:4310`.
 
-**Permanent fix**: The postinstall hook automatically rebuilds node-pty:
+Verify the daemon:
 
 ```bash
-pnpm install  # Automatically rebuilds node-pty via postinstall hook
+curl http://127.0.0.1:4310/info
 ```
 
-If you need to manually rebuild:
+If your config uses another port, start the UI with the matching daemon URL:
 
 ```bash
-cd node_modules/.pnpm/node-pty@1.1.0/node_modules/node-pty
-npx node-gyp rebuild
+SPUR_DAEMON_URL=http://127.0.0.1:4311 pnpm dev
 ```
 
-## Other Issues
+## `tmux` is missing
 
-### Config file not found
-
-**Symptom**: API returns 500 with "No agent-orchestrator.yaml found"
-
-**Fix**: Ensure config exists in the directory where you run `ao start`, or symlink it:
+Spur's default runtime requires `tmux`. Install it, then rerun setup:
 
 ```bash
-ln -s /path/to/agent-orchestrator.yaml packages/web/agent-orchestrator.yaml
+bash scripts/setup.sh
 ```
+
+## CI or onboarding drift after repo cleanup
+
+The supported root surfaces are only:
+
+- `v2/`
+- `packages/web/`
+- the root docs/scripts/workflows that support them
+
+If a workflow or script refers to `ao`, `agent-orchestrator.yaml`, `packages/mobile`, or a deleted plugin/package tree, it is stale and should be removed or rewritten.

@@ -1,7 +1,7 @@
-# Integration test environment - simulates fresh developer machine
+# Integration test environment for fresh Spur onboarding
 FROM node:20-bookworm
 
-# Install dependencies that a typical developer would have
+# Install the baseline tools Spur expects
 RUN apt-get update && apt-get install -y \
     git \
     tmux \
@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Install pnpm globally (typically installed by developer)
+# Install pnpm globally
 RUN npm install -g pnpm
 
 # Install GitHub CLI (common for developers working with GitHub)
@@ -24,7 +24,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
 WORKDIR /workspace
 
 # Copy the entire repo (simulates git clone)
-COPY . /workspace/agent-orchestrator
+COPY . /workspace/spur
 
 # Create a test user (simulates developer's home directory)
 RUN useradd -m -s /bin/bash testuser
@@ -38,5 +38,5 @@ ENV PATH="/home/testuser/.npm-global/bin:$PATH"
 
 WORKDIR /home/testuser
 
-# Entry point will be the test script
+# Entry point stays bash; docker compose runs the onboarding script
 CMD ["/bin/bash"]

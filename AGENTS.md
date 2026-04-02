@@ -26,7 +26,9 @@
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
 - Default close-out for repo work: if the current branch already has an open PR, commit and push every update to that branch. If no PR exists, create one unless the user explicitly says not to. New PRs default to auto-merge when allowed by repository settings.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
-- For Spur work, change only `v2/`. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
+- `v2/` is the source of truth for Spur behavior.
+- Outside `v2/`, the only supported product surface is `packages/web`, and it must remain a thin UI over Spur's daemon HTTP API.
+- Remove `ao`/`v1` root artifacts instead of keeping parallel docs, configs, workflows, or package trees.
 - For `v2/` migration planning or implementation, use `$migrate-orchestrator-v2`.
 - `AGENTS.md` and `CLAUDE.md` must stay in sync. If you add or change a durable instruction in one, mirror it in the other in the same change.
 - Mirrored agent and skill files under `.agents/` and `.claude/` must stay in sync. If you change one copy, mirror the other in the same change.
@@ -34,7 +36,7 @@
 ## Spur (`v2/`)
 
 - `Spur` is the lean `v2/` orchestrator. Treat its interface as fixed unless the user asks to change it.
-- `Spur` is CLI plus local HTTP daemon. There is no UI layer in the current milestone.
+- `Spur` is CLI plus local HTTP daemon. `packages/web` is the only supported non-`v2` UI layer, and it must not grow its own backend or runtime logic.
 - The current human-facing `Spur` command surface is: `spawn`, `list`, `send`, `pause`, `complete`, `kill`. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `Spur` CLI defaults to human output. Use `--json` only on commands that expose structured data for scripts.
 - `Spur` brand mark is `𖤓`. Use it for CLI help headers, runtime summary lines, and spinner frames.
@@ -66,18 +68,9 @@
 - Spur test scenarios live in `v2/TEST_SCENARIOS.md`. Each scenario belongs to exactly one tier. When a new Spur feature is added, extend that file in the same change.
 - `$tester` must cover both: potentially affected existing Spur scenarios and the new scenarios introduced by the feature.
 
-# PR Pipeline Resolve Team (Terminal-Driven)
+## PR Pipeline Resolve Team (Terminal-Driven)
 
 - Use `.agents/skills/manager/SKILL.md` as the only manager workflow for this repo.
 - Run it for every task, including short one-shot work.
 - Do not duplicate the manager loop in configs or agent files. Reference the skill instead.
 - Keep `.claude/skills/manager/SKILL.md` mirrored with `.agents/skills/manager/SKILL.md`.
-
-## Keeping Skills and Orchestrator Prompt in Sync
-
-When adding or changing CLI commands or features, update these files:
-
-1. **`packages/core/src/orchestrator-prompt.ts`** — the "Available Commands" table and workflows shown to the orchestrator agent at runtime
-2. **`.agents/skills/ao/SKILL.md`** — the `/ao` skill reference used by Codex and Claude Code (via symlink at `.claude/skills/ao.md`)
-
-This ensures both human-facing docs (`/ao` skill) and agent-facing context (orchestrator prompt) stay accurate.

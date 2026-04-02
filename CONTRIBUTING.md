@@ -1,82 +1,48 @@
-# Contributing to Agent Orchestrator
+# Contributing
 
-Contributions welcome! The plugin architecture makes it straightforward to add support for new agents, runtimes, trackers, and notifiers.
+This repo accepts changes in three places only:
 
-## Quick Start
+- `v2/` for Spur behavior
+- `packages/web/` for the optional UI over Spur's API
+- root docs/scripts/workflows that support those two surfaces
+
+Do not reintroduce AO/v1 backends, plugin trees, example config sets, mobile clients, or parallel documentation.
+
+## Setup
 
 ```bash
-# Fork and clone
-git clone https://github.com/<your-username>/agent-orchestrator.git
-cd agent-orchestrator
+bash scripts/setup.sh
+```
 
-# Install and build
-pnpm install
+## Required Checks
+
+Before opening or updating a PR:
+
+```bash
 pnpm build
-
-# Run tests
 pnpm test
-
-# Typecheck
+pnpm test:integration
+pnpm lint
 pnpm typecheck
 ```
 
-## Writing a Plugin
+When agent launch or prompt delivery changes:
 
-Every plugin implements a TypeScript interface from `packages/core/src/types.ts`. The fastest way to start:
-
-1. Pick an interface: `Runtime`, `Agent`, `Workspace`, `Tracker`, `SCM`, `Notifier`, `Terminal`
-2. Copy an existing plugin as template (e.g., `packages/plugins/notifier-slack/` for a new notifier)
-3. Implement the interface methods
-4. Export a `PluginModule` with inline `satisfies`:
-
-```typescript
-import type { PluginModule, Notifier } from "@composio/ao-core";
-
-export const manifest = {
-  name: "my-notifier",
-  slot: "notifier" as const,
-  description: "Notifier plugin: my-notifier",
-  version: "0.1.0",
-};
-
-export function create(): Notifier {
-  return {
-    name: "my-notifier",
-    async notify(event) { /* ... */ },
-  };
-}
-
-export default { manifest, create } satisfies PluginModule<Notifier>;
+```bash
+pnpm --dir v2 test:smoke
 ```
 
-5. Add tests in `__tests__/` or `*.test.ts`
-6. Submit a PR
+## Repo Rules
 
-## Code Conventions
+- `v2/` is the source of truth for runtime behavior.
+- `packages/web/` must stay a thin UI over Spur's daemon API.
+- Prefer deleting stale paths over keeping compatibility shims.
+- Keep `AGENTS.md` and `CLAUDE.md` in sync.
+- Keep mirrored files under `.agents/` and `.claude/` in sync.
 
-- **ESM modules** with `.js` extensions in imports
-- **`node:` prefix** for builtins (`import { readFileSync } from "node:fs"`)
-- **`execFile`** instead of `exec` (security -- see CLAUDE.md)
-- **No `any`** -- use `unknown` + type guards
-- **Semicolons, double quotes, 2-space indent**
+## Change Shape
 
-See [CLAUDE.md](CLAUDE.md) for the full conventions.
-
-## PR Guidelines
-
-- Keep PRs focused -- one feature or fix per PR
-- Add tests for new functionality
-- Run `pnpm lint && pnpm typecheck` before submitting
-- Use conventional commits: `feat:`, `fix:`, `chore:`, `docs:`
-
-## Review SLA
-
-We aim to review all PRs within 48 hours. If you haven't heard back, ping us in the PR.
-
-## Good First Issues
-
-Look for issues labeled [`good first issue`](https://github.com/ashugaev/ao/labels/good%20first%20issue) -- these are scoped, well-documented, and designed for new contributors.
-
-## Need Help?
-
-Open an issue or join our Discord for faster help.
+- Keep PRs focused.
+- Add or update tests when behavior changes.
+- Update docs only where they remain the single source of truth.
+- Use conventional commits.
