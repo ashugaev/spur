@@ -1,7 +1,11 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "outDir": "dist",
     "rootDir": ".",
     "jsx": "preserve",
@@ -13,7 +17,9 @@
       }
     ],
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": [
+        "./src/*"
+      ]
     },
     "allowJs": true,
     "noEmit": true,
@@ -22,6 +28,14 @@
     "declarationMap": false,
     "verbatimModuleSyntax": false
   },
-  "include": ["next-env.d.ts", "src", ".next/types/**/*.ts"],
-  "exclude": ["node_modules", "src/**/*.test.tsx", "src/**/__tests__"]
+  "include": [
+    "next-env.d.ts",
+    "src",
+    ".next/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "src/**/*.test.tsx",
+    "src/**/__tests__"
+  ]
 }

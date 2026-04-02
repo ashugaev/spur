@@ -23,8 +23,7 @@
     "version-packages": "changeset version",
     "release": "pnpm build && changeset publish",
     "prepare": "husky",
-    "dev:auto-pull": "bash scripts/dev-autoupdate.sh",
-    "start:auto-pull": "bash scripts/start-autoupdate.sh"
+    "dev:auto-pull": "bash scripts/dev-autoupdate.sh"
   },
   "devDependencies": {
     "@changesets/cli": "^2.29.8",

@@ -1,16 +1,21 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-export async function POST(_: Request, context: RouteContext) {
+interface KillBody {
+  force?: boolean;
+}
+
+export async function POST(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
   try {
+    const body = (await request.json().catch(() => ({}))) as KillBody;
     const result = await spurRequestJson<{ ok: true }>(
       `/sessions/${encodeURIComponent(id)}/kill`,
-      spurJsonInit("POST"),
+      spurJsonInit("POST", { force: body.force === true }),
     );
     return NextResponse.json(result);
   } catch (error) {
@@ -18,4 +23,3 @@ export async function POST(_: Request, context: RouteContext) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
-

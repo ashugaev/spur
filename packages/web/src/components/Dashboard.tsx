@@ -4,21 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import type { SpurSessionView, SpurSessionsResponse } from "@/lib/spur-types";
 import { buildSessionPath } from "@/lib/project-routes";
+import { formatRelativeTime } from "@/lib/time";
 
 const POLL_INTERVAL_MS = 5_000;
-
-function formatRelativeTime(iso: string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return "unknown";
-  const diff = Date.now() - ts;
-  const minutes = Math.floor(diff / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
 
 export function Dashboard() {
   const searchParams = useSearchParams();
@@ -51,12 +39,12 @@ export function Dashboard() {
   };
 
   useEffect(() => {
-    void loadSessions();
+    void loadSessions(projectId);
     const timer = setInterval(() => {
-      void loadSessions();
+      void loadSessions(projectId);
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, []);
+  }, [projectId]);
 
   const projectOptions = useMemo(() => {
     if (projects.length > 0) {
@@ -113,14 +101,22 @@ export function Dashboard() {
 
   const handleAction = async (sessionId: string, action: "stop" | "kill" | "restore" | "complete") => {
     try {
+      if (
+        action === "kill" &&
+        !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
+      ) {
+        return;
+      }
       if (action === "complete") {
         setCompletingId(sessionId);
       }
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
+        headers: action === "kill" ? { "content-type": "application/json" } : undefined,
+        body: action === "kill" ? JSON.stringify({ force: true }) : undefined,
       });
       if (!response.ok) throw new Error(await response.text());
-      await loadSessions();
+      await loadSessions(projectId);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
     } finally {
@@ -147,9 +143,7 @@ export function Dashboard() {
             className="w-full rounded border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2 text-sm"
             value={projectId}
             onChange={(event) => {
-              const selected = event.target.value;
-              setProjectId(selected);
-              void loadSessions(selected);
+              setProjectId(event.target.value);
             }}
           >
             <option value="">All projects</option>

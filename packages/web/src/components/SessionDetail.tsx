@@ -3,19 +3,9 @@
 import { useEffect, useState } from "react";
 import type { SpurSessionView } from "@/lib/spur-types";
 import { buildProjectPath } from "@/lib/project-routes";
+import { formatRelativeTime } from "@/lib/time";
 
 const POLL_INTERVAL_MS = 4_000;
-
-function relativeTime(iso: string): string {
-  const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return "unknown";
-  const diffMinutes = Math.floor((Date.now() - ts) / 60_000);
-  if (diffMinutes < 1) return "just now";
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${Math.floor(diffHours / 24)}d ago`;
-}
 
 interface SessionDetailProps {
   sessionId: string;
@@ -54,10 +44,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const postAction = async (action: "send" | "stop" | "restore" | "kill" | "complete") => {
     setBusy(true);
     try {
+      if (
+        action === "kill" &&
+        !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
+      ) {
+        setBusy(false);
+        return;
+      }
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: action === "send" ? JSON.stringify({ message: message.trim() }) : undefined,
+        headers:
+          action === "send" || action === "kill" ? { "content-type": "application/json" } : undefined,
+        body:
+          action === "send"
+            ? JSON.stringify({ message: message.trim() })
+            : action === "kill"
+              ? JSON.stringify({ force: true })
+              : undefined,
       });
       if (!response.ok) throw new Error(await response.text());
       if (action === "send") setMessage("");
@@ -91,7 +94,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <span>status: {session.status}</span>
             <span>state: {session.state}</span>
             <span>branch: {session.branch}</span>
-            <span>last activity: {relativeTime(session.lastActivityAt)}</span>
+            <span>last activity: {formatRelativeTime(session.lastActivityAt)}</span>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">

@@ -16,7 +16,12 @@ function configCandidates(): string[] {
   if (envPath) {
     return [resolve(envPath)];
   }
-  return [resolve(process.cwd(), "spur.yaml"), resolve(process.cwd(), "spur.yml")];
+  return [
+    resolve(process.cwd(), "spur.yaml"),
+    resolve(process.cwd(), "spur.yml"),
+    resolve(process.cwd(), "..", "..", "spur.yaml"),
+    resolve(process.cwd(), "..", "..", "spur.yml"),
+  ];
 }
 
 export function readSpurProjectOptions(): SpurProjectOption[] {
