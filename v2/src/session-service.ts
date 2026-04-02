@@ -1920,6 +1920,15 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
+
+      // Hook state is the primary readiness signal — if it says "working",
+      // the agent is mid-turn and not ready for the next step.
+      const hookState = readAgentHookState(this.config.dataDir, sessionId);
+      if (hookState?.state === "working") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+
       const paneState = await classifyAgentState(session.agent, session.tmuxSession);
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
