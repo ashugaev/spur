@@ -2,11 +2,7 @@
 
 import { ActivityDot } from "@/components/ActivityDot";
 import { cn } from "@/lib/cn";
-import {
-  formatRelativeTime,
-  getSessionSubtitle,
-  getSessionTitle,
-} from "@/lib/format";
+import { formatRelativeTime, getSessionSubtitle, getSessionTitle } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import {
   getAttentionLevel,
@@ -76,7 +72,8 @@ export function SessionCard({ session, onAttach, attaching = false }: SessionCar
   const level = getAttentionLevel(session);
   const title = getSessionTitle(session);
   const subtitle = getSessionSubtitle(session);
-  const canAttach = session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
+  const canAttach =
+    session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
   return (
     <article
@@ -136,7 +133,9 @@ export function SessionCard({ session, onAttach, attaching = false }: SessionCar
 
       <div className="mt-3 flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="font-mono text-[10px] text-[var(--color-text-tertiary)]">{session.id}</div>
+          <div className="font-mono text-[10px] text-[var(--color-text-tertiary)]">
+            {session.id}
+          </div>
           <div className="text-[11px] text-[var(--color-text-secondary)]">
             {formatRelativeTime(session.lastActivityAt)}
           </div>

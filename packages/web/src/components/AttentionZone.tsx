@@ -13,10 +13,7 @@ interface AttentionZoneProps {
   attachingSessionId?: string | null;
 }
 
-const zoneConfig: Record<
-  AttentionLevel,
-  { label: string; color: string; border: string }
-> = {
+const zoneConfig: Record<AttentionLevel, { label: string; color: string; border: string }> = {
   respond: {
     label: "Respond",
     color: "var(--color-status-error)",
@@ -109,9 +106,7 @@ export function AttentionZone({
       <header className="mb-3 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full" style={{ background: config.color }} />
-          <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">
-            {config.label}
-          </h2>
+          <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">{config.label}</h2>
         </div>
         <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           {sessions.length}
