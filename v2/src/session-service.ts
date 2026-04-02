@@ -1920,6 +1920,15 @@ export class SessionService {
       }
 
       const stepUpdatedAt = new Date(session.updatedAt);
+
+      // Hook state is the primary readiness signal — if it says "working",
+      // the agent is mid-turn and not ready for the next step.
+      const hookState = readAgentHookState(this.config.dataDir, sessionId);
+      if (hookState?.state === "working") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+
       const paneState = await classifyAgentState(session.agent, session.tmuxSession);
       if (paneState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
@@ -2040,9 +2049,21 @@ export class SessionService {
         } else {
           state = hookState.state;
         }
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (hook=${hookState.state}, pane=${paneState}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
+        });
       } else {
         // No hook state (first poll, hooks not installed). Full pane classification.
         state = await classifyAgentState(session.agent, session.tmuxSession);
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (no hook, pane-only)`,
+        });
       }
     }
 
