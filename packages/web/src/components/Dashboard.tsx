@@ -80,11 +80,7 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as SpurSessionsResponse;
       setRawSessions(payload.sessions);
-      setProjects(
-        payload.projects && payload.projects.length > 0
-          ? payload.projects
-          : deriveProjects(payload.sessions),
-      );
+      setProjects(payload.projects ?? []);
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
@@ -118,16 +114,30 @@ export function Dashboard() {
     };
   }, [fetchSessions, projectId]);
 
-  const projectOptions = useMemo(() => {
-    const source = projects.length > 0 ? projects : deriveProjects(rawSessions);
-    return [...source].sort((left, right) =>
+  const filterProjectOptions = useMemo(() => {
+    const merged = new Map(projects.map((project) => [project.id, project]));
+    for (const project of deriveProjects(rawSessions)) {
+      if (!merged.has(project.id)) {
+        merged.set(project.id, project);
+      }
+    }
+
+    return [...merged.values()].sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
     );
   }, [projects, rawSessions]);
 
+  const spawnProjectOptions = useMemo(
+    () =>
+      [...projects].sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+      ),
+    [projects],
+  );
+
   const projectNameMap = useMemo(
-    () => new Map(projectOptions.map((project) => [project.id, project.name])),
-    [projectOptions],
+    () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
+    [filterProjectOptions],
   );
 
   const sessions = useMemo(
@@ -166,13 +176,23 @@ export function Dashboard() {
   );
 
   const activeProjectName = projectId
-    ? (projectOptions.find((project) => project.id === projectId)?.name ?? projectId)
+    ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All projects";
 
   useEffect(() => {
-    if (spawnProjectId) return;
-    setSpawnProjectId(projectId || projectOptions[0]?.id || "");
-  }, [projectId, projectOptions, spawnProjectId]);
+    if (spawnProjectId && spawnProjectOptions.some((project) => project.id === spawnProjectId)) {
+      return;
+    }
+
+    const nextProjectId =
+      spawnProjectOptions.find((project) => project.id === projectId)?.id ??
+      spawnProjectOptions[0]?.id ??
+      "";
+
+    if (nextProjectId !== spawnProjectId) {
+      setSpawnProjectId(nextProjectId);
+    }
+  }, [projectId, spawnProjectId, spawnProjectOptions]);
 
   useEffect(() => {
     if (!isMobile) return;
@@ -272,7 +292,7 @@ export function Dashboard() {
                 value={projectId}
               >
                 <option value="">All projects</option>
-                {projectOptions.map((project) => (
+                {filterProjectOptions.map((project) => (
                   <option key={project.id} value={project.id}>
                     {project.name}
                   </option>
@@ -301,7 +321,7 @@ export function Dashboard() {
                   value={spawnProjectId}
                 >
                   <option value="">Select project</option>
-                  {projectOptions.map((project) => (
+                  {spawnProjectOptions.map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
                     </option>

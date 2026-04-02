@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 
@@ -91,5 +91,36 @@ describe("Dashboard", () => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
     });
+  });
+
+  it("keeps discovered projects in the filter but only configured projects in spawn", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          projects: [{ id: "sp", name: "Spur Core" }],
+          sessions: [
+            {
+              ...sessionsPayload().sessions[0],
+              id: "spur-local-1",
+              project: "spur-local",
+              tmuxSession: "spur-local-1",
+            },
+          ],
+        }),
+      ),
+    );
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("spur-local-1")).toBeInTheDocument();
+    });
+
+    const selects = screen.getAllByRole("combobox");
+    expect(within(selects[0]).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
+    expect(
+      within(selects[1]).queryByRole("option", { name: "spur-local" }),
+    ).not.toBeInTheDocument();
+    expect(within(selects[1]).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
   });
 });

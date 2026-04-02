@@ -84,7 +84,7 @@ describe("Spur web API routes", () => {
     expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
   });
 
-  it("GET /api/sessions merges configured and discovered project options", async () => {
+  it("GET /api/sessions returns only configured spawn project options", async () => {
     mockedSpurRequestJson.mockResolvedValue([
       sessionFixture(),
       sessionFixture({
@@ -101,11 +101,7 @@ describe("Spur web API routes", () => {
     };
 
     expect(response.status).toBe(200);
-    expect(payload.projects).toEqual([
-      { id: "api", name: "api" },
-      { id: "ops", name: "ops" },
-      { id: "sp", name: "Spur Core" },
-    ]);
+    expect(payload.projects).toEqual([{ id: "sp", name: "Spur Core" }]);
   });
 
   it("POST /api/spawn validates body and proxies to Spur", async () => {
