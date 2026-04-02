@@ -1,5 +1,4 @@
 import { ImageResponse } from "next/og";
-import { getProjectName } from "@/lib/project-name";
 
 export const size = { width: 32, height: 32 };
 export const contentType = "image/png";
@@ -14,8 +13,7 @@ function stringToHue(s: string): number {
 }
 
 export default function Icon() {
-  const name = getProjectName();
-  const hue = stringToHue(name);
+  const hue = stringToHue("Spur");
 
   return new ImageResponse(
     <div

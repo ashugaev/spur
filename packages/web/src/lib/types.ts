@@ -37,6 +37,7 @@ export interface SpurSessionView {
   prompt: string;
   branch: string;
   worktree: boolean;
+  tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
   createdAt: string;
@@ -75,6 +76,7 @@ export interface DashboardSession {
   prompt: string;
   branch: string | null;
   worktree: boolean;
+  tmuxSession: string | null;
   status: SpurSessionStatus;
   state: SpurSessionState;
   createdAt: string;
@@ -103,6 +105,7 @@ export function toDashboardSession(
     prompt: session.prompt,
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
+    tmuxSession: session.tmuxSession ?? null,
     status: session.status,
     state: session.state,
     createdAt: session.createdAt,

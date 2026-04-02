@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AttentionZone } from "@/components/AttentionZone";
 import { EmptyState } from "@/components/EmptyState";
-import { useMediaQuery, MOBILE_BREAKPOINT } from "@/hooks/useMediaQuery";
+import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
 import {
   getAttentionLevel,
@@ -37,17 +37,17 @@ function StatCard({
   return (
     <div
       className={cn(
-        "rounded-3xl border px-4 py-4",
-        tone === "respond" && "border-red-500/25 bg-red-500/[0.08]",
-        tone === "review" && "border-orange-400/25 bg-orange-400/[0.08]",
-        tone === "pending" && "border-amber-400/25 bg-amber-400/[0.08]",
-        tone === "working" && "border-sky-400/25 bg-sky-400/[0.08]",
+        "rounded-2xl border px-3 py-3",
+        tone === "respond" && "border-red-500/25 bg-red-500/[0.06]",
+        tone === "review" && "border-orange-400/25 bg-orange-400/[0.06]",
+        tone === "pending" && "border-amber-400/25 bg-amber-400/[0.06]",
+        tone === "working" && "border-sky-400/25 bg-sky-400/[0.06]",
       )}
     >
-      <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
         {label}
       </div>
-      <div className="mt-2 text-2xl font-semibold text-[var(--color-text-primary)]">{value}</div>
+      <div className="mt-1.5 text-xl font-semibold text-[var(--color-text-primary)]">{value}</div>
     </div>
   );
 }
@@ -65,6 +65,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
   const [spawning, setSpawning] = useState(false);
+  const [attachingSessionId, setAttachingSessionId] = useState<string | null>(null);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
@@ -195,10 +196,6 @@ export function Dashboard() {
     window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
   };
 
-  const reloadCurrentProject = async () => {
-    await fetchSessions(projectId, true);
-  };
-
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -220,6 +217,7 @@ export function Dashboard() {
       syncProjectFilter(nextProjectId);
       setSpawnProjectId(nextProjectId);
       await fetchSessions(nextProjectId, true);
+      setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
@@ -227,63 +225,47 @@ export function Dashboard() {
     }
   };
 
-  const postAction = async (
-    sessionId: string,
-    action: "send" | "pause" | "restore" | "complete" | "kill",
-    body?: Record<string, unknown>,
-  ) => {
-    if (
-      action === "kill" &&
-      !window.confirm(`Kill session ${sessionId}? This forces cleanup even with local changes.`)
-    ) {
-      return;
-    }
-
+  const openTerminal = async (sessionId: string) => {
+    setAttachingSessionId(sessionId);
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/${action}`, {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attach`, {
         method: "POST",
-        headers: body ? { "content-type": "application/json" } : undefined,
-        body: body ? JSON.stringify(body) : undefined,
       });
-
       if (!response.ok) {
         const message = await response.text();
-        setError(message || `Failed to ${action} session`);
-        throw new Error(message || `Failed to ${action} session`);
+        throw new Error(message || "Failed to open session terminal");
       }
-
-      await reloadCurrentProject();
       setError(null);
-    } catch (actionError) {
-      const message =
-        actionError instanceof Error ? actionError.message : `Failed to ${action} session`;
-      setError(message);
-      throw actionError;
+    } catch (attachError) {
+      setError(
+        attachError instanceof Error ? attachError.message : "Failed to open session terminal",
+      );
+    } finally {
+      setAttachingSessionId((current) => (current === sessionId ? null : current));
     }
   };
 
   return (
-    <main className="mx-auto max-w-[1500px] px-4 py-5 sm:px-6 lg:px-8">
-      <section className="relative overflow-hidden rounded-[2rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-6 shadow-[0_28px_90px_rgba(0,0,0,0.32)]">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.16),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.12),transparent_38%)]" />
+    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+      <section className="relative overflow-hidden rounded-[1.75rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)] sm:p-5">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.12),transparent_38%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.08),transparent_34%)]" />
 
         <div className="relative">
-          <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--color-border-default)] bg-black/10 px-3 py-1 text-[11px] uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">
+              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
                 <span className="text-sm text-[var(--color-accent)]">𖤓</span>
                 Spur UI
               </div>
-              <h1 className="mt-4 text-3xl font-semibold tracking-[-0.04em] text-[var(--color-text-primary)] sm:text-4xl">
+              <h1 className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-[var(--color-text-primary)] sm:text-3xl">
                 {activeProjectName}
               </h1>
-              <p className="mt-3 max-w-2xl text-sm leading-6 text-[var(--color-text-secondary)] sm:text-[15px]">
-                Latest dashboard direction from the parent UI, narrowed to a single Spur-only path:
-                one web client, one set of session actions, one `v2` API backend.
+              <p className="mt-2 max-w-2xl text-sm text-[var(--color-text-secondary)]">
+                Compact board for the current Spur v2 daemon.
               </p>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               <StatCard label="Needs Input" tone="respond" value={stats.respond} />
               <StatCard label="Needs Review" tone="review" value={stats.review} />
               <StatCard label="Pending" tone="pending" value={stats.pending} />
@@ -291,13 +273,13 @@ export function Dashboard() {
             </div>
           </div>
 
-          <div className="mt-6 grid gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
-            <section className="rounded-3xl border border-[var(--color-border-default)] bg-black/10 p-4">
-              <label className="block text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+          <div className="mt-4 grid gap-3 xl:grid-cols-[16rem_minmax(0,1fr)]">
+            <section className="rounded-2xl border border-[var(--color-border-default)] bg-black/10 p-3">
+              <label className="block text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                 Project filter
               </label>
               <select
-                className="mt-3 w-full rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                className="mt-2.5 w-full rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                 onChange={(event) => {
                   syncProjectFilter(event.target.value);
                 }}
@@ -311,35 +293,24 @@ export function Dashboard() {
                 ))}
               </select>
 
-              <div className="mt-4 rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-3">
-                <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+              <div className="mt-3 rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   Visible sessions
                 </div>
-                <div className="mt-2 text-2xl font-semibold text-[var(--color-text-primary)]">
+                <div className="mt-1.5 text-xl font-semibold text-[var(--color-text-primary)]">
                   {stats.total}
                 </div>
-                <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">
-                  Filtering is local to the Spur dashboard and only calls the current `v2` daemon
-                  routes.
-                </p>
               </div>
             </section>
 
-            <section className="rounded-3xl border border-[var(--color-border-default)] bg-black/10 p-4">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                    Spawn session
-                  </div>
-                  <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">
-                    Launch a new Spur worktree session directly from the UI.
-                  </p>
-                </div>
+            <section className="rounded-2xl border border-[var(--color-border-default)] bg-black/10 p-3">
+              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                Spawn session
               </div>
 
-              <div className="mt-4 grid gap-3 md:grid-cols-[minmax(12rem,15rem)_minmax(10rem,12rem)_1fr_auto]">
+              <div className="mt-3 grid gap-2.5 md:grid-cols-[minmax(11rem,14rem)_minmax(9rem,11rem)_1fr_auto]">
                 <select
-                  className="rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnProjectId(event.target.value)}
                   value={spawnProjectId}
                 >
@@ -352,7 +323,7 @@ export function Dashboard() {
                 </select>
 
                 <select
-                  className="rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                   value={spawnAgent}
                 >
@@ -361,14 +332,14 @@ export function Dashboard() {
                 </select>
 
                 <input
-                  className="rounded-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                  className="rounded-xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnPrompt(event.target.value)}
                   placeholder="Prompt for the new session"
                   value={spawnPrompt}
                 />
 
                 <button
-                  className="rounded-2xl bg-[var(--color-accent)] px-5 py-3 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
                   onClick={() => void handleSpawn()}
                   type="button"
@@ -382,17 +353,17 @@ export function Dashboard() {
       </section>
 
       {error ? (
-        <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-100">
+        <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
           {error}
         </div>
       ) : null}
 
       {loading ? (
-        <p className="mt-5 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+        <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
       ) : null}
 
       {!loading && sessions.length === 0 ? (
-        <section className="mt-6">
+        <section className="mt-5">
           <EmptyState
             message={
               projectId
@@ -405,17 +376,14 @@ export function Dashboard() {
 
       {!loading && sessions.length > 0 ? (
         isMobile ? (
-          <section className="mt-6 space-y-4">
+          <section className="mt-5 space-y-3">
             {LANE_ORDER.map((level) => (
               <AttentionZone
                 key={level}
+                attachingSessionId={attachingSessionId}
                 collapsed={expandedLevel !== level}
                 level={level}
-                onComplete={(sessionId) => postAction(sessionId, "complete")}
-                onKill={(sessionId) => postAction(sessionId, "kill", { force: true })}
-                onPause={(sessionId) => postAction(sessionId, "pause")}
-                onRestore={(sessionId) => postAction(sessionId, "restore")}
-                onSend={(sessionId, message) => postAction(sessionId, "send", { message })}
+                onAttach={openTerminal}
                 onToggle={(nextLevel) =>
                   setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
                 }
@@ -424,16 +392,13 @@ export function Dashboard() {
             ))}
           </section>
         ) : (
-          <section className="mt-6 grid gap-4 xl:grid-cols-5">
+          <section className="mt-5 grid gap-3 xl:grid-cols-5">
             {LANE_ORDER.map((level) => (
               <AttentionZone
                 key={level}
+                attachingSessionId={attachingSessionId}
                 level={level}
-                onComplete={(sessionId) => postAction(sessionId, "complete")}
-                onKill={(sessionId) => postAction(sessionId, "kill", { force: true })}
-                onPause={(sessionId) => postAction(sessionId, "pause")}
-                onRestore={(sessionId) => postAction(sessionId, "restore")}
-                onSend={(sessionId, message) => postAction(sessionId, "send", { message })}
+                onAttach={openTerminal}
                 sessions={grouped[level]}
               />
             ))}
