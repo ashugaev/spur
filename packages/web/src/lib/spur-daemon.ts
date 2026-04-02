@@ -42,4 +42,3 @@ export function spurJsonInit(method: "POST", body?: unknown): RequestInit {
     body: body === undefined ? undefined : JSON.stringify(body),
   };
 }
-

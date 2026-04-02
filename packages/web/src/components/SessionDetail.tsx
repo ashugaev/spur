@@ -30,13 +30,7 @@ interface SessionDetailProps {
   projectId?: string;
 }
 
-function DetailCard({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
+function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="rounded-3xl border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-5 shadow-[0_18px_60px_rgba(0,0,0,0.26)]">
       <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -83,7 +77,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const loadSession = useCallback(async () => {
     try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+        cache: "no-store",
+      });
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as SpurSessionView;
       const nextSession = toDashboardSession(payload);
@@ -133,7 +129,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const title = useMemo(() => (session ? getSessionTitle(session) : sessionId), [session, sessionId]);
+  const title = useMemo(
+    () => (session ? getSessionTitle(session) : sessionId),
+    [session, sessionId],
+  );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const effectiveProjectId = projectId ?? session?.projectId ?? "";
 
@@ -222,7 +221,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : (
                   <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-                    This session is not currently accepting input. Restore it first if you want to continue the same worktree.
+                    This session is not currently accepting input. Restore it first if you want to
+                    continue the same worktree.
                   </p>
                 )}
               </DetailCard>
@@ -285,17 +285,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <DetailCard title="Actions">
                 <div className="flex flex-wrap gap-2">
                   {canPause(session) ? (
-                    <ActionButton disabled={busyAction !== null} onClick={() => void handleAction("pause")}>
+                    <ActionButton
+                      disabled={busyAction !== null}
+                      onClick={() => void handleAction("pause")}
+                    >
                       {busyAction === "pause" ? "Pausing..." : "Pause"}
                     </ActionButton>
                   ) : null}
                   {isRestorable(session) ? (
-                    <ActionButton disabled={busyAction !== null} onClick={() => void handleAction("restore")}>
+                    <ActionButton
+                      disabled={busyAction !== null}
+                      onClick={() => void handleAction("restore")}
+                    >
                       {busyAction === "restore" ? "Restoring..." : "Restore"}
                     </ActionButton>
                   ) : null}
                   {canComplete(session) ? (
-                    <ActionButton disabled={busyAction !== null} onClick={() => void handleAction("complete")}>
+                    <ActionButton
+                      disabled={busyAction !== null}
+                      onClick={() => void handleAction("complete")}
+                    >
                       {busyAction === "complete" ? "Completing..." : "Complete"}
                     </ActionButton>
                   ) : null}

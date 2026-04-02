@@ -2,53 +2,53 @@
 
 @theme {
   /* ── Base surfaces ────────────────────────────────────────────────── */
-  --color-bg-base:      #0d1117;
-  --color-bg-surface:   rgba(22, 27, 34, 0.8);
-  --color-bg-elevated:  rgba(28, 33, 40, 0.9);
-  --color-bg-subtle:    rgba(33, 38, 45, 0.7);
+  --color-bg-base: #0d1117;
+  --color-bg-surface: rgba(22, 27, 34, 0.8);
+  --color-bg-elevated: rgba(28, 33, 40, 0.9);
+  --color-bg-subtle: rgba(33, 38, 45, 0.7);
 
   /* Backward-compat aliases */
-  --color-bg-primary:   var(--color-bg-base);
+  --color-bg-primary: var(--color-bg-base);
   --color-bg-secondary: var(--color-bg-surface);
-  --color-bg-tertiary:  var(--color-bg-elevated);
+  --color-bg-tertiary: var(--color-bg-elevated);
 
   /* ── Borders ─────────────────────────────────────────────────────── */
-  --color-border-subtle:   rgba(48, 54, 61, 0.6);
-  --color-border-default:  rgba(48, 54, 61, 1);
-  --color-border-strong:   rgba(72, 79, 88, 1);
+  --color-border-subtle: rgba(48, 54, 61, 0.6);
+  --color-border-default: rgba(48, 54, 61, 1);
+  --color-border-strong: rgba(72, 79, 88, 1);
 
   /* Backward-compat aliases */
-  --color-border-muted:    var(--color-border-subtle);
+  --color-border-muted: var(--color-border-subtle);
   --color-border-emphasis: var(--color-border-strong);
 
   /* ── Text ─────────────────────────────────────────────────────────── */
-  --color-text-primary:   #e6edf3;
+  --color-text-primary: #e6edf3;
   --color-text-secondary: #7d8590;
-  --color-text-tertiary:  #484f58;
-  --color-text-muted:     #484f58;
-  --color-text-inverse:   #0d1117;
+  --color-text-tertiary: #484f58;
+  --color-text-muted: #484f58;
+  --color-text-inverse: #0d1117;
 
   /* ── Interactive accent ──────────────────────────────────────────── */
-  --color-accent:         #58a6ff;
-  --color-accent-hover:   #79b8ff;
-  --color-accent-subtle:  rgba(88, 166, 255, 0.12);
+  --color-accent: #58a6ff;
+  --color-accent-hover: #79b8ff;
+  --color-accent-subtle: rgba(88, 166, 255, 0.12);
 
   /* ── Status / semantic colors ────────────────────────────────────── */
-  --color-status-working:   #58a6ff;
-  --color-status-ready:     #3fb950;
+  --color-status-working: #58a6ff;
+  --color-status-ready: #3fb950;
   --color-status-attention: #d29922;
-  --color-status-idle:      #484f58;
-  --color-status-done:      #30363d;
-  --color-status-error:     #f85149;
+  --color-status-idle: #484f58;
+  --color-status-done: #30363d;
+  --color-status-error: #f85149;
 
   /* Semantic aliases */
-  --color-accent-blue:    #58a6ff;
-  --color-accent-green:   #3fb950;
-  --color-accent-yellow:  #d29922;
-  --color-accent-orange:  #d18616;
-  --color-accent-red:     #f85149;
-  --color-accent-violet:  #a371f7;
-  --color-accent-purple:  #bc8cff;
+  --color-accent-blue: #58a6ff;
+  --color-accent-green: #3fb950;
+  --color-accent-yellow: #d29922;
+  --color-accent-orange: #d18616;
+  --color-accent-red: #f85149;
+  --color-accent-violet: #a371f7;
+  --color-accent-purple: #bc8cff;
 
   /* ── Typography ──────────────────────────────────────────────────── */
   --font-sans: var(--font-ibm-plex-sans), "SF Pro Text", -apple-system, system-ui, sans-serif;
@@ -61,7 +61,7 @@
   --radius-xl: 12px;
 
   /* ── Transitions ──────────────────────────────────────────────────── */
-  --transition-quick:   0.1s;
+  --transition-quick: 0.1s;
   --transition-regular: 0.25s;
 }
 
@@ -88,32 +88,64 @@ a:hover {
 
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
-::-webkit-scrollbar-thumb:active { background: rgba(255,255,255,0.25); }
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.25);
+}
 
 /* ── Animations ──────────────────────────────────────────────────────── */
 
 @keyframes activity-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45); }
-  50%       { box-shadow: 0 0 0 4px rgba(88, 166, 255, 0); }
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(88, 166, 255, 0);
+  }
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to   { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50%       { opacity: 0.4; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }
 
 @keyframes slide-up {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .dot-pulse {
@@ -123,24 +155,27 @@ a:hover {
 /* ── Session cards ────────────────────────────────────────────────────── */
 
 .session-card {
-  background: linear-gradient(175deg, rgba(28,36,47,1) 0%, rgba(18,23,31,1) 100%);
+  background: linear-gradient(175deg, rgba(28, 36, 47, 1) 0%, rgba(18, 23, 31, 1) 100%);
   box-shadow:
-    0 1px 2px rgba(0,0,0,0.9),
-    0 3px 10px rgba(0,0,0,0.55),
-    inset 0 1px 0 rgba(255,255,255,0.07);
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+    0 1px 2px rgba(0, 0, 0, 0.9),
+    0 3px 10px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease,
+    border-color 0.12s ease;
 
   /* Bump dim text colors inside the card — the elevated surface is darker
      than the transparent bg these values were calibrated for */
   --color-text-secondary: #8b949e;
-  --color-text-muted:     #656d76;
-  --color-text-tertiary:  #656d76;
+  --color-text-muted: #656d76;
+  --color-text-tertiary: #656d76;
 }
 
 .session-card:hover {
   transform: translateY(-2px);
   box-shadow:
-    0 4px 8px rgba(0,0,0,0.85),
-    0 14px 36px rgba(0,0,0,0.55),
-    inset 0 1px 0 rgba(255,255,255,0.1);
+    0 4px 8px rgba(0, 0, 0, 0.85),
+    0 14px 36px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }

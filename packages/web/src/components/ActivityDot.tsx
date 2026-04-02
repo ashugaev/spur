@@ -59,11 +59,10 @@ interface ActivityDotProps {
 }
 
 export function ActivityDot({ activity, dotOnly = false, size = 6 }: ActivityDotProps) {
-  const config =
-    (activity !== null && activityConfig[activity]) || {
-      ...fallbackConfig,
-      label: activity ?? fallbackConfig.label,
-    };
+  const config = (activity !== null && activityConfig[activity]) || {
+    ...fallbackConfig,
+    label: activity ?? fallbackConfig.label,
+  };
 
   if (dotOnly) {
     return (

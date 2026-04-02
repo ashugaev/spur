@@ -176,9 +176,9 @@ if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
     fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
-# Verify the configured project page resolves
-if ! curl -sf "http://127.0.0.1:${WEB_PORT}/projects/test-project" > /dev/null; then
-    fail_step "Step 9: project page failed"
+# Verify the configured project filter resolves on the dashboard
+if ! curl -sf "http://127.0.0.1:${WEB_PORT}/?project=test-project" > /dev/null; then
+    fail_step "Step 9: project dashboard filter failed"
 fi
 
 end_step "Step 9: Web UI API responding"

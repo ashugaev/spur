@@ -78,7 +78,11 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       const payload = (await response.json()) as SpurSessionsResponse;
       setRawSessions(payload.sessions);
-      setProjects(payload.projects && payload.projects.length > 0 ? payload.projects : deriveProjects(payload.sessions));
+      setProjects(
+        payload.projects && payload.projects.length > 0
+          ? payload.projects
+          : deriveProjects(payload.sessions),
+      );
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
@@ -125,7 +129,10 @@ export function Dashboard() {
   );
 
   const sessions = useMemo(
-    () => rawSessions.map((session) => toDashboardSession(session, projectNameMap.get(session.project))),
+    () =>
+      rawSessions.map((session) =>
+        toDashboardSession(session, projectNameMap.get(session.project)),
+      ),
     [projectNameMap, rawSessions],
   );
 
@@ -157,7 +164,7 @@ export function Dashboard() {
   );
 
   const activeProjectName = projectId
-    ? projectOptions.find((project) => project.id === projectId)?.name ?? projectId
+    ? (projectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All projects";
 
   useEffect(() => {
@@ -312,7 +319,8 @@ export function Dashboard() {
                   {stats.total}
                 </div>
                 <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">
-                  Filtering is local to the Spur dashboard and only calls the current `v2` daemon routes.
+                  Filtering is local to the Spur dashboard and only calls the current `v2` daemon
+                  routes.
                 </p>
               </div>
             </section>

@@ -6,7 +6,13 @@ export type SpurSessionStatus =
   | "completed"
   | "killed";
 
-export type SpurSessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type SpurSessionState =
+  | "working"
+  | "waiting"
+  | "needs_input"
+  | "stopped"
+  | "error"
+  | "killed";
 
 export interface SpurServiceView {
   serviceId: string;

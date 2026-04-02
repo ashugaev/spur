@@ -7,7 +7,9 @@ export async function GET(request: NextRequest) {
   try {
     const projectId = request.nextUrl.searchParams.get("project")?.trim();
     const sessions = await spurRequestJson<SpurSessionView[]>("/sessions");
-    const filtered = projectId ? sessions.filter((session) => session.project === projectId) : sessions;
+    const filtered = projectId
+      ? sessions.filter((session) => session.project === projectId)
+      : sessions;
     return NextResponse.json({
       sessions: filtered,
       projects: readSpurProjectOptions(),

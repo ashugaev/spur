@@ -18,25 +18,23 @@ export default function Icon() {
   const hue = stringToHue(name);
 
   return new ImageResponse(
-    (
-      <div
-        style={{
-          width: "32px",
-          height: "32px",
-          borderRadius: "6px",
-          background: `hsl(${hue}, 60%, 45%)`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "white",
-          fontSize: "18px",
-          fontWeight: 700,
-          fontFamily: "sans-serif",
-        }}
-      >
-        𖤓
-      </div>
-    ),
+    <div
+      style={{
+        width: "32px",
+        height: "32px",
+        borderRadius: "6px",
+        background: `hsl(${hue}, 60%, 45%)`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "white",
+        fontSize: "18px",
+        fontWeight: 700,
+        fontFamily: "sans-serif",
+      }}
+    >
+      𖤓
+    </div>,
     { ...size },
   );
 }

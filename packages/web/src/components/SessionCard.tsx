@@ -156,7 +156,9 @@ export function SessionCard({
           <span className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] font-semibold text-[var(--color-text-primary)]">
             {toneLabels[level]}
           </span>
-          <span className="font-mono text-[11px] text-[var(--color-text-tertiary)]">{session.id}</span>
+          <span className="font-mono text-[11px] text-[var(--color-text-tertiary)]">
+            {session.id}
+          </span>
         </div>
       </div>
 
@@ -189,7 +191,9 @@ export function SessionCard({
         </div>
         <div className="flex items-center justify-between gap-4">
           <dt className="text-[var(--color-text-tertiary)]">Workspace</dt>
-          <dd className="text-right font-mono text-[11px]">{truncateMiddle(session.worktreePath)}</dd>
+          <dd className="text-right font-mono text-[11px]">
+            {truncateMiddle(session.worktreePath)}
+          </dd>
         </div>
       </dl>
 
@@ -226,7 +230,10 @@ export function SessionCard({
               value={draft}
             />
             <div className="flex justify-end">
-              <ActionButton disabled={sendBusy || busyAction !== null || !draft.trim()} onClick={() => void handleSend()}>
+              <ActionButton
+                disabled={sendBusy || busyAction !== null || !draft.trim()}
+                onClick={() => void handleSend()}
+              >
                 {sendBusy ? "Sending..." : "Send"}
               </ActionButton>
             </div>
@@ -236,7 +243,10 @@ export function SessionCard({
 
       <div className="mt-4 flex flex-wrap gap-2">
         {canPause(session) ? (
-          <ActionButton disabled={busyAction !== null || sendBusy} onClick={() => void handleAction("pause", onPause)}>
+          <ActionButton
+            disabled={busyAction !== null || sendBusy}
+            onClick={() => void handleAction("pause", onPause)}
+          >
             {busyAction === "pause" ? "Pausing..." : "Pause"}
           </ActionButton>
         ) : null}

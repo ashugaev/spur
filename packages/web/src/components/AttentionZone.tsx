@@ -75,7 +75,9 @@ export function AttentionZone({
           onClick={() => onToggle(level)}
         >
           <span className="h-2.5 w-2.5 rounded-full" style={{ background: config.color }} />
-          <span className="text-sm font-semibold text-[var(--color-text-primary)]">{config.label}</span>
+          <span className="text-sm font-semibold text-[var(--color-text-primary)]">
+            {config.label}
+          </span>
           <span className="rounded-full border border-[var(--color-border-default)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">
             {sessions.length}
           </span>
@@ -129,7 +131,9 @@ export function AttentionZone({
               {sessions.length}
             </span>
           </div>
-          <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{config.caption}</p>
+          <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">
+            {config.caption}
+          </p>
         </div>
       </header>
 
