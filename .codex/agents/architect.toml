@@ -18,7 +18,7 @@ Process:
 4. Produce structured plan with scope, steps, acceptance criteria, risks, trade-offs
 
 Architectural principles:
-- Plugin interfaces defined in packages/core/src/types.ts — extend there, not in plugins
+- Extend the narrowest existing module boundary that already owns the behavior
 - execFile/spawn only — never exec (shell injection)
 - No user input interpolated into shell commands
 - Wrap JSON.parse in try/catch

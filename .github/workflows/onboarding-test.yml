@@ -3,10 +3,14 @@ name: Onboarding Integration Test
 on:
   pull_request:
     paths:
-      - 'packages/**'
-      - 'scripts/setup.sh'
-      - 'tests/integration/**'
-      - '.github/workflows/onboarding-test.yml'
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "packages/web/**"
+      - "scripts/setup.sh"
+      - "tests/integration/**"
+      - "v2/**"
+      - ".github/workflows/onboarding-test.yml"
   push:
     branches:
       - main
@@ -38,7 +42,7 @@ jobs:
         if: always()
         run: |
           # Extract onboarding time from container logs
-          docker logs ao-onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
+          docker logs spur-onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
 
       - name: Cleanup
         if: always()

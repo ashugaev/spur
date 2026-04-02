@@ -6,17 +6,13 @@ export function decodeRouteParam(value: string): string {
   }
 }
 
-export function buildProjectPath(projectId: string): string {
-  return `/projects/${encodeURIComponent(projectId)}`;
-}
-
-function buildProjectSessionPath(projectId: string, sessionId: string): string {
-  return `${buildProjectPath(projectId)}/sessions/${encodeURIComponent(sessionId)}`;
+export function buildDashboardPath(projectId?: string | null): string {
+  if (!projectId) return "/";
+  return `/?project=${encodeURIComponent(projectId)}`;
 }
 
 export function buildSessionPath(sessionId: string, projectId?: string | null): string {
-  if (projectId) {
-    return buildProjectSessionPath(projectId, sessionId);
-  }
-  return "/";
+  const basePath = `/sessions/${encodeURIComponent(sessionId)}`;
+  if (!projectId) return basePath;
+  return `${basePath}?project=${encodeURIComponent(projectId)}`;
 }

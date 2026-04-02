@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView } from "@/lib/spur-types";
+import type { SpurSessionView } from "@/lib/types";
 
 interface RouteContext {
   params: Promise<{ id: string }>;
@@ -16,4 +16,3 @@ export async function GET(_: Request, context: RouteContext) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
-

@@ -1,9 +1,6 @@
 #!/bin/bash
 # Spur setup script
-# Validates prerequisites, installs dependencies, builds packages, and links the CLI globally
-#
-# STATUS: Active — referenced in README.md and CI workflow
-# PLAN: Keep; consider `ao setup` CLI command long-term
+# Validates prerequisites, installs dependencies, builds packages, and links the CLI globally.
 
 set -e  # Exit on error
 
@@ -174,7 +171,7 @@ echo ""
 echo "Setup complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Create spur.yaml for your project"
-echo "  2. spur daemon start"
-echo "  3. pnpm --dir packages/web dev"
+echo "  1. Copy v2/spur.yaml.example to spur.yaml and edit it"
+echo "  2. SPUR_CONFIG=./spur.yaml spur daemon start"
+echo "  3. SPUR_CONFIG=./spur.yaml pnpm --dir packages/web dev"
 echo ""

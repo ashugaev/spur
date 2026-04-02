@@ -56,13 +56,8 @@ id_ed25519
 .claude/metadata-updater.sh
 .claude/worktrees/
 
-# Development symlinks (created per-worktree, not committed)
-packages/web/agent-orchestrator.yaml
-
-# Local agent orchestrator config (may contain secrets)
-agent-orchestrator.yaml
-
-# Runtime PID file
-.ao-start-runtime.json
+# Optional local Spur config overrides
+spur.local.yaml
+spur.*.local.yaml
 
 .idea/

@@ -1,12 +1,11 @@
 #!/bin/bash
-# Integration test: Fresh developer onboarding experience
-# Measures time and verifies each step of the onboarding flow
+# Integration test: fresh Spur onboarding experience
 
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DAEMON_PORT=$((4310 + ($$ % 200)))
-DASHBOARD_PORT=$((9000 + ($$ % 200)))
+WEB_PORT=$((9000 + ($$ % 200)))
 
 # Colors for output
 RED='\033[0;31m'
@@ -141,57 +140,57 @@ if ! grep -q "^\[" /tmp/spur-list.json; then
 fi
 end_step "Step 7: Spur CLI responding"
 
-# Step 8: Start dashboard dev server
-start_step "Step 8: Start dashboard"
+# Step 8: Start web UI dev server
+start_step "Step 8: Start web UI"
 cd "$REPO_ROOT"
-PORT="$DASHBOARD_PORT" \
+PORT="$WEB_PORT" \
 SPUR_CONFIG=/tmp/spur-test-project/spur.yaml \
 SPUR_DAEMON_URL="http://127.0.0.1:${DAEMON_PORT}" \
 pnpm --dir packages/web dev > /tmp/spur-web.log 2>&1 &
-DASHBOARD_PID=$!
+WEB_PID=$!
 
-echo "  Waiting for dashboard to start..."
+echo "  Waiting for web UI to start..."
 for i in {1..30}; do
-    if curl -s "http://127.0.0.1:${DASHBOARD_PORT}" > /dev/null 2>&1; then
+    if curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
         break
     fi
-    if ! kill -0 $DASHBOARD_PID 2>/dev/null; then
+    if ! kill -0 $WEB_PID 2>/dev/null; then
         cat /tmp/spur-web.log
-        fail_step "Step 8: Dashboard process died"
+        fail_step "Step 8: Web UI process died"
     fi
     sleep 1
 done
 
-if ! curl -s "http://127.0.0.1:${DASHBOARD_PORT}" > /dev/null 2>&1; then
+if ! curl -s "http://127.0.0.1:${WEB_PORT}" > /dev/null 2>&1; then
     cat /tmp/spur-web.log
-    fail_step "Step 8: Dashboard not responding after 30s"
+    fail_step "Step 8: Web UI not responding after 30s"
 fi
 
-end_step "Step 8: Dashboard started successfully"
+end_step "Step 8: Web UI started successfully"
 
-# Step 9: Verify dashboard endpoints
-start_step "Step 9: Verify dashboard API"
+# Step 9: Verify web UI endpoints
+start_step "Step 9: Verify web UI API"
 
 # Test /api/sessions endpoint
-if ! curl -sf "http://127.0.0.1:${DASHBOARD_PORT}/api/sessions" > /dev/null; then
+if ! curl -sf "http://127.0.0.1:${WEB_PORT}/api/sessions" > /dev/null; then
     fail_step "Step 9: /api/sessions endpoint failed"
 fi
 
 # Verify the configured project page resolves
-if ! curl -sf "http://127.0.0.1:${DASHBOARD_PORT}/projects/test-project" > /dev/null; then
-    fail_step "Step 9: project dashboard page failed"
+if ! curl -sf "http://127.0.0.1:${WEB_PORT}/projects/test-project" > /dev/null; then
+    fail_step "Step 9: project page failed"
 fi
 
-end_step "Step 9: Dashboard API responding"
+end_step "Step 9: Web UI API responding"
 
 # Step 10: Cleanup
 start_step "Step 10: Cleanup"
-kill $DASHBOARD_PID 2>/dev/null || true
+kill $WEB_PID 2>/dev/null || true
 kill $DAEMON_PID 2>/dev/null || true
 # Wait for process to exit
 sleep 2
 # Force kill if still running
-kill -9 $DASHBOARD_PID 2>/dev/null || true
+kill -9 $WEB_PID 2>/dev/null || true
 kill -9 $DAEMON_PID 2>/dev/null || true
 
 # Kill any remaining Node processes

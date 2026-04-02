@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView } from "@/lib/spur-types";
+import type { SpurSessionView } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
@@ -38,4 +38,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
-

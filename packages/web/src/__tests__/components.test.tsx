@@ -15,6 +15,7 @@ describe("Dashboard", () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
+          projects: [{ id: "api", name: "API" }],
           sessions: [
             {
               id: "api-a1",
@@ -41,7 +42,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByText("Spur Dashboard")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "All projects" })).toBeInTheDocument();
       expect(screen.getByText("Fix auth")).toBeInTheDocument();
       expect(screen.getByText("api-a1")).toBeInTheDocument();
     });

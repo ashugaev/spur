@@ -14,7 +14,7 @@ import { spurRequestJson } from "@/lib/spur-daemon";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
-import { POST as pauseSession } from "@/app/api/sessions/[id]/stop/route";
+import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
@@ -26,7 +26,7 @@ describe("Spur web API routes", () => {
     mockedSpurRequestJson.mockReset();
   });
 
-  it("GET /api/sessions filters by projectId", async () => {
+  it("GET /api/sessions filters by project", async () => {
     mockedSpurRequestJson.mockResolvedValue([
       {
         id: "api-a1",
@@ -65,7 +65,7 @@ describe("Spur web API routes", () => {
     ]);
 
     const response = await listSessions(
-      new NextRequest("http://localhost:3000/api/sessions?projectId=api"),
+      new NextRequest("http://localhost:3000/api/sessions?project=api"),
     );
     const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
 

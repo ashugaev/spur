@@ -10,5 +10,5 @@ export const getProjectName = cache((): string => {
   if (envProject && envProject.length > 0) {
     return envProject;
   }
-  return readSpurProjectOptions()[0]?.label ?? "Spur";
+  return readSpurProjectOptions()[0]?.name ?? "Spur";
 });
