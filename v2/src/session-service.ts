@@ -99,6 +99,7 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
 const HOOK_FRESHNESS_MS = 2_000;
+const STATE_HOLD_MS = 4_000;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -273,7 +274,8 @@ const CODEX_PANE_WORKING_RE = /esc to interrupt/i;
 function classifyCodexPane(pane: string): SessionState {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) return "needs_input";
-  if (CODEX_QUESTION_RE.test(pane)) return "needs_input";
+  const tail = lines.slice(-WAITING_INPUT_TAIL_LINES).join(" ");
+  if (CODEX_QUESTION_RE.test(tail)) return "needs_input";
   if (CODEX_PANE_WORKING_RE.test(pane)) return "working";
   return "waiting";
 }
@@ -428,6 +430,7 @@ export class SessionService {
   config: AppConfig;
   private registryPaths: string[];
   private readonly pipelineRuns = new Map<string, Promise<void>>();
+  private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
@@ -1118,6 +1121,7 @@ export class SessionService {
         interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
+      this.stateCache.delete(sessionId);
       const updated: SessionRecord = {
         ...readySession,
         status: "running",
@@ -1277,6 +1281,7 @@ export class SessionService {
       throw error;
     }
 
+    this.stateCache.delete(sessionId);
     const record: SessionRecord = {
       ...session,
       status: targetStatus,
@@ -1337,6 +1342,8 @@ export class SessionService {
       });
       throw error;
     }
+
+    this.stateCache.delete(sessionId);
 
     if (session.status === "killed") {
       this.logEvent("session.kill.noop", {
@@ -1534,6 +1541,7 @@ export class SessionService {
       }
     }
 
+    this.stateCache.delete(session.id);
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     const recovered: SessionRecord = {
       ...recoveredBase,
@@ -1689,6 +1697,7 @@ export class SessionService {
         agentSessionId: persistedRestored.agentSessionId ?? null,
       },
     });
+    this.stateCache.delete(sessionId);
     if (persistedRestored.pipeline?.status === "running") {
       this.schedulePipelineRunner(persistedRestored.id);
     }
@@ -2030,6 +2039,16 @@ export class SessionService {
         state = await classifyAgentState(session.agent, session.tmuxSession);
       }
     }
+
+    // State debounce: suppress single-poll flicker for running sessions.
+    const cached = this.stateCache.get(session.id);
+    const now = Date.now();
+    if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
+      if (state !== "needs_input" && state !== "stopped" && state !== "killed" && state !== "error") {
+        state = cached.state;
+      }
+    }
+    this.stateCache.set(session.id, { state, classifiedAt: now });
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
