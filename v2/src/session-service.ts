@@ -62,6 +62,8 @@ import {
   type BranchSource,
   type DevServerConfig,
   type KillSessionRequest,
+  type PreflightRequest,
+  type PreflightResponse,
   type ProjectConfig,
   type RunServiceRequest,
   type RuntimeInfo,
@@ -813,6 +815,29 @@ export class SessionService {
       });
       return this.enrichService(record);
     }
+  }
+
+  async preflight(request: PreflightRequest): Promise<PreflightResponse> {
+    if (typeof request.prompt !== "string" || !request.prompt.trim()) {
+      throw new Error("prompt must be a non-empty string");
+    }
+    const project = this.getProject(request.project);
+    const agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+    const overrides = parseSpawnOverrides(request.overrides, "overrides");
+    const worktree = resolveSpawnWorktree(project, overrides);
+    const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+    if (!worktree || !project.preflight) {
+      return { branch: null };
+    }
+    const result = await runSpawnPreflight({
+      agent,
+      projectId: request.project,
+      project,
+      baseBranch: defaultBranch,
+      worktree,
+      prompt: request.prompt,
+    });
+    return { branch: result.branch ?? null };
   }
 
   async spawn(request: SpawnSessionRequest): Promise<SessionView> {

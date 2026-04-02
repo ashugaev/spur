@@ -8,6 +8,7 @@ import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   KillSessionRequest,
+  PreflightRequest,
   RunServiceRequest,
   SendMessageRequest,
   SpawnSessionRequest,
@@ -194,6 +195,13 @@ export async function startServer(
         }
         await reloadAutomation(body.configPath);
         sendJson(response, 200, { ok: true });
+        return;
+      }
+
+      const preflightProjectId = path.match(/^\/projects\/([^/]+)\/preflight$/)?.[1];
+      if (method === "POST" && preflightProjectId) {
+        const body = await readJsonBody<PreflightRequest>(request);
+        sendJson(response, 200, await service.preflight({ ...body, project: preflightProjectId }));
         return;
       }
 
