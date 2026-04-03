@@ -232,17 +232,19 @@ describe("SessionService", () => {
 
     buildAgentLaunchPlanMock
       .mockReset()
-      .mockImplementation((agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
-        agent,
-        launchCommand:
-          agent === "codex"
-            ? "codex --dangerously-bypass-approvals-and-sandbox"
-            : options?.planMode
-              ? "claude --dangerously-skip-permissions --permission-mode plan"
-              : "claude --dangerously-skip-permissions",
-        initialMessage,
-        readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
-      }));
+      .mockImplementation(
+        (agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
+          agent,
+          launchCommand:
+            agent === "codex"
+              ? "codex --dangerously-bypass-approvals-and-sandbox"
+              : options?.planMode
+                ? "claude --dangerously-skip-permissions --permission-mode plan"
+                : "claude --dangerously-skip-permissions",
+          initialMessage,
+          readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
+        }),
+      );
     buildAgentRestorePlanMock.mockReset().mockResolvedValue({
       agent: "claude",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
@@ -250,19 +252,21 @@ describe("SessionService", () => {
         "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
       readyMarkers: ["❯"],
     });
-    buildAgentResumePlanMock.mockReset().mockImplementation(
-      (
-        _agent: string,
-        _agentSessionId: string,
-        _launchCommand: string,
-        options?: { planMode?: boolean },
-      ) => ({
-        launchCommand: options?.planMode
-          ? "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan"
-          : "claude --resume session-uuid --dangerously-skip-permissions",
-        readyMarkers: ["❯"],
-      }),
-    );
+    buildAgentResumePlanMock
+      .mockReset()
+      .mockImplementation(
+        (
+          _agent: string,
+          _agentSessionId: string,
+          _launchCommand: string,
+          options?: { planMode?: boolean },
+        ) => ({
+          launchCommand: options?.planMode
+            ? "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan"
+            : "claude --resume session-uuid --dangerously-skip-permissions",
+          readyMarkers: ["❯"],
+        }),
+      );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});

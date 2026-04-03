@@ -44,11 +44,7 @@ export function parseAgentName(agent: string): AgentName {
   throw new Error(`Unsupported agent: ${agent}`);
 }
 
-export function buildAgentLaunchPlan(
-  agent: AgentName,
-  prompt: string,
-  options?: AgentPlanOptions,
-) {
+export function buildAgentLaunchPlan(agent: AgentName, prompt: string, options?: AgentPlanOptions) {
   if (agent === "claude") {
     return buildClaudePlan(prompt, claudePlanOptions(options));
   }

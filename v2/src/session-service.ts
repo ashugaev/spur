@@ -868,7 +868,7 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
-    let planMode = false;
+    let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     try {
