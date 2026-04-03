@@ -39,11 +39,32 @@ function extractPrCoords(url: string): { owner: string; repo: string; number: st
   return { owner: match[1], repo: match[2], number: match[3] };
 }
 
+let resolvedToken: string | null = null;
+let tokenResolved = false;
+
+function resolveGhToken(): string | null {
+  if (tokenResolved) return resolvedToken;
+  tokenResolved = true;
+  resolvedToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"] ?? null;
+  if (resolvedToken) return resolvedToken;
+  // Fallback: read from gh CLI auth
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const cp = require("node:child_process") as {
+      execSync: (cmd: string, opts: { encoding: string }) => string;
+    };
+    resolvedToken = cp.execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
+  } catch {
+    resolvedToken = null;
+  }
+  return resolvedToken;
+}
+
 function ghHeaders(): Record<string, string> {
   const headers: Record<string, string> = { accept: "application/vnd.github+json" };
-  const ghToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (ghToken) {
-    headers["authorization"] = `Bearer ${ghToken}`;
+  const token = resolveGhToken();
+  if (token) {
+    headers["authorization"] = `Bearer ${token}`;
   }
   return headers;
 }
