@@ -370,33 +370,18 @@ export function Dashboard() {
       ) : null}
 
       {!loading && sessions.length > 0 ? (
-        isMobile ? (
-          <section className="mt-5 space-y-3">
-            {LANE_ORDER.map((level) => (
-              <AttentionZone
-                key={level}
-                collapsed={expandedLevel !== level}
-                level={level}
-                onOpenTerminal={openTerminal}
-                onToggle={(nextLevel) =>
-                  setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
-                }
-                sessions={grouped[level]}
-              />
-            ))}
-          </section>
-        ) : (
-          <section className="mt-5 grid gap-3 xl:grid-cols-5">
-            {LANE_ORDER.map((level) => (
-              <AttentionZone
-                key={level}
-                level={level}
-                onOpenTerminal={openTerminal}
-                sessions={grouped[level]}
-              />
-            ))}
-          </section>
-        )
+        <section className="mt-5 space-y-4">
+          {LANE_ORDER.map((level) => (
+            <AttentionZone
+              key={level}
+              collapsed={isMobile ? expandedLevel !== level : undefined}
+              level={level}
+              onOpenTerminal={openTerminal}
+              onToggle={isMobile ? (nextLevel) => setExpandedLevel((current) => (current === nextLevel ? null : nextLevel)) : undefined}
+              sessions={grouped[level]}
+            />
+          ))}
+        </section>
       ) : null}
 
       {terminalSession ? (

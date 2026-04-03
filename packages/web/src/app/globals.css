@@ -89,17 +89,8 @@ a:hover {
   animation: activity-pulse 2s ease-in-out infinite;
 }
 
-/* ── Session cards ────────────────────────────────────────────────────── */
+/* ── Data rows ───────────────────────────────────────────────────────── */
 
-.session-card {
-  background: rgba(17, 17, 18, 0.95);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-  transition: border-color 0.12s ease;
-
-  /* Bump dim text on darker card surface */
-  --color-text-tertiary: #666669;
-}
-
-.session-card:hover {
+.data-row:hover {
   background: rgba(255, 255, 255, 0.03);
 }
