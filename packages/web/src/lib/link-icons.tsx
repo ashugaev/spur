@@ -40,7 +40,10 @@ export function usePrState(url: string | undefined): PrState | null {
         if (
           !cancelled &&
           typeof data.state === "string" &&
-          (data.state === "draft" || data.state === "open" || data.state === "merged" || data.state === "closed")
+          (data.state === "draft" ||
+            data.state === "open" ||
+            data.state === "merged" ||
+            data.state === "closed")
         ) {
           setState(data.state);
         }

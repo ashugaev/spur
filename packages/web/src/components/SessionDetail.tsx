@@ -443,7 +443,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   logEntries.map((entry, i) => (
                     <div
                       key={`${entry.timestamp}-${i}`}
-                      style={{ color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)" }}
+                      style={{
+                        color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)",
+                      }}
                     >
                       <span className="text-[var(--color-text-tertiary)]">
                         [{formatLogTime(entry.timestamp)}]

@@ -95,7 +95,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("keeps discovered projects in the filter but only configured projects in spawn", async () => {
+  it("shows all projects (configured and discovered) in both filter and spawn", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -128,8 +128,8 @@ describe("Dashboard", () => {
     const spawnSelects = screen.getAllByRole("combobox");
     const spawnProjectSelect = spawnSelects[1];
     expect(
-      within(spawnProjectSelect).queryByRole("option", { name: "spur-local" }),
-    ).not.toBeInTheDocument();
+      within(spawnProjectSelect).getByRole("option", { name: "spur-local" }),
+    ).toBeInTheDocument();
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
     ).toBeInTheDocument();
