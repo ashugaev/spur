@@ -73,6 +73,8 @@ describe("runSpawnPreflight", () => {
         "--dangerously-skip-permissions",
       ]),
     );
+    expect(args).not.toContain("--permission-mode");
+    expect(args).not.toContain("plan");
     expect((args as string[]).at(-1)).toContain("Fix login rate limiting for PR #42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options).toEqual(
@@ -118,6 +120,8 @@ describe("runSpawnPreflight", () => {
         "--output-last-message",
       ]),
     );
+    expect(args).not.toContain("--permission-mode");
+    expect(args).not.toContain("plan");
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options).toEqual(

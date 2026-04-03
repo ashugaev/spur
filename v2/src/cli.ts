@@ -1090,6 +1090,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<project>", "Configured project id")
     .argument("<prompt...>", "Task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
+    .option(
+      "--plan",
+      "Start in plan mode (Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+    )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
     .option(
@@ -1138,6 +1142,7 @@ export function createProgram(cliEntrypoint: string): Command {
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
         agent: options.agent,
+        ...(options.plan ? { planMode: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
       };

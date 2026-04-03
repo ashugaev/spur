@@ -161,6 +161,7 @@ export interface SessionRecord {
   id: string;
   project: string;
   agent: AgentName;
+  planMode?: boolean;
   agentSessionId?: string;
   prompt: string;
   branch: string;
@@ -223,6 +224,7 @@ export interface SpawnSessionRequest {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;

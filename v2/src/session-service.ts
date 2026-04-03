@@ -153,6 +153,7 @@ function tryRealpath(path: string): string {
 function normalizeSpawnRequest(request: SpawnSessionRequest): {
   prompt: string;
   steps?: string[];
+  planMode: boolean;
 } {
   if (typeof request.prompt !== "string" || !request.prompt.trim()) {
     throw new Error("prompt must be a non-empty string");
@@ -163,10 +164,25 @@ function normalizeSpawnRequest(request: SpawnSessionRequest): {
     }
     return step.trim();
   });
+  const normalized = {
+    prompt: request.prompt.trim(),
+    planMode: request.planMode === true,
+  };
   if (!steps || steps.length === 0) {
-    return { prompt: request.prompt.trim() };
+    return normalized;
   }
-  return { prompt: request.prompt.trim(), steps };
+  return { ...normalized, steps };
+}
+
+function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
+  return session.planMode === true;
+}
+
+function withPlanMode(
+  options: { claudeSettingsPath?: string; codexHomePath?: string },
+  planMode: boolean,
+): { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean } {
+  return planMode ? { ...options, planMode: true } : options;
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -361,7 +377,7 @@ async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
   restoreMessage: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string },
+  options?: { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
   let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage, options);
@@ -852,11 +868,12 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
+    let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps } = normalizeSpawnRequest({
+      ({ prompt, steps, planMode } = normalizeSpawnRequest({
         ...request,
         ...(request.steps === undefined && project.spawn?.steps !== undefined
           ? { steps: project.spawn.steps }
@@ -944,6 +961,7 @@ export class SessionService {
         id: sessionId,
         project: request.project,
         agent,
+        planMode,
         prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
@@ -1010,7 +1028,11 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
       });
-      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, hookSetup);
+      const launchPlan = buildAgentLaunchPlan(
+        agent,
+        initialMessage,
+        withPlanMode(hookSetup, planMode),
+      );
       const pipeline = steps
         ? {
             steps,
@@ -1021,6 +1043,7 @@ export class SessionService {
         : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
+        planMode,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -1571,14 +1594,19 @@ export class SessionService {
       worktreePath: session.worktreePath,
       sessionToolDir,
     });
-    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, hookSetup);
-    const baseLaunchCommand = session.launchCommand || baseLaunchPlan.launchCommand;
+    const planMode = resolvePlanMode(session);
+    const baseLaunchPlan = buildAgentLaunchPlan(
+      session.agent,
+      session.prompt,
+      withPlanMode(hookSetup, planMode),
+    );
+    const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
           sessionWithAgentId.agent,
           sessionWithAgentId.agentSessionId,
           baseLaunchCommand,
-          hookSetup,
+          withPlanMode(hookSetup, planMode),
         )
       : null;
     this.logEvent("session.recover.started", {
@@ -1656,6 +1684,7 @@ export class SessionService {
     const { error: _ignoredError, ...recoveredBase } = sessionWithAgentId;
     const recovered: SessionRecord = {
       ...recoveredBase,
+      planMode,
       ...(recoveredAgentSessionId ? { agentSessionId: recoveredAgentSessionId } : {}),
       launchCommand: baseLaunchCommand,
       status: "running",
@@ -1713,12 +1742,13 @@ export class SessionService {
         worktreePath: current.worktreePath,
         sessionToolDir,
       });
+      const planMode = resolvePlanMode(current);
       const restorePrompt = buildRestorePrompt(current.prompt);
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,
         restorePrompt,
-        hookSetup,
+        withPlanMode(hookSetup, planMode),
       );
       if (!launchPlan) {
         this.logEvent("session.restore.failed", {
@@ -1742,7 +1772,7 @@ export class SessionService {
             current.agent,
             restoredAgentSessionId,
             launchPlan.launchCommand,
-            hookSetup,
+            withPlanMode(hookSetup, planMode),
           );
           restoreLaunchCommand = resumePlan.launchCommand;
           restoreReadyMarkers = resumePlan.readyMarkers;
@@ -1789,6 +1819,7 @@ export class SessionService {
     const { error: _ignoredError, ...restoredBase } = current;
     const restored: SessionRecord = {
       ...restoredBase,
+      planMode: resolvePlanMode(current),
       launchCommand: restoredLaunchCommand,
       status: "running",
       updatedAt: nowIso(),
@@ -2203,6 +2234,7 @@ export class SessionService {
 
     return {
       ...session,
+      planMode: resolvePlanMode(session),
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,
