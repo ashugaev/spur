@@ -17,7 +17,7 @@ import {
 } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "review", "pending", "working", "done"];
+const LANE_ORDER: AttentionLevel[] = ["respond", "review", "working", "pending", "done"];
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -30,14 +30,22 @@ function StatItem({
   label,
   value,
   color,
+  active,
+  onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   value: number | string;
   color?: string;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <div className="flex items-center gap-1.5">
+    <button
+      className={`flex items-center gap-1.5 border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      onClick={onClick}
+      type="button"
+    >
       <span style={color ? { color } : undefined}>{icon}</span>
       <span className="text-[var(--color-text-secondary)]">{label}:</span>
       <span
@@ -46,7 +54,7 @@ function StatItem({
       >
         {value}
       </span>
-    </div>
+    </button>
   );
 }
 
@@ -121,6 +129,7 @@ export function Dashboard() {
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
@@ -361,24 +370,32 @@ export function Dashboard() {
           label="Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+          active={activeStatFilter === "respond"}
+          onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
         />
         <StatItem
           icon={<IconEye />}
           label="Review"
           value={stats.review}
           color={stats.review > 0 ? "var(--color-accent-orange)" : undefined}
-        />
-        <StatItem
-          icon={<IconClock />}
-          label="Pending"
-          value={stats.pending}
-          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+          active={activeStatFilter === "review"}
+          onClick={() => setActiveStatFilter((c) => (c === "review" ? null : "review"))}
         />
         <StatItem
           icon={<IconBolt />}
           label="Working"
           value={stats.working}
           color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+          active={activeStatFilter === "working"}
+          onClick={() => setActiveStatFilter((c) => (c === "working" ? null : "working"))}
+        />
+        <StatItem
+          icon={<IconClock />}
+          label="Pending"
+          value={stats.pending}
+          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+          active={activeStatFilter === "pending"}
+          onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
         />
         <div className="ml-auto hidden items-center gap-2 border-l border-[var(--color-border-default)] pl-4 sm:flex">
           <span className="text-[10px] font-bold tracking-[0.08em]">Online</span>
@@ -480,7 +497,11 @@ export function Dashboard() {
 
       {!loading && sessions.length > 0 ? (
         <section className="mt-5 space-y-4">
-          {LANE_ORDER.filter((level) => grouped[level].length > 0).map((level) => (
+          {LANE_ORDER.filter(
+            (level) =>
+              grouped[level].length > 0 &&
+              (activeStatFilter === null || level === activeStatFilter),
+          ).map((level) => (
             <AttentionZone
               key={level}
               collapsed={isMobile ? expandedLevel !== level : undefined}
