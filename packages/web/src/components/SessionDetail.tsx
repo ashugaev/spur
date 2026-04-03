@@ -51,7 +51,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       {link.label === "pr" ? (
         <>
           <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge count={prInfo.reviewComments} />
+          <ReviewCommentsBadge count={prInfo.unresolvedThreads} />
         </>
       ) : null}
     </a>

@@ -70,7 +70,7 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
           <GithubIcon />
           <span className="text-[11px]">{extractLinkId(prLink)}</span>
           <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge count={prInfo.reviewComments} />
+          <ReviewCommentsBadge count={prInfo.unresolvedThreads} />
         </a>
       ) : null}
 

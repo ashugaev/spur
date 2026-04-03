@@ -6,19 +6,21 @@ type CiStatus = "success" | "failure" | "pending" | null;
 interface PrStatusResponse {
   state: PrState;
   ciStatus: CiStatus;
-  reviewComments: number;
+  unresolvedThreads: number;
 }
 
-interface GithubPullResponse {
-  state: string;
-  draft?: boolean;
-  merged?: boolean;
-  review_comments?: number;
-  head?: { sha?: string };
-}
-
-interface GithubCombinedStatus {
-  state?: string;
+interface GithubGraphQLResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        state: string;
+        isDraft: boolean;
+        merged: boolean;
+        reviewThreads: { nodes: { isResolved: boolean }[] };
+        commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
+      };
+    };
+  };
 }
 
 interface CacheEntry {
@@ -28,10 +30,20 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 120_000; // 2 min
-const ERROR_CACHE_TTL_MS = 60_000; // cache errors for 1 min to avoid hammering
+const CACHE_TTL_MS = 120_000;
+const ERROR_CACHE_TTL_MS = 60_000;
 
 let rateLimitResetAt = 0;
+
+const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
+  repository(owner:$owner,name:$repo) {
+    pullRequest(number:$number) {
+      state isDraft merged
+      reviewThreads(first:100) { nodes { isResolved } }
+      commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
+    }
+  }
+}`;
 
 function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
@@ -109,8 +121,15 @@ export async function GET(request: NextRequest) {
   const headers = ghHeaders();
 
   try {
-    const apiUrl = `https://api.github.com/repos/${coords.owner}/${coords.repo}/pulls/${coords.number}`;
-    const ghResponse = await fetch(apiUrl, { headers, cache: "no-store" });
+    const ghResponse = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        query: GQL_QUERY,
+        variables: { owner: coords.owner, repo: coords.repo, number: Number(coords.number) },
+      }),
+      cache: "no-store",
+    });
 
     if (!ghResponse.ok) {
       handleRateLimit(ghResponse);
@@ -123,36 +142,32 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: errorMsg }, { status: 502 });
     }
 
-    const data = (await ghResponse.json()) as GithubPullResponse;
-    let state: PrState;
-    if (data.draft) state = "draft";
-    else if (data.merged) state = "merged";
-    else if (data.state === "closed") state = "closed";
-    else state = "open";
-
-    const reviewComments = typeof data.review_comments === "number" ? data.review_comments : 0;
-
-    let ciStatus: CiStatus = null;
-    const headSha = data.head?.sha;
-    if (headSha) {
-      try {
-        const statusUrl = `https://api.github.com/repos/${coords.owner}/${coords.repo}/commits/${headSha}/status`;
-        const statusRes = await fetch(statusUrl, { headers, cache: "no-store" });
-        if (statusRes.ok) {
-          const statusData = (await statusRes.json()) as GithubCombinedStatus;
-          if (statusData.state === "success") ciStatus = "success";
-          else if (statusData.state === "failure" || statusData.state === "error")
-            ciStatus = "failure";
-          else if (statusData.state === "pending") ciStatus = "pending";
-        } else {
-          handleRateLimit(statusRes);
-        }
-      } catch {
-        // Non-critical
-      }
+    const gql = (await ghResponse.json()) as GithubGraphQLResponse;
+    const pr = gql.data?.repository?.pullRequest;
+    if (!pr) {
+      cache.set(cacheKey, {
+        response: null,
+        error: "PR not found",
+        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
+      });
+      return NextResponse.json({ error: "PR not found" }, { status: 404 });
     }
 
-    const response: PrStatusResponse = { state, ciStatus, reviewComments };
+    let state: PrState;
+    if (pr.isDraft) state = "draft";
+    else if (pr.merged) state = "merged";
+    else if (pr.state === "CLOSED") state = "closed";
+    else state = "open";
+
+    const unresolvedThreads = pr.reviewThreads.nodes.filter((t) => !t.isResolved).length;
+
+    let ciStatus: CiStatus = null;
+    const rollupState = pr.commits.nodes[0]?.commit.statusCheckRollup?.state;
+    if (rollupState === "SUCCESS") ciStatus = "success";
+    else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
+    else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
+
+    const response: PrStatusResponse = { state, ciStatus, unresolvedThreads };
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);
   } catch (error) {

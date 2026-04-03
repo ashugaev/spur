@@ -9,7 +9,7 @@ export type CiStatus = "success" | "failure" | "pending" | null;
 export interface PrInfo {
   state: PrState | null;
   ciStatus: CiStatus;
-  reviewComments: number;
+  unresolvedThreads: number;
 }
 
 const PR_STATE_COLORS: Record<PrState, string> = {
@@ -19,7 +19,7 @@ const PR_STATE_COLORS: Record<PrState, string> = {
   closed: "var(--color-status-error)",
 };
 
-const EMPTY_PR_INFO: PrInfo = { state: null, ciStatus: null, reviewComments: 0 };
+const EMPTY_PR_INFO: PrInfo = { state: null, ciStatus: null, unresolvedThreads: 0 };
 const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
 
@@ -74,7 +74,8 @@ async function fetchPrInfo(url: string): Promise<PrInfo> {
     return {
       state: isPrState(obj["state"]) ? obj["state"] : null,
       ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
-      reviewComments: typeof obj["reviewComments"] === "number" ? obj["reviewComments"] : 0,
+      unresolvedThreads:
+        typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
     };
   } catch {
     setGitError("GitHub API unreachable");
@@ -158,7 +159,7 @@ export function ReviewCommentsBadge({ count }: { count: number }) {
   return (
     <span
       className="inline-flex items-center gap-0.5 text-[10px] font-bold text-[var(--color-status-attention)]"
-      title={`${count} review comment${count === 1 ? "" : "s"}`}
+      title={`${count} unresolved thread${count === 1 ? "" : "s"}`}
     >
       <svg
         className="h-2.5 w-2.5"
