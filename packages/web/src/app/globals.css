@@ -29,6 +29,13 @@
   --color-status-attention: #FFD700;
   --color-status-error: #FF4D4D;
 
+  /* ── Border radius ────────────────────────────────────────────────── */
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+
   /* ── Typography ──────────────────────────────────────────────────── */
   --font-sans: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
   --font-mono: var(--font-sans);

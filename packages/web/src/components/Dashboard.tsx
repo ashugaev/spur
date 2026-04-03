@@ -57,6 +57,7 @@ export function Dashboard() {
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
   const [spawning, setSpawning] = useState(false);
+  const [spawnOpen, setSpawnOpen] = useState(false);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
   const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
@@ -226,6 +227,7 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       setSpawnPrompt("");
+      setSpawnOpen(false);
       syncProjectFilter(nextProjectId);
       setSpawnProjectId(nextProjectId);
       await fetchSessions(nextProjectId, true);
@@ -244,36 +246,33 @@ export function Dashboard() {
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <header className="mb-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="text-lg text-[var(--color-accent)]">𖤓</span>
-            <h1 className="text-2xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)]">
-              {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
-            </h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <select
-              className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-              onChange={(event) => syncProjectFilter(event.target.value)}
-              value={projectId}
-            >
-              <option value="">All projects</option>
-              {filterProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="rounded-sm bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
-              onClick={() => void handleSpawn()}
-              type="button"
-            >
-              {spawning ? "Spawning..." : "Spawn_New_Session"}
-            </button>
-          </div>
+      <header className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className="text-lg text-[var(--color-accent)]">𖤓</span>
+          <h1 className="text-2xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)]">
+            {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
+          </h1>
+        </div>
+        <div className="flex items-center gap-3">
+          <select
+            className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+            onChange={(event) => syncProjectFilter(event.target.value)}
+            value={projectId}
+          >
+            <option value="">All projects</option>
+            {filterProjectOptions.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="rounded-sm bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            onClick={() => setSpawnOpen(true)}
+            type="button"
+          >
+            Spawn_New_Session
+          </button>
         </div>
       </header>
 
@@ -289,35 +288,66 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="mt-3 flex items-center gap-2">
-        <select
-          className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-          onChange={(event) => setSpawnProjectId(event.target.value)}
-          value={spawnProjectId}
+      {spawnOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={(event) => { if (event.target === event.currentTarget) setSpawnOpen(false); }}
         >
-          <option value="">Select project</option>
-          {spawnProjectOptions.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
-            </option>
-          ))}
-        </select>
-        <select
-          className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-          onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
-          value={spawnAgent}
-        >
-          <option value="claude">claude</option>
-          <option value="codex">codex</option>
-        </select>
-        <input
-          className="flex-1 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-          onChange={(event) => setSpawnPrompt(event.target.value)}
-          onKeyDown={(event) => { if (event.key === "Enter") void handleSpawn(); }}
-          placeholder="Prompt for the new session..."
-          value={spawnPrompt}
-        />
-      </div>
+          <div className="w-full max-w-lg rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-5 shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">Spawn Session</h2>
+              <button
+                className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                onClick={() => setSpawnOpen(false)}
+                type="button"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <select
+                  className="flex-1 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnProjectId(event.target.value)}
+                  value={spawnProjectId}
+                >
+                  <option value="">Select project</option>
+                  {spawnProjectOptions.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                  value={spawnAgent}
+                >
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
+                </select>
+              </div>
+              <input
+                className="w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                onChange={(event) => setSpawnPrompt(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") void handleSpawn(); }}
+                placeholder="Prompt for the new session..."
+                value={spawnPrompt}
+              />
+              <div className="flex justify-end">
+                <button
+                  className="rounded-sm bg-[var(--color-accent)] px-4 py-2 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                  onClick={() => void handleSpawn()}
+                  type="button"
+                >
+                  {spawning ? "Spawning..." : "Spawn"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {error ? (
         <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">

@@ -49,7 +49,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "All projects" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Fleet Overview" })).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
     });
@@ -116,11 +116,16 @@ describe("Dashboard", () => {
       expect(screen.getByRole("button", { name: "Open web terminal for spur-local-1" })).toBeInTheDocument();
     });
 
-    const selects = screen.getAllByRole("combobox");
-    expect(within(selects[0]).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
+    const filterSelect = screen.getByRole("combobox");
+    expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
+    expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn_New_Session" }));
+    const spawnSelects = screen.getAllByRole("combobox");
+    const spawnProjectSelect = spawnSelects[1];
     expect(
-      within(selects[1]).queryByRole("option", { name: "spur-local" }),
+      within(spawnProjectSelect).queryByRole("option", { name: "spur-local" }),
     ).not.toBeInTheDocument();
-    expect(within(selects[1]).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+    expect(within(spawnProjectSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
   });
 });
