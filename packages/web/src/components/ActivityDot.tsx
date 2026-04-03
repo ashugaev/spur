@@ -9,7 +9,7 @@ const activityConfig: Record<
   working: {
     label: "working",
     dot: "var(--color-status-working)",
-    bg: "rgba(88,166,255,0.14)",
+    bg: "rgba(88,166,255,0.10)",
     text: "var(--color-status-working)",
     pulse: true,
   },

@@ -1,25 +1,19 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, JetBrains_Mono } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
-
-const geistSans = Geist({
-  subsets: ["latin"],
-  variable: "--font-ibm-plex-sans",
-  display: "swap",
-});
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-ibm-plex-mono",
   display: "swap",
-  weight: ["400", "500"],
+  weight: ["300", "400", "500", "700"],
 });
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#0d1117",
+  themeColor: "#0D0D0E",
 };
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -34,7 +28,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${geistSans.variable} ${jetbrainsMono.variable}`}>
+    <html lang="en" className={`dark ${jetbrainsMono.variable}`}>
       <body
         suppressHydrationWarning
         className="bg-[var(--color-bg-base)] text-[var(--color-text-primary)] antialiased"

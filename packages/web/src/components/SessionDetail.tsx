@@ -32,7 +32,7 @@ interface SessionDetailProps {
 
 function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-5 shadow-[0_18px_60px_rgba(0,0,0,0.26)]">
+    <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
       <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
         {title}
       </h2>
@@ -154,10 +154,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
       {session ? (
         <>
-          <header className="relative mt-5 overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-6 shadow-[0_28px_90px_rgba(0,0,0,0.32)]">
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(88,166,255,0.14),transparent_42%),radial-gradient(circle_at_bottom_right,rgba(163,113,247,0.1),transparent_38%)]" />
-
-            <div className="relative">
+          <header className="mt-5 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
+            <div>
               <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                 <span>{session.projectName}</span>
                 <span>•</span>
@@ -199,8 +197,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             </div>
           </header>
 
-          <section className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
-            <div className="space-y-4">
+          <section className="mt-6 grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
+            <div className="space-y-3">
               <DetailCard title="Message">
                 {canSendMessage(session) ? (
                   <div className="space-y-3">
@@ -281,7 +279,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </DetailCard>
             </div>
 
-            <div className="space-y-4">
+            <div className="space-y-3">
               <DetailCard title="Actions">
                 <div className="flex flex-wrap gap-2">
                   {canPause(session) ? (

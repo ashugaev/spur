@@ -42,7 +42,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
   return (
     <article
       className={cn(
-        "session-card rounded-sm border px-3 py-3 shadow-[0_12px_36px_rgba(0,0,0,0.2)]",
+        "session-card rounded-sm border px-2.5 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.2)]",
         toneClasses[level],
       )}
     >
@@ -73,7 +73,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
         </span>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <ActivityDot activity={session.state} />
         <span className="rounded-sm border border-[var(--color-border-default)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
           {session.status}
@@ -95,7 +95,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
         ) : null}
       </div>
 
-      <div className="mt-3 flex items-center justify-between gap-3">
+      <div className="mt-2 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="font-mono text-[10px] text-[var(--color-text-tertiary)]">
             {session.id}
