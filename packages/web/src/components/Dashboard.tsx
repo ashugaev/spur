@@ -7,7 +7,6 @@ import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
-import { toneClasses } from "@/lib/tone";
 import {
   getAttentionLevel,
   toDashboardSession,
@@ -27,6 +26,13 @@ function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
     .map((id) => ({ id, name: id }));
 }
 
+const statToneClasses: Record<string, string> = {
+  respond: "border-red-500/25 bg-red-500/[0.06]",
+  review: "border-orange-400/25 bg-orange-400/[0.06]",
+  pending: "border-amber-400/25 bg-amber-400/[0.06]",
+  working: "border-sky-400/25 bg-sky-400/[0.06]",
+};
+
 function StatCard({
   label,
   value,
@@ -37,7 +43,7 @@ function StatCard({
   tone: "respond" | "review" | "pending" | "working";
 }) {
   return (
-    <div className={cn("rounded-sm border px-2.5 py-2", toneClasses[tone])}>
+    <div className={cn("rounded-sm border px-2.5 py-2", statToneClasses[tone])}>
       <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
         {label}
       </div>

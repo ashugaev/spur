@@ -40,13 +40,9 @@ export function AttentionZone({
     </div>
   );
 
-  const rows = sessions.length > 0 ? (
-    <div>
-      {sessions.map((session) => (
-        <SessionRow key={session.id} session={session} onOpenTerminal={onOpenTerminal} />
-      ))}
-    </div>
-  ) : null;
+  const rows = sessions.map((session) => (
+    <SessionRow key={session.id} session={session} onOpenTerminal={onOpenTerminal} />
+  ));
 
   if (isAccordion) {
     return (

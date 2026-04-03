@@ -35,13 +35,9 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
         {title}
       </a>
 
-      {session.branch ? (
-        <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[11px] text-[var(--color-text-secondary)] lg:inline">
-          {session.branch}
-        </span>
-      ) : (
-        <span className="hidden w-[8rem] shrink-0 lg:inline" />
-      )}
+      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[11px] text-[var(--color-text-secondary)] lg:inline">
+        {session.branch}
+      </span>
 
       <span className="w-[4rem] shrink-0 text-right text-[11px] text-[var(--color-text-tertiary)]">
         {formatRelativeTime(session.lastActivityAt)}
@@ -50,7 +46,7 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
       <button
         aria-label={`Open web terminal for ${session.id}`}
         className={cn(
-          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border opacity-0 transition group-hover:opacity-100",
+          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border opacity-0 transition group-hover:opacity-100 focus:opacity-100",
           canAttach
             ? "border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
             : "border-[var(--color-border-default)] text-[var(--color-text-tertiary)]",
