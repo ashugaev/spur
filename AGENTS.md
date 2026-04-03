@@ -68,6 +68,13 @@
 - Spur test scenarios live in `v2/TEST_SCENARIOS.md`. Each scenario belongs to exactly one tier. When a new Spur feature is added, extend that file in the same change.
 - `$tester` must cover both: potentially affected existing Spur scenarios and the new scenarios introduced by the feature.
 
+## Web UI (`packages/web`)
+
+- Every `packages/web` change must update `packages/web/UI_TEST_SCENARIOS.md` in the same commit when the change adds, removes, or alters visible behavior.
+- Every `packages/web` change requires a manual browser test by the agent (via Chrome automation tools) before marking the task complete. Run the dev server, navigate to `localhost`, and verify the touched scenarios visually.
+- Load `$frontend-codestyle` when implementing or reviewing `packages/web` changes.
+- `pnpm --dir packages/web build` and `pnpm --dir packages/web test` must pass before completion.
+
 ## PR Pipeline Resolve Team (Terminal-Driven)
 
 - Use `.agents/skills/manager/SKILL.md` as the only manager workflow for this repo.

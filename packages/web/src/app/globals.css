@@ -20,8 +20,7 @@
   /* ── Interactive accent ──────────────────────────────────────────── */
   --color-accent: #ffffff;
   --color-accent-hover: rgba(255, 255, 255, 0.8);
-  --color-accent-subtle: rgba(255, 255, 255, 0.08);
-  --color-accent-orange: #d18616;
+  --color-accent-violet: #a371f7;
 
   /* ── Status / semantic colors ────────────────────────────────────── */
   --color-status-working: #58a6ff;

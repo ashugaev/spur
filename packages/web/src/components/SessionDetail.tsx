@@ -10,6 +10,15 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
+import {
+  CiStatusDot,
+  ReviewCommentsBadge,
+  extractLinkId,
+  GithubIcon,
+  JiraIcon,
+  prStateColor,
+  usePrInfo,
+} from "@/lib/link-icons";
 import { buildDashboardPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -23,7 +32,56 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
+function LinkBadge({ link }: { link: { label: string; url: string } }) {
+  const prUrl = link.label === "pr" ? link.url : undefined;
+  const prInfo = usePrInfo(prUrl);
+  const color = prStateColor(prInfo.state);
+
+  return (
+    <a
+      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+      href={link.url}
+      rel="noreferrer"
+      target="_blank"
+    >
+      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      <span className="text-[11px]" style={color ? { color } : undefined}>
+        {extractLinkId(link)}
+      </span>
+      {link.label === "pr" ? (
+        <>
+          <CiStatusDot status={prInfo.ciStatus} />
+          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
+        </>
+      ) : null}
+    </a>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
+
+interface LogEntry {
+  timestamp: string;
+  event: string;
+  level: string;
+  message?: string;
+  sessionId?: string;
+}
+
+function formatLogTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+const LOG_LEVEL_COLORS: Record<string, string> = {
+  info: "var(--color-text-secondary)",
+  warn: "var(--color-status-attention)",
+  error: "var(--color-status-error)",
+};
 
 interface SessionDetailProps {
   sessionId: string;
@@ -36,6 +94,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [logsOpen, setLogsOpen] = useState(false);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
 
   const loadSession = useCallback(async () => {
     try {
@@ -91,6 +151,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const openLogs = async () => {
+    setLogsOpen(true);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/logs`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+      const data: unknown = await res.json();
+      if (Array.isArray(data)) {
+        setLogEntries(data as LogEntry[]);
+      }
+    } catch {
+      // Non-critical.
+    }
+  };
+
   const title = useMemo(
     () => (session ? getSessionTitle(session) : sessionId),
     [session, sessionId],
@@ -142,6 +218,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
+              {session.links
+                .filter((l) => l.label === "tracker" || l.label === "pr")
+                .map((link) => (
+                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
+                ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-red-500/30 px-2 py-0.5 text-red-200">offline</span>
               ) : null}
@@ -204,6 +285,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "kill" ? "Killing..." : "Kill"}
               </button>
             ) : null}
+            <button
+              type="button"
+              onClick={() => void openLogs()}
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+            >
+              Logs
+            </button>
           </div>
 
           {/* Content */}
@@ -342,6 +430,48 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
             </section>
           </div>
+
+          {/* Logs modal */}
+          {logsOpen ? (
+            <div
+              className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg-base)]"
+              role="dialog"
+              aria-label={`Logs ${session.id}`}
+            >
+              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
+                <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                  Logs — {session.id}
+                </span>
+                <button
+                  type="button"
+                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                  onClick={() => setLogsOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-5">
+                {logEntries.length === 0 ? (
+                  <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
+                ) : (
+                  logEntries.map((entry, i) => (
+                    <div
+                      key={`${entry.timestamp}-${i}`}
+                      style={{
+                        color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)",
+                      }}
+                    >
+                      <span className="text-[var(--color-text-tertiary)]">
+                        [{formatLogTime(entry.timestamp)}]
+                      </span>{" "}
+                      <span className="uppercase">{entry.event}</span>
+                      {entry.message ? ` — ${entry.message}` : ""}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : null}
 
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (

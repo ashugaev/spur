@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AttentionZone } from "@/components/AttentionZone";
+import { useGitError } from "@/lib/link-icons";
 import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -17,7 +18,7 @@ import {
 } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "review", "pending", "working", "done"];
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -26,16 +27,27 @@ function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
 }
 
 function StatItem({
+  icon,
   label,
   value,
   color,
+  active,
+  onClick,
 }: {
+  icon: React.ReactNode;
   label: string;
   value: number | string;
   color?: string;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <button
+      className={`flex items-center gap-1.5 border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      onClick={onClick}
+      type="button"
+    >
+      <span style={color ? { color } : undefined}>{icon}</span>
       <span className="text-[var(--color-text-secondary)]">{label}:</span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
@@ -43,7 +55,48 @@ function StatItem({
       >
         {value}
       </span>
-    </div>
+    </button>
+  );
+}
+
+function IconChat() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+function IconClock() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+function IconBolt() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
+    </svg>
   );
 }
 
@@ -51,17 +104,20 @@ export function Dashboard() {
   const searchParams = useSearchParams();
   const requestedProject = searchParams.get("project")?.trim() ?? "";
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
+  const gitError = useGitError();
   const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(requestedProject);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
@@ -122,31 +178,30 @@ export function Dashboard() {
     );
   }, [projects, rawSessions]);
 
-  const spawnProjectOptions = useMemo(
-    () =>
-      [...projects].sort((left, right) =>
-        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-      ),
-    [projects],
-  );
-
   const projectNameMap = useMemo(
     () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
     [filterProjectOptions],
   );
 
-  const sessions = useMemo(
-    () =>
-      rawSessions.map((session) =>
-        toDashboardSession(session, projectNameMap.get(session.project)),
-      ),
-    [projectNameMap, rawSessions],
-  );
+  const sessions = useMemo(() => {
+    const all = rawSessions.map((session) =>
+      toDashboardSession(session, projectNameMap.get(session.project)),
+    );
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (s) =>
+        s.id.toLowerCase().includes(q) ||
+        (s.title ?? "").toLowerCase().includes(q) ||
+        s.prompt.toLowerCase().includes(q) ||
+        s.projectName.toLowerCase().includes(q) ||
+        (s.branch ?? "").toLowerCase().includes(q),
+    );
+  }, [projectNameMap, rawSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      review: [],
       pending: [],
       working: [],
       done: [],
@@ -162,12 +217,10 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      review: grouped.review.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
-      total: sessions.length,
     }),
-    [grouped, sessions.length],
+    [grouped],
   );
 
   const activeProjectName = projectId
@@ -175,19 +228,19 @@ export function Dashboard() {
     : "All projects";
 
   useEffect(() => {
-    if (spawnProjectId && spawnProjectOptions.some((project) => project.id === spawnProjectId)) {
+    if (spawnProjectId && filterProjectOptions.some((project) => project.id === spawnProjectId)) {
       return;
     }
 
     const nextProjectId =
-      spawnProjectOptions.find((project) => project.id === projectId)?.id ??
-      spawnProjectOptions[0]?.id ??
+      filterProjectOptions.find((project) => project.id === projectId)?.id ??
+      filterProjectOptions[0]?.id ??
       "";
 
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, spawnProjectOptions]);
+  }, [projectId, spawnProjectId, filterProjectOptions]);
 
   useEffect(() => {
     if (!isMobile) return;
@@ -253,10 +306,28 @@ export function Dashboard() {
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
           <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-            {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
+            {activeProjectName === "All projects" ? "All Projects" : activeProjectName}
           </h1>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="w-32 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter sessions..."
+              value={searchQuery}
+            />
+          </div>
           <select
             className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
             onChange={(event) => syncProjectFilter(event.target.value)}
@@ -274,34 +345,45 @@ export function Dashboard() {
             onClick={() => setSpawnOpen(true)}
             type="button"
           >
-            Spawn_New_Session
+            Spawn Session
           </button>
         </div>
       </header>
 
       <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
-        <StatItem label="Total" value={stats.total} />
         <StatItem
-          label="Input"
+          icon={<IconChat />}
+          label="Needs Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+          active={activeStatFilter === "respond"}
+          onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
         />
         <StatItem
-          label="Review"
-          value={stats.review}
-          color={stats.review > 0 ? "var(--color-accent-orange)" : undefined}
-        />
-        <StatItem
-          label="Pending"
-          value={stats.pending}
-          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-        />
-        <StatItem
+          icon={<IconBolt />}
           label="Working"
           value={stats.working}
           color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+          active={activeStatFilter === "working"}
+          onClick={() => setActiveStatFilter((c) => (c === "working" ? null : "working"))}
         />
-        <div className="ml-auto hidden items-center gap-2 border-l border-[var(--color-border-default)] pl-4 sm:flex">
+        <StatItem
+          icon={<IconClock />}
+          label="Waiting"
+          value={stats.pending}
+          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+          active={activeStatFilter === "pending"}
+          onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
+        />
+        <div className="ml-auto hidden items-center gap-3 border-l border-[var(--color-border-default)] pl-4 sm:flex">
+          {gitError ? (
+            <span
+              className="text-[10px] font-bold tracking-[0.08em] text-[var(--color-status-error)]"
+              title={gitError}
+            >
+              Git Error
+            </span>
+          ) : null}
           <span className="text-[10px] font-bold tracking-[0.08em]">Online</span>
           <span className="h-2 w-2 rounded-full bg-[var(--color-status-ready)] shadow-[0_0_6px_var(--color-status-ready)]" />
         </div>
@@ -335,7 +417,7 @@ export function Dashboard() {
                   value={spawnProjectId}
                 >
                   <option value="">Select project</option>
-                  {spawnProjectOptions.map((project) => (
+                  {filterProjectOptions.map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
                     </option>
@@ -378,7 +460,7 @@ export function Dashboard() {
       ) : null}
 
       {error ? (
-        <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
+        <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
           {error}
         </div>
       ) : null}
@@ -401,7 +483,11 @@ export function Dashboard() {
 
       {!loading && sessions.length > 0 ? (
         <section className="mt-5 space-y-4">
-          {LANE_ORDER.map((level) => (
+          {LANE_ORDER.filter(
+            (level) =>
+              grouped[level].length > 0 &&
+              (activeStatFilter === null || level === activeStatFilter),
+          ).map((level) => (
             <AttentionZone
               key={level}
               collapsed={isMobile ? expandedLevel !== level : undefined}
