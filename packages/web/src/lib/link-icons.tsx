@@ -1,4 +1,16 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
+
+export type PrState = "draft" | "open" | "merged" | "closed";
+
+const PR_STATE_COLORS: Record<PrState, string> = {
+  draft: "var(--color-text-tertiary)",
+  open: "var(--color-status-ready)",
+  merged: "var(--color-accent-violet)",
+  closed: "var(--color-status-error)",
+};
 
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
@@ -11,6 +23,42 @@ export function extractLinkId(link: SpurSessionLink): string {
     return match ? match[1] : "task";
   }
   return link.label;
+}
+
+export function usePrState(url: string | undefined): PrState | null {
+  const [state, setState] = useState<PrState | null>(null);
+
+  useEffect(() => {
+    if (!url) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { state?: string };
+        if (
+          !cancelled &&
+          typeof data.state === "string" &&
+          (data.state === "draft" || data.state === "open" || data.state === "merged" || data.state === "closed")
+        ) {
+          setState(data.state);
+        }
+      } catch {
+        // Non-critical — leave uncolored.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [url]);
+
+  return state;
+}
+
+export function prStateColor(state: PrState | null): string | undefined {
+  return state ? PR_STATE_COLORS[state] : undefined;
 }
 
 export function GithubIcon() {

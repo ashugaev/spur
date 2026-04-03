@@ -10,7 +10,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import { extractLinkId, GithubIcon, JiraIcon } from "@/lib/link-icons";
+import { extractLinkId, GithubIcon, JiraIcon, prStateColor, usePrState } from "@/lib/link-icons";
 import { buildDashboardPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -23,6 +23,26 @@ import {
   type DashboardSession,
   type SpurSessionView,
 } from "@/lib/types";
+
+function LinkBadge({ link }: { link: { label: string; url: string } }) {
+  const prUrl = link.label === "pr" ? link.url : undefined;
+  const state = usePrState(prUrl);
+  const color = prStateColor(state);
+
+  return (
+    <a
+      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+      href={link.url}
+      rel="noreferrer"
+      target="_blank"
+    >
+      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      <span className="text-[11px]" style={color ? { color } : undefined}>
+        {extractLinkId(link)}
+      </span>
+    </a>
+  );
+}
 
 const POLL_INTERVAL_MS = 4_000;
 
@@ -146,16 +166,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.links
                 .filter((l) => l.label === "tracker" || l.label === "pr")
                 .map((link) => (
-                  <a
-                    key={`${link.label}-${link.url}`}
-                    className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-                    href={link.url}
-                    rel="noreferrer"
-                    target="_blank"
-                  >
-                    {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-                    <span className="text-[11px]">{extractLinkId(link)}</span>
-                  </a>
+                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-red-500/30 px-2 py-0.5 text-red-200">offline</span>
