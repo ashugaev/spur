@@ -4,7 +4,7 @@ import "./globals.css";
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
-  variable: "--font-ibm-plex-mono",
+  variable: "--font-jetbrains-mono",
   display: "swap",
   weight: ["300", "400", "500", "700"],
 });

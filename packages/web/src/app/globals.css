@@ -5,64 +5,33 @@
   --color-bg-base: #0D0D0E;
   --color-bg-surface: rgba(17, 17, 18, 0.8);
   --color-bg-elevated: rgba(23, 23, 26, 0.9);
-  --color-bg-subtle: rgba(30, 30, 33, 0.7);
-
-  /* Backward-compat aliases */
-  --color-bg-primary: var(--color-bg-base);
-  --color-bg-secondary: var(--color-bg-surface);
-  --color-bg-tertiary: var(--color-bg-elevated);
 
   /* ── Borders ─────────────────────────────────────────────────────── */
   --color-border-subtle: rgba(35, 35, 38, 0.6);
   --color-border-default: rgba(35, 35, 38, 1);
   --color-border-strong: rgba(50, 50, 54, 1);
 
-  /* Backward-compat aliases */
-  --color-border-muted: var(--color-border-subtle);
-  --color-border-emphasis: var(--color-border-strong);
-
   /* ── Text ─────────────────────────────────────────────────────────── */
   --color-text-primary: #E1E1E1;
   --color-text-secondary: #A1A1A1;
   --color-text-tertiary: #555558;
-  --color-text-muted: #555558;
   --color-text-inverse: #0D0D0E;
 
   /* ── Interactive accent ──────────────────────────────────────────── */
   --color-accent: #FFFFFF;
   --color-accent-hover: rgba(255, 255, 255, 0.8);
   --color-accent-subtle: rgba(255, 255, 255, 0.08);
+  --color-accent-orange: #d18616;
 
   /* ── Status / semantic colors ────────────────────────────────────── */
   --color-status-working: #58a6ff;
   --color-status-ready: #3fb950;
   --color-status-attention: #FFD700;
-  --color-status-idle: #484f58;
-  --color-status-done: #30363d;
   --color-status-error: #FF4D4D;
 
-  /* Semantic aliases */
-  --color-accent-blue: #58a6ff;
-  --color-accent-green: #3fb950;
-  --color-accent-yellow: #FFD700;
-  --color-accent-orange: #d18616;
-  --color-accent-red: #FF4D4D;
-  --color-accent-violet: #a371f7;
-  --color-accent-purple: #bc8cff;
-
   /* ── Typography ──────────────────────────────────────────────────── */
-  --font-sans: var(--font-ibm-plex-mono), "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  --font-mono: var(--font-ibm-plex-mono), "SF Mono", "Menlo", "Consolas", monospace;
-
-  /* ── Border radius ────────────────────────────────────────────────── */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-
-  /* ── Transitions ──────────────────────────────────────────────────── */
-  --transition-quick: 0.1s;
-  --transition-regular: 0.25s;
+  --font-sans: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  --font-mono: var(--font-jetbrains-mono), "SF Mono", "Menlo", "Consolas", monospace;
 }
 
 /* ── Base styles ─────────────────────────────────────────────────────── */
@@ -116,15 +85,6 @@ a:hover {
   }
 }
 
-@keyframes spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @keyframes pulse {
   0%,
   100% {
@@ -132,17 +92,6 @@ a:hover {
   }
   50% {
     opacity: 0.4;
-  }
-}
-
-@keyframes slide-up {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -155,18 +104,12 @@ a:hover {
 .session-card {
   background: rgba(17, 17, 18, 0.95);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-  transition:
-    transform 0.12s ease,
-    box-shadow 0.12s ease,
-    border-color 0.12s ease;
+  transition: border-color 0.12s ease;
 
-  /* Bump dim text colors inside the card */
-  --color-text-secondary: #A1A1A1;
-  --color-text-muted: #666669;
+  /* Bump dim text on darker card surface */
   --color-text-tertiary: #666669;
 }
 
 .session-card:hover {
   background: rgba(255, 255, 255, 0.03);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }

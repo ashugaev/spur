@@ -42,7 +42,7 @@ export function SessionCard({ session, onOpenTerminal }: SessionCardProps) {
   return (
     <article
       className={cn(
-        "session-card rounded-sm border px-2.5 py-2 shadow-[0_12px_36px_rgba(0,0,0,0.2)]",
+        "session-card rounded-sm border px-2.5 py-2",
         toneClasses[level],
       )}
     >
