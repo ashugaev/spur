@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-export type PrState = "draft" | "open" | "merged" | "closed";
-export type CiStatus = "success" | "failure" | "pending" | null;
+type PrState = "draft" | "open" | "merged" | "closed";
+type CiStatus = "success" | "failure" | "pending" | null;
 
 interface PrStatusResponse {
   state: PrState;

@@ -101,11 +101,6 @@ export function usePrInfo(url: string | undefined): PrInfo {
   return info;
 }
 
-/** @deprecated Use usePrInfo instead */
-export function usePrState(url: string | undefined): PrState | null {
-  return usePrInfo(url).state;
-}
-
 export function prStateColor(state: PrState | null): string | undefined {
   return state ? PR_STATE_COLORS[state] : undefined;
 }
