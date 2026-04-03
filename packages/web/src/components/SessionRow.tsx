@@ -1,6 +1,5 @@
 "use client";
 
-import { ActivityDot } from "@/components/ActivityDot";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import {
   CiStatusDot,
@@ -30,8 +29,6 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
-      <ActivityDot activity={session.state} dotOnly size={8} />
-
       <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
         {session.projectName}
       </span>
