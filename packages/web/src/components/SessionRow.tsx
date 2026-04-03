@@ -46,10 +46,10 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
       <button
         aria-label={`Open web terminal for ${session.id}`}
         className={cn(
-          "inline-flex h-6 w-6 shrink-0 items-center justify-center border opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+          "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition",
           canAttach
-            ? "border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
-            : "border-[var(--color-border-default)] text-[var(--color-text-tertiary)]",
+            ? "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+            : "hidden",
         )}
         disabled={!canAttach}
         onClick={() => onOpenTerminal?.(session)}

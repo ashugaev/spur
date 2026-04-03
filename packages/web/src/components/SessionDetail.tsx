@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityDot } from "@/components/ActivityDot";
-import { cn } from "@/lib/cn";
+import { DirectTerminal } from "@/components/DirectTerminal";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -30,50 +30,12 @@ interface SessionDetailProps {
   projectId?: string;
 }
 
-function DetailCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
-      <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-        {title}
-      </h2>
-      <div className="mt-4">{children}</div>
-    </section>
-  );
-}
-
-function ActionButton({
-  children,
-  disabled,
-  onClick,
-  tone = "default",
-}: {
-  children: React.ReactNode;
-  disabled?: boolean;
-  onClick: () => void;
-  tone?: "default" | "danger";
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        "rounded-sm border px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-        tone === "danger"
-          ? "border-red-500/40 text-red-200 hover:bg-red-500/10"
-          : "border-[var(--color-border-default)] text-[var(--color-text-primary)] hover:bg-white/5",
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
 
   const loadSession = useCallback(async () => {
     try {
@@ -136,100 +98,174 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const effectiveProjectId = projectId ?? session?.projectId ?? "";
 
+  const canAttach =
+    session &&
+    session.runtimeAlive &&
+    !isTerminalSession(session) &&
+    Boolean(session.tmuxSession);
+
   return (
-    <main className="mx-auto max-w-6xl px-4 py-5 sm:px-6 lg:px-8">
+    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
       <a
-        className="inline-flex items-center gap-2 text-sm text-[var(--color-accent)] hover:no-underline"
+        className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(effectiveProjectId)}
       >
-        <span aria-hidden="true">←</span>
-        Back to dashboard
+        ← Back
       </a>
 
       {error ? (
-        <div className="mt-5 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-4 py-3 text-sm text-red-100">
+        <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
           {error}
         </div>
       ) : null}
 
       {session ? (
         <>
-          <header className="mt-5 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
-              <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                <span>{session.projectName}</span>
-                <span>•</span>
-                <span>{session.agent}</span>
-                <span>•</span>
-                <span className="font-mono">{session.id}</span>
-              </div>
+          {/* Header */}
+          <header className="mt-4 border-b-2 border-[var(--color-accent)] pb-4">
+            <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-tertiary)] uppercase tracking-[0.1em]">
+              <span>{session.projectName}</span>
+              <span>•</span>
+              <span>{session.agent}</span>
+              <span>•</span>
+              <span className="font-mono">{session.id}</span>
+            </div>
 
-              <h1 className="text-3xl font-semibold tracking-[-0.04em] text-[var(--color-text-primary)]">
-                {title}
-              </h1>
-              {subtitle ? (
-                <p className="mt-3 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">
-                  {subtitle}
-                </p>
-              ) : null}
+            <h1 className="mt-2 text-xl font-bold tracking-[-0.02em] text-[var(--color-text-primary)] uppercase sm:text-2xl">
+              {title}
+            </h1>
+            {subtitle ? (
+              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">
+                {subtitle}
+              </p>
+            ) : null}
 
-              <div className="mt-5 flex flex-wrap items-center gap-2">
-                <ActivityDot activity={session.state} />
-                <span className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
-                  status: {session.status}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <ActivityDot activity={session.state} />
+              {session.branch ? (
+                <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
+                  {session.branch}
                 </span>
-                {session.branch ? (
-                  <span className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 font-mono text-[11px] text-[var(--color-text-secondary)]">
-                    {session.branch}
-                  </span>
-                ) : null}
-                {!session.runtimeAlive && !isTerminalSession(session) ? (
-                  <span className="rounded-sm border border-red-500/30 px-2.5 py-1 text-[11px] text-red-200">
-                    agent offline
-                  </span>
-                ) : null}
-                {hasServiceProblems(session) ? (
-                  <span className="rounded-sm border border-orange-400/30 px-2.5 py-1 text-[11px] text-orange-200">
-                    service issues detected
-                  </span>
-                ) : null}
-              </div>
+              ) : null}
+              {!session.runtimeAlive && !isTerminalSession(session) ? (
+                <span className="border border-red-500/30 px-2 py-0.5 text-red-200">
+                  offline
+                </span>
+              ) : null}
+              {hasServiceProblems(session) ? (
+                <span className="border border-orange-400/30 px-2 py-0.5 text-orange-200">
+                  service issue
+                </span>
+              ) : null}
+            </div>
           </header>
 
-          <section className="mt-6 grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
-            <div className="space-y-3">
-              <DetailCard title="Message">
+          {/* Actions bar */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-default)] py-3">
+            {canAttach ? (
+              <button
+                type="button"
+                className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={() => setTerminalOpen(true)}
+              >
+                Terminal
+              </button>
+            ) : null}
+            {canPause(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("pause")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+              >
+                {busyAction === "pause" ? "Pausing..." : "Pause"}
+              </button>
+            ) : null}
+            {isRestorable(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("restore")}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+              >
+                {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
+            ) : null}
+            {canComplete(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("complete")}
+                className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
+              >
+                {busyAction === "complete" ? "Completing..." : "Complete"}
+              </button>
+            ) : null}
+            {!isTerminalSession(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleAction("kill", { force: true })}
+                className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
+              >
+                {busyAction === "kill" ? "Killing..." : "Kill"}
+              </button>
+            ) : null}
+          </div>
+
+          {/* Content */}
+          <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
+            <div className="space-y-4">
+              {/* Message */}
+              <section>
+                <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  Message
+                  <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                </h2>
                 {canSendMessage(session) ? (
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                     <textarea
-                      className="min-h-32 w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-3 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                      className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
                       onChange={(event) => setMessage(event.target.value)}
-                      placeholder="Message to the running agent"
+                      onKeyDown={(event) => {
+                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                          void handleAction("send", { message: message.trim() });
+                        }
+                      }}
+                      placeholder="Message to the running agent..."
                       value={message}
                     />
-                    <div className="flex justify-end">
-                      <ActionButton
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">⌘/Ctrl + Enter</span>
+                      <button
+                        type="button"
                         disabled={busyAction !== null || !message.trim()}
                         onClick={() => void handleAction("send", { message: message.trim() })}
+                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       >
                         {busyAction === "send" ? "Sending..." : "Send"}
-                      </ActionButton>
+                      </button>
                     </div>
                   </div>
                 ) : (
-                  <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-                    This session is not currently accepting input. Restore it first if you want to
-                    continue the same worktree.
+                  <p className="py-2 text-[var(--color-text-secondary)]">
+                    Not accepting input. Restore to continue.
                   </p>
                 )}
-              </DetailCard>
+              </section>
 
+              {/* Links */}
               {session.links.length > 0 ? (
-                <DetailCard title="Links">
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Links
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
                   <div className="flex flex-wrap gap-2">
                     {session.links.map((link) => (
                       <a
                         key={`${session.id}-${link.label}-${link.url}`}
-                        className="rounded-sm border border-[var(--color-border-default)] px-3 py-1.5 text-sm text-[var(--color-accent)] hover:no-underline"
+                        className="border border-[var(--color-border-default)] px-2.5 py-1 text-[var(--color-accent)] hover:no-underline"
                         href={link.url}
                         rel="noreferrer"
                         target="_blank"
@@ -238,128 +274,97 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </a>
                     ))}
                   </div>
-                </DetailCard>
+                </section>
               ) : null}
 
-              <DetailCard title="Services">
-                {session.services.length > 0 ? (
-                  <div className="space-y-3">
-                    {session.services.map((service) => (
-                      <article
-                        key={`${session.id}-${service.serviceId}`}
-                        className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-4"
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-3">
-                          <div>
-                            <div className="font-mono text-sm text-[var(--color-text-primary)]">
-                              {service.serviceId}
-                            </div>
-                            <div className="mt-1 text-sm text-[var(--color-text-secondary)]">
-                              {service.command}
-                            </div>
-                          </div>
-                          <div className="rounded-sm border border-[var(--color-border-default)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)]">
-                            {service.state}
-                            {typeof service.port === "number" ? ` • :${service.port}` : ""}
-                          </div>
-                        </div>
-                        <div className="mt-3 text-xs text-[var(--color-text-tertiary)]">
-                          cwd: {truncateMiddle(service.cwd)}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm leading-6 text-[var(--color-text-secondary)]">
-                    No auxiliary services are registered for this session.
-                  </p>
-                )}
-              </DetailCard>
+              {/* Services */}
+              {session.services.length > 0 ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Services
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  {session.services.map((service) => (
+                    <div
+                      key={`${session.id}-${service.serviceId}`}
+                      className="data-row flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] px-2 py-2"
+                    >
+                      <div>
+                        <span className="font-mono text-[var(--color-text-primary)]">{service.serviceId}</span>
+                        <span className="ml-2 text-[var(--color-text-tertiary)]">{service.command}</span>
+                      </div>
+                      <span className="text-[var(--color-text-secondary)]">
+                        {service.state}{typeof service.port === "number" ? ` :${service.port}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </section>
+              ) : null}
             </div>
 
-            <div className="space-y-3">
-              <DetailCard title="Actions">
-                <div className="flex flex-wrap gap-2">
-                  {canPause(session) ? (
-                    <ActionButton
-                      disabled={busyAction !== null}
-                      onClick={() => void handleAction("pause")}
-                    >
-                      {busyAction === "pause" ? "Pausing..." : "Pause"}
-                    </ActionButton>
-                  ) : null}
-                  {isRestorable(session) ? (
-                    <ActionButton
-                      disabled={busyAction !== null}
-                      onClick={() => void handleAction("restore")}
-                    >
-                      {busyAction === "restore" ? "Restoring..." : "Restore"}
-                    </ActionButton>
-                  ) : null}
-                  {canComplete(session) ? (
-                    <ActionButton
-                      disabled={busyAction !== null}
-                      onClick={() => void handleAction("complete")}
-                    >
-                      {busyAction === "complete" ? "Completing..." : "Complete"}
-                    </ActionButton>
-                  ) : null}
-                  {!isTerminalSession(session) ? (
-                    <ActionButton
-                      disabled={busyAction !== null}
-                      onClick={() => void handleAction("kill", { force: true })}
-                      tone="danger"
-                    >
-                      {busyAction === "kill" ? "Killing..." : "Kill"}
-                    </ActionButton>
-                  ) : null}
+            {/* Runtime sidebar */}
+            <section>
+              <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                Runtime
+                <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+              </h2>
+              <dl className="space-y-2 text-[var(--color-text-secondary)]">
+                {[
+                  ["Created", formatAbsoluteTime(session.createdAt)],
+                  ["Last activity", formatRelativeTime(session.lastActivityAt)],
+                  ["Worktree", session.worktree ? "isolated" : "shared"],
+                  ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
+                  ["Workspace", session.workspaceExists ? "present" : "missing"],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5">
+                    <dt className="text-[var(--color-text-tertiary)]">{label}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+
+              <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  Worktree path
                 </div>
-              </DetailCard>
-
-              <DetailCard title="Runtime">
-                <dl className="space-y-3 text-sm text-[var(--color-text-secondary)]">
-                  <div className="flex items-center justify-between gap-4">
-                    <dt className="text-[var(--color-text-tertiary)]">Created</dt>
-                    <dd>{formatAbsoluteTime(session.createdAt)}</dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <dt className="text-[var(--color-text-tertiary)]">Last activity</dt>
-                    <dd>{formatRelativeTime(session.lastActivityAt)}</dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <dt className="text-[var(--color-text-tertiary)]">Worktree</dt>
-                    <dd>{session.worktree ? "isolated" : "shared"}</dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <dt className="text-[var(--color-text-tertiary)]">Agent runtime</dt>
-                    <dd>{session.runtimeAlive ? "alive" : "offline"}</dd>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <dt className="text-[var(--color-text-tertiary)]">Workspace</dt>
-                    <dd>{session.workspaceExists ? "present" : "missing"}</dd>
-                  </div>
-                </dl>
-
-                <div className="mt-4 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
-                    Worktree path
-                  </div>
-                  <div className="mt-2 font-mono text-xs text-[var(--color-text-secondary)]">
-                    {truncateMiddle(session.worktreePath, 96)}
-                  </div>
+                <div className="mt-1 font-mono text-[var(--color-text-secondary)]">
+                  {truncateMiddle(session.worktreePath, 60)}
                 </div>
+              </div>
 
-                {session.error ? (
-                  <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-3 text-sm text-red-100">
-                    {session.error}
-                  </div>
-                ) : null}
-              </DetailCard>
+              {session.error ? (
+                <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-2.5 py-2 text-red-100">
+                  {session.error}
+                </div>
+              ) : null}
+            </section>
+          </div>
+
+          {/* Terminal modal */}
+          {terminalOpen && canAttach ? (
+            <div
+              className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg-base)]"
+              role="dialog"
+              aria-label={`Terminal ${session.id}`}
+            >
+              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
+                <span className="font-bold uppercase text-[var(--color-text-primary)]">Terminal — {session.id}</span>
+                <button
+                  type="button"
+                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                  onClick={() => setTerminalOpen(false)}
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="flex-1">
+                <DirectTerminal sessionId={session.id} />
+              </div>
             </div>
-          </section>
+          ) : null}
         </>
       ) : (
-        <p className="mt-5 text-sm text-[var(--color-text-secondary)]">Loading session...</p>
+        <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
     </main>
   );
