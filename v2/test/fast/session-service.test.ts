@@ -232,12 +232,14 @@ describe("SessionService", () => {
 
     buildAgentLaunchPlanMock
       .mockReset()
-      .mockImplementation((agent: string, initialMessage: string) => ({
+      .mockImplementation((agent: string, initialMessage: string, options?: { planMode?: boolean }) => ({
         agent,
         launchCommand:
           agent === "codex"
             ? "codex --dangerously-bypass-approvals-and-sandbox"
-            : "claude --dangerously-skip-permissions",
+            : options?.planMode
+              ? "claude --dangerously-skip-permissions --permission-mode plan"
+              : "claude --dangerously-skip-permissions",
         initialMessage,
         readyMarkers: agent === "codex" ? ["OpenAI Codex", "›"] : ["Claude Code", "❯"],
       }));
@@ -248,10 +250,19 @@ describe("SessionService", () => {
         "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
       readyMarkers: ["❯"],
     });
-    buildAgentResumePlanMock.mockReset().mockReturnValue({
-      launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
-      readyMarkers: ["❯"],
-    });
+    buildAgentResumePlanMock.mockReset().mockImplementation(
+      (
+        _agent: string,
+        _agentSessionId: string,
+        _launchCommand: string,
+        options?: { planMode?: boolean },
+      ) => ({
+        launchCommand: options?.planMode
+          ? "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan"
+          : "claude --resume session-uuid --dangerously-skip-permissions",
+        readyMarkers: ["❯"],
+      }),
+    );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});
@@ -375,6 +386,7 @@ describe("SessionService", () => {
     expect(result.runtimeAlive).toBe(true);
     expect(result.workspaceExists).toBe(true);
     expect(result.worktree).toBe(true);
+    expect(result.planMode).toBe(false);
     expect(result.branch).toBe("api-1");
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     expect(
@@ -390,6 +402,59 @@ describe("SessionService", () => {
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
+  });
+
+  it("passes planMode to launch planning and persists it on the session", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      planMode: true,
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {
+      planMode: true,
+    });
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
+      }),
+    );
+    expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        planMode: true,
+      }),
+    );
+    expect(writeSessionMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        planMode: true,
+      }),
+    );
+    expect(result.planMode).toBe(true);
+  });
+
+  it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      planMode: true,
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
+      planMode: true,
+    });
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      }),
+    );
+    expect(result.planMode).toBe(true);
   });
 
   it("starts a pipelined session by sending only the first step immediately", async () => {
@@ -1611,6 +1676,47 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
   });
 
+  it("uses planMode from the session as the source of truth during send recovery", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      planMode: true,
+      agentSessionId: "session-uuid",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
+      status: "paused",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.send("api-1", { message: "resume work" });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {
+      planMode: true,
+    });
+    expect(buildAgentResumePlanMock).toHaveBeenCalledWith(
+      "claude",
+      "session-uuid",
+      "claude --dangerously-skip-permissions --permission-mode plan",
+      { planMode: true },
+    );
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchCommand:
+          "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+      }),
+    );
+  });
+
   it("respects a per-spawn worktree override without changing the project default", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -2297,6 +2403,52 @@ describe("SessionService", () => {
     );
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
+    );
+  });
+
+  it("passes planMode through restore planning and native resume", async () => {
+    findAgentSessionIdMock.mockResolvedValue("session-uuid");
+    buildAgentRestorePlanMock.mockResolvedValueOnce({
+      agent: "claude",
+      launchCommand:
+        "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+      initialMessage:
+        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      readyMarkers: ["❯"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      planMode: true,
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      "/tmp/spur-worktrees/api/api-1",
+      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      { planMode: true },
+    );
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchCommand:
+          "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+      }),
     );
   });
 

@@ -63,13 +63,14 @@ export async function findClaudeSessionId(worktreePath: string): Promise<string 
 
 export function buildClaudePlan(
   prompt: string,
-  options?: { settingsPath?: string },
+  options?: { settingsPath?: string; planMode?: boolean },
 ): AgentLaunchPlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
+  const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   return {
-    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${settingsArg}`,
+    launchCommand: `${claudeCommand()} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
     initialMessage: prompt,
     readyMarkers: ["Claude Code", "❯"],
   };
@@ -78,13 +79,14 @@ export function buildClaudePlan(
 export function buildClaudeResumePlan(
   sessionId: string,
   binary = claudeCommand(),
-  options?: { settingsPath?: string },
+  options?: { settingsPath?: string; planMode?: boolean },
 ): AgentResumePlan {
   const settingsArg = options?.settingsPath
     ? ` --settings ${shellEscape(options.settingsPath)}`
     : "";
+  const planModeArg = options?.planMode ? " --permission-mode plan" : "";
   return {
-    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${settingsArg}`,
+    launchCommand: `${shellEscape(binary)} --resume ${shellEscape(sessionId)} --dangerously-skip-permissions${planModeArg}${settingsArg}`,
     readyMarkers: ["❯"],
   };
 }
@@ -92,6 +94,7 @@ export function buildClaudeResumePlan(
 export async function buildClaudeRestorePlan(
   worktreePath: string,
   prompt: string,
+  options?: { settingsPath?: string; planMode?: boolean },
 ): Promise<AgentLaunchPlan | null> {
   const sessionId = await findClaudeSessionId(worktreePath);
   if (!sessionId) {
@@ -99,7 +102,7 @@ export async function buildClaudeRestorePlan(
   }
 
   return {
-    ...buildClaudeResumePlan(sessionId),
+    ...buildClaudeResumePlan(sessionId, claudeCommand(), options),
     initialMessage: prompt,
   };
 }

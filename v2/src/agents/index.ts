@@ -16,6 +16,26 @@ import type { AgentName } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
+interface AgentPlanOptions {
+  claudeSettingsPath?: string;
+  codexHomePath?: string;
+  planMode?: boolean;
+}
+
+function claudePlanOptions(options?: AgentPlanOptions): {
+  settingsPath?: string;
+  planMode?: boolean;
+} {
+  return {
+    ...(options?.claudeSettingsPath ? { settingsPath: options.claudeSettingsPath } : {}),
+    ...(options?.planMode ? { planMode: true } : {}),
+  };
+}
+
+function codexPlanOptions(options?: AgentPlanOptions): { codexHomePath?: string } {
+  return options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {};
+}
+
 export function parseAgentName(agent: string): AgentName {
   if (agent === "claude" || agent === "codex") {
     return agent;
@@ -27,26 +47,24 @@ export function parseAgentName(agent: string): AgentName {
 export function buildAgentLaunchPlan(
   agent: AgentName,
   prompt: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string },
+  options?: AgentPlanOptions,
 ) {
   if (agent === "claude") {
-    return options?.claudeSettingsPath
-      ? buildClaudePlan(prompt, { settingsPath: options.claudeSettingsPath })
-      : buildClaudePlan(prompt);
+    return buildClaudePlan(prompt, claudePlanOptions(options));
   }
-  return buildCodexPlan(prompt, options);
+  return buildCodexPlan(prompt, codexPlanOptions(options));
 }
 
 export async function buildAgentRestorePlan(
   agent: AgentName,
   worktreePath: string,
   prompt: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string },
+  options?: AgentPlanOptions,
 ): Promise<AgentLaunchPlan | null> {
   if (agent === "claude") {
-    return buildClaudeRestorePlan(worktreePath, prompt);
+    return buildClaudeRestorePlan(worktreePath, prompt, claudePlanOptions(options));
   }
-  return buildCodexRestorePlan(worktreePath, prompt, options);
+  return buildCodexRestorePlan(worktreePath, prompt, codexPlanOptions(options));
 }
 
 function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
@@ -80,17 +98,13 @@ export function buildAgentResumePlan(
   agent: AgentName,
   agentSessionId: string,
   launchCommand = "",
-  options?: { claudeSettingsPath?: string; codexHomePath?: string },
+  options?: AgentPlanOptions,
 ): AgentResumePlan {
   const binary = extractCommandBinary(launchCommand, agent);
   if (agent === "claude") {
-    return options?.claudeSettingsPath
-      ? buildClaudeResumePlan(agentSessionId, binary, {
-          settingsPath: options.claudeSettingsPath,
-        })
-      : buildClaudeResumePlan(agentSessionId, binary);
+    return buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options));
   }
-  return buildCodexResumePlan(agentSessionId, binary, options);
+  return buildCodexResumePlan(agentSessionId, binary, codexPlanOptions(options));
 }
 
 export async function findAgentSessionId(

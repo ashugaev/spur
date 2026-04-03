@@ -1672,6 +1672,58 @@ projects:
     expect(log).toContain("ship the task");
   });
 
+  it.each([
+    { agent: "claude", expectPlanFlag: true },
+    { agent: "codex", expectPlanFlag: false },
+  ] as const)(
+    "accepts --plan for $agent and applies startup behavior only where supported",
+    async (row) => {
+      const port = await findFreePort();
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-plan-${row.agent}-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      });
+      const configPath = await context.writeConfig(
+        "plan-flag.yaml",
+        baseConfig(context, sessionPrefix),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            "plan mode check",
+            "--agent",
+            row.agent,
+            "--plan",
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      expect(spawned.planMode).toBe(true);
+      const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("startup:launch::"),
+      });
+      if (row.expectPlanFlag) {
+        expect(log).toContain("--permission-mode");
+        expect(log).toContain("plan");
+      } else {
+        expect(log).not.toContain("--permission-mode");
+      }
+    },
+  );
+
   it("uses project default spawn steps, paces later steps, and lets CLI steps override them", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
