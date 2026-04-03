@@ -50,7 +50,7 @@ function StatItem({
   );
 }
 
-function IconHub() {
+function IconChat() {
   return (
     <svg
       className="h-4 w-4"
@@ -59,21 +59,7 @@ function IconHub() {
       stroke="currentColor"
       strokeWidth="1.5"
     >
-      <circle cx="12" cy="12" r="3" />
-      <path d="M12 3v6m0 6v6m9-9h-6m-6 0H3" />
-    </svg>
-  );
-}
-function IconAlert() {
-  return (
-    <svg
-      className="h-4 w-4"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-    >
-      <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   );
 }
@@ -105,7 +91,7 @@ function IconClock() {
     </svg>
   );
 }
-function IconCpu() {
+function IconBolt() {
   return (
     <svg
       className="h-4 w-4"
@@ -114,9 +100,7 @@ function IconCpu() {
       stroke="currentColor"
       strokeWidth="1.5"
     >
-      <rect x="4" y="4" width="16" height="16" rx="2" />
-      <rect x="9" y="9" width="6" height="6" />
-      <path d="M9 1v3m6-3v3M9 20v3m6-3v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+      <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" />
     </svg>
   );
 }
@@ -240,9 +224,8 @@ export function Dashboard() {
       review: grouped.review.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
-      total: sessions.length,
     }),
-    [grouped, sessions.length],
+    [grouped],
   );
 
   const activeProjectName = projectId
@@ -373,9 +356,8 @@ export function Dashboard() {
       </header>
 
       <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
-        <StatItem icon={<IconHub />} label="Total" value={stats.total} />
         <StatItem
-          icon={<IconAlert />}
+          icon={<IconChat />}
           label="Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
@@ -393,7 +375,7 @@ export function Dashboard() {
           color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
         />
         <StatItem
-          icon={<IconCpu />}
+          icon={<IconBolt />}
           label="Working"
           value={stats.working}
           color={stats.working > 0 ? "var(--color-status-working)" : undefined}
