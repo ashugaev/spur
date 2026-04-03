@@ -1795,6 +1795,69 @@ projects:
     expect(overridePane).not.toContain("[Spur step 1/2: research]");
   });
 
+  it("queues a busy manual send and delivers it before the next pipeline step", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-send-queue-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "send-queue.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - "research"
+        - "test"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "ship the task", "--json"]))
+        .stdout,
+    ) as SessionView;
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("[Spur step 1/2: research]"),
+    });
+
+    await context.execCli(["--config", configPath, "send", spawned.id, "simulate-work", "--json"]);
+    await context.execCli([
+      "--config",
+      configPath,
+      "send",
+      spawned.id,
+      "queued follow up",
+      "--json",
+    ]);
+
+    const queuedLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("queued follow up"),
+    });
+    expect(queuedLog).toContain("simulate-work");
+    expect(queuedLog).toContain("queued follow up");
+    expect(queuedLog).not.toContain("[Spur step 2/2: test]");
+
+    const finalLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 45_000,
+      accept: (value) => value.includes("[Spur step 2/2: test]"),
+    });
+    expect(finalLog.indexOf("queued follow up")).toBeGreaterThan(-1);
+    expect(finalLog.indexOf("[Spur step 2/2: test]")).toBeGreaterThan(
+      finalLog.indexOf("queued follow up"),
+    );
+  });
+
   it("blocks kill from the interactive list when the worktree is dirty", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

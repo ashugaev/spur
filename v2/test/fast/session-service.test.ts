@@ -652,7 +652,8 @@ describe("SessionService", () => {
   });
 
   it("logs message delivery after updating tmux and metadata", async () => {
-    readSessionMock.mockReturnValue({
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -669,8 +670,10 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
 
     const result = await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { interrupt: false });
     expect(writeSessionMock).toHaveBeenCalledWith(
@@ -688,6 +691,76 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("queues manual send messages while the agent is busy", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    captureTmuxPaneMock.mockResolvedValue("Working on it");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages).toEqual({
+      messages: ["follow up"],
+      awaitingPrompt: false,
+    });
+
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("delivers a manual send before the next pipeline step when the agent is waiting", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      pipeline: {
+        steps: ["research", "test"],
+        nextStepIndex: 1,
+        status: "running",
+      },
+    });
+    listSessionsMock.mockReturnValue([]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(1, "api-1", "follow up", {
+      interrupt: false,
+    });
   });
 
   it("classifies waiting state from prompt pane", async () => {
@@ -1631,7 +1704,8 @@ describe("SessionService", () => {
   });
 
   it("resumes a paused session on send and marks it running again", async () => {
-    readSessionMock.mockReturnValue({
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
       id: "api-1",
       project: "api",
       agent: "claude",
@@ -1646,10 +1720,12 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
+    listSessionsMock.mockReturnValue([]);
     tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
 
     const result = await service.send("api-1", { message: "resume work" });
 

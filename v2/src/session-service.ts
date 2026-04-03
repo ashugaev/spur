@@ -262,6 +262,33 @@ function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number
   return Math.max(0, timestamp - Date.now());
 }
 
+function queuedMessages(session: SessionRecord): string[] {
+  return session.queuedMessages?.messages ?? [];
+}
+
+function hasQueuedMessages(session: SessionRecord): boolean {
+  return queuedMessages(session).length > 0;
+}
+
+function withQueuedMessages(
+  session: SessionRecord,
+  messages: string[],
+  awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false,
+): SessionRecord {
+  if (messages.length === 0 && !awaitingPrompt) {
+    const next = { ...session };
+    delete next.queuedMessages;
+    return next;
+  }
+  return {
+    ...session,
+    queuedMessages: {
+      messages,
+      awaitingPrompt,
+    },
+  };
+}
+
 function classifyLivePaneState(pane: string): SessionState {
   const lines = normalizePaneLines(pane);
   if (isWaitingInput(lines)) {
@@ -449,7 +476,7 @@ export class SessionService {
   readonly startedAt: string;
   config: AppConfig;
   private registryPaths: string[];
-  private readonly pipelineRuns = new Map<string, Promise<void>>();
+  private readonly deliveryRuns = new Map<string, Promise<void>>();
   private readonly attentionStates = new Map<string, AttentionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
@@ -524,7 +551,7 @@ export class SessionService {
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
     writeConfigRegistry(this.config.dataDir, this.registryPaths);
-    this.resumeRunningPipelines();
+    this.resumeSessionDelivery();
   }
 
   getRegistryPaths(): string[] {
@@ -542,8 +569,8 @@ export class SessionService {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
 
-  private schedulePipelineRunner(sessionId: string): void {
-    this.ensurePipelineRunner(sessionId);
+  private scheduleDeliveryRunner(sessionId: string): void {
+    this.ensureDeliveryRunner(sessionId);
   }
 
   private startAttentionMonitor(): void {
@@ -1150,8 +1177,8 @@ export class SessionService {
           agentSessionId: persistedRecord.agentSessionId ?? null,
         },
       });
-      if (persistedRecord.pipeline?.status === "running") {
-        this.schedulePipelineRunner(persistedRecord.id);
+      if (this.shouldRunDelivery(persistedRecord)) {
+        this.scheduleDeliveryRunner(persistedRecord.id);
       }
 
       return await this.enrich(persistedRecord);
@@ -1228,7 +1255,44 @@ export class SessionService {
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
-    return this.deliver(sessionId, request.message, { interrupt: false });
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (typeof request.message !== "string") {
+      throw new Error("message must be a non-empty string");
+    }
+    const message = request.message.trim();
+    if (!message) {
+      throw new Error("message must be a non-empty string");
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+
+    const readySession = await this.ensureSessionReadyForSend(session);
+    const updated = withQueuedMessages(
+      {
+        ...readySession,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      [...queuedMessages(readySession), message],
+    );
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.message.queued", {
+      level: "info",
+      sessionId,
+      projectId: updated.project,
+      message: `Queued message for ${sessionId}`,
+      details: {
+        queuedCount: queuedMessages(updated).length,
+        messageLength: message.length,
+      },
+    });
+    await this.tryDeliverQueuedMessage(sessionId);
+    this.scheduleDeliveryRunner(sessionId);
+    return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
   }
 
   async deliver(
@@ -1840,51 +1904,145 @@ export class SessionService {
       },
     });
     this.stateCache.delete(sessionId);
-    if (persistedRestored.pipeline?.status === "running") {
-      this.schedulePipelineRunner(persistedRestored.id);
+    if (this.shouldRunDelivery(persistedRestored)) {
+      this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
   }
 
-  private resumeRunningPipelines(): void {
+  private resumeSessionDelivery(): void {
     for (const session of listSessions(this.config.dataDir)) {
-      this.ensurePipelineRunner(session.id);
+      this.ensureDeliveryRunner(session.id);
     }
   }
 
-  private ensurePipelineRunner(sessionId: string): void {
-    if (this.pipelineRuns.has(sessionId)) {
+  private shouldRunDelivery(session: SessionRecord | null): session is SessionRecord {
+    if (!session || session.status !== "running") {
+      return false;
+    }
+    return (
+      hasQueuedMessages(session) ||
+      session.queuedMessages?.awaitingPrompt === true ||
+      session.pipeline?.status === "running"
+    );
+  }
+
+  private ensureDeliveryRunner(sessionId: string): void {
+    if (this.deliveryRuns.has(sessionId)) {
       return;
     }
 
     const session = readSession(this.config.dataDir, sessionId);
-    if (
-      !session?.pipeline ||
-      session.status !== "running" ||
-      session.pipeline.status !== "running"
-    ) {
+    if (!this.shouldRunDelivery(session)) {
       return;
     }
 
-    const run = this.runPipeline(sessionId).finally(() => {
-      this.pipelineRuns.delete(sessionId);
+    const run = this.runDeliveryLoop(sessionId).finally(() => {
+      this.deliveryRuns.delete(sessionId);
     });
-    this.pipelineRuns.set(sessionId, run);
+    this.deliveryRuns.set(sessionId, run);
   }
 
-  private async runPipeline(sessionId: string): Promise<void> {
+  private async tryDeliverQueuedMessage(sessionId: string): Promise<boolean> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!this.shouldRunDelivery(session) || !hasQueuedMessages(session)) {
+      return false;
+    }
+
+    const readySession = await this.ensureSessionReadyForSend(session);
+    const paneState = await classifyAgentState(readySession.agent, readySession.tmuxSession);
+    if (paneState !== "waiting") {
+      return false;
+    }
+
+    const latest = readSession(this.config.dataDir, sessionId);
+    if (!this.shouldRunDelivery(latest) || !hasQueuedMessages(latest)) {
+      return false;
+    }
+
+    const nextMessage = queuedMessages(latest)[0];
+    if (!nextMessage) {
+      return false;
+    }
+
+    await sendMessageToTmux(latest.tmuxSession, nextMessage, { interrupt: false });
+    this.stateCache.delete(sessionId);
+    const updated = withQueuedMessages(
+      {
+        ...latest,
+        status: "running",
+        updatedAt: nowIso(),
+      },
+      queuedMessages(latest).slice(1),
+      true,
+    );
+    const persisted = await this.captureAgentSessionId(updated, AGENT_SESSION_ID_REFRESH_WAIT_MS);
+    writeSession(this.config.dataDir, persisted);
+    this.logEvent("session.message.sent", {
+      level: "info",
+      sessionId,
+      projectId: latest.project,
+      message: `Delivered message to ${sessionId}`,
+      details: {
+        interrupt: false,
+        messageLength: nextMessage.length,
+        agentSessionId: persisted.agentSessionId ?? null,
+      },
+    });
+    return true;
+  }
+
+  private async runDeliveryLoop(sessionId: string): Promise<void> {
     try {
       for (;;) {
         const session = readSession(this.config.dataDir, sessionId);
-        if (
-          !session?.pipeline ||
-          session.status !== "running" ||
-          session.pipeline.status !== "running"
-        ) {
+        if (!this.shouldRunDelivery(session)) {
           return;
         }
 
-        if (session.pipeline.awaitingStepIndex !== undefined) {
+        if (session.queuedMessages?.awaitingPrompt) {
+          const waitOutcome = await this.waitForQueuedMessage(sessionId);
+          if (waitOutcome === "ready") {
+            const latest = readSession(this.config.dataDir, sessionId);
+            if (!latest?.queuedMessages?.awaitingPrompt) {
+              continue;
+            }
+            writeSession(
+              this.config.dataDir,
+              withQueuedMessages(
+                {
+                  ...latest,
+                  updatedAt: nowIso(),
+                },
+                queuedMessages(latest),
+                false,
+              ),
+            );
+            continue;
+          }
+
+          if (waitOutcome === "stopped") {
+            return;
+          }
+
+          const latest = readSession(this.config.dataDir, sessionId);
+          if (latest?.queuedMessages?.awaitingPrompt) {
+            writeSession(
+              this.config.dataDir,
+              withQueuedMessages(
+                {
+                  ...latest,
+                  updatedAt: nowIso(),
+                },
+                queuedMessages(latest),
+                false,
+              ),
+            );
+          }
+          continue;
+        }
+
+        if (session.pipeline?.awaitingStepIndex !== undefined) {
           const waitOutcome = await this.waitForPipelineStep(sessionId);
           if (waitOutcome === "stopped") {
             return;
@@ -1942,6 +2100,19 @@ export class SessionService {
               ? `Pipeline step ${failedStepIndex + 1}/${session.pipeline.steps.length} timed out waiting for the agent prompt`
               : `Pipeline step ${failedStepIndex + 1}/${session.pipeline.steps.length} ended before the agent returned to a prompt`;
           this.markPipelineErrored(sessionId, message);
+          return;
+        }
+
+        if (hasQueuedMessages(session)) {
+          if (await this.tryDeliverQueuedMessage(sessionId)) {
+            await sleep(PIPELINE_POLL_INTERVAL_MS);
+            continue;
+          }
+          await sleep(PIPELINE_POLL_INTERVAL_MS);
+          continue;
+        }
+
+        if (!session.pipeline || session.pipeline.status !== "running") {
           return;
         }
 
@@ -2085,6 +2256,46 @@ export class SessionService {
     }
 
     return "timeout";
+  }
+
+  private async waitForQueuedMessage(sessionId: string): Promise<PipelineWaitOutcome> {
+    for (;;) {
+      const session = readSession(this.config.dataDir, sessionId);
+      if (!session || session.status !== "running") {
+        return "stopped";
+      }
+      if (!session.queuedMessages?.awaitingPrompt) {
+        return "ready";
+      }
+
+      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
+      if (!runtimeAlive) {
+        return "exited";
+      }
+
+      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+      if (!processAlive) {
+        return "exited";
+      }
+
+      const messageUpdatedAt = new Date(session.updatedAt);
+      const hookState = readAgentHookState(this.config.dataDir, sessionId);
+      if (hookState?.state === "working") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+
+      const paneState = await classifyAgentState(session.agent, session.tmuxSession);
+      if (paneState === "needs_input") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (paneState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+        return "ready";
+      }
+
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+    }
   }
 
   private markPipelineErrored(sessionId: string, message: string): void {

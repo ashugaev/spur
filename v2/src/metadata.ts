@@ -10,6 +10,7 @@ import {
 import { dirname, join } from "node:path";
 import type {
   GitHubSignal,
+  SessionQueuedMessagesState,
   ServiceInstanceRecord,
   ServiceSourceState,
   SessionPipelineState,
@@ -109,6 +110,15 @@ function normalizePipelineState(pipeline: SessionPipelineState): SessionPipeline
   };
 }
 
+function normalizeQueuedMessagesState(
+  queuedMessages: SessionQueuedMessagesState,
+): SessionQueuedMessagesState {
+  return {
+    messages: queuedMessages.messages,
+    awaitingPrompt: queuedMessages.awaitingPrompt,
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: session.id,
@@ -127,6 +137,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     updatedAt: session.updatedAt,
     ...(session.slots ? { slots: session.slots } : {}),
     ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
+    ...(session.queuedMessages
+      ? { queuedMessages: normalizeQueuedMessagesState(session.queuedMessages) }
+      : {}),
     ...(session.error ? { error: session.error } : {}),
   };
 }
