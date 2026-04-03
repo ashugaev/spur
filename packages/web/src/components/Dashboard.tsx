@@ -460,7 +460,7 @@ export function Dashboard() {
       ) : null}
 
       {error ? (
-        <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
+        <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
           {error}
         </div>
       ) : null}

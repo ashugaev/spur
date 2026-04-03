@@ -15,7 +15,6 @@ export default function Icon() {
         justifyContent: "center",
       }}
     >
-      {/* Stylized asterisk/star shape representing 𖤓 */}
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
         <path
           d="M12 2v20M2 12h20M4.93 4.93l14.14 14.14M19.07 4.93 4.93 19.07"

@@ -87,7 +87,6 @@ export interface DashboardSession {
   worktreePath: string;
   services: SpurServiceView[];
   links: SpurSessionLink[];
-  primaryLink: SpurSessionLink | null;
   error?: string;
 }
 
@@ -116,7 +115,6 @@ export function toDashboardSession(
     worktreePath: session.worktreePath,
     services: session.services,
     links,
-    primaryLink: links[0] ?? null,
     error: session.error,
   };
 }
