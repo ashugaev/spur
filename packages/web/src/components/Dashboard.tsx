@@ -36,8 +36,8 @@ function StatItem({
 }) {
   return (
     <div className="flex items-center gap-2">
-      <span className="text-[var(--color-text-tertiary)]">{label}:</span>
-      <span className="font-bold" style={color ? { color } : undefined}>
+      <span className="text-[var(--color-text-secondary)]">{label}:</span>
+      <span className="font-bold text-[var(--color-text-primary)]" style={color ? { color } : undefined}>
         {value}
       </span>
     </div>

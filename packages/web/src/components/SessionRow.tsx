@@ -32,10 +32,10 @@ function GithubIcon() {
   );
 }
 
-function TrackerIcon() {
+function JiraIcon() {
   return (
-    <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M1.5 0A1.5 1.5 0 0 0 0 1.5v13A1.5 1.5 0 0 0 1.5 16h13a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 14.5 0h-13zM4 4h8v1.5H4V4zm0 3.25h8v1.5H4v-1.5zM4 10.5h5v1.5H4v-1.5z" />
+    <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53zM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77zM2 11.6a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72A4.362 4.362 0 0 0 12.48 22V12.44a.84.84 0 0 0-.84-.84H2z" />
     </svg>
   );
 }
@@ -74,7 +74,7 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
           rel="noreferrer"
           target="_blank"
         >
-          <TrackerIcon />
+          <JiraIcon />
           <span className="text-[11px]">{extractLinkId(trackerLink)}</span>
         </a>
       ) : null}
