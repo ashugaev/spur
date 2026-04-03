@@ -49,7 +49,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Fleet Overview" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
@@ -124,7 +124,7 @@ describe("Dashboard", () => {
     expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
     expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Spawn_New_Session" }));
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     const spawnSelects = screen.getAllByRole("combobox");
     const spawnProjectSelect = spawnSelects[1];
     expect(

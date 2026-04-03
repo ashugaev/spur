@@ -79,8 +79,15 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 | `md–lg` | Tablet | Agent column shows |
 | `lg+` | Desktop | Branch column shows, full layout |
 
+### Text style
+
+- Use normal spaces in UI labels: "Spawn Session", "Needs Input", "All Projects" — not underscores.
+- Button text is always uppercase via `uppercase` class.
+- Placeholder text uses normal casing: "Filter sessions...", "Prompt for the new session..."
+
 ### Do not
 
+- Use `UNDER_SCORE` style in visible UI text — always use spaces
 - Use `rounded-*` classes (radius is 0 globally)
 - Hardcode hex colors in components — use CSS variables
 - Use `text-sm`, `text-xs` etc. — body is 12px, components inherit

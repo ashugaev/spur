@@ -306,7 +306,7 @@ export function Dashboard() {
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
           <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-            {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
+            {activeProjectName === "All projects" ? "All Projects" : activeProjectName}
           </h1>
         </div>
         <div className="flex items-center gap-2">
@@ -324,7 +324,7 @@ export function Dashboard() {
             <input
               className="w-32 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
               onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter_Sessions..."
+              placeholder="Filter sessions..."
               value={searchQuery}
             />
           </div>
@@ -345,7 +345,7 @@ export function Dashboard() {
             onClick={() => setSpawnOpen(true)}
             type="button"
           >
-            Spawn_New_Session
+            Spawn Session
           </button>
         </div>
       </header>
@@ -353,7 +353,7 @@ export function Dashboard() {
       <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
         <StatItem
           icon={<IconChat />}
-          label="Needs_Input"
+          label="Needs Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
           active={activeStatFilter === "respond"}
@@ -381,7 +381,7 @@ export function Dashboard() {
               className="text-[10px] font-bold tracking-[0.08em] text-[var(--color-status-error)]"
               title={gitError}
             >
-              Git_Error
+              Git Error
             </span>
           ) : null}
           <span className="text-[10px] font-bold tracking-[0.08em]">Online</span>

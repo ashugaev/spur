@@ -12,7 +12,7 @@ interface AttentionZoneProps {
 }
 
 const zoneConfig: Record<AttentionLevel, { label: string; color: string }> = {
-  respond: { label: "Needs_Input", color: "var(--color-status-error)" },
+  respond: { label: "Needs Input", color: "var(--color-status-error)" },
   pending: { label: "Waiting", color: "var(--color-status-attention)" },
   working: { label: "Working", color: "var(--color-status-working)" },
   done: { label: "Done", color: "var(--color-text-tertiary)" },
