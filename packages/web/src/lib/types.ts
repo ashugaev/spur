@@ -65,7 +65,7 @@ export interface SpurSessionsResponse {
   projects?: ProjectInfo[];
 }
 
-export type AttentionLevel = "respond" | "review" | "pending" | "working" | "done";
+export type AttentionLevel = "respond" | "pending" | "working" | "done";
 
 export interface DashboardSession {
   id: string;
@@ -162,17 +162,12 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.status === "errored" ||
     session.state === "needs_input" ||
     session.state === "error" ||
-    Boolean(session.error)
-  ) {
-    return "respond";
-  }
-
-  if (
+    Boolean(session.error) ||
     hasServiceProblems(session) ||
     !session.workspaceExists ||
     (!session.runtimeAlive && session.status === "running")
   ) {
-    return "review";
+    return "respond";
   }
 
   if (

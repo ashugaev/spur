@@ -17,7 +17,7 @@ import {
 } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "review", "working", "pending", "done"];
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -68,20 +68,6 @@ function IconChat() {
       strokeWidth="1.5"
     >
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-    </svg>
-  );
-}
-function IconEye() {
-  return (
-    <svg
-      className="h-4 w-4"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-    >
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-      <circle cx="12" cy="12" r="3" />
     </svg>
   );
 }
@@ -214,7 +200,6 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      review: [],
       pending: [],
       working: [],
       done: [],
@@ -230,7 +215,6 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      review: grouped.review.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
     }),
@@ -372,14 +356,6 @@ export function Dashboard() {
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
           active={activeStatFilter === "respond"}
           onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
-        />
-        <StatItem
-          icon={<IconEye />}
-          label="Attention"
-          value={stats.review}
-          color={stats.review > 0 ? "var(--color-accent-orange)" : undefined}
-          active={activeStatFilter === "review"}
-          onClick={() => setActiveStatFilter((c) => (c === "review" ? null : "review"))}
         />
         <StatItem
           icon={<IconBolt />}
