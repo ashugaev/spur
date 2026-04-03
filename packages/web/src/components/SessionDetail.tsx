@@ -99,10 +99,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const effectiveProjectId = projectId ?? session?.projectId ?? "";
 
   const canAttach =
-    session &&
-    session.runtimeAlive &&
-    !isTerminalSession(session) &&
-    Boolean(session.tmuxSession);
+    session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -135,9 +132,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {title}
             </h1>
             {subtitle ? (
-              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">
-                {subtitle}
-              </p>
+              <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -148,9 +143,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-red-500/30 px-2 py-0.5 text-red-200">
-                  offline
-                </span>
+                <span className="border border-red-500/30 px-2 py-0.5 text-red-200">offline</span>
               ) : null}
               {hasServiceProblems(session) ? (
                 <span className="border border-orange-400/30 px-2 py-0.5 text-orange-200">
@@ -236,7 +229,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       value={message}
                     />
                     <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">⌘/Ctrl + Enter</span>
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        ⌘/Ctrl + Enter
+                      </span>
                       <button
                         type="button"
                         disabled={busyAction !== null || !message.trim()}
@@ -290,11 +285,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       className="data-row flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] px-2 py-2"
                     >
                       <div>
-                        <span className="font-mono text-[var(--color-text-primary)]">{service.serviceId}</span>
-                        <span className="ml-2 text-[var(--color-text-tertiary)]">{service.command}</span>
+                        <span className="font-mono text-[var(--color-text-primary)]">
+                          {service.serviceId}
+                        </span>
+                        <span className="ml-2 text-[var(--color-text-tertiary)]">
+                          {service.command}
+                        </span>
                       </div>
                       <span className="text-[var(--color-text-secondary)]">
-                        {service.state}{typeof service.port === "number" ? ` :${service.port}` : ""}
+                        {service.state}
+                        {typeof service.port === "number" ? ` :${service.port}` : ""}
                       </span>
                     </div>
                   ))}
@@ -316,7 +316,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ["Agent runtime", session.runtimeAlive ? "alive" : "offline"],
                   ["Workspace", session.workspaceExists ? "present" : "missing"],
                 ].map(([label, value]) => (
-                  <div key={label} className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5">
+                  <div
+                    key={label}
+                    className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                  >
                     <dt className="text-[var(--color-text-tertiary)]">{label}</dt>
                     <dd>{value}</dd>
                   </div>
@@ -348,7 +351,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               aria-label={`Terminal ${session.id}`}
             >
               <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">Terminal — {session.id}</span>
+                <span className="font-bold uppercase text-[var(--color-text-primary)]">
+                  Terminal — {session.id}
+                </span>
                 <button
                   type="button"
                   className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"

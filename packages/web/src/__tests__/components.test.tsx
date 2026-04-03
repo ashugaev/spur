@@ -51,7 +51,9 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "Fleet Overview" })).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -113,7 +115,9 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for spur-local-1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for spur-local-1" }),
+      ).toBeInTheDocument();
     });
 
     const filterSelect = screen.getByRole("combobox");
@@ -126,6 +130,8 @@ describe("Dashboard", () => {
     expect(
       within(spawnProjectSelect).queryByRole("option", { name: "spur-local" }),
     ).not.toBeInTheDocument();
-    expect(within(spawnProjectSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
+    expect(
+      within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
+    ).toBeInTheDocument();
   });
 });

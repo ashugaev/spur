@@ -35,7 +35,10 @@ export function AttentionZone({
       <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
         {config.label}
       </span>
-      <div className="flex-1 border-t" style={{ borderColor: `color-mix(in srgb, ${config.color} 25%, transparent)` }} />
+      <div
+        className="flex-1 border-t"
+        style={{ borderColor: `color-mix(in srgb, ${config.color} 25%, transparent)` }}
+      />
       <span className="text-[10px] text-[var(--color-text-tertiary)]">{sessions.length}</span>
     </div>
   );
@@ -47,7 +50,11 @@ export function AttentionZone({
   if (isAccordion) {
     return (
       <section>
-        <button type="button" className="flex w-full items-center text-left" onClick={() => onToggle(level)}>
+        <button
+          type="button"
+          className="flex w-full items-center text-left"
+          onClick={() => onToggle(level)}
+        >
           <div className="flex-1">{header}</div>
           <span className="ml-2 text-[11px] text-[var(--color-text-tertiary)]">
             {collapsed ? "\u25B8" : "\u25BE"}

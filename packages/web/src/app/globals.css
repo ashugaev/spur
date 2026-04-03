@@ -2,7 +2,7 @@
 
 @theme {
   /* ── Base surfaces ────────────────────────────────────────────────── */
-  --color-bg-base: #0D0D0E;
+  --color-bg-base: #0d0d0e;
   --color-bg-surface: rgba(17, 17, 18, 0.8);
   --color-bg-elevated: rgba(23, 23, 26, 0.9);
 
@@ -12,13 +12,13 @@
   --color-border-strong: rgba(50, 50, 54, 1);
 
   /* ── Text ─────────────────────────────────────────────────────────── */
-  --color-text-primary: #E1E1E1;
-  --color-text-secondary: #A1A1A1;
+  --color-text-primary: #e1e1e1;
+  --color-text-secondary: #a1a1a1;
   --color-text-tertiary: #555558;
-  --color-text-inverse: #0D0D0E;
+  --color-text-inverse: #0d0d0e;
 
   /* ── Interactive accent ──────────────────────────────────────────── */
-  --color-accent: #FFFFFF;
+  --color-accent: #ffffff;
   --color-accent-hover: rgba(255, 255, 255, 0.8);
   --color-accent-subtle: rgba(255, 255, 255, 0.08);
   --color-accent-orange: #d18616;
@@ -26,8 +26,8 @@
   /* ── Status / semantic colors ────────────────────────────────────── */
   --color-status-working: #58a6ff;
   --color-status-ready: #3fb950;
-  --color-status-attention: #FFD700;
-  --color-status-error: #FF4D4D;
+  --color-status-attention: #ffd700;
+  --color-status-error: #ff4d4d;
 
   /* ── Border radius ────────────────────────────────────────────────── */
   --radius-xs: 0px;
@@ -37,7 +37,8 @@
   --radius-xl: 0px;
 
   /* ── Typography ──────────────────────────────────────────────────── */
-  --font-sans: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans:
+    var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
   --font-mono: var(--font-sans);
 }
 
