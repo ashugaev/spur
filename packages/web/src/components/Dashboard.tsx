@@ -367,7 +367,7 @@ export function Dashboard() {
       <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
         <StatItem
           icon={<IconChat />}
-          label="Input"
+          label="Needs_Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
           active={activeStatFilter === "respond"}
@@ -375,7 +375,7 @@ export function Dashboard() {
         />
         <StatItem
           icon={<IconEye />}
-          label="Review"
+          label="Attention"
           value={stats.review}
           color={stats.review > 0 ? "var(--color-accent-orange)" : undefined}
           active={activeStatFilter === "review"}
@@ -391,7 +391,7 @@ export function Dashboard() {
         />
         <StatItem
           icon={<IconClock />}
-          label="Pending"
+          label="Waiting"
           value={stats.pending}
           color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
           active={activeStatFilter === "pending"}
