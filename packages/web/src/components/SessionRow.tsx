@@ -1,7 +1,6 @@
 "use client";
 
 import { ActivityDot } from "@/components/ActivityDot";
-import { cn } from "@/lib/cn";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import { isTerminalSession, type DashboardSession, type SpurSessionLink } from "@/lib/types";
@@ -99,31 +98,27 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
         {formatRelativeTime(session.lastActivityAt)}
       </span>
 
-      <button
-        aria-label={`Open web terminal for ${session.id}`}
-        className={cn(
-          "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition",
-          canAttach
-            ? "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
-            : "hidden",
-        )}
-        disabled={!canAttach}
-        onClick={() => onOpenTerminal?.(session)}
-        type="button"
-      >
-        <svg
-          aria-hidden="true"
-          className="h-3.5 w-3.5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          viewBox="0 0 24 24"
+      {canAttach ? (
+        <button
+          aria-label={`Open web terminal for ${session.id}`}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+          onClick={() => onOpenTerminal?.(session)}
+          type="button"
         >
-          <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
-          <path d="m8 10 2.5 2L8 14.5" />
-          <path d="M13 15h3" />
-        </svg>
-      </button>
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            viewBox="0 0 24 24"
+          >
+            <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
+            <path d="m8 10 2.5 2L8 14.5" />
+            <path d="M13 15h3" />
+          </svg>
+        </button>
+      ) : null}
     </div>
   );
 }
