@@ -26,16 +26,19 @@ function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
 }
 
 function StatItem({
+  icon,
   label,
   value,
   color,
 }: {
+  icon: React.ReactNode;
   label: string;
   value: number | string;
   color?: string;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex items-center gap-1.5">
+      <span style={color ? { color } : undefined}>{icon}</span>
       <span className="text-[var(--color-text-secondary)]">{label}:</span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
@@ -44,6 +47,77 @@ function StatItem({
         {value}
       </span>
     </div>
+  );
+}
+
+function IconHub() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 3v6m0 6v6m9-9h-6m-6 0H3" />
+    </svg>
+  );
+}
+function IconAlert() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+    </svg>
+  );
+}
+function IconEye() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+function IconClock() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M12 6v6l4 2" />
+    </svg>
+  );
+}
+function IconCpu() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+    >
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+      <rect x="9" y="9" width="6" height="6" />
+      <path d="M9 1v3m6-3v3M9 20v3m6-3v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+    </svg>
   );
 }
 
@@ -56,6 +130,7 @@ export function Dashboard() {
   const [projectId, setProjectId] = useState(requestedProject);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
@@ -135,13 +210,21 @@ export function Dashboard() {
     [filterProjectOptions],
   );
 
-  const sessions = useMemo(
-    () =>
-      rawSessions.map((session) =>
-        toDashboardSession(session, projectNameMap.get(session.project)),
-      ),
-    [projectNameMap, rawSessions],
-  );
+  const sessions = useMemo(() => {
+    const all = rawSessions.map((session) =>
+      toDashboardSession(session, projectNameMap.get(session.project)),
+    );
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (s) =>
+        s.id.toLowerCase().includes(q) ||
+        (s.title ?? "").toLowerCase().includes(q) ||
+        s.prompt.toLowerCase().includes(q) ||
+        s.projectName.toLowerCase().includes(q) ||
+        (s.branch ?? "").toLowerCase().includes(q),
+    );
+  }, [projectNameMap, rawSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -257,6 +340,24 @@ export function Dashboard() {
           </h1>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="w-32 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter_Sessions..."
+              value={searchQuery}
+            />
+          </div>
           <select
             className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
             onChange={(event) => syncProjectFilter(event.target.value)}
@@ -280,23 +381,27 @@ export function Dashboard() {
       </header>
 
       <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
-        <StatItem label="Total" value={stats.total} />
+        <StatItem icon={<IconHub />} label="Total" value={stats.total} />
         <StatItem
+          icon={<IconAlert />}
           label="Input"
           value={stats.respond}
           color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
         />
         <StatItem
+          icon={<IconEye />}
           label="Review"
           value={stats.review}
           color={stats.review > 0 ? "var(--color-accent-orange)" : undefined}
         />
         <StatItem
+          icon={<IconClock />}
           label="Pending"
           value={stats.pending}
           color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
         />
         <StatItem
+          icon={<IconCpu />}
           label="Working"
           value={stats.working}
           color={stats.working > 0 ? "var(--color-status-working)" : undefined}
@@ -401,7 +506,7 @@ export function Dashboard() {
 
       {!loading && sessions.length > 0 ? (
         <section className="mt-5 space-y-4">
-          {LANE_ORDER.map((level) => (
+          {LANE_ORDER.filter((level) => grouped[level].length > 0).map((level) => (
             <AttentionZone
               key={level}
               collapsed={isMobile ? expandedLevel !== level : undefined}
