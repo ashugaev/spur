@@ -6,7 +6,6 @@ import { AttentionZone } from "@/components/AttentionZone";
 import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
-import { cn } from "@/lib/cn";
 import {
   getAttentionLevel,
   toDashboardSession,
@@ -26,28 +25,21 @@ function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
     .map((id) => ({ id, name: id }));
 }
 
-const statToneClasses: Record<string, string> = {
-  respond: "border-red-500/25 bg-red-500/[0.06]",
-  review: "border-orange-400/25 bg-orange-400/[0.06]",
-  pending: "border-amber-400/25 bg-amber-400/[0.06]",
-  working: "border-sky-400/25 bg-sky-400/[0.06]",
-};
-
-function StatCard({
+function StatItem({
   label,
   value,
-  tone,
+  color,
 }: {
   label: string;
-  value: number;
-  tone: "respond" | "review" | "pending" | "working";
+  value: number | string;
+  color?: string;
 }) {
   return (
-    <div className={cn("rounded-sm border px-2.5 py-2", statToneClasses[tone])}>
-      <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-        {label}
-      </div>
-      <div className="mt-1.5 text-lg font-semibold text-[var(--color-text-primary)]">{value}</div>
+    <div className="flex items-center gap-2">
+      <span className="text-[var(--color-text-tertiary)]">{label}:</span>
+      <span className="font-bold" style={color ? { color } : undefined}>
+        {value}
+      </span>
     </div>
   );
 }
@@ -252,106 +244,80 @@ export function Dashboard() {
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)] sm:p-5">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-            <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
-                <span className="text-sm text-[var(--color-accent)]">𖤓</span>
-                Spur UI
-              </div>
-              <h1 className="mt-3 text-2xl font-semibold tracking-[-0.04em] text-[var(--color-text-primary)] sm:text-3xl">
-                {activeProjectName}
-              </h1>
-              <p className="mt-2 max-w-2xl text-sm text-[var(--color-text-secondary)]">
-                Compact board for the current Spur v2 daemon.
-              </p>
-            </div>
-
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              <StatCard label="Needs Input" tone="respond" value={stats.respond} />
-              <StatCard label="Needs Review" tone="review" value={stats.review} />
-              <StatCard label="Pending" tone="pending" value={stats.pending} />
-              <StatCard label="Working" tone="working" value={stats.working} />
-            </div>
+      <header className="mb-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-lg text-[var(--color-accent)]">𖤓</span>
+            <h1 className="text-2xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)]">
+              {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
+            </h1>
           </div>
-
-          <div className="mt-4 grid gap-3 xl:grid-cols-[16rem_minmax(0,1fr)]">
-            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
-              <label className="block text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                Project filter
-              </label>
-              <select
-                className="mt-2.5 w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                onChange={(event) => {
-                  syncProjectFilter(event.target.value);
-                }}
-                value={projectId}
-              >
-                <option value="">All projects</option>
-                {filterProjectOptions.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-
-              <div className="mt-3 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-3 py-2.5">
-                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  Visible sessions
-                </div>
-                <div className="mt-1.5 text-xl font-semibold text-[var(--color-text-primary)]">
-                  {stats.total}
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-sm border border-[var(--color-border-default)] bg-black/10 p-3">
-              <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                Spawn session
-              </div>
-
-              <div className="mt-3 grid gap-2.5 md:grid-cols-[minmax(11rem,14rem)_minmax(9rem,11rem)_1fr_auto]">
-                <select
-                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnProjectId(event.target.value)}
-                  value={spawnProjectId}
-                >
-                  <option value="">Select project</option>
-                  {spawnProjectOptions.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
-                  value={spawnAgent}
-                >
-                  <option value="claude">claude</option>
-                  <option value="codex">codex</option>
-                </select>
-
-                <input
-                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-3 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnPrompt(event.target.value)}
-                  placeholder="Prompt for the new session"
-                  value={spawnPrompt}
-                />
-
-                <button
-                  className="rounded-sm bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
-                  onClick={() => void handleSpawn()}
-                  type="button"
-                >
-                  {spawning ? "Spawning..." : "Spawn"}
-                </button>
-              </div>
-            </section>
+          <div className="flex items-center gap-3">
+            <select
+              className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
+            >
+              <option value="">All projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded-sm bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+              onClick={() => void handleSpawn()}
+              type="button"
+            >
+              {spawning ? "Spawning..." : "Spawn_New_Session"}
+            </button>
           </div>
-      </section>
+        </div>
+      </header>
+
+      <div className="flex flex-wrap items-center gap-6 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2.5 text-[11px] uppercase tracking-[0.06em]">
+        <StatItem label="Total_Sessions" value={stats.total} />
+        <StatItem label="Needs_Input" value={stats.respond} color={stats.respond > 0 ? "var(--color-status-error)" : undefined} />
+        <StatItem label="Needs_Review" value={stats.review} color={stats.review > 0 ? "var(--color-accent-orange)" : undefined} />
+        <StatItem label="Pending" value={stats.pending} color={stats.pending > 0 ? "var(--color-status-attention)" : undefined} />
+        <StatItem label="Working" value={stats.working} color={stats.working > 0 ? "var(--color-status-working)" : undefined} />
+        <div className="ml-auto flex items-center gap-2 border-l border-[var(--color-border-default)] pl-4">
+          <span className="text-[9px] font-bold tracking-[0.08em]">Status: Online</span>
+          <span className="h-2 w-2 rounded-full bg-[var(--color-status-ready)] shadow-[0_0_6px_var(--color-status-ready)]" />
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2">
+        <select
+          className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+          onChange={(event) => setSpawnProjectId(event.target.value)}
+          value={spawnProjectId}
+        >
+          <option value="">Select project</option>
+          {spawnProjectOptions.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+        <select
+          className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+          onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+          value={spawnAgent}
+        >
+          <option value="claude">claude</option>
+          <option value="codex">codex</option>
+        </select>
+        <input
+          className="flex-1 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+          onChange={(event) => setSpawnPrompt(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") void handleSpawn(); }}
+          placeholder="Prompt for the new session..."
+          value={spawnPrompt}
+        />
+      </div>
 
       {error ? (
         <div className="mt-4 rounded-sm border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
