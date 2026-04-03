@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { cn } from "@/lib/cn";
+import { toneClasses } from "@/lib/tone";
 import {
   getAttentionLevel,
   toDashboardSession,
@@ -36,15 +37,7 @@ function StatCard({
   tone: "respond" | "review" | "pending" | "working";
 }) {
   return (
-    <div
-      className={cn(
-        "rounded-sm border px-2.5 py-2",
-        tone === "respond" && "border-red-500/25 bg-red-500/[0.06]",
-        tone === "review" && "border-orange-400/25 bg-orange-400/[0.06]",
-        tone === "pending" && "border-amber-400/25 bg-amber-400/[0.06]",
-        tone === "working" && "border-sky-400/25 bg-sky-400/[0.06]",
-      )}
-    >
+    <div className={cn("rounded-sm border px-2.5 py-2", toneClasses[tone])}>
       <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
         {label}
       </div>
@@ -254,7 +247,6 @@ export function Dashboard() {
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
       <section className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)] sm:p-5">
-        <div>
           <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
             <div className="max-w-3xl">
               <div className="inline-flex items-center gap-2 rounded-sm border border-[var(--color-border-default)] bg-black/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
@@ -353,7 +345,6 @@ export function Dashboard() {
               </div>
             </section>
           </div>
-        </div>
       </section>
 
       {error ? (

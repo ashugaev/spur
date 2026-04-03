@@ -2,6 +2,7 @@
 
 import { SessionCard } from "@/components/SessionCard";
 import { cn } from "@/lib/cn";
+import { toneClasses } from "@/lib/tone";
 import type { AttentionLevel, DashboardSession } from "@/lib/types";
 
 interface AttentionZoneProps {
@@ -12,32 +13,12 @@ interface AttentionZoneProps {
   onOpenTerminal?: (session: DashboardSession) => void;
 }
 
-const zoneConfig: Record<AttentionLevel, { label: string; color: string; border: string }> = {
-  respond: {
-    label: "Respond",
-    color: "var(--color-status-error)",
-    border: "border-red-500/25",
-  },
-  review: {
-    label: "Review",
-    color: "var(--color-accent-orange)",
-    border: "border-orange-400/25",
-  },
-  pending: {
-    label: "Pending",
-    color: "var(--color-status-attention)",
-    border: "border-amber-400/25",
-  },
-  working: {
-    label: "Working",
-    color: "var(--color-status-working)",
-    border: "border-sky-400/25",
-  },
-  done: {
-    label: "Done",
-    color: "var(--color-text-tertiary)",
-    border: "border-white/10",
-  },
+const zoneConfig: Record<AttentionLevel, { label: string; color: string }> = {
+  respond: { label: "Respond", color: "var(--color-status-error)" },
+  review: { label: "Review", color: "var(--color-accent-orange)" },
+  pending: { label: "Pending", color: "var(--color-status-attention)" },
+  working: { label: "Working", color: "var(--color-status-working)" },
+  done: { label: "Done", color: "var(--color-text-tertiary)" },
 };
 
 export function AttentionZone({
@@ -93,7 +74,7 @@ export function AttentionZone({
     <section
       className={cn(
         "flex min-h-[14rem] flex-col rounded-sm border bg-[var(--color-bg-surface)] p-2.5",
-        config.border,
+        toneClasses[level],
       )}
     >
       <header className="mb-2 flex items-center justify-between gap-3">

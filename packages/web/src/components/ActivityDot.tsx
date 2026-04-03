@@ -2,10 +2,23 @@
 
 import { cn } from "@/lib/cn";
 
-const activityConfig: Record<
-  string,
-  { label: string; dot: string; bg: string; text: string; pulse?: boolean }
-> = {
+type ActivityConfig = { label: string; dot: string; bg: string; text: string; pulse?: boolean };
+
+const errorConfig: ActivityConfig = {
+  label: "error",
+  dot: "var(--color-status-error)",
+  bg: "rgba(248,81,73,0.14)",
+  text: "var(--color-status-error)",
+};
+
+const inactiveConfig: ActivityConfig = {
+  label: "paused",
+  dot: "var(--color-text-tertiary)",
+  bg: "rgba(72,79,88,0.2)",
+  text: "var(--color-text-secondary)",
+};
+
+const activityConfig: Record<string, ActivityConfig> = {
   working: {
     label: "working",
     dot: "var(--color-status-working)",
@@ -19,38 +32,13 @@ const activityConfig: Record<
     bg: "rgba(210,153,34,0.14)",
     text: "var(--color-status-attention)",
   },
-  needs_input: {
-    label: "needs input",
-    dot: "var(--color-status-error)",
-    bg: "rgba(248,81,73,0.14)",
-    text: "var(--color-status-error)",
-  },
-  stopped: {
-    label: "paused",
-    dot: "var(--color-text-tertiary)",
-    bg: "rgba(72,79,88,0.2)",
-    text: "var(--color-text-secondary)",
-  },
-  error: {
-    label: "error",
-    dot: "var(--color-status-error)",
-    bg: "rgba(248,81,73,0.14)",
-    text: "var(--color-status-error)",
-  },
-  killed: {
-    label: "killed",
-    dot: "var(--color-text-tertiary)",
-    bg: "rgba(72,79,88,0.2)",
-    text: "var(--color-text-secondary)",
-  },
+  needs_input: { ...errorConfig, label: "needs input" },
+  error: errorConfig,
+  stopped: inactiveConfig,
+  killed: { ...inactiveConfig, label: "killed" },
 };
 
-const fallbackConfig = {
-  label: "unknown",
-  dot: "var(--color-text-tertiary)",
-  bg: "rgba(72,79,88,0.2)",
-  text: "var(--color-text-secondary)",
-};
+const fallbackConfig: ActivityConfig = { ...inactiveConfig, label: "unknown" };
 
 interface ActivityDotProps {
   activity: string | null;

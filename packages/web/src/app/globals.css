@@ -30,8 +30,8 @@
   --color-status-error: #FF4D4D;
 
   /* ── Typography ──────────────────────────────────────────────────── */
-  --font-sans: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  --font-mono: var(--font-jetbrains-mono), "SF Mono", "Menlo", "Consolas", monospace;
+  --font-sans: var(--font-jetbrains-mono), "JetBrains Mono", "SF Mono", "Menlo", "Consolas", monospace;
+  --font-mono: var(--font-sans);
 }
 
 /* ── Base styles ─────────────────────────────────────────────────────── */
@@ -82,16 +82,6 @@ a:hover {
   }
   50% {
     box-shadow: 0 0 0 4px rgba(255, 255, 255, 0);
-  }
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
   }
 }
 

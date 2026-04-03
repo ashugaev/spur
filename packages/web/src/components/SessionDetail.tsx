@@ -155,7 +155,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       {session ? (
         <>
           <header className="mt-5 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-4 shadow-[0_8px_30px_rgba(0,0,0,0.3)]">
-            <div>
               <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                 <span>{session.projectName}</span>
                 <span>•</span>
@@ -194,7 +193,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </span>
                 ) : null}
               </div>
-            </div>
           </header>
 
           <section className="mt-6 grid gap-3 lg:grid-cols-[minmax(0,1.15fr)_minmax(18rem,0.85fr)]">
