@@ -246,16 +246,16 @@ export function Dashboard() {
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <header className="mb-4 flex items-center justify-between">
+      <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
-          <h1 className="text-2xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)]">
+          <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
             {activeProjectName === "All projects" ? "Fleet Overview" : activeProjectName}
           </h1>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <select
-            className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[11px] uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
             onChange={(event) => syncProjectFilter(event.target.value)}
             value={projectId}
           >
@@ -267,7 +267,7 @@ export function Dashboard() {
             ))}
           </select>
           <button
-            className="rounded-sm bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
             onClick={() => setSpawnOpen(true)}
             type="button"
           >
@@ -276,14 +276,14 @@ export function Dashboard() {
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center gap-6 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2.5 text-[11px] uppercase tracking-[0.06em]">
-        <StatItem label="Total_Sessions" value={stats.total} />
-        <StatItem label="Needs_Input" value={stats.respond} color={stats.respond > 0 ? "var(--color-status-error)" : undefined} />
-        <StatItem label="Needs_Review" value={stats.review} color={stats.review > 0 ? "var(--color-accent-orange)" : undefined} />
+      <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
+        <StatItem label="Total" value={stats.total} />
+        <StatItem label="Input" value={stats.respond} color={stats.respond > 0 ? "var(--color-status-error)" : undefined} />
+        <StatItem label="Review" value={stats.review} color={stats.review > 0 ? "var(--color-accent-orange)" : undefined} />
         <StatItem label="Pending" value={stats.pending} color={stats.pending > 0 ? "var(--color-status-attention)" : undefined} />
         <StatItem label="Working" value={stats.working} color={stats.working > 0 ? "var(--color-status-working)" : undefined} />
-        <div className="ml-auto flex items-center gap-2 border-l border-[var(--color-border-default)] pl-4">
-          <span className="text-[9px] font-bold tracking-[0.08em]">Status: Online</span>
+        <div className="ml-auto hidden items-center gap-2 border-l border-[var(--color-border-default)] pl-4 sm:flex">
+          <span className="text-[10px] font-bold tracking-[0.08em]">Online</span>
           <span className="h-2 w-2 rounded-full bg-[var(--color-status-ready)] shadow-[0_0_6px_var(--color-status-ready)]" />
         </div>
       </div>
@@ -293,7 +293,7 @@ export function Dashboard() {
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
           onClick={(event) => { if (event.target === event.currentTarget) setSpawnOpen(false); }}
         >
-          <div className="w-full max-w-lg rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-5 shadow-[0_20px_60px_rgba(0,0,0,0.5)]">
+          <div className="mx-4 w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:mx-0 sm:p-5">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">Spawn Session</h2>
               <button
@@ -307,7 +307,7 @@ export function Dashboard() {
             <div className="space-y-3">
               <div className="flex gap-2">
                 <select
-                  className="flex-1 rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnProjectId(event.target.value)}
                   value={spawnProjectId}
                 >
@@ -319,7 +319,7 @@ export function Dashboard() {
                   ))}
                 </select>
                 <select
-                  className="rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                   onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                   value={spawnAgent}
                 >
@@ -327,16 +327,17 @@ export function Dashboard() {
                   <option value="codex">codex</option>
                 </select>
               </div>
-              <input
-                className="w-full rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[11px] text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+              <textarea
+                className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
                 onChange={(event) => setSpawnPrompt(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") void handleSpawn(); }}
+                onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void handleSpawn(); }}
                 placeholder="Prompt for the new session..."
                 value={spawnPrompt}
               />
-              <div className="flex justify-end">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] text-[var(--color-text-tertiary)]">⌘/Ctrl + Enter to submit</span>
                 <button
-                  className="rounded-sm bg-[var(--color-accent)] px-4 py-2 text-[11px] font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                  className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
                   onClick={() => void handleSpawn()}
                   type="button"

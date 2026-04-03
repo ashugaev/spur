@@ -17,36 +17,36 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
   return (
-    <div className="data-row group flex items-center gap-3 border-b border-[var(--color-border-subtle)] px-2.5 py-2 transition-colors">
+    <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
       <ActivityDot activity={session.state} dotOnly size={8} />
 
-      <span className="w-[7rem] shrink-0 truncate text-[11px] font-semibold uppercase text-[var(--color-text-primary)]">
+      <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
         {session.projectName}
       </span>
 
-      <span className="w-[3.5rem] shrink-0 text-[11px] text-[var(--color-text-tertiary)]">
+      <span className="hidden w-[3.5rem] shrink-0 text-[var(--color-text-tertiary)] md:inline">
         {session.agent}
       </span>
 
       <a
-        className="min-w-0 flex-1 truncate text-[11px] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
+        className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildSessionPath(session.id, session.projectId)}
       >
         {title}
       </a>
 
-      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[11px] text-[var(--color-text-secondary)] lg:inline">
+      <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
         {session.branch}
       </span>
 
-      <span className="w-[4rem] shrink-0 text-right text-[11px] text-[var(--color-text-tertiary)]">
+      <span className="w-[4rem] shrink-0 text-right text-[var(--color-text-tertiary)]">
         {formatRelativeTime(session.lastActivityAt)}
       </span>
 
       <button
         aria-label={`Open web terminal for ${session.id}`}
         className={cn(
-          "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-sm border opacity-0 transition group-hover:opacity-100 focus:opacity-100",
+          "inline-flex h-6 w-6 shrink-0 items-center justify-center border opacity-0 transition group-hover:opacity-100 focus:opacity-100",
           canAttach
             ? "border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent)] hover:text-[var(--color-text-inverse)]"
             : "border-[var(--color-border-default)] text-[var(--color-text-tertiary)]",
