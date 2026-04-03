@@ -211,6 +211,15 @@ export async function startServer(
         return;
       }
 
+      const logsSessionId = path.match(/^\/sessions\/([^/]+)\/logs$/)?.[1];
+      if (method === "GET" && logsSessionId) {
+        const { readSessionEventLog } = await import("./event-log.js");
+        const info = service.info();
+        const entries = readSessionEventLog(info.dataDir, logsSessionId, 200);
+        sendJson(response, 200, entries);
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request);
         sendJson(response, 201, await service.spawn(body));
