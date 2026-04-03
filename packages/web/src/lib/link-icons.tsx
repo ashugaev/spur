@@ -157,7 +157,7 @@ export function ReviewCommentsBadge({ count }: { count: number }) {
   if (count <= 0) return null;
   return (
     <span
-      className="inline-flex items-center gap-0.5 text-[10px] text-[var(--color-text-tertiary)]"
+      className="inline-flex items-center gap-0.5 text-[10px] font-bold text-[var(--color-status-attention)]"
       title={`${count} review comment${count === 1 ? "" : "s"}`}
     >
       <svg

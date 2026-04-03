@@ -8,6 +8,7 @@ import {
   extractLinkId,
   GithubIcon,
   JiraIcon,
+  prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -60,9 +61,10 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
 
       {prLink ? (
         <a
-          className="hidden shrink-0 items-center gap-1 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] hover:no-underline sm:inline-flex"
+          className="hidden shrink-0 items-center gap-1 hover:text-[var(--color-text-primary)] hover:no-underline sm:inline-flex"
           href={prLink.url}
           rel="noreferrer"
+          style={{ color: prStateColor(prInfo.state) ?? "var(--color-text-tertiary)" }}
           target="_blank"
         >
           <GithubIcon />
