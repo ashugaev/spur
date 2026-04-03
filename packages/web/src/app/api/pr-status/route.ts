@@ -6,6 +6,7 @@ type CiStatus = "success" | "failure" | "pending" | null;
 interface PrStatusResponse {
   state: PrState;
   ciStatus: CiStatus;
+  totalThreads: number;
   unresolvedThreads: number;
 }
 
@@ -159,6 +160,7 @@ export async function GET(request: NextRequest) {
     else if (pr.state === "CLOSED") state = "closed";
     else state = "open";
 
+    const totalThreads = pr.reviewThreads.nodes.length;
     const unresolvedThreads = pr.reviewThreads.nodes.filter((t) => !t.isResolved).length;
 
     let ciStatus: CiStatus = null;
@@ -167,7 +169,7 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
-    const response: PrStatusResponse = { state, ciStatus, unresolvedThreads };
+    const response: PrStatusResponse = { state, ciStatus, totalThreads, unresolvedThreads };
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);
   } catch (error) {

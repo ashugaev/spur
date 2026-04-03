@@ -9,6 +9,7 @@ export type CiStatus = "success" | "failure" | "pending" | null;
 export interface PrInfo {
   state: PrState | null;
   ciStatus: CiStatus;
+  totalThreads: number;
   unresolvedThreads: number;
 }
 
@@ -19,7 +20,12 @@ const PR_STATE_COLORS: Record<PrState, string> = {
   closed: "var(--color-status-error)",
 };
 
-const EMPTY_PR_INFO: PrInfo = { state: null, ciStatus: null, unresolvedThreads: 0 };
+const EMPTY_PR_INFO: PrInfo = {
+  state: null,
+  ciStatus: null,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
 const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
 
@@ -74,6 +80,7 @@ async function fetchPrInfo(url: string): Promise<PrInfo> {
     return {
       state: isPrState(obj["state"]) ? obj["state"] : null,
       ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+      totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
       unresolvedThreads:
         typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
     };
@@ -158,12 +165,20 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
-export function ReviewCommentsBadge({ count }: { count: number }) {
-  if (count <= 0) return null;
+export function ReviewCommentsBadge({ total, unresolved }: { total: number; unresolved: number }) {
+  if (total <= 0) return null;
+  const hasUnresolved = unresolved > 0;
+  const color = hasUnresolved
+    ? "text-[var(--color-status-attention)]"
+    : "text-[var(--color-text-tertiary)]";
+  const label = hasUnresolved ? `${unresolved}/${total}` : `${total}`;
+  const title = hasUnresolved
+    ? `${unresolved} unresolved of ${total} thread${total === 1 ? "" : "s"}`
+    : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className="inline-flex items-center gap-0.5 text-[10px] font-bold text-[var(--color-status-attention)]"
-      title={`${count} unresolved thread${count === 1 ? "" : "s"}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
+      title={title}
     >
       <svg
         className="h-2.5 w-2.5"
@@ -174,7 +189,7 @@ export function ReviewCommentsBadge({ count }: { count: number }) {
       >
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
       </svg>
-      {count}
+      {label}
     </span>
   );
 }
