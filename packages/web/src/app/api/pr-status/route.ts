@@ -22,19 +22,41 @@ interface GithubCombinedStatus {
 }
 
 interface CacheEntry {
-  state: PrState;
-  ciStatus: CiStatus;
-  reviewComments: number;
+  response: PrStatusResponse | null;
+  error?: string;
   expiresAt: number;
 }
 
 const cache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 60_000;
+const CACHE_TTL_MS = 120_000; // 2 min
+const ERROR_CACHE_TTL_MS = 60_000; // cache errors for 1 min to avoid hammering
+
+let rateLimitResetAt = 0;
 
 function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
   if (!match || !match[1] || !match[2] || !match[3]) return null;
   return { owner: match[1], repo: match[2], number: match[3] };
+}
+
+function ghHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { accept: "application/vnd.github+json" };
+  const ghToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
+  if (ghToken) {
+    headers["authorization"] = `Bearer ${ghToken}`;
+  }
+  return headers;
+}
+
+function handleRateLimit(response: Response): void {
+  if (response.status === 403 || response.status === 429) {
+    const reset = response.headers.get("x-ratelimit-reset");
+    if (reset) {
+      rateLimitResetAt = Number(reset) * 1000;
+    } else {
+      rateLimitResetAt = Date.now() + 60_000;
+    }
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -51,40 +73,41 @@ export async function GET(request: NextRequest) {
   const cacheKey = `${coords.owner}/${coords.repo}/${coords.number}`;
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json({
-      state: cached.state,
-      ciStatus: cached.ciStatus,
-      reviewComments: cached.reviewComments,
-    } satisfies PrStatusResponse);
+    if (cached.error) {
+      return NextResponse.json({ error: cached.error }, { status: 502 });
+    }
+    return NextResponse.json(cached.response);
   }
 
-  const apiUrl = `https://api.github.com/repos/${coords.owner}/${coords.repo}/pulls/${coords.number}`;
-  const headers: Record<string, string> = { accept: "application/vnd.github+json" };
-  const ghToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (ghToken) {
-    headers["authorization"] = `Bearer ${ghToken}`;
+  // Rate limit backoff
+  if (Date.now() < rateLimitResetAt) {
+    const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
+    return NextResponse.json({ error: `GitHub rate limit — retry in ${wait}s` }, { status: 429 });
   }
+
+  const headers = ghHeaders();
 
   try {
+    const apiUrl = `https://api.github.com/repos/${coords.owner}/${coords.repo}/pulls/${coords.number}`;
     const ghResponse = await fetch(apiUrl, { headers, cache: "no-store" });
+
     if (!ghResponse.ok) {
-      return NextResponse.json(
-        { error: `GitHub API returned ${ghResponse.status}` },
-        { status: 502 },
-      );
+      handleRateLimit(ghResponse);
+      const errorMsg = `GitHub API ${ghResponse.status}`;
+      cache.set(cacheKey, {
+        response: null,
+        error: errorMsg,
+        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
+      });
+      return NextResponse.json({ error: errorMsg }, { status: 502 });
     }
 
     const data = (await ghResponse.json()) as GithubPullResponse;
     let state: PrState;
-    if (data.draft) {
-      state = "draft";
-    } else if (data.merged) {
-      state = "merged";
-    } else if (data.state === "closed") {
-      state = "closed";
-    } else {
-      state = "open";
-    }
+    if (data.draft) state = "draft";
+    else if (data.merged) state = "merged";
+    else if (data.state === "closed") state = "closed";
+    else state = "open";
 
     const reviewComments = typeof data.review_comments === "number" ? data.review_comments : 0;
 
@@ -100,25 +123,24 @@ export async function GET(request: NextRequest) {
           else if (statusData.state === "failure" || statusData.state === "error")
             ciStatus = "failure";
           else if (statusData.state === "pending") ciStatus = "pending";
+        } else {
+          handleRateLimit(statusRes);
         }
       } catch {
-        // Non-critical — leave ciStatus as null.
+        // Non-critical
       }
     }
 
-    cache.set(cacheKey, {
-      state,
-      ciStatus,
-      reviewComments,
-      expiresAt: Date.now() + CACHE_TTL_MS,
-    });
-    return NextResponse.json({
-      state,
-      ciStatus,
-      reviewComments,
-    } satisfies PrStatusResponse);
+    const response: PrStatusResponse = { state, ciStatus, reviewComments };
+    cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
+    return NextResponse.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
+    cache.set(cacheKey, {
+      response: null,
+      error: message,
+      expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
+    });
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }
