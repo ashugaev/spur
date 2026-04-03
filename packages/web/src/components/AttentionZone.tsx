@@ -55,7 +55,7 @@ export function AttentionZone({
       <section className="overflow-hidden rounded-sm border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
         <button
           type="button"
-          className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
+          className="flex w-full items-center gap-2 px-2.5 py-2 text-left"
           onClick={() => onToggle(level)}
         >
           <span className="h-2 w-2 rounded-full" style={{ background: config.color }} />
@@ -71,8 +71,8 @@ export function AttentionZone({
         </button>
 
         {!collapsed ? (
-          <div className="border-t border-[var(--color-border-default)] p-2.5">
-            <div className="space-y-2.5">
+          <div className="border-t border-[var(--color-border-default)] p-2">
+            <div className="space-y-2">
               {sessions.length > 0 ? (
                 sessions.map((session) => (
                   <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />
@@ -92,11 +92,11 @@ export function AttentionZone({
   return (
     <section
       className={cn(
-        "flex min-h-[14rem] flex-col rounded-sm border bg-[var(--color-bg-surface)] p-3",
+        "flex min-h-[14rem] flex-col rounded-sm border bg-[var(--color-bg-surface)] p-2.5",
         config.border,
       )}
     >
-      <header className="mb-3 flex items-center justify-between gap-3">
+      <header className="mb-2 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full" style={{ background: config.color }} />
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">{config.label}</h2>
@@ -106,7 +106,7 @@ export function AttentionZone({
         </span>
       </header>
 
-      <div className="flex-1 space-y-2.5">
+      <div className="flex-1 space-y-2">
         {sessions.length > 0 ? (
           sessions.map((session) => (
             <SessionCard key={session.id} onOpenTerminal={onOpenTerminal} session={session} />

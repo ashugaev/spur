@@ -2,10 +2,10 @@
 
 @theme {
   /* ── Base surfaces ────────────────────────────────────────────────── */
-  --color-bg-base: #0d1117;
-  --color-bg-surface: rgba(22, 27, 34, 0.8);
-  --color-bg-elevated: rgba(28, 33, 40, 0.9);
-  --color-bg-subtle: rgba(33, 38, 45, 0.7);
+  --color-bg-base: #0D0D0E;
+  --color-bg-surface: rgba(17, 17, 18, 0.8);
+  --color-bg-elevated: rgba(23, 23, 26, 0.9);
+  --color-bg-subtle: rgba(30, 30, 33, 0.7);
 
   /* Backward-compat aliases */
   --color-bg-primary: var(--color-bg-base);
@@ -13,45 +13,45 @@
   --color-bg-tertiary: var(--color-bg-elevated);
 
   /* ── Borders ─────────────────────────────────────────────────────── */
-  --color-border-subtle: rgba(48, 54, 61, 0.6);
-  --color-border-default: rgba(48, 54, 61, 1);
-  --color-border-strong: rgba(72, 79, 88, 1);
+  --color-border-subtle: rgba(35, 35, 38, 0.6);
+  --color-border-default: rgba(35, 35, 38, 1);
+  --color-border-strong: rgba(50, 50, 54, 1);
 
   /* Backward-compat aliases */
   --color-border-muted: var(--color-border-subtle);
   --color-border-emphasis: var(--color-border-strong);
 
   /* ── Text ─────────────────────────────────────────────────────────── */
-  --color-text-primary: #e6edf3;
-  --color-text-secondary: #7d8590;
-  --color-text-tertiary: #484f58;
-  --color-text-muted: #484f58;
-  --color-text-inverse: #0d1117;
+  --color-text-primary: #E1E1E1;
+  --color-text-secondary: #A1A1A1;
+  --color-text-tertiary: #555558;
+  --color-text-muted: #555558;
+  --color-text-inverse: #0D0D0E;
 
   /* ── Interactive accent ──────────────────────────────────────────── */
-  --color-accent: #58a6ff;
-  --color-accent-hover: #79b8ff;
-  --color-accent-subtle: rgba(88, 166, 255, 0.12);
+  --color-accent: #FFFFFF;
+  --color-accent-hover: rgba(255, 255, 255, 0.8);
+  --color-accent-subtle: rgba(255, 255, 255, 0.08);
 
   /* ── Status / semantic colors ────────────────────────────────────── */
   --color-status-working: #58a6ff;
   --color-status-ready: #3fb950;
-  --color-status-attention: #d29922;
+  --color-status-attention: #FFD700;
   --color-status-idle: #484f58;
   --color-status-done: #30363d;
-  --color-status-error: #f85149;
+  --color-status-error: #FF4D4D;
 
   /* Semantic aliases */
   --color-accent-blue: #58a6ff;
   --color-accent-green: #3fb950;
-  --color-accent-yellow: #d29922;
+  --color-accent-yellow: #FFD700;
   --color-accent-orange: #d18616;
-  --color-accent-red: #f85149;
+  --color-accent-red: #FF4D4D;
   --color-accent-violet: #a371f7;
   --color-accent-purple: #bc8cff;
 
   /* ── Typography ──────────────────────────────────────────────────── */
-  --font-sans: var(--font-ibm-plex-sans), "SF Pro Text", -apple-system, system-ui, sans-serif;
+  --font-sans: var(--font-ibm-plex-mono), "JetBrains Mono", "SF Mono", "Menlo", monospace;
   --font-mono: var(--font-ibm-plex-mono), "SF Mono", "Menlo", "Consolas", monospace;
 
   /* ── Border radius ────────────────────────────────────────────────── */
@@ -69,13 +69,11 @@
 
 body {
   font-family: var(--font-sans);
-  background:
-    radial-gradient(ellipse 70% 40% at 15% 0%, rgba(88, 166, 255, 0.05) 0%, transparent 60%),
-    radial-gradient(ellipse 50% 30% at 85% 90%, rgba(163, 113, 247, 0.04) 0%, transparent 60%),
-    var(--color-bg-base);
+  font-size: 11px;
+  background: var(--color-bg-base);
   color: var(--color-text-primary);
   min-height: 100vh;
-  letter-spacing: -0.011em;
+  letter-spacing: 0.02em;
 }
 
 a {
@@ -111,10 +109,10 @@ a:hover {
 @keyframes activity-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45);
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.45);
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(88, 166, 255, 0);
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0);
   }
 }
 
@@ -155,27 +153,20 @@ a:hover {
 /* ── Session cards ────────────────────────────────────────────────────── */
 
 .session-card {
-  background: linear-gradient(175deg, rgba(28, 36, 47, 1) 0%, rgba(18, 23, 31, 1) 100%);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.9),
-    0 3px 10px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  background: rgba(17, 17, 18, 0.95);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   transition:
     transform 0.12s ease,
     box-shadow 0.12s ease,
     border-color 0.12s ease;
 
-  /* Bump dim text colors inside the card — the elevated surface is darker
-     than the transparent bg these values were calibrated for */
-  --color-text-secondary: #8b949e;
-  --color-text-muted: #656d76;
-  --color-text-tertiary: #656d76;
+  /* Bump dim text colors inside the card */
+  --color-text-secondary: #A1A1A1;
+  --color-text-muted: #666669;
+  --color-text-tertiary: #666669;
 }
 
 .session-card:hover {
-  transform: translateY(-2px);
-  box-shadow:
-    0 4px 8px rgba(0, 0, 0, 0.85),
-    0 14px 36px rgba(0, 0, 0, 0.55),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
