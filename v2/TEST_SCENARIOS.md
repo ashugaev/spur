@@ -30,6 +30,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
+- Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
@@ -85,6 +86,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Non-TTY and `--json` spawn skip the preflight endpoint call.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path.

@@ -157,6 +157,11 @@ export interface SessionPipelineState {
   error?: string;
 }
 
+export interface SessionQueuedMessagesState {
+  messages: string[];
+  awaitingPrompt: boolean;
+}
+
 export interface SessionRecord {
   id: string;
   project: string;
@@ -175,6 +180,7 @@ export interface SessionRecord {
   updatedAt: string;
   slots?: SessionSlots;
   pipeline?: SessionPipelineState;
+  queuedMessages?: SessionQueuedMessagesState;
   error?: string;
 }
 
