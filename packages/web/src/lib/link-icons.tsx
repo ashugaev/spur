@@ -148,19 +148,42 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   if (!status) return null;
   if (status === "success")
     return (
-      <svg className="h-3 w-3" viewBox="0 0 16 16" fill="var(--color-status-ready)">
-        <path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.78-9.72a.75.75 0 0 0-1.06-1.06L6.75 9.19 5.28 7.72a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l4.5-4.5Z" />
+      <svg
+        className="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--color-status-ready)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M20 6 9 17l-5-5" />
       </svg>
     );
   if (status === "failure")
     return (
-      <svg className="h-3 w-3" viewBox="0 0 16 16" fill="var(--color-status-error)">
-        <path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16Zm3.03-11.03a.75.75 0 0 0-1.06 0L8 6.94 6.03 4.97a.75.75 0 0 0-1.06 1.06L6.94 8 4.97 9.97a.75.75 0 1 0 1.06 1.06L8 9.06l1.97 1.97a.75.75 0 0 0 1.06-1.06L9.06 8l1.97-1.97a.75.75 0 0 0 0-1.06Z" />
+      <svg
+        className="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--color-status-error)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+      >
+        <path d="M18 6 6 18M6 6l12 12" />
       </svg>
     );
   return (
-    <svg className="h-3 w-3" viewBox="0 0 16 16" fill="var(--color-status-attention)">
-      <path d="M8 16A8 8 0 1 1 8 0a8 8 0 0 1 0 16ZM8 4a.75.75 0 0 0-.75.75v3.5a.75.75 0 0 0 .75.75h2.5a.75.75 0 0 0 0-1.5H8.75v-2.5A.75.75 0 0 0 8 4Z" />
+    <svg
+      className="h-3 w-3"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--color-status-attention)"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+    >
+      <circle cx="12" cy="12" r="10" strokeWidth="2" />
+      <path d="M12 6v6l4 2" />
     </svg>
   );
 }
