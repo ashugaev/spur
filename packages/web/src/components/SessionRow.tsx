@@ -2,7 +2,14 @@
 
 import { ActivityDot } from "@/components/ActivityDot";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { extractLinkId, GithubIcon, JiraIcon } from "@/lib/link-icons";
+import {
+  CiStatusDot,
+  ReviewCommentsBadge,
+  extractLinkId,
+  GithubIcon,
+  JiraIcon,
+  usePrInfo,
+} from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import { isTerminalSession, type DashboardSession } from "@/lib/types";
 
@@ -18,6 +25,7 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
 
   const prLink = session.links.find((l) => l.label === "pr");
   const trackerLink = session.links.find((l) => l.label === "tracker");
+  const prInfo = usePrInfo(prLink?.url);
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
@@ -59,6 +67,8 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
         >
           <GithubIcon />
           <span className="text-[11px]">{extractLinkId(prLink)}</span>
+          <CiStatusDot status={prInfo.ciStatus} />
+          <ReviewCommentsBadge count={prInfo.reviewComments} />
         </a>
       ) : null}
 

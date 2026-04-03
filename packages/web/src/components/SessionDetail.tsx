@@ -10,7 +10,15 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import { extractLinkId, GithubIcon, JiraIcon, prStateColor, usePrState } from "@/lib/link-icons";
+import {
+  CiStatusDot,
+  ReviewCommentsBadge,
+  extractLinkId,
+  GithubIcon,
+  JiraIcon,
+  prStateColor,
+  usePrInfo,
+} from "@/lib/link-icons";
 import { buildDashboardPath } from "@/lib/project-routes";
 import {
   canComplete,
@@ -26,8 +34,8 @@ import {
 
 function LinkBadge({ link }: { link: { label: string; url: string } }) {
   const prUrl = link.label === "pr" ? link.url : undefined;
-  const state = usePrState(prUrl);
-  const color = prStateColor(state);
+  const prInfo = usePrInfo(prUrl);
+  const color = prStateColor(prInfo.state);
 
   return (
     <a
@@ -40,6 +48,12 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       <span className="text-[11px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
+      {link.label === "pr" ? (
+        <>
+          <CiStatusDot status={prInfo.ciStatus} />
+          <ReviewCommentsBadge count={prInfo.reviewComments} />
+        </>
+      ) : null}
     </a>
   );
 }

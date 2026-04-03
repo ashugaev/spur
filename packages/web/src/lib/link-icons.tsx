@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
 
 export type PrState = "draft" | "open" | "merged" | "closed";
+export type CiStatus = "success" | "failure" | "pending" | null;
+
+export interface PrInfo {
+  state: PrState | null;
+  ciStatus: CiStatus;
+  reviewComments: number;
+}
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -11,6 +18,38 @@ const PR_STATE_COLORS: Record<PrState, string> = {
   merged: "var(--color-accent-violet)",
   closed: "var(--color-status-error)",
 };
+
+const EMPTY_PR_INFO: PrInfo = { state: null, ciStatus: null, reviewComments: 0 };
+const CACHE_TTL_MS = 30_000;
+const POLL_MS = 30_000;
+
+interface CacheEntry {
+  data: PrInfo;
+  fetchedAt: number;
+}
+
+const prCache = new Map<string, CacheEntry>();
+
+function isPrState(value: unknown): value is PrState {
+  return value === "draft" || value === "open" || value === "merged" || value === "closed";
+}
+
+function isCiStatus(value: unknown): value is CiStatus {
+  return value === "success" || value === "failure" || value === "pending" || value === null;
+}
+
+async function fetchPrInfo(url: string): Promise<PrInfo> {
+  const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
+  if (!res.ok) return EMPTY_PR_INFO;
+  const data: unknown = await res.json();
+  if (typeof data !== "object" || data === null) return EMPTY_PR_INFO;
+  const obj = data as Record<string, unknown>;
+  return {
+    state: isPrState(obj["state"]) ? obj["state"] : null,
+    ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+    reviewComments: typeof obj["reviewComments"] === "number" ? obj["reviewComments"] : 0,
+  };
+}
 
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
@@ -25,43 +64,88 @@ export function extractLinkId(link: SpurSessionLink): string {
   return link.label;
 }
 
-export function usePrState(url: string | undefined): PrState | null {
-  const [state, setState] = useState<PrState | null>(null);
+export function usePrInfo(url: string | undefined): PrInfo {
+  const [info, setInfo] = useState<PrInfo>(() => {
+    if (!url) return EMPTY_PR_INFO;
+    const cached = prCache.get(url);
+    return cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS ? cached.data : EMPTY_PR_INFO;
+  });
+
+  const doFetch = useCallback(async (target: string) => {
+    const cached = prCache.get(target);
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      setInfo(cached.data);
+      return;
+    }
+    const result = await fetchPrInfo(target);
+    prCache.set(target, { data: result, fetchedAt: Date.now() });
+    setInfo(result);
+  }, []);
 
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
 
-    void (async () => {
-      try {
-        const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-        if (!res.ok || cancelled) return;
-        const data = (await res.json()) as { state?: string };
-        if (
-          !cancelled &&
-          typeof data.state === "string" &&
-          (data.state === "draft" ||
-            data.state === "open" ||
-            data.state === "merged" ||
-            data.state === "closed")
-        ) {
-          setState(data.state);
-        }
-      } catch {
-        // Non-critical — leave uncolored.
-      }
-    })();
+    const run = () => {
+      if (!cancelled) void doFetch(url);
+    };
 
+    run();
+    const timer = setInterval(run, POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
-  }, [url]);
+  }, [url, doFetch]);
 
-  return state;
+  return info;
+}
+
+/** @deprecated Use usePrInfo instead */
+export function usePrState(url: string | undefined): PrState | null {
+  return usePrInfo(url).state;
 }
 
 export function prStateColor(state: PrState | null): string | undefined {
   return state ? PR_STATE_COLORS[state] : undefined;
+}
+
+const CI_DOT_COLORS: Record<string, string> = {
+  success: "var(--color-status-ready)",
+  failure: "var(--color-status-error)",
+  pending: "var(--color-status-attention)",
+};
+
+export function CiStatusDot({ status }: { status: CiStatus }) {
+  if (!status) return null;
+  return (
+    <span
+      className="inline-block h-1.5 w-1.5 rounded-full"
+      style={{ backgroundColor: CI_DOT_COLORS[status] }}
+      title={`CI: ${status}`}
+    />
+  );
+}
+
+export function ReviewCommentsBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-0.5 text-[10px] text-[var(--color-text-tertiary)]"
+      title={`${count} review comment${count === 1 ? "" : "s"}`}
+    >
+      <svg
+        className="h-2.5 w-2.5"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+      >
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      </svg>
+      {count}
+    </span>
+  );
 }
 
 export function GithubIcon() {
