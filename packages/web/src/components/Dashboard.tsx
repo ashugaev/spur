@@ -197,14 +197,6 @@ export function Dashboard() {
     );
   }, [projects, rawSessions]);
 
-  const spawnProjectOptions = useMemo(
-    () =>
-      [...projects].sort((left, right) =>
-        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
-      ),
-    [projects],
-  );
-
   const projectNameMap = useMemo(
     () => new Map(filterProjectOptions.map((project) => [project.id, project.name])),
     [filterProjectOptions],
@@ -258,19 +250,19 @@ export function Dashboard() {
     : "All projects";
 
   useEffect(() => {
-    if (spawnProjectId && spawnProjectOptions.some((project) => project.id === spawnProjectId)) {
+    if (spawnProjectId && filterProjectOptions.some((project) => project.id === spawnProjectId)) {
       return;
     }
 
     const nextProjectId =
-      spawnProjectOptions.find((project) => project.id === projectId)?.id ??
-      spawnProjectOptions[0]?.id ??
+      filterProjectOptions.find((project) => project.id === projectId)?.id ??
+      filterProjectOptions[0]?.id ??
       "";
 
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
-  }, [projectId, spawnProjectId, spawnProjectOptions]);
+  }, [projectId, spawnProjectId, filterProjectOptions]);
 
   useEffect(() => {
     if (!isMobile) return;
@@ -440,7 +432,7 @@ export function Dashboard() {
                   value={spawnProjectId}
                 >
                   <option value="">Select project</option>
-                  {spawnProjectOptions.map((project) => (
+                  {filterProjectOptions.map((project) => (
                     <option key={project.id} value={project.id}>
                       {project.name}
                     </option>
