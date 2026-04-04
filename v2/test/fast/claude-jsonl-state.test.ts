@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  classifyClaudeJsonlState,
-  type ParsedRecord,
-} from "../../src/claude-jsonl-state.js";
+import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
 
 const NOW = 1_700_000_000_000;
 
@@ -49,16 +46,12 @@ describe("classifyClaudeJsonlState", () => {
   });
 
   it("returns working for tool_use within stale window", () => {
-    const records = [
-      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 2_000 }),
-    ];
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 2_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
   it("returns needs_input for tool_use past stale window with no progress", () => {
-    const records = [
-      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 }),
-    ];
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 

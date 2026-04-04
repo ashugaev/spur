@@ -23,10 +23,7 @@ const TOOL_USE_STALE_MS = 3_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
-export function classifyClaudeJsonlState(
-  records: ParsedRecord[],
-  nowMs: number,
-): SessionState {
+export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number): SessionState {
   // Walk backwards, skip progress noise to find the last meaningful record.
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -121,7 +118,9 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     const content = Array.isArray(message["content"]) ? message["content"] : [];
     const hasToolUse = content.some(
       (block: unknown) =>
-        typeof block === "object" && block !== null && (block as Record<string, unknown>)["type"] === "tool_use",
+        typeof block === "object" &&
+        block !== null &&
+        (block as Record<string, unknown>)["type"] === "tool_use",
     );
     return {
       type: "assistant",
@@ -136,7 +135,9 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     const content = Array.isArray(message["content"]) ? message["content"] : [];
     const hasToolResult = content.some(
       (block: unknown) =>
-        typeof block === "object" && block !== null && (block as Record<string, unknown>)["type"] === "tool_result",
+        typeof block === "object" &&
+        block !== null &&
+        (block as Record<string, unknown>)["type"] === "tool_result",
     );
     return {
       type: "user",
@@ -178,10 +179,7 @@ export async function readClaudeJsonlState(
   };
 
   // Mtime unchanged and we already have records → skip re-read
-  if (
-    fileStat.mtimeMs === currentReader.lastMtimeMs &&
-    currentReader.tailRecords.length > 0
-  ) {
+  if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {
       state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now()),
       reader: currentReader,
