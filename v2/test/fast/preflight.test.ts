@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
@@ -9,7 +10,7 @@ const { mockExecFileAsync } = vi.hoisted(() => ({
   mockExecFileAsync: vi.fn(),
 }));
 const { mockRm } = vi.hoisted(() => ({
-  mockRm: vi.fn<typeof import("node:fs/promises").rm>(),
+  mockRm: vi.fn<typeof FsPromises.rm>(),
 }));
 
 vi.mock("node:child_process", () => {
@@ -20,7 +21,7 @@ vi.mock("node:child_process", () => {
 });
 
 vi.mock("node:fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const actual = await importOriginal<typeof FsPromises>();
   return {
     ...actual,
     rm: mockRm,
