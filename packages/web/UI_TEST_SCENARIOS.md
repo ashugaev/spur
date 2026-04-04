@@ -47,12 +47,18 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal
-- Modal has: project select, agent select, multiline textarea, Spawn button
+- Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
+- Branch input: placeholder "branch name", optional
+- Workspace select: Default / Worktree / Shared options
+- When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"
+- Plan checkbox: labeled "PLAN", toggles plan mode
+- Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled when project or prompt empty
+- All new fields reset on successful spawn
 
 ## Session Detail
 

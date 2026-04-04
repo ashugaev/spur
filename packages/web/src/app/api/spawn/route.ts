@@ -7,6 +7,9 @@ interface SpawnBody {
   prompt?: string;
   agent?: "claude" | "codex";
   branch?: string;
+  planMode?: boolean;
+  steps?: string[];
+  overrides?: { worktree?: boolean; defaultBranch?: string };
 }
 
 export async function POST(request: NextRequest) {
@@ -22,14 +25,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
+    const filteredSteps = Array.isArray(body.steps)
+      ? body.steps
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim())
+      : undefined;
+
+    const rawOverrides =
+      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
+    const overrides =
+      rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
+
+    const payload: Record<string, unknown> = { project, prompt };
+    if (body.agent) payload.agent = body.agent;
+    if (body.branch?.trim()) payload.branch = body.branch.trim();
+    if (body.planMode === true) payload.planMode = true;
+    if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
+    if (overrides) payload.overrides = overrides;
+
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions",
-      spurJsonInit("POST", {
-        project,
-        prompt,
-        ...(body.agent ? { agent: body.agent } : {}),
-        ...(body.branch?.trim() ? { branch: body.branch.trim() } : {}),
-      }),
+      spurJsonInit("POST", payload),
     );
 
     return NextResponse.json(session, { status: 201 });

@@ -114,6 +114,13 @@ export function Dashboard() {
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
   const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnBranch, setSpawnBranch] = useState("");
+  const [spawnPlanMode, setSpawnPlanMode] = useState(false);
+  const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
+    "default",
+  );
+  const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
@@ -265,6 +272,13 @@ export function Dashboard() {
     window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
   };
 
+  const addStep = () => {
+    setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
+  };
+  const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
+  const updateStep = (id: number, value: string) =>
+    setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -272,17 +286,37 @@ export function Dashboard() {
 
     setSpawning(true);
     try {
+      const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
+      let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
+      if (spawnWorkspaceMode === "worktree") {
+        overrides = { worktree: true };
+        if (spawnDefaultBranch.trim()) overrides.defaultBranch = spawnDefaultBranch.trim();
+      } else if (spawnWorkspaceMode === "shared") {
+        overrides = { worktree: false };
+      }
+
+      const payload: Record<string, unknown> = {
+        projectId: nextProjectId,
+        prompt: nextPrompt,
+        agent: spawnAgent,
+      };
+      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      if (spawnPlanMode) payload.planMode = true;
+      if (filteredSteps.length > 0) payload.steps = filteredSteps;
+      if (overrides) payload.overrides = overrides;
+
       const response = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          projectId: nextProjectId,
-          prompt: nextPrompt,
-          agent: spawnAgent,
-        }),
+        body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
       setSpawnPrompt("");
+      setSpawnBranch("");
+      setSpawnPlanMode(false);
+      setSpawnSteps([]);
+      setSpawnWorkspaceMode("default");
+      setSpawnDefaultBranch("");
       setSpawnOpen(false);
       syncProjectFilter(nextProjectId);
       setSpawnProjectId(nextProjectId);
@@ -431,6 +465,75 @@ export function Dashboard() {
                   <option value="claude">claude</option>
                   <option value="codex">codex</option>
                 </select>
+              </div>
+              <div className="flex gap-2">
+                <input
+                  aria-label="branch name"
+                  className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnBranch(event.target.value)}
+                  placeholder="branch name"
+                  value={spawnBranch}
+                />
+                <select
+                  aria-label="workspace mode"
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) =>
+                    setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
+                  }
+                  value={spawnWorkspaceMode}
+                >
+                  <option value="default">Default</option>
+                  <option value="worktree">Worktree</option>
+                  <option value="shared">Shared</option>
+                </select>
+                <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                  <input
+                    checked={spawnPlanMode}
+                    className="accent-[var(--color-accent)]"
+                    onChange={(event) => setSpawnPlanMode(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                    Plan
+                  </span>
+                </label>
+              </div>
+              {spawnWorkspaceMode === "worktree" ? (
+                <input
+                  className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                  placeholder="base branch (defaults to project default)"
+                  value={spawnDefaultBranch}
+                />
+              ) : null}
+              <div>
+                <div className="max-h-48 space-y-2 overflow-y-auto">
+                  {spawnSteps.map((step, index) => (
+                    <div className="flex gap-2" key={step.id}>
+                      <input
+                        aria-label={`step ${index + 1}`}
+                        className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                        onChange={(event) => updateStep(step.id, event.target.value)}
+                        placeholder={`Step ${index + 1}`}
+                        value={step.value}
+                      />
+                      <button
+                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                        onClick={() => removeStep(step.id)}
+                        type="button"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                  onClick={addStep}
+                  type="button"
+                >
+                  + Step
+                </button>
               </div>
               <textarea
                 className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
