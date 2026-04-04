@@ -205,7 +205,9 @@ config_file = "agents/default.toml"
         return { stdout: "", stderr: "" };
       },
     );
-    mockRm.mockRejectedValueOnce(Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" }));
+    mockRm.mockRejectedValueOnce(
+      Object.assign(new Error("directory not empty"), { code: "ENOTEMPTY" }),
+    );
 
     await expect(
       runSpawnPreflight({
