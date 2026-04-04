@@ -189,7 +189,7 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
 }
 
 export function ReviewCommentsBadge({ total, unresolved }: { total: number; unresolved: number }) {
-  if (total <= 0) return null;
+  if (total <= 0) return <span className="inline-flex w-6" />;
   const hasUnresolved = unresolved > 0;
   const color = hasUnresolved
     ? "text-[var(--color-status-attention)]"
@@ -200,11 +200,11 @@ export function ReviewCommentsBadge({ total, unresolved }: { total: number; unre
     : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex w-6 items-center gap-0.5 text-[10px] font-bold ${color}`}
       title={title}
     >
       <svg
-        className="h-2.5 w-2.5"
+        className="h-2.5 w-2.5 shrink-0"
         viewBox="0 0 24 24"
         fill="none"
         stroke="currentColor"
