@@ -26,7 +26,7 @@ const EMPTY_PR_INFO: PrInfo = {
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-const CACHE_TTL_MS = 120_000; // match server cache
+export const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
 
 let gitErrorMessage: string | null = null;
@@ -50,12 +50,12 @@ export function useGitError(): string | null {
   return err;
 }
 
-interface CacheEntry {
+export interface CacheEntry {
   data: PrInfo;
   fetchedAt: number;
 }
 
-const prCache = new Map<string, CacheEntry>();
+export const prCache = new Map<string, CacheEntry>();
 
 function isPrState(value: unknown): value is PrState {
   return value === "draft" || value === "open" || value === "merged" || value === "closed";
@@ -65,7 +65,7 @@ function isCiStatus(value: unknown): value is CiStatus {
   return value === "success" || value === "failure" || value === "pending" || value === null;
 }
 
-async function fetchPrInfo(url: string): Promise<PrInfo> {
+export async function fetchPrInfo(url: string): Promise<PrInfo> {
   try {
     const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
     if (!res.ok) {
