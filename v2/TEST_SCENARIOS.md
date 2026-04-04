@@ -71,6 +71,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
+- PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
 
 - Config parses `devServer` with `command` and `autoStart`; absent key returns `undefined`.
 - `startDevServer` rejects sessions without `devServer` config, inactive sessions, and missing workspace.

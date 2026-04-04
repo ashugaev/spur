@@ -1,7 +1,6 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { setInterval as startInterval, clearInterval } from "node:timers";
-import { promisify } from "node:util";
+import { gh } from "../gh.js";
 import {
   deleteGitHubSourceSnapshot,
   listSessions,
@@ -17,8 +16,6 @@ import type {
   SessionRecord,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
-
-const execFileAsync = promisify(execFile);
 
 interface GitHubPrSummary {
   number: number;
@@ -94,15 +91,6 @@ function hasMergeConflict(pr: GitHubPrSummary): boolean {
     normalizeGitHubState(pr.mergeable) === "CONFLICTING" ||
     normalizeGitHubState(pr.mergeStateStatus) === "DIRTY"
   );
-}
-
-async function gh(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("gh", args, {
-    cwd,
-    timeout: 30_000,
-    maxBuffer: 10 * 1024 * 1024,
-  });
-  return stdout.trim();
 }
 
 async function resolvePrSummary(

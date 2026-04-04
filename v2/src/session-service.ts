@@ -88,6 +88,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
+import { gh } from "./gh.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -117,6 +118,16 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const PR_CHECK_THROTTLE_MS = 30_000;
+const PR_CHECK_WAITING_LIMIT = 5;
+
+interface PrCheckTracker {
+  waitingChecks: number;
+  lastState: SessionState | null;
+  lastCheckAt: number;
+  found: boolean;
+}
+
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
@@ -401,6 +412,7 @@ export class SessionService {
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
+  private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
@@ -529,6 +541,7 @@ export class SessionService {
       );
       for (const session of sessions) {
         const view = await this.enrich(session);
+        this.checkPrForSession(session, view.state);
         const attention =
           view.state === "needs_input" ? "needs_input" : view.state === "error" ? "error" : null;
         if (!attention) {
@@ -546,6 +559,111 @@ export class SessionService {
     } finally {
       this.attentionMonitorRunning = false;
     }
+  }
+
+  private checkPrForSession(session: SessionRecord, state: SessionState): void {
+    // Skip if PR slot already exists
+    if (session.slots?.links.some((link) => link.label === "pr")) {
+      return;
+    }
+    // Skip terminal states
+    if (isTerminalSessionStatus(session.status)) {
+      return;
+    }
+    // Skip if no worktree
+    if (!session.worktree || !session.worktreePath) {
+      return;
+    }
+
+    const tracker = this.prCheckTrackers.get(session.id) ?? {
+      waitingChecks: 0,
+      lastState: null,
+      lastCheckAt: 0,
+      found: false,
+    };
+    if (!this.prCheckTrackers.has(session.id)) {
+      this.prCheckTrackers.set(session.id, tracker);
+    }
+
+    // Already found
+    if (tracker.found) {
+      return;
+    }
+
+    // Reset waitingChecks on state change
+    if (tracker.lastState !== null && tracker.lastState !== state) {
+      tracker.waitingChecks = 0;
+    }
+    tracker.lastState = state;
+
+    // Back off after limit in waiting with no state change
+    if (state === "waiting" && tracker.waitingChecks >= PR_CHECK_WAITING_LIMIT) {
+      return;
+    }
+
+    // Throttle between gh calls
+    if (Date.now() - tracker.lastCheckAt < PR_CHECK_THROTTLE_MS) {
+      return;
+    }
+
+    tracker.lastCheckAt = Date.now();
+    if (state === "waiting") {
+      tracker.waitingChecks += 1;
+    }
+
+    // Fire and forget
+    void this.runPrCheck(session).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.pr_auto_detect.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `PR auto-detect failed for ${session.id}: ${message}`,
+      });
+    });
+  }
+
+  private async runPrCheck(session: SessionRecord): Promise<void> {
+    const raw = await gh(
+      session.worktreePath,
+      "pr",
+      "list",
+      "--head",
+      session.branch,
+      "--json",
+      "url",
+      "--limit",
+      "1",
+    );
+    const prs: Array<{ url: string }> = JSON.parse(raw);
+    const pr = prs[0];
+    if (!pr?.url) {
+      return;
+    }
+
+    const tracker = this.prCheckTrackers.get(session.id);
+    if (tracker) {
+      tracker.found = true;
+    }
+
+    // Re-read session to avoid stale overwrites
+    const current = readSession(this.config.dataDir, session.id);
+    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+      return;
+    }
+
+    const slots = applySlotsUpdate(current.slots, {
+      links: [{ label: "pr", url: pr.url }],
+    });
+    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
+    writeSession(this.config.dataDir, updated);
+    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    this.logEvent("session.pr_auto_detect.found", {
+      level: "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+    });
   }
 
   private async notifyAttention(
