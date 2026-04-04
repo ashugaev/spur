@@ -10,9 +10,13 @@ function normalizePort(value: string | undefined, fallback: number): string {
 }
 
 export async function GET() {
+  const bindPort = normalizePort(
+    process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
+    14801,
+  );
   return NextResponse.json(
     {
-      directTerminalPort: normalizePort(process.env["DIRECT_TERMINAL_PORT"], 14801),
+      directTerminalPort: normalizePort(process.env["DIRECT_TERMINAL_PUBLIC_PORT"], Number(bindPort)),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

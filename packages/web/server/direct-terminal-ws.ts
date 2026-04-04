@@ -44,6 +44,11 @@ function parsePort(value: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
 }
 
+function readHost(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
 function readSessionId(urlValue: string | undefined): string | null {
   const url = new URL(urlValue ?? "/", "ws://127.0.0.1");
   const sessionId = url.searchParams.get("session")?.trim();
@@ -175,12 +180,16 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
   };
 }
 
-const port = parsePort(process.env["DIRECT_TERMINAL_PORT"], 14801);
+const port = parsePort(
+  process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
+  14801,
+);
+const host = readHost(process.env["DIRECT_TERMINAL_BIND_HOST"], "127.0.0.1");
 const shouldListen = import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
 if (shouldListen) {
   const { server } = createDirectTerminalServer();
-  server.listen(port, "127.0.0.1", () => {
-    process.stdout.write(`[direct-terminal] listening on 127.0.0.1:${port}\n`);
+  server.listen(port, host, () => {
+    process.stdout.write(`[direct-terminal] listening on ${host}:${port}\n`);
   });
 }
