@@ -335,272 +335,273 @@ export function Dashboard() {
 
   return (
     <>
-    <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-      <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-lg text-[var(--color-accent)]">𖤓</span>
-          <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-            {activeProjectName === "All projects" ? "All Projects" : activeProjectName}
-          </h1>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-            <svg
-              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.35-4.35" />
-            </svg>
-            <input
-              className="w-32 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Filter sessions..."
-              value={searchQuery}
-            />
+      <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
+        <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-lg text-[var(--color-accent)]">𖤓</span>
+            <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+              {activeProjectName === "All projects" ? "All Projects" : activeProjectName}
+            </h1>
           </div>
-          <select
-            className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-            onChange={(event) => syncProjectFilter(event.target.value)}
-            value={projectId}
-          >
-            <option value="">All projects</option>
-            {filterProjectOptions.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-          <button
-            className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-            onClick={() => setSpawnOpen(true)}
-            type="button"
-          >
-            Spawn Session
-          </button>
-        </div>
-      </header>
-
-      <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
-        <StatItem
-          icon={<IconChat />}
-          label="Needs Input"
-          value={stats.respond}
-          color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-          active={activeStatFilter === "respond"}
-          onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
-        />
-        <StatItem
-          icon={<IconBolt />}
-          label="Working"
-          value={stats.working}
-          color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-          active={activeStatFilter === "working"}
-          onClick={() => setActiveStatFilter((c) => (c === "working" ? null : "working"))}
-        />
-        <StatItem
-          icon={<IconClock />}
-          label="Waiting"
-          value={stats.pending}
-          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-          active={activeStatFilter === "pending"}
-          onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
-        />
-      </div>
-
-      {spawnOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
-          onClick={(event) => {
-            if (event.target === event.currentTarget) setSpawnOpen(false);
-          }}
-        >
-          <div className="mx-4 w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:mx-0 sm:p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
-                Spawn Session
-              </h2>
-              <button
-                className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                onClick={() => setSpawnOpen(false)}
-                type="button"
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+              <svg
+                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
               >
-                ✕
-              </button>
-            </div>
-            <div className="space-y-3">
-              <div className="flex gap-2">
-                <select
-                  className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnProjectId(event.target.value)}
-                  value={spawnProjectId}
-                >
-                  <option value="">Select project</option>
-                  {filterProjectOptions.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
-                  value={spawnAgent}
-                >
-                  <option value="claude">claude</option>
-                  <option value="codex">codex</option>
-                </select>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  aria-label="branch name"
-                  className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnBranch(event.target.value)}
-                  placeholder="branch name"
-                  value={spawnBranch}
-                />
-                <select
-                  aria-label="workspace mode"
-                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) =>
-                    setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
-                  }
-                  value={spawnWorkspaceMode}
-                >
-                  <option value="default">Default</option>
-                  <option value="worktree">Worktree</option>
-                  <option value="shared">Shared</option>
-                </select>
-                <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
-                  <input
-                    checked={spawnPlanMode}
-                    className="accent-[var(--color-accent)]"
-                    onChange={(event) => setSpawnPlanMode(event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
-                    Plan
-                  </span>
-                </label>
-              </div>
-              {spawnWorkspaceMode === "worktree" ? (
-                <input
-                  className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnDefaultBranch(event.target.value)}
-                  placeholder="base branch (defaults to project default)"
-                  value={spawnDefaultBranch}
-                />
-              ) : null}
-              <div>
-                <div className="max-h-48 space-y-2 overflow-y-auto">
-                  {spawnSteps.map((step, index) => (
-                    <div className="flex gap-2" key={step.id}>
-                      <input
-                        aria-label={`step ${index + 1}`}
-                        className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                        onChange={(event) => updateStep(step.id, event.target.value)}
-                        placeholder={`Step ${index + 1}`}
-                        value={step.value}
-                      />
-                      <button
-                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                        onClick={() => removeStep(step.id)}
-                        type="button"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))}
-                </div>
-                <button
-                  className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
-                  onClick={addStep}
-                  type="button"
-                >
-                  + Step
-                </button>
-              </div>
-              <textarea
-                className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                onChange={(event) => setSpawnPrompt(event.target.value)}
-                onKeyDown={(event) => {
-                  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") void handleSpawn();
-                }}
-                placeholder="Prompt for the new session..."
-                value={spawnPrompt}
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <input
+                className="w-32 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Filter sessions..."
+                value={searchQuery}
               />
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                  ⌘/Ctrl + Enter to submit
-                </span>
+            </div>
+            <select
+              className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
+            >
+              <option value="">All projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              onClick={() => setSpawnOpen(true)}
+              type="button"
+            >
+              Spawn Session
+            </button>
+          </div>
+        </header>
+
+        <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
+          <StatItem
+            icon={<IconChat />}
+            label="Needs Input"
+            value={stats.respond}
+            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+            active={activeStatFilter === "respond"}
+            onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
+          />
+          <StatItem
+            icon={<IconBolt />}
+            label="Working"
+            value={stats.working}
+            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+            active={activeStatFilter === "working"}
+            onClick={() => setActiveStatFilter((c) => (c === "working" ? null : "working"))}
+          />
+          <StatItem
+            icon={<IconClock />}
+            label="Waiting"
+            value={stats.pending}
+            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+            active={activeStatFilter === "pending"}
+            onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
+          />
+        </div>
+
+        {spawnOpen ? (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) setSpawnOpen(false);
+            }}
+          >
+            <div className="mx-4 w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:mx-0 sm:p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                  Spawn Session
+                </h2>
                 <button
-                  className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
-                  onClick={() => void handleSpawn()}
+                  className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                  onClick={() => setSpawnOpen(false)}
                   type="button"
                 >
-                  {spawning ? "Spawning..." : "Spawn"}
+                  ✕
                 </button>
+              </div>
+              <div className="space-y-3">
+                <div className="flex gap-2">
+                  <select
+                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    onChange={(event) => setSpawnProjectId(event.target.value)}
+                    value={spawnProjectId}
+                  >
+                    <option value="">Select project</option>
+                    {filterProjectOptions.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                    value={spawnAgent}
+                  >
+                    <option value="claude">claude</option>
+                    <option value="codex">codex</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    aria-label="branch name"
+                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    onChange={(event) => setSpawnBranch(event.target.value)}
+                    placeholder="branch name"
+                    value={spawnBranch}
+                  />
+                  <select
+                    aria-label="workspace mode"
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    onChange={(event) =>
+                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
+                    }
+                    value={spawnWorkspaceMode}
+                  >
+                    <option value="default">Default</option>
+                    <option value="worktree">Worktree</option>
+                    <option value="shared">Shared</option>
+                  </select>
+                  <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
+                    <input
+                      checked={spawnPlanMode}
+                      className="accent-[var(--color-accent)]"
+                      onChange={(event) => setSpawnPlanMode(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                      Plan
+                    </span>
+                  </label>
+                </div>
+                {spawnWorkspaceMode === "worktree" ? (
+                  <input
+                    className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    placeholder="base branch (defaults to project default)"
+                    value={spawnDefaultBranch}
+                  />
+                ) : null}
+                <div>
+                  <div className="max-h-48 space-y-2 overflow-y-auto">
+                    {spawnSteps.map((step, index) => (
+                      <div className="flex gap-2" key={step.id}>
+                        <input
+                          aria-label={`step ${index + 1}`}
+                          className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                          onChange={(event) => updateStep(step.id, event.target.value)}
+                          placeholder={`Step ${index + 1}`}
+                          value={step.value}
+                        />
+                        <button
+                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                          onClick={() => removeStep(step.id)}
+                          type="button"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                  <button
+                    className="mt-2 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={addStep}
+                    type="button"
+                  >
+                    + Step
+                  </button>
+                </div>
+                <textarea
+                  className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                  onChange={(event) => setSpawnPrompt(event.target.value)}
+                  onKeyDown={(event) => {
+                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                      void handleSpawn();
+                  }}
+                  placeholder="Prompt for the new session..."
+                  value={spawnPrompt}
+                />
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                    ⌘/Ctrl + Enter to submit
+                  </span>
+                  <button
+                    className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                    onClick={() => void handleSpawn()}
+                    type="button"
+                  >
+                    {spawning ? "Spawning..." : "Spawn"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      ) : null}
+        ) : null}
 
-      {error ? (
-        <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
-          {error}
-        </div>
-      ) : null}
+        {error ? (
+          <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
+            {error}
+          </div>
+        ) : null}
 
-      {loading ? (
-        <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
-      ) : null}
+        {loading ? (
+          <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
+        ) : null}
 
-      {!loading && sessions.length === 0 ? (
-        <section className="mt-5">
-          <EmptyState
-            message={
-              projectId
-                ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
-                : undefined
-            }
-          />
-        </section>
-      ) : null}
-
-      {!loading && sessions.length > 0 ? (
-        <section className="mt-5 space-y-4">
-          {LANE_ORDER.filter(
-            (level) =>
-              grouped[level].length > 0 &&
-              (activeStatFilter === null || level === activeStatFilter),
-          ).map((level) => (
-            <AttentionZone
-              key={level}
-              collapsed={isMobile ? expandedLevel !== level : undefined}
-              level={level}
-              onOpenTerminal={openTerminal}
-              onToggle={
-                isMobile
-                  ? (nextLevel) =>
-                      setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
+        {!loading && sessions.length === 0 ? (
+          <section className="mt-5">
+            <EmptyState
+              message={
+                projectId
+                  ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
                   : undefined
               }
-              sessions={grouped[level]}
             />
-          ))}
-        </section>
-      ) : null}
+          </section>
+        ) : null}
 
-      {terminalSession ? (
-        <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
-      ) : null}
-    </main>
-    <StatusBar sessions={rawSessions} />
+        {!loading && sessions.length > 0 ? (
+          <section className="mt-5 space-y-4">
+            {LANE_ORDER.filter(
+              (level) =>
+                grouped[level].length > 0 &&
+                (activeStatFilter === null || level === activeStatFilter),
+            ).map((level) => (
+              <AttentionZone
+                key={level}
+                collapsed={isMobile ? expandedLevel !== level : undefined}
+                level={level}
+                onOpenTerminal={openTerminal}
+                onToggle={
+                  isMobile
+                    ? (nextLevel) =>
+                        setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
+                    : undefined
+                }
+                sessions={grouped[level]}
+              />
+            ))}
+          </section>
+        ) : null}
+
+        {terminalSession ? (
+          <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
+        ) : null}
+      </main>
+      <StatusBar sessions={rawSessions} />
     </>
   );
 }
