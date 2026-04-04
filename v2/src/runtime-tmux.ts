@@ -101,15 +101,6 @@ export async function getTmuxSessionActivity(sessionName: string): Promise<Date 
   }
 }
 
-export async function getTmuxPaneTitle(sessionName: string): Promise<string> {
-  const target = exactPaneTarget(sessionName);
-  try {
-    return await tmux("display-message", "-t", target, "-p", "#{pane_title}");
-  } catch {
-    return "";
-  }
-}
-
 export async function isProcessRunningInTmux(
   sessionName: string,
   processName: AgentName,

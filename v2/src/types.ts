@@ -3,6 +3,13 @@ export const SPUR_DAEMON_API_VERSION = 2;
 
 export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+export type StateSource = "jsonl" | "pane" | "status";
+
+export interface SessionStateTransition {
+  state: SessionState;
+  at: string;
+  source: StateSource;
+}
 export type BranchSource = "explicit" | "preflight" | "shared_workspace";
 export type ServiceInstanceStatus = "running" | "stopped" | "errored";
 export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
@@ -202,6 +209,7 @@ export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   state: SessionState;
+  stateHistory?: SessionStateTransition[];
   lastActivityAt: string;
   services: ServiceInstanceView[];
   devServerAlive: boolean;
@@ -236,8 +244,14 @@ export interface SpawnSessionRequest {
   configPath?: string;
 }
 
+export interface SendMessageAttachment {
+  name: string;
+  data: string; // base64
+}
+
 export interface SendMessageRequest {
   message: string;
+  attachments?: SendMessageAttachment[];
 }
 
 export interface RunServiceRequest {

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { shellEscape } from "./agents/shell-escape.js";
-import type { SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
+import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
 const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
@@ -168,6 +168,7 @@ export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
+  agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
@@ -188,9 +189,11 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
 `,
     { encoding: "utf8", mode: 0o755 },
   );
-  writeFileSync(
-    join(toolDir, AGENT_STATE_UPDATER_NAME),
-    `#!/usr/bin/env node
+  // Claude uses JSONL-based state classification — no hook state scripts needed.
+  if (args.agent !== "claude") {
+    writeFileSync(
+      join(toolDir, AGENT_STATE_UPDATER_NAME),
+      `#!/usr/bin/env node
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -269,16 +272,17 @@ try {
   process.exit(0);
 }
 `,
-    { encoding: "utf8", mode: 0o755 },
-  );
-  writeFileSync(
-    join(toolDir, AGENT_STATE_TOOL_NAME),
-    `#!/usr/bin/env bash
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, AGENT_STATE_TOOL_NAME),
+      `#!/usr/bin/env bash
 set -euo pipefail
 exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UPDATER_NAME))} ${shellEscape(stateFilePath)}
 `,
-    { encoding: "utf8", mode: 0o755 },
-  );
+      { encoding: "utf8", mode: 0o755 },
+    );
+  }
   writeFileSync(
     join(toolDir, "spur-dev-server"),
     `#!/usr/bin/env bash
