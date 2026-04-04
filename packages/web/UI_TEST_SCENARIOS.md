@@ -84,8 +84,14 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 
 - Textarea for sending messages when session accepts input
 - Ctrl/Cmd+Enter submits
-- Send button disabled when empty or action in progress
+- Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
+- Cmd+V paste with image on clipboard adds thumbnail preview below textarea
+- Drag-and-drop image file onto textarea adds thumbnail preview
+- Non-image files in paste/drop are silently ignored
+- Each thumbnail has a remove button visible on hover
+- Send button enabled when attachments are present even with empty text
+- Attachments and text cleared after successful send
 
 ### S4: Links section
 
