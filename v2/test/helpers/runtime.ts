@@ -98,7 +98,12 @@ else
   session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
   mkdir -p "$session_dir"
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
-fi`
+fi
+jsonl_append() {
+  if [[ -n "\${session_dir:-}" ]] && [[ -n "\${session_uuid:-}" ]]; then
+    printf '%s\n' "$1" >> "$session_dir/$session_uuid.jsonl"
+  fi
+}`
       : `if [[ "\${1:-}" == "exec" ]]; then
   output_file=""
   args=("$@")
@@ -133,6 +138,19 @@ else
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
 fi`;
+  // State signal helpers — Claude writes JSONL records, Codex writes hook state files.
+  const signalWaiting =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
+      : `printf '{"hook_event_name":"Stop"}' | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true`;
+  const signalWorking =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
+      : `printf '{"hook_event_name":"UserPromptSubmit"}' | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true`;
+  const signalNeedsInput =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
+      : ":";
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -144,10 +162,13 @@ if [[ "$mode" == "launch" ]]; then
   printf '%s\n' "${header}"
 fi
 printf '%s\n' "${prompt}"
+${signalWaiting}
 while IFS= read -r line; do
   printf '%s\n' "$line" >> "$log_file"
+  ${signalWorking}
   case "$line" in
     show-waiting-menu)
+      ${signalNeedsInput}
       printf '%s\n' "Entered plan mode"
       printf '%s\n' "1. fast"
       printf '%s\n' "2. runtime"
@@ -158,6 +179,7 @@ while IFS= read -r line; do
       printf '%s\n' "• Working (simulated)"
       sleep 1
       printf '%s\n' "${prompt}"
+      ${signalWaiting}
       ;;
     exit-now)
       exit 0
@@ -165,6 +187,7 @@ while IFS= read -r line; do
     *)
       printf '%s\n' "ack: $line"
       printf '%s\n' "${prompt}"
+      ${signalWaiting}
       ;;
   esac
 done

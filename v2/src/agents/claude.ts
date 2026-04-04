@@ -1,11 +1,9 @@
-import { readdir, stat, writeFile } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
 import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
-
-const CLAUDE_HOOK_SETTINGS_FILE = "claude-hooks.settings.json";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
@@ -40,7 +38,7 @@ async function findLatestSessionFileForProjectDir(projectDir: string): Promise<s
   return files[0]?.path ?? null;
 }
 
-async function findLatestSessionFile(worktreePath: string): Promise<string | null> {
+export async function findLatestSessionFile(worktreePath: string): Promise<string | null> {
   for (const candidate of await resolveWorktreePathCandidates(worktreePath)) {
     const sessionFile = await findLatestSessionFileForProjectDir(
       join(homedir(), ".claude", "projects", toClaudeProjectPath(candidate)),
@@ -105,20 +103,4 @@ export async function buildClaudeRestorePlan(
     ...buildClaudeResumePlan(sessionId, claudeCommand(), options),
     initialMessage: prompt,
   };
-}
-
-export async function ensureClaudeHookSettings(sessionToolDir: string): Promise<string> {
-  const settingsPath = join(sessionToolDir, CLAUDE_HOOK_SETTINGS_FILE);
-  const hookEntry = { hooks: [{ type: "command", command: "$SPUR_AGENT_STATE_COMMAND" }] };
-  const hooksConfig = {
-    hooks: {
-      SessionStart: [hookEntry],
-      UserPromptSubmit: [hookEntry],
-      PreToolUse: [hookEntry],
-      PostToolUse: [hookEntry],
-      Stop: [hookEntry],
-    },
-  };
-  await writeFile(settingsPath, JSON.stringify(hooksConfig, null, 2) + "\n", "utf8");
-  return settingsPath;
 }
