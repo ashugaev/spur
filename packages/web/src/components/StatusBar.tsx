@@ -36,29 +36,30 @@ function worstStatus(entries: PrEntry[]): CiStatus {
 }
 
 function useAggregatePr(sessions: SpurSessionView[]) {
-  const prUrls = useMemo(() => {
+  const prUrlsKey = useMemo(() => {
     const urls = new Set<string>();
     for (const s of sessions) {
       for (const link of s.slots?.links ?? []) {
         if (link.label === "pr") urls.add(link.url);
       }
     }
-    return [...urls];
+    return [...urls].sort().join("\n");
   }, [sessions]);
 
   const [entries, setEntries] = useState<PrEntry[]>([]);
 
   useEffect(() => {
-    if (prUrls.length === 0) {
+    if (!prUrlsKey) {
       setEntries([]);
       return;
     }
 
+    const urls = prUrlsKey.split("\n");
     let cancelled = false;
 
     const run = async () => {
       const results: PrEntry[] = [];
-      for (const url of prUrls) {
+      for (const url of urls) {
         const label = parsePrLabel(url);
         if (!label) continue;
         const info = await fetchPrInfo(url);
@@ -73,7 +74,7 @@ function useAggregatePr(sessions: SpurSessionView[]) {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [prUrls]);
+  }, [prUrlsKey]);
 
   return entries;
 }
