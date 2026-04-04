@@ -10,6 +10,10 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import {
+  readClaudeJsonlState,
+  type ClaudeJsonlReaderState,
+} from "./claude-jsonl-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -74,8 +78,10 @@ import {
   type SessionStatus,
   type SessionState,
   type SessionView,
+  type SessionStateTransition,
   type SpawnOverrides,
   type SpawnSessionRequest,
+  type StateSource,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import {
@@ -90,7 +96,6 @@ import {
 
 const WAITING_INPUT_TAIL_LINES = 12;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
-const PROMPT_RE = /^[❯›>$#](?:\s.*)?$/;
 const TRAILING_UI_RE = [
   /^[─━]+$/,
   /^⏵⏵ /,
@@ -102,6 +107,7 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
 const STATE_HOLD_MS = 4_000;
+const STATE_HISTORY_LIMIT = 100;
 const PERMISSION_PROMPTS = [
   /approval required/i,
   /Do you want to proceed\?/i,
@@ -289,15 +295,6 @@ function withQueuedMessages(
   };
 }
 
-function classifyLivePaneState(pane: string): SessionState {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) {
-    return "needs_input";
-  }
-  const lastLine = lines.at(-1)?.trim() ?? "";
-  return lastLine && PROMPT_RE.test(lastLine) ? "waiting" : "working";
-}
-
 // Braille spinner chars used by Codex in terminal title when active.
 const CODEX_BRAILLE_SPINNER_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
 
@@ -327,16 +324,12 @@ function classifyCodexPane(pane: string): SessionState {
   return "waiting";
 }
 
-async function classifyAgentState(agent: string, tmuxSession: string): Promise<SessionState> {
-  if (agent === "codex") {
-    const title = await getTmuxPaneTitle(tmuxSession);
-    const titleState = classifyCodexTitle(title);
-    if (titleState !== null) return titleState;
-    const pane = await captureTmuxPane(tmuxSession, 80);
-    return classifyCodexPane(pane);
-  }
+async function classifyCodexAgentState(tmuxSession: string): Promise<SessionState> {
+  const title = await getTmuxPaneTitle(tmuxSession);
+  const titleState = classifyCodexTitle(title);
+  if (titleState !== null) return titleState;
   const pane = await captureTmuxPane(tmuxSession, 80);
-  return classifyLivePaneState(pane);
+  return classifyCodexPane(pane);
 }
 
 export function isRestorableSession(
@@ -481,6 +474,8 @@ export class SessionService {
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
+  private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
+  private readonly stateHistory = new Map<string, SessionStateTransition[]>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
@@ -1009,6 +1004,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         configPath: this.config.configPath,
+        agent,
       });
 
       if (worktree) {
@@ -1315,7 +1311,7 @@ export class SessionService {
       const readySession = await this.ensureSessionReadyForSend(session);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
-        const sendState = await classifyAgentState(readySession.agent, readySession.tmuxSession);
+        const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
       await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
@@ -1652,6 +1648,7 @@ export class SessionService {
       dataDir: this.config.dataDir,
       sessionId: session.id,
       configPath: this.config.configPath,
+      agent: session.agent,
     });
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
@@ -1800,6 +1797,7 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId: current.id,
         configPath: this.config.configPath,
+        agent: current.agent,
       });
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
@@ -1950,8 +1948,8 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const paneState = await classifyAgentState(readySession.agent, readySession.tmuxSession);
-    if (paneState !== "waiting") {
+    const agentState = await this.classifySessionState(readySession);
+    if (agentState !== "waiting") {
       return false;
     }
 
@@ -2235,20 +2233,16 @@ export class SessionService {
 
       const stepUpdatedAt = new Date(session.updatedAt);
 
-      // Hook state is the primary readiness signal — if it says "working",
-      // the agent is mid-turn and not ready for the next step.
-      const hookState = readAgentHookState(this.config.dataDir, sessionId);
-      if (hookState?.state === "working") {
+      const agentState = await this.classifySessionState(session);
+      if (agentState === "working") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-
-      const paneState = await classifyAgentState(session.agent, session.tmuxSession);
-      if (paneState === "needs_input") {
+      if (agentState === "needs_input") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (paneState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2279,18 +2273,17 @@ export class SessionService {
       }
 
       const messageUpdatedAt = new Date(session.updatedAt);
-      const hookState = readAgentHookState(this.config.dataDir, sessionId);
-      if (hookState?.state === "working") {
-        await sleep(PIPELINE_POLL_INTERVAL_MS);
-        continue;
-      }
 
-      const paneState = await classifyAgentState(session.agent, session.tmuxSession);
-      if (paneState === "needs_input") {
+      const agentState = await this.classifySessionState(session);
+      if (agentState === "working") {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (paneState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "needs_input") {
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2373,6 +2366,7 @@ export class SessionService {
     const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
 
     let state: SessionState;
+    let stateSource: StateSource = "status";
     if (session.status === "killed") {
       state = "killed";
     } else if (session.status === "paused" || session.status === "completed") {
@@ -2383,22 +2377,41 @@ export class SessionService {
       state = "working";
     } else if (!runtimeAlive || !processAlive) {
       state = "stopped";
+    } else if (session.agent === "claude") {
+      // Claude: JSONL-based state classification.
+      const jsonlResult = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+      );
+      if (jsonlResult) {
+        this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+        state = jsonlResult.state;
+        stateSource = "jsonl";
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+        });
+      } else {
+        // No JSONL file yet (agent just started). Default to working.
+        state = "working";
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (no jsonl)`,
+        });
+      }
     } else {
+      // Codex: hook + pane classification (unchanged).
+      stateSource = "pane";
       const hookState = readAgentHookState(this.config.dataDir, session.id);
       if (hookState) {
-        // Hooks are authoritative. Trust the last hook event until the next one
-        // overwrites it. Process liveness (checked above) is the crash guard.
-        // Always overlay pane check for needs_input — hooks cannot signal it.
-        const paneState = await classifyAgentState(session.agent, session.tmuxSession);
+        const paneState = await classifyCodexAgentState(session.tmuxSession);
         if (paneState === "needs_input") {
           state = "needs_input";
-        } else if (
-          hookState.state === "working" &&
-          session.agent === "codex" &&
-          paneState === "waiting"
-        ) {
-          // Codex title spinner is a reliable working indicator — if title says
-          // waiting (no spinner), trust it over a potentially stale hook.
+        } else if (hookState.state === "working" && paneState === "waiting") {
           state = "waiting";
         } else {
           state = hookState.state;
@@ -2410,8 +2423,7 @@ export class SessionService {
           message: `State: ${state} (hook=${hookState.state}, pane=${paneState}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
-        // No hook state (first poll, hooks not installed). Full pane classification.
-        state = await classifyAgentState(session.agent, session.tmuxSession);
+        state = await classifyCodexAgentState(session.tmuxSession);
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -2436,6 +2448,17 @@ export class SessionService {
     }
     this.stateCache.set(session.id, { state, classifiedAt: now });
 
+    // State history: ring buffer of transitions.
+    const history = this.stateHistory.get(session.id) ?? [];
+    const lastEntry = history[history.length - 1];
+    if (history.length === 0 || lastEntry?.state !== state) {
+      history.push({ state, at: new Date(now).toISOString(), source: stateSource });
+      if (history.length > STATE_HISTORY_LIMIT) {
+        history.splice(0, history.length - STATE_HISTORY_LIMIT);
+      }
+      this.stateHistory.set(session.id, history);
+    }
+
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       services.push(await this.enrichService(service));
@@ -2449,9 +2472,35 @@ export class SessionService {
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,
+      ...(history.length > 0 ? { stateHistory: history } : {}),
       lastActivityAt,
       services,
       devServerAlive,
     };
+  }
+
+  private async classifySessionState(
+    session: Pick<SessionRecord, "id" | "agent" | "tmuxSession" | "worktreePath">,
+  ): Promise<SessionState> {
+    if (session.agent === "claude") {
+      const jsonlResult = await readClaudeJsonlState(
+        session.worktreePath,
+        this.claudeJsonlReaders.get(session.id),
+      );
+      if (jsonlResult) {
+        this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+        return jsonlResult.state;
+      }
+      return "working";
+    }
+
+    // Codex: hook + pane
+    const hookState = readAgentHookState(this.config.dataDir, session.id);
+    if (hookState?.state === "working") {
+      const paneState = await classifyCodexAgentState(session.tmuxSession);
+      // Trust pane over stale hook when Codex title says waiting
+      return paneState === "waiting" ? "waiting" : "working";
+    }
+    return classifyCodexAgentState(session.tmuxSession);
   }
 }

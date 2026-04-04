@@ -53,7 +53,12 @@ const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+
+vi.mock("../../src/claude-jsonl-state.js", () => ({
+  readClaudeJsonlState: readClaudeJsonlStateMock,
+}));
 
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
@@ -225,6 +230,13 @@ async function advanceSeconds(seconds: number): Promise<void> {
   }
 }
 
+function mockClaudeJsonlState(state: string) {
+  readClaudeJsonlStateMock.mockResolvedValue({
+    state,
+    reader: { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] },
+  });
+}
+
 describe("SessionService", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -272,6 +284,7 @@ describe("SessionService", () => {
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
     readAgentHookStateMock.mockReset().mockReturnValue(null);
+    readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
@@ -348,6 +361,7 @@ describe("SessionService", () => {
   });
 
   it("spawns a session through one clear path and returns the enriched view", async () => {
+    mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -567,6 +581,7 @@ describe("SessionService", () => {
   });
 
   it("resumes an unfinished pipeline into a cooldown before the next auto-step", async () => {
+    mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set(
       "api-1",
@@ -652,6 +667,7 @@ describe("SessionService", () => {
   });
 
   it("logs message delivery after updating tmux and metadata", async () => {
+    mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -729,6 +745,7 @@ describe("SessionService", () => {
   });
 
   it("delivers a manual send before the next pipeline step when the agent is waiting", async () => {
+    mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -763,7 +780,7 @@ describe("SessionService", () => {
     });
   });
 
-  it("classifies waiting state from prompt pane", async () => {
+  it("classifies waiting state from JSONL for claude sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -778,14 +795,17 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue("Claude Code\n❯");
+    mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const result = await service.get("api-1");
 
     expect(result.state).toBe("waiting");
-    expect(captureTmuxPaneMock).toHaveBeenCalledWith("api-1", 80);
+    expect(readClaudeJsonlStateMock).toHaveBeenCalledWith(
+      "/tmp/spur-worktrees/api/api-1",
+      undefined,
+    );
   });
 
   it("trusts hook working state indefinitely and checks pane for needs_input", async () => {
@@ -960,7 +980,7 @@ describe("SessionService", () => {
     expect(result.runtimeAlive).toBe(false);
   });
 
-  it("trusts hook waiting state — returns waiting even if pane looks like working", async () => {
+  it("trusts JSONL waiting state for claude sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -975,11 +995,8 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // Stop hook fired — hookState is "waiting". Pane still shows stale working content.
-    readAgentHookStateMock.mockReturnValue({
-      state: "waiting",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
+    // JSONL says waiting — pane content is irrelevant for Claude.
+    mockClaudeJsonlState("waiting");
     captureTmuxPaneMock.mockResolvedValue("running some command...");
 
     const { SessionService } = await loadSessionServiceModule();
@@ -987,11 +1004,10 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    // Hook "waiting" wins over pane — prevents working→waiting flicker on Stop hook race.
     expect(result.state).toBe("waiting");
   });
 
-  it("reports needs_input from pane when interview options are visible", async () => {
+  it("reports needs_input from JSONL when claude agent needs input", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1006,7 +1022,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue("Do you want to proceed?\n(Y)es / (N)o");
+    mockClaudeJsonlState("needs_input");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -1016,7 +1032,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
-  it("detects needs_input from line-wrapped @clack interview prompt", async () => {
+  it("detects needs_input from JSONL for claude sessions with tool use", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1031,17 +1047,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    // Real Claude pane: "Esc to cancel" wraps across lines in narrow terminals
-    captureTmuxPaneMock.mockResolvedValue(
-      [
-        "Pick an option:",
-        "  1. First option",
-        "  2. Second option",
-        "  3. Third option",
-        "Enter to select · ↑/↓ to navigate · Esc to",
-        "cancel",
-      ].join("\n"),
-    );
+    mockClaudeJsonlState("needs_input");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -1169,12 +1175,13 @@ describe("SessionService", () => {
         updatedAt: "2026-03-18T10:01:00.000Z",
       }),
     );
-    captureTmuxPaneMock
-      .mockResolvedValueOnce("Claude Code\n❯")
-      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o")
-      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o")
-      .mockResolvedValueOnce("Claude Code\n❯")
-      .mockResolvedValueOnce("Do you want to proceed?\n(Y)es / (N)o");
+    const jsonlReader = { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
+    readClaudeJsonlStateMock
+      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -1704,6 +1711,7 @@ describe("SessionService", () => {
   });
 
   it("resumes a paused session on send and marks it running again", async () => {
+    mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
       id: "api-1",
@@ -2425,6 +2433,7 @@ describe("SessionService", () => {
   });
 
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
+    mockClaudeJsonlState("waiting");
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -3194,7 +3203,7 @@ describe("codex title-based state", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue("Claude Code\n❯");
+    mockClaudeJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
