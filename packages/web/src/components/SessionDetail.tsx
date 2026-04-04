@@ -75,11 +75,6 @@ async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  const dataUrl = await fileToDataUrl(file);
-  return dataUrl.split(",")[1] ?? "";
-}
-
 interface Attachment {
   file: File;
   preview: string;
@@ -208,12 +203,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const doSend = async () => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
-    const encoded = await Promise.all(
-      attachments.map(async (att) => ({
-        name: sanitizeFilename(att.file.name),
-        data: await fileToBase64(att.file),
-      })),
-    );
+    const encoded = attachments.map((att) => ({
+      name: sanitizeFilename(att.file.name),
+      data: att.preview.split(",")[1] ?? "",
+    }));
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     await handleAction("send", body);
