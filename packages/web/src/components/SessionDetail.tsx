@@ -416,7 +416,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
                     <ActivityDot activity={conversation.state} />
-                    <span className="uppercase">{conversation.state.replace("_", " ")}</span>
+                    <span className="uppercase">{conversation.state.replaceAll("_", " ")}</span>
                   </div>
                 </section>
               ) : null}
