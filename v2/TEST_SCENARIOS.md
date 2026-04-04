@@ -56,8 +56,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
-- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using fresh native Claude/Codex activity signals before the plan-mode menu, permission prompt, and trailing-UI tmux fallbacks.
+- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook+pane classification for Codex.
+- Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within 3s→working, assistant+tool_use stale→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, user→working, progress→working, empty→working.
+- Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
 - Codex title-based state: `classifyCodexTitle` maps Ready→waiting, Thinking/Working/Starting/Undoing→working, Waiting→needs_input, returns null for unrecognized titles.
+- Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
+- State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.

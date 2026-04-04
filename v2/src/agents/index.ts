@@ -2,7 +2,6 @@ import {
   buildClaudePlan,
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
-  ensureClaudeHookSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import {
@@ -119,7 +118,8 @@ export async function setupAgentHooks(args: {
   sessionToolDir: string;
 }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
   if (args.agent === "claude") {
-    return { claudeSettingsPath: await ensureClaudeHookSettings(args.sessionToolDir) };
+    // Claude uses JSONL-based state classification — no hook settings needed.
+    return {};
   }
   return { codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir) };
 }
