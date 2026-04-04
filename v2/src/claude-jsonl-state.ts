@@ -1,5 +1,5 @@
-import { open, stat } from "node:fs/promises";
-import type { SessionState } from "./types.js";
+import { open, readFile, stat } from "node:fs/promises";
+import type { ConversationMessage, SessionState } from "./types.js";
 import { findLatestSessionFile } from "./agents/claude.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
@@ -230,4 +230,78 @@ export async function readClaudeJsonlState(
     state: classifyClaudeJsonlState(combined, nowMs),
     reader: nextReader,
   };
+}
+
+// ── Full conversation reader ──────────────────────────────────────────
+
+export async function readClaudeConversation(
+  worktreePath: string,
+): Promise<{ messages: ConversationMessage[]; state: SessionState } | null> {
+  const filePath = await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let text: string;
+  try {
+    text = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  const messages: ConversationMessage[] = [];
+  const stateRecords: ParsedRecord[] = [];
+  const nowMs = Date.now();
+
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const stateRecord = parseJsonlRecord(trimmed, nowMs);
+    if (stateRecord) stateRecords.push(stateRecord);
+
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+
+    const message =
+      typeof parsed["message"] === "object" && parsed["message"] !== null
+        ? (parsed["message"] as Record<string, unknown>)
+        : parsed;
+
+    const role =
+      typeof message["role"] === "string"
+        ? message["role"]
+        : typeof parsed["role"] === "string"
+          ? parsed["role"]
+          : "";
+
+    if (role !== "user" && role !== "assistant") continue;
+
+    const content = Array.isArray(message["content"]) ? message["content"] : [];
+    const textParts: string[] = [];
+    for (const block of content) {
+      if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as Record<string, unknown>)["type"] === "text" &&
+        typeof (block as Record<string, unknown>)["text"] === "string"
+      ) {
+        textParts.push((block as Record<string, unknown>)["text"] as string);
+      }
+    }
+    const combinedText = textParts.join("\n").trim();
+    if (!combinedText) continue;
+
+    const ts =
+      typeof parsed["timestamp"] === "number"
+        ? parsed["timestamp"]
+        : nowMs;
+
+    messages.push({ role, text: combinedText, timestampMs: ts });
+  }
+
+  const state = classifyClaudeJsonlState(stateRecords, nowMs);
+  return { messages, state };
 }

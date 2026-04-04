@@ -10,7 +10,7 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import { readClaudeConversation, readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -59,6 +59,7 @@ import {
   SPUR_DAEMON_API_VERSION,
   type AppConfig,
   type BranchSource,
+  type ConversationResponse,
   type DevServerConfig,
   type KillSessionRequest,
   type PreflightRequest,
@@ -728,6 +729,21 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  async getConversation(sessionId: string): Promise<ConversationResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const createdAtMs = new Date(session.createdAt).getTime();
+    const durationMs = Date.now() - createdAtMs;
+    if (session.agent !== "claude") {
+      return { messages: [], durationMs, state: "working" };
+    }
+    const result = await readClaudeConversation(session.worktreePath);
+    if (!result) {
+      return { messages: [], durationMs, state: "working" };
+    }
+    return { messages: result.messages, durationMs, state: result.state };
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {

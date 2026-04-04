@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityDot } from "@/components/ActivityDot";
 import { DirectTerminal } from "@/components/DirectTerminal";
 import {
@@ -28,6 +28,7 @@ import {
   isRestorable,
   isTerminalSession,
   toDashboardSession,
+  type ConversationResponse,
   type DashboardSession,
   type SpurSessionView,
 } from "@/lib/types";
@@ -103,6 +104,15 @@ const LOG_LEVEL_COLORS: Record<string, string> = {
   error: "var(--color-status-error)",
 };
 
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return "<1m";
+}
+
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
@@ -117,6 +127,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -141,6 +153,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadSession]);
+
+  const loadConversation = useCallback(async () => {
+    if (!session || session.agent !== "claude") return;
+    try {
+      const res = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/conversation`,
+        { cache: "no-store" },
+      );
+      if (res.ok) {
+        setConversation((await res.json()) as ConversationResponse);
+      }
+    } catch {
+      /* non-critical */
+    }
+  }, [session?.agent, sessionId]);
+
+  useEffect(() => {
+    void loadConversation();
+    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [loadConversation]);
+
+  // Auto-scroll dialog when new messages arrive, if already at bottom
+  useEffect(() => {
+    const el = dialogRef.current;
+    if (!el) return;
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    if (isNearBottom) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [conversation?.messages.length]);
 
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
@@ -340,6 +383,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Content */}
           <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
+              {/* Conversation dialog - Claude only */}
+              {session.agent === "claude" && conversation && conversation.messages.length > 0 ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Dialog
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                    {conversation.durationMs > 0 ? (
+                      <span className="font-normal normal-case tracking-normal">
+                        {formatDuration(conversation.durationMs)}
+                      </span>
+                    ) : null}
+                  </h2>
+                  <div
+                    ref={dialogRef}
+                    className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
+                  >
+                    {conversation.messages.map((msg, i) => (
+                      <div
+                        key={i}
+                        className={`max-w-[85%] px-3 py-2 text-sm ${
+                          msg.role === "user"
+                            ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
+                            : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
+                        }`}
+                      >
+                        <div className="whitespace-pre-wrap break-words">
+                          {msg.text.length > 500 ? msg.text.slice(0, 500) + "..." : msg.text}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+                    <ActivityDot activity={conversation.state} />
+                    <span className="uppercase">{conversation.state.replace("_", " ")}</span>
+                  </div>
+                </section>
+              ) : null}
+
               {/* Message */}
               <section>
                 <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">

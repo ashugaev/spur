@@ -297,3 +297,15 @@ export interface ServiceSourceState {
   lastTailLines: string[];
   rules: Record<string, ServiceSourceRuleState>;
 }
+
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestampMs: number;
+}
+
+export interface ConversationResponse {
+  messages: ConversationMessage[];
+  durationMs: number;
+  state: SessionState;
+}

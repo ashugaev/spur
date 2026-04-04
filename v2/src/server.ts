@@ -230,6 +230,12 @@ export async function startServer(
         return;
       }
 
+      const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
+      if (method === "GET" && conversationSessionId) {
+        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request);
         sendJson(response, 201, await service.spawn(body));
