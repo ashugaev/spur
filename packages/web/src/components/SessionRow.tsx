@@ -15,7 +15,8 @@ import { buildSessionPath } from "@/lib/project-routes";
 import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
 
 const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
-const DISABLED_BTN = "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed";
+const DISABLED_BTN =
+  "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed";
 
 function IconButton({
   label,
@@ -119,7 +120,9 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
           onClick={async () => {
             setCompleting(true);
             try {
-              const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, { method: "POST" });
+              const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
+                method: "POST",
+              });
               if (!res.ok) throw new Error(`complete: ${res.status}`);
             } catch (err) {
               console.error("complete failed", err);
@@ -127,7 +130,16 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
             }
           }}
         >
-          <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            viewBox="0 0 24 24"
+          >
             <path d="M20 6 9 17l-5-5" />
           </svg>
         </IconButton>
@@ -138,7 +150,14 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
           onClick={() => canAttach && onOpenTerminal?.(session)}
         >
-          <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" viewBox="0 0 24 24">
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            viewBox="0 0 24 24"
+          >
             <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
             <path d="m8 10 2.5 2L8 14.5" />
             <path d="M13 15h3" />
