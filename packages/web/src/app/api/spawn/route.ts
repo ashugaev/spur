@@ -25,26 +25,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
-    const filteredSteps = body.steps
-      ?.map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    const filteredSteps = Array.isArray(body.steps)
+      ? body.steps.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim())
+      : undefined;
 
+    const rawOverrides =
+      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
     const overrides =
-      body.overrides && Object.keys(body.overrides).length > 0
-        ? body.overrides
-        : undefined;
+      rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
+
+    const payload: Record<string, unknown> = { project, prompt };
+    if (body.agent) payload.agent = body.agent;
+    if (body.branch?.trim()) payload.branch = body.branch.trim();
+    if (body.planMode === true) payload.planMode = true;
+    if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
+    if (overrides) payload.overrides = overrides;
 
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions",
-      spurJsonInit("POST", {
-        project,
-        prompt,
-        ...(body.agent ? { agent: body.agent } : {}),
-        ...(body.branch?.trim() ? { branch: body.branch.trim() } : {}),
-        ...(body.planMode === true ? { planMode: true } : {}),
-        ...(filteredSteps && filteredSteps.length > 0 ? { steps: filteredSteps } : {}),
-        ...(overrides ? { overrides } : {}),
-      }),
+      spurJsonInit("POST", payload),
     );
 
     return NextResponse.json(session, { status: 201 });
