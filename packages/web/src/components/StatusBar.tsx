@@ -2,11 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  CACHE_TTL_MS,
   CiStatusDot,
   fetchPrInfo,
   GithubIcon,
-  prCache,
+  prStateColor,
   useGitError,
   type CiStatus,
   type PrInfo,
@@ -17,15 +16,13 @@ const AGGREGATE_POLL_MS = 120_000;
 
 interface PrEntry {
   url: string;
-  owner: string;
-  repo: string;
-  number: string;
+  label: string;
   info: PrInfo;
 }
 
-function parsePrUrl(url: string): { owner: string; repo: string; number: string } | null {
+function parsePrLabel(url: string): string | null {
   const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  return m ? { owner: m[1], repo: m[2], number: m[3] } : null;
+  return m ? `${m[1]}/${m[2]}#${m[3]}` : null;
 }
 
 function worstStatus(entries: PrEntry[]): CiStatus {
@@ -62,17 +59,10 @@ function useAggregatePr(sessions: SpurSessionView[]) {
     const run = async () => {
       const results: PrEntry[] = [];
       for (const url of prUrls) {
-        const parsed = parsePrUrl(url);
-        if (!parsed) continue;
-        const cached = prCache.get(url);
-        const info =
-          cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS
-            ? cached.data
-            : await fetchPrInfo(url);
-        if (!cached || Date.now() - cached.fetchedAt >= CACHE_TTL_MS) {
-          prCache.set(url, { data: info, fetchedAt: Date.now() });
-        }
-        results.push({ url, ...parsed, info });
+        const label = parsePrLabel(url);
+        if (!label) continue;
+        const info = await fetchPrInfo(url);
+        results.push({ url, label, info });
       }
       if (!cancelled) setEntries(results);
     };
@@ -97,16 +87,10 @@ function useClock() {
   return now.toLocaleTimeString("en-GB", { hour12: false });
 }
 
-function PrStateLabel({ state }: { state: string | null }) {
+function PrStateLabel({ state }: { state: PrInfo["state"] }) {
   if (!state) return null;
-  const colors: Record<string, string> = {
-    draft: "var(--color-text-tertiary)",
-    open: "var(--color-status-ready)",
-    merged: "var(--color-accent-violet)",
-    closed: "var(--color-status-error)",
-  };
   return (
-    <span className="uppercase" style={{ color: colors[state] ?? undefined }}>
+    <span className="uppercase" style={{ color: prStateColor(state) }}>
       {state}
     </span>
   );
@@ -140,19 +124,19 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
 
         {/* Aggregate CI */}
         {prEntries.length > 0 ? (
-          <div className="group relative flex items-center gap-1.5">
+          <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
             <GithubIcon />
             <CiStatusDot status={aggregate} />
 
             {/* Tooltip */}
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-hover:block">
+            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
               {prEntries.slice(0, 8).map((entry) => (
                 <div
                   key={entry.url}
                   className="flex items-center gap-2 py-0.5"
                 >
                   <span className="truncate text-[var(--color-text-secondary)]">
-                    {entry.owner}/{entry.repo}#{entry.number}
+                    {entry.label}
                   </span>
                   <CiStatusDot status={entry.info.ciStatus} />
                   <PrStateLabel state={entry.info.state} />

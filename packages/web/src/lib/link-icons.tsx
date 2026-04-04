@@ -26,7 +26,7 @@ const EMPTY_PR_INFO: PrInfo = {
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-export const CACHE_TTL_MS = 120_000; // match server cache
+const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
 
 let gitErrorMessage: string | null = null;
@@ -50,12 +50,12 @@ export function useGitError(): string | null {
   return err;
 }
 
-export interface CacheEntry {
+interface CacheEntry {
   data: PrInfo;
   fetchedAt: number;
 }
 
-export const prCache = new Map<string, CacheEntry>();
+const prCache = new Map<string, CacheEntry>();
 
 function isPrState(value: unknown): value is PrState {
   return value === "draft" || value === "open" || value === "merged" || value === "closed";

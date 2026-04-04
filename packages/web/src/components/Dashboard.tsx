@@ -335,7 +335,7 @@ export function Dashboard() {
 
   return (
     <>
-    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+    <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
       <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
