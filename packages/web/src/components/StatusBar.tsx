@@ -97,30 +97,37 @@ function PrStateLabel({ state }: { state: PrInfo["state"] }): React.ReactNode {
   );
 }
 
-export function StatusBar({ sessions }: { sessions: SpurSessionView[] }): React.ReactNode {
+export function StatusBar({ sessions, daemonError }: { sessions: SpurSessionView[]; daemonError: string | null }): React.ReactNode {
   const gitError = useGitError();
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
   const clock = useClock();
+  const daemonOnline = !daemonError;
 
   return (
     <footer className="fixed inset-x-0 bottom-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
       <div className="flex items-center gap-6">
         <div className="flex items-center gap-1.5">
-          {gitError ? (
-            <span
-              className="font-bold text-[var(--color-status-error)]"
-              title={gitError}
-            >
-              Git Error
-            </span>
-          ) : (
+          {daemonOnline ? (
             <>
               <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-status-ready)] shadow-[0_0_4px_var(--color-status-ready)]" />
-              <span className="text-[var(--color-text-secondary)]">Online</span>
+              <span className="text-[var(--color-text-secondary)]">Daemon</span>
             </>
+          ) : (
+            <span
+              className="font-bold text-[var(--color-status-error)]"
+              title={daemonError}
+            >
+              Daemon Offline
+            </span>
           )}
         </div>
+
+        {gitError ? (
+          <span className="font-bold text-[var(--color-status-error)]" title={gitError}>
+            Git Error
+          </span>
+        ) : null}
 
         {prEntries.length > 0 ? (
           <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
