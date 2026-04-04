@@ -7,6 +7,9 @@ interface SpawnBody {
   prompt?: string;
   agent?: "claude" | "codex";
   branch?: string;
+  planMode?: boolean;
+  steps?: string[];
+  overrides?: { worktree?: boolean; defaultBranch?: string };
 }
 
 export async function POST(request: NextRequest) {
@@ -22,6 +25,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
+    const filteredSteps = body.steps
+      ?.map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    const overrides =
+      body.overrides && Object.keys(body.overrides).length > 0
+        ? body.overrides
+        : undefined;
+
     const session = await spurRequestJson<SpurSessionView>(
       "/sessions",
       spurJsonInit("POST", {
@@ -29,6 +41,9 @@ export async function POST(request: NextRequest) {
         prompt,
         ...(body.agent ? { agent: body.agent } : {}),
         ...(body.branch?.trim() ? { branch: body.branch.trim() } : {}),
+        ...(body.planMode === true ? { planMode: true } : {}),
+        ...(filteredSteps && filteredSteps.length > 0 ? { steps: filteredSteps } : {}),
+        ...(overrides ? { overrides } : {}),
       }),
     );
 
