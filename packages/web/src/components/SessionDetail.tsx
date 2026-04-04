@@ -200,7 +200,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (images.length === 0) return;
     void Promise.all(
       images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })),
-    ).then((entries) => setAttachments((prev) => [...prev, ...entries]));
+    )
+      .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
   };
 
   const doSend = async () => {
