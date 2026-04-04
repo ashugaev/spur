@@ -25,8 +25,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     );
     return NextResponse.json(result);
   } catch (error) {
-    const msg =
-      error instanceof Error ? error.message : "Failed to send message to Spur session";
+    const msg = error instanceof Error ? error.message : "Failed to send message to Spur session";
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }
