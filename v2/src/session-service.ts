@@ -734,16 +734,11 @@ export class SessionService {
   async getConversation(sessionId: string): Promise<ConversationResponse> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
-    const createdAtMs = new Date(session.createdAt).getTime();
-    const durationMs = Date.now() - createdAtMs;
-    if (session.agent !== "claude") {
-      return { messages: [], durationMs, state: "working" };
-    }
+    const durationMs = Date.now() - new Date(session.createdAt).getTime();
+    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
-    if (!result) {
-      return { messages: [], durationMs, state: "working" };
-    }
-    return { messages: result.messages, durationMs, state: result.state };
+    return result ? { ...result, durationMs } : fallback;
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {

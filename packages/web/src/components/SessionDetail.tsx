@@ -384,7 +384,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
               {/* Conversation dialog - Claude only */}
-              {session.agent === "claude" && conversation && conversation.messages.length > 0 ? (
+              {session.agent === "claude" && conversation?.messages.length ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Dialog

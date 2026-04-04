@@ -79,15 +79,64 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
   return "working";
 }
 
-// ── JSONL parser ──────────────────────────────────────────────────────
+// ── JSONL helpers ─────────────────────────────────────────────────────
 
-function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
-  let parsed: Record<string, unknown>;
+function tryParseJson(line: string): Record<string, unknown> | null {
   try {
-    parsed = JSON.parse(line) as Record<string, unknown>;
+    return JSON.parse(line) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** Unwrap the nested "message" envelope that Claude JSONL uses. */
+function unwrapMessage(parsed: Record<string, unknown>): Record<string, unknown> {
+  return typeof parsed["message"] === "object" && parsed["message"] !== null
+    ? (parsed["message"] as Record<string, unknown>)
+    : parsed;
+}
+
+function extractRole(parsed: Record<string, unknown>, message: Record<string, unknown>): string {
+  return typeof message["role"] === "string"
+    ? message["role"]
+    : typeof parsed["role"] === "string"
+      ? parsed["role"]
+      : "";
+}
+
+function contentBlocks(message: Record<string, unknown>): unknown[] {
+  return Array.isArray(message["content"]) ? (message["content"] as unknown[]) : [];
+}
+
+function hasBlockType(blocks: unknown[], type: string): boolean {
+  return blocks.some(
+    (b) =>
+      typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
+  );
+}
+
+function extractTextContent(message: Record<string, unknown>): string {
+  const raw = message["content"];
+  if (typeof raw === "string") return raw.trim();
+  const parts: string[] = [];
+  for (const block of contentBlocks(message)) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as Record<string, unknown>)["type"] === "text" &&
+      typeof (block as Record<string, unknown>)["text"] === "string"
+    ) {
+      parts.push((block as Record<string, unknown>)["text"] as string);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+// ── JSONL parser ──────────────────────────────────────────────────────
+
+function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
+  const parsed = tryParseJson(line);
+  if (!parsed) return null;
 
   const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
 
@@ -99,49 +148,26 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     return { type, timestampMs };
   }
 
-  // Assistant and user messages come nested under "message"
-  const message =
-    typeof parsed["message"] === "object" && parsed["message"] !== null
-      ? (parsed["message"] as Record<string, unknown>)
-      : parsed;
-
-  const role =
-    typeof message["role"] === "string"
-      ? message["role"]
-      : typeof parsed["role"] === "string"
-        ? parsed["role"]
-        : "";
+  const message = unwrapMessage(parsed);
+  const role = extractRole(parsed, message);
 
   if (role === "assistant") {
     const stopReason =
       typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
-    const content = Array.isArray(message["content"]) ? message["content"] : [];
-    const hasToolUse = content.some(
-      (block: unknown) =>
-        typeof block === "object" &&
-        block !== null &&
-        (block as Record<string, unknown>)["type"] === "tool_use",
-    );
+    const blocks = contentBlocks(message);
     return {
       type: "assistant",
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
-      hasToolUse,
+      hasToolUse: hasBlockType(blocks, "tool_use"),
       timestampMs,
     };
   }
 
   if (role === "user") {
-    const content = Array.isArray(message["content"]) ? message["content"] : [];
-    const hasToolResult = content.some(
-      (block: unknown) =>
-        typeof block === "object" &&
-        block !== null &&
-        (block as Record<string, unknown>)["type"] === "tool_result",
-    );
     return {
       type: "user",
-      role: hasToolResult ? "tool_result" : "user",
+      role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
       timestampMs,
     };
   }
@@ -232,6 +258,39 @@ export async function readClaudeJsonlState(
   };
 }
 
+// ── Conversation parser (pure, no I/O) ───────────────────────────────
+
+export function parseConversationLines(
+  lines: string[],
+  nowMs: number,
+): { messages: ConversationMessage[]; state: SessionState } {
+  const messages: ConversationMessage[] = [];
+  const stateRecords: ParsedRecord[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const stateRecord = parseJsonlRecord(trimmed, nowMs);
+    if (stateRecord) stateRecords.push(stateRecord);
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const message = unwrapMessage(parsed);
+    const role = extractRole(parsed, message);
+    if (role !== "user" && role !== "assistant") continue;
+
+    const combinedText = extractTextContent(message);
+    if (!combinedText) continue;
+
+    const ts = typeof parsed["timestamp"] === "number" ? parsed["timestamp"] : nowMs;
+    messages.push({ role, text: combinedText, timestampMs: ts });
+  }
+
+  return { messages, state: classifyClaudeJsonlState(stateRecords, nowMs) };
+}
+
 // ── Full conversation reader ──────────────────────────────────────────
 
 export async function readClaudeConversation(
@@ -247,61 +306,5 @@ export async function readClaudeConversation(
     return null;
   }
 
-  const messages: ConversationMessage[] = [];
-  const stateRecords: ParsedRecord[] = [];
-  const nowMs = Date.now();
-
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    const stateRecord = parseJsonlRecord(trimmed, nowMs);
-    if (stateRecord) stateRecords.push(stateRecord);
-
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-
-    const message =
-      typeof parsed["message"] === "object" && parsed["message"] !== null
-        ? (parsed["message"] as Record<string, unknown>)
-        : parsed;
-
-    const role =
-      typeof message["role"] === "string"
-        ? message["role"]
-        : typeof parsed["role"] === "string"
-          ? parsed["role"]
-          : "";
-
-    if (role !== "user" && role !== "assistant") continue;
-
-    const content = Array.isArray(message["content"]) ? message["content"] : [];
-    const textParts: string[] = [];
-    for (const block of content) {
-      if (
-        typeof block === "object" &&
-        block !== null &&
-        (block as Record<string, unknown>)["type"] === "text" &&
-        typeof (block as Record<string, unknown>)["text"] === "string"
-      ) {
-        textParts.push((block as Record<string, unknown>)["text"] as string);
-      }
-    }
-    const combinedText = textParts.join("\n").trim();
-    if (!combinedText) continue;
-
-    const ts =
-      typeof parsed["timestamp"] === "number"
-        ? parsed["timestamp"]
-        : nowMs;
-
-    messages.push({ role, text: combinedText, timestampMs: ts });
-  }
-
-  const state = classifyClaudeJsonlState(stateRecords, nowMs);
-  return { messages, state };
+  return parseConversationLines(text.split("\n"), Date.now());
 }
