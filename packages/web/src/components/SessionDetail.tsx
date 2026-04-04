@@ -193,9 +193,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (!files) return;
     const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
     if (images.length === 0) return;
-    void Promise.all(
-      images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })),
-    )
+    void Promise.all(images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })))
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
@@ -401,7 +399,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </span>
                       <button
                         type="button"
-                        disabled={busyAction !== null || (!message.trim() && attachments.length === 0)}
+                        disabled={
+                          busyAction !== null || (!message.trim() && attachments.length === 0)
+                        }
                         onClick={() => void doSend()}
                         className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       >
