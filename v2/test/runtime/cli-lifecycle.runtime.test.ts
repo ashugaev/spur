@@ -1795,6 +1795,64 @@ projects:
     expect(overridePane).not.toContain("[Spur step 1/2: research]");
   });
 
+  it("disables spawn steps in plan mode and sends the raw prompt", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-plan-no-steps-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "plan-no-steps.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - "research"
+        - "test"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--plan",
+          "--step",
+          "review",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    expect(spawned.planMode).toBe(true);
+    expect(spawned.pipeline).toBeUndefined();
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+    expect(pane).toContain("ship the task");
+    expect(pane).not.toContain("[Spur step");
+
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+    expect(log).toContain("ship the task");
+    expect(log).not.toContain("[Spur step");
+  });
+
   it("queues a busy manual send and delivers it before the next pipeline step", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

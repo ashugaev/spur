@@ -166,7 +166,7 @@ function normalizeSpawnRequest(request: SpawnSessionRequest): {
     prompt: request.prompt.trim(),
     planMode: request.planMode === true,
   };
-  if (!steps || steps.length === 0) {
+  if (normalized.planMode || !steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
