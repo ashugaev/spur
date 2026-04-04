@@ -41,6 +41,18 @@ If your config uses another port, start the UI with the matching daemon URL:
 SPUR_DAEMON_URL=http://127.0.0.1:4311 pnpm dev
 ```
 
+## Terminal opens locally but fails through a reverse proxy
+
+When the direct terminal server is bound to loopback behind a proxy, set:
+
+```bash
+DIRECT_TERMINAL_BIND_HOST=127.0.0.1
+DIRECT_TERMINAL_BIND_PORT=14801
+DIRECT_TERMINAL_PUBLIC_PORT=<public-port>
+```
+
+`DIRECT_TERMINAL_PUBLIC_PORT` must match the externally reachable proxy port that serves `/ws`.
+
 ## `tmux` is missing
 
 Spur's default runtime requires `tmux`. Install it, then rerun setup:

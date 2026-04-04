@@ -56,6 +56,8 @@ describe("Spur web API routes", () => {
     mockedReadSpurProjectOptions.mockReset();
     mockedReadSpurProjectOptions.mockReturnValue([{ id: "sp", name: "Spur Core" }]);
     delete process.env["DIRECT_TERMINAL_PORT"];
+    delete process.env["DIRECT_TERMINAL_BIND_PORT"];
+    delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   it("GET /api/sessions filters by project", async () => {
@@ -178,5 +180,16 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toEqual({ directTerminalPort: "14999" });
+  });
+
+  it("GET /api/runtime/terminal prefers public terminal port when configured", async () => {
+    process.env["DIRECT_TERMINAL_BIND_PORT"] = "14801";
+    process.env["DIRECT_TERMINAL_PUBLIC_PORT"] = "443";
+
+    const response = await runtimeTerminalConfig();
+    const payload = (await response.json()) as { directTerminalPort: string };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({ directTerminalPort: "443" });
   });
 });

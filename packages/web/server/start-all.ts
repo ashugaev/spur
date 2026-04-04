@@ -38,6 +38,11 @@ function spawnProcess(label: string, command: string, args: string[]): ChildProc
   return child;
 }
 
+function readHost(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
 function resolveNextBin(): string {
   const localBin = resolve(pkgRoot, "node_modules", ".bin", "next");
   if (existsSync(localBin)) return localBin;
@@ -77,7 +82,8 @@ function cleanup(exitCode: number): void {
 }
 
 const port = process.env["PORT"] || "3000";
-spawnProcess("next", resolveNextBin(), ["start", "-p", port]);
+const host = readHost(process.env["WEB_HOST"], "0.0.0.0");
+spawnProcess("next", resolveNextBin(), ["start", "-H", host, "-p", port]);
 spawnProcess("direct-terminal", "node", [resolve(__dirname, "direct-terminal-ws.js")]);
 
 process.on("SIGINT", () => cleanup(0));

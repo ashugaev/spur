@@ -2,6 +2,7 @@
 
 Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon with `SPUR_DAEMON_URL` set.
+When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
 
 ## Dashboard
 
