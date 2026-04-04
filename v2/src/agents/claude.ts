@@ -9,7 +9,7 @@ export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
 }
 
-export function toClaudeProjectPath(worktreePath: string): string {
+function toClaudeProjectPath(worktreePath: string): string {
   return worktreePath.replaceAll("\\", "/").replaceAll(":", "").replace(/[/.]/g, "-");
 }
 
