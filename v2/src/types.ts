@@ -18,6 +18,7 @@ export interface SessionLink {
   url: string;
 }
 export type SessionPipelineStatus = "running" | "completed" | "errored";
+export type SessionTodoStatus = "running" | "completed";
 
 export interface SessionSlots {
   title?: string;
@@ -81,11 +82,13 @@ export interface DevServerConfig {
 
 export interface ProjectSpawnConfig {
   steps?: string[];
+  todo?: boolean;
 }
 
 export interface TriggerSpawnConfig {
   prompt: string;
   steps?: string[];
+  todo?: boolean;
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
@@ -164,6 +167,13 @@ export interface SessionPipelineState {
   error?: string;
 }
 
+export interface SessionTodoState {
+  status: SessionTodoStatus;
+  total: number;
+  done: number;
+  lastNudgeAt?: string;
+}
+
 export interface SessionQueuedMessagesState {
   messages: string[];
   awaitingPrompt: boolean;
@@ -187,6 +197,7 @@ export interface SessionRecord {
   updatedAt: string;
   slots?: SessionSlots;
   pipeline?: SessionPipelineState;
+  todo?: SessionTodoState;
   queuedMessages?: SessionQueuedMessagesState;
   error?: string;
 }
@@ -237,6 +248,7 @@ export interface SpawnSessionRequest {
   project: string;
   prompt: string;
   steps?: string[];
+  todo?: boolean;
   agent?: AgentName;
   planMode?: boolean;
   branch?: string;

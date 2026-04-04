@@ -249,7 +249,11 @@ function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfi
   const label = `projects.${projectId}.spawn`;
   const raw = asObject(value, label);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
-  return steps !== undefined ? { steps } : {};
+  const todo = asOptionalBoolean(raw["todo"], `${label}.todo`);
+  const result: ProjectSpawnConfig = {};
+  if (steps !== undefined) result.steps = steps;
+  if (todo !== undefined) result.todo = todo;
+  return result;
 }
 
 function parseTrigger(
@@ -293,6 +297,7 @@ function parseTrigger(
   const spawnRaw = asObject(raw["spawn"], `${label}.spawn`);
   const prompt = asString(spawnRaw["prompt"], `${label}.spawn.prompt`);
   const steps = asOptionalStringArray(spawnRaw["steps"], `${label}.spawn.steps`);
+  const todoFlag = asOptionalBoolean(spawnRaw["todo"], `${label}.spawn.todo`);
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
@@ -303,6 +308,7 @@ function parseTrigger(
     spawn: {
       prompt,
       ...(steps !== undefined ? { steps } : {}),
+      ...(todoFlag !== undefined ? { todo: todoFlag } : {}),
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),

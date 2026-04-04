@@ -562,6 +562,59 @@ describe("SessionService", () => {
     );
   });
 
+  it("spawns a todo session that injects todo instructions", async () => {
+    const sessions = createSessionStore();
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+      todo: true,
+    });
+
+    expect(result.prompt).toBe("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(".spur/todo.md");
+
+    expect(sessions.get("api-1")?.todo).toMatchObject({
+      status: "running",
+      total: 0,
+      done: 0,
+    });
+    expect(sessions.get("api-1")?.pipeline).toBeUndefined();
+  });
+
+  it("uses project default spawn.todo when the request does not provide it", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          spawn: {
+            todo: true,
+          },
+        },
+      },
+    });
+    const { SessionService } = await loadSessionServiceModule();
+    createSessionStore();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "ship the task",
+    });
+
+    expect(result.todo).toMatchObject({
+      status: "running",
+      total: 0,
+      done: 0,
+    });
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
+  });
+
   it("requires a prompt for spawn", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

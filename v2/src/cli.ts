@@ -1096,6 +1096,7 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
+    .option("--todo", "Enable agent-managed todo list mode")
     .option(
       "--worktree [defaultBranch]",
       "Use an owned worktree; optionally override the base branch",
@@ -1141,6 +1142,7 @@ export function createProgram(cliEntrypoint: string): Command {
         project,
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
+        ...(options.todo ? { todo: true } : {}),
         agent: options.agent,
         ...(options.plan ? { planMode: true } : {}),
         ...(branch !== undefined ? { branch } : {}),

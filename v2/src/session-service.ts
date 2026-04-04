@@ -31,6 +31,13 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  formatTodoNudgeMessage,
+  formatTodoSpawnMessage,
+  readTodoSnapshot,
+  shouldNudge,
+  todoStateFromSnapshot,
+} from "./todo.js";
+import {
   createTmuxCommandSession,
   createTmuxDevServerSession,
   createTmuxSession,
@@ -77,6 +84,7 @@ import {
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
+  type SessionTodoState,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import {
@@ -151,6 +159,7 @@ function tryRealpath(path: string): string {
 function normalizeSpawnRequest(request: SpawnSessionRequest): {
   prompt: string;
   steps?: string[];
+  todo: boolean;
   planMode: boolean;
 } {
   if (typeof request.prompt !== "string" || !request.prompt.trim()) {
@@ -164,6 +173,7 @@ function normalizeSpawnRequest(request: SpawnSessionRequest): {
   });
   const normalized = {
     prompt: request.prompt.trim(),
+    todo: request.todo === true,
     planMode: request.planMode === true,
   };
   if (!steps || steps.length === 0) {
@@ -922,15 +932,19 @@ export class SessionService {
     let placeholderWritten = false;
     let prompt = "";
     let steps: string[] | undefined;
+    let todo: boolean;
     let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest({
+      ({ prompt, steps, todo, planMode } = normalizeSpawnRequest({
         ...request,
         ...(request.steps === undefined && project.spawn?.steps !== undefined
           ? { steps: project.spawn.steps }
+          : {}),
+        ...(request.todo === undefined && project.spawn?.todo !== undefined
+          ? { todo: project.spawn.todo }
           : {}),
       }));
       if (
@@ -1074,10 +1088,14 @@ export class SessionService {
       }
 
       const firstStage = steps?.[0];
-      const initialMessage =
-        steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
-          : prompt;
+      let initialMessage: string;
+      if (todo && !steps) {
+        initialMessage = formatTodoSpawnMessage(prompt);
+      } else if (steps && firstStage) {
+        initialMessage = formatPipelineStepMessage(prompt, firstStage, 0, steps.length);
+      } else {
+        initialMessage = prompt;
+      }
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
@@ -1096,6 +1114,8 @@ export class SessionService {
             status: "running" as const,
           }
         : undefined;
+      const todoState: SessionTodoState | undefined =
+        todo && !steps ? { status: "running", total: 0, done: 0 } : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
         planMode,
@@ -1104,6 +1124,7 @@ export class SessionService {
         status: "running",
         updatedAt: nowIso(),
         ...(pipeline ? { pipeline } : {}),
+        ...(todoState ? { todo: todoState } : {}),
       };
 
       stage = "tmux.create";
@@ -1983,7 +2004,8 @@ export class SessionService {
     return (
       hasQueuedMessages(session) ||
       session.queuedMessages?.awaitingPrompt === true ||
-      session.pipeline?.status === "running"
+      session.pipeline?.status === "running" ||
+      session.todo?.status === "running"
     );
   }
 
@@ -2168,6 +2190,12 @@ export class SessionService {
             await sleep(PIPELINE_POLL_INTERVAL_MS);
             continue;
           }
+          await sleep(PIPELINE_POLL_INTERVAL_MS);
+          continue;
+        }
+
+        if (session.todo?.status === "running") {
+          await this.checkTodoProgress(sessionId, session);
           await sleep(PIPELINE_POLL_INTERVAL_MS);
           continue;
         }
@@ -2382,6 +2410,65 @@ export class SessionService {
         awaitingStepIndex: session.pipeline.awaitingStepIndex ?? null,
       },
     });
+  }
+
+  private async checkTodoProgress(sessionId: string, session: SessionRecord): Promise<void> {
+    if (!session.todo || session.todo.status !== "running") {
+      return;
+    }
+    const snapshot = readTodoSnapshot(session.worktreePath);
+    const newState = todoStateFromSnapshot(snapshot);
+
+    if (newState.total !== session.todo.total || newState.done !== session.todo.done) {
+      writeSession(this.config.dataDir, {
+        ...session,
+        updatedAt: nowIso(),
+        todo: { ...session.todo, ...newState },
+      });
+    }
+
+    if (snapshot?.allDone) {
+      writeSession(this.config.dataDir, {
+        ...(readSession(this.config.dataDir, sessionId) ?? session),
+        updatedAt: nowIso(),
+        todo: { ...session.todo, ...newState, status: "completed" },
+      });
+      this.logEvent("session.todo.completed", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Todo list completed for ${sessionId} (${newState.done}/${newState.total})`,
+      });
+      return;
+    }
+
+    const agentState = await this.classifySessionState(session);
+    if (agentState !== "waiting") {
+      return;
+    }
+
+    if (!shouldNudge(session.todo, snapshot)) {
+      return;
+    }
+
+    if (snapshot) {
+      await sendMessageToTmux(session.tmuxSession, formatTodoNudgeMessage(snapshot));
+      const latest = readSession(this.config.dataDir, sessionId) ?? session;
+      writeSession(this.config.dataDir, {
+        ...latest,
+        updatedAt: nowIso(),
+        todo: {
+          ...(latest.todo ?? session.todo),
+          lastNudgeAt: nowIso(),
+        },
+      });
+      this.logEvent("session.todo.nudge", {
+        level: "info",
+        sessionId,
+        projectId: session.project,
+        message: `Nudged ${sessionId}: ${newState.done}/${newState.total} tasks done`,
+      });
+    }
   }
 
   private async enrichService(service: ServiceInstanceRecord): Promise<ServiceInstanceView> {

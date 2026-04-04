@@ -15,6 +15,7 @@ import type {
   ServiceSourceState,
   SessionPipelineState,
   SessionRecord,
+  SessionTodoState,
 } from "./types.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
@@ -119,6 +120,15 @@ function normalizeQueuedMessagesState(
   };
 }
 
+function normalizeTodoState(todo: SessionTodoState): SessionTodoState {
+  return {
+    status: todo.status,
+    total: todo.total,
+    done: todo.done,
+    ...(todo.lastNudgeAt !== undefined ? { lastNudgeAt: todo.lastNudgeAt } : {}),
+  };
+}
+
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
   return {
     id: session.id,
@@ -137,6 +147,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     updatedAt: session.updatedAt,
     ...(session.slots ? { slots: session.slots } : {}),
     ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
+    ...(session.todo ? { todo: normalizeTodoState(session.todo) } : {}),
     ...(session.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(session.queuedMessages) }
       : {}),
