@@ -600,7 +600,7 @@ export function Dashboard() {
         <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
       ) : null}
     </main>
-    <StatusBar sessions={rawSessions} daemonError={error} />
+    <StatusBar daemonError={error} />
     </>
   );
 }

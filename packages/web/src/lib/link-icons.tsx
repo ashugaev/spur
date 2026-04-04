@@ -65,7 +65,7 @@ function isCiStatus(value: unknown): value is CiStatus {
   return value === "success" || value === "failure" || value === "pending" || value === null;
 }
 
-export async function fetchPrInfo(url: string): Promise<PrInfo> {
+async function fetchPrInfo(url: string): Promise<PrInfo> {
   try {
     const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
     if (!res.ok) {
