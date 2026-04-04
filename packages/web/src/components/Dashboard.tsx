@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AttentionZone } from "@/components/AttentionZone";
-import { useGitError } from "@/lib/link-icons";
+import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -104,7 +104,6 @@ export function Dashboard() {
   const searchParams = useSearchParams();
   const requestedProject = searchParams.get("project")?.trim() ?? "";
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const gitError = useGitError();
   const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(requestedProject);
@@ -335,7 +334,8 @@ export function Dashboard() {
   };
 
   return (
-    <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
+    <>
+    <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
       <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
@@ -409,18 +409,6 @@ export function Dashboard() {
           active={activeStatFilter === "pending"}
           onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
         />
-        <div className="ml-auto hidden items-center gap-3 border-l border-[var(--color-border-default)] pl-4 sm:flex">
-          {gitError ? (
-            <span
-              className="text-[10px] font-bold tracking-[0.08em] text-[var(--color-status-error)]"
-              title={gitError}
-            >
-              Git Error
-            </span>
-          ) : null}
-          <span className="text-[10px] font-bold tracking-[0.08em]">Online</span>
-          <span className="h-2 w-2 rounded-full bg-[var(--color-status-ready)] shadow-[0_0_6px_var(--color-status-ready)]" />
-        </div>
       </div>
 
       {spawnOpen ? (
@@ -612,5 +600,7 @@ export function Dashboard() {
         <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
       ) : null}
     </main>
+    <StatusBar sessions={rawSessions} />
+    </>
   );
 }
