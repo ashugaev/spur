@@ -52,13 +52,10 @@ EOF
     return
   fi
 
-  command="\$code-simplifier"
-  cat >&2 <<EOF
-$command
-
-Only review files changed since the previous stop-hook simplifier pass, and only if the most recent iteration made relevant code, config, docs, or prompt edits. If there were no such edits in the latest iteration, skip and stop.
-EOF
-  exit 2
+  # Codex Stop-hook continuation currently hits a client/provider bug where the
+  # next request can include non-message UUIDs in Responses API input history.
+  # Keep the dedupe signature update, but do not inject a blocked follow-up turn.
+  return
 }
 
 stop_hook_active=$(json_field '.stop_hook_active')
