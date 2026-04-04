@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAgentLaunchPlan,
@@ -94,6 +94,22 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
 const STATE_HOLD_MS = 4_000;
+const PERMISSION_PROMPTS = [
+  /approval required/i,
+  /Do you want to proceed\?/i,
+  /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
+  /Would you like to (?:run|grant|make|approve)\b/i,
+];
+const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
+const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
+const INTERVIEW_OPTION_RE = /^\d+[.:]\s/;
+// Codex interactive question UI: "tab to add notes | enter to submit answer"
+const CODEX_QUESTION_RE = /\benter to submit\b/i;
+
+const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const NAME_RE = /^[\w.-]+$/;
+const MAX_DECODED_SIZE = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
 const STATE_HISTORY_LIMIT = 100;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
@@ -1164,15 +1180,45 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    if (typeof request.message !== "string") {
-      throw new Error("message must be a non-empty string");
-    }
-    const message = request.message.trim();
-    if (!message) {
-      throw new Error("message must be a non-empty string");
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!message && !hasAttachments) {
+      throw new Error("message or attachments required");
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
+    }
+
+    let finalMessage = message;
+    if (hasAttachments) {
+      const attachments = request.attachments ?? [];
+      if (attachments.length > MAX_ATTACHMENTS) {
+        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+      }
+      const attachDir = join(session.worktreePath, ".spur", "attachments");
+      mkdirSync(attachDir, { recursive: true });
+      const prefixLines: string[] = [];
+      for (const att of attachments) {
+        if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
+          throw new Error(`Invalid attachment name: ${String(att.name)}`);
+        }
+        const ext = extname(att.name).toLowerCase();
+        if (!ALLOWED_EXT.has(ext)) {
+          throw new Error(`Unsupported attachment extension: ${ext}`);
+        }
+        if (typeof att.data !== "string" || !att.data) {
+          throw new Error("Attachment data must be a non-empty base64 string");
+        }
+        const buf = Buffer.from(att.data, "base64");
+        if (buf.length > MAX_DECODED_SIZE) {
+          throw new Error(`Attachment ${att.name} exceeds 5MB`);
+        }
+        const filename = `${Date.now()}-${att.name}`;
+        const filePath = join(attachDir, filename);
+        writeFileSync(filePath, buf, { mode: 0o644 });
+        prefixLines.push(`[Attached file: ${filePath}]`);
+      }
+      finalMessage = prefixLines.join("\n") + (message ? `\n${message}` : "");
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -1182,7 +1228,7 @@ export class SessionService {
         status: "running",
         updatedAt: nowIso(),
       },
-      [...queuedMessages(readySession), message],
+      [...queuedMessages(readySession), finalMessage],
     );
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.message.queued", {
@@ -1192,7 +1238,7 @@ export class SessionService {
       message: `Queued message for ${sessionId}`,
       details: {
         queuedCount: queuedMessages(updated).length,
-        messageLength: message.length,
+        messageLength: finalMessage.length,
       },
     });
     await this.tryDeliverQueuedMessage(sessionId);
