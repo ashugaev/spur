@@ -10,10 +10,7 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import {
-  readClaudeJsonlState,
-  type ClaudeJsonlReaderState,
-} from "./claude-jsonl-state.js";
+import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -34,13 +31,11 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
-  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxDevServerSession,
   createTmuxSession,
   devServerTmuxAlive,
   devServerTmuxSession,
-  getTmuxPaneTitle,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
   killDevServerTmux,
@@ -94,31 +89,12 @@ import {
   workspaceExists,
 } from "./workspace.js";
 
-const WAITING_INPUT_TAIL_LINES = 12;
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
-const TRAILING_UI_RE = [
-  /^[─━]+$/,
-  /^⏵⏵ /,
-  /^Claude in Chrome enabled\b/,
-  /^Update available!\b/,
-  /^gpt-[\w.-]+\b.*·/,
-];
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
 const STATE_HOLD_MS = 4_000;
 const STATE_HISTORY_LIMIT = 100;
-const PERMISSION_PROMPTS = [
-  /approval required/i,
-  /Do you want to proceed\?/i,
-  /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
-  /Would you like to (?:run|grant|make|approve)\b/i,
-];
-const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
-const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
-const INTERVIEW_OPTION_RE = /^\d+[.:]\s/;
-// Codex interactive question UI: "tab to add notes | enter to submit answer"
-const CODEX_QUESTION_RE = /\benter to submit\b/i;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
@@ -216,36 +192,6 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
-export function isWaitingInput(lines: string[]): boolean {
-  const tailLines = lines.slice(-WAITING_INPUT_TAIL_LINES).map((line) => line.trim());
-  // Join with space so patterns work across line-wrapped text
-  // (e.g. "Esc to\ncancel" in narrow terminals).
-  const tail = tailLines.join(" ");
-  if (PERMISSION_PROMPTS.some((pattern) => pattern.test(tail))) {
-    return true;
-  }
-  return (
-    INTERVIEW_ENTER_RE.test(tail) &&
-    INTERVIEW_ESCAPE_RE.test(tail) &&
-    tailLines.filter((line) => INTERVIEW_OPTION_RE.test(line)).length >= 2
-  );
-}
-
-function normalizePaneLines(pane: string): string[] {
-  const lines = pane
-    .split("\n")
-    .map((line) => line.trimEnd())
-    .filter((line) => line.trim().length > 0);
-  while (lines.length > 0) {
-    const trimmed = lines.at(-1)?.trim() ?? "";
-    if (!TRAILING_UI_RE.some((pattern) => pattern.test(trimmed))) {
-      break;
-    }
-    lines.pop();
-  }
-  return lines;
-}
-
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
@@ -293,43 +239,6 @@ function withQueuedMessages(
       awaitingPrompt,
     },
   };
-}
-
-// Braille spinner chars used by Codex in terminal title when active.
-const CODEX_BRAILLE_SPINNER_RE = /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
-
-export function classifyCodexTitle(title: string): SessionState | null {
-  // Codex title format: "⠋ session-name" (Braille spinner) when active,
-  // or "⠋ session-name · Thinking" / "· Ready" if status items configured.
-  if (/\bReady\b/i.test(title)) return "waiting";
-  if (/\b(?:Thinking|Working|Starting|Undoing|Exploring)\b/i.test(title)) return "working";
-  if (/\bWaiting\b/i.test(title)) return "needs_input";
-  // Braille spinner = active but could be working OR question prompt — fall through to pane.
-  // No spinner and no status word = idle (title is just "session-name").
-  if (!CODEX_BRAILLE_SPINNER_RE.test(title) && title.trim().length > 0) return "waiting";
-  return null;
-}
-
-// Codex TUI always renders `›` in the input area, even while working.
-// "esc to interrupt" appears in BOTH active-state widgets AND interactive question UIs.
-// Check question/approval patterns first to avoid misclassifying questions as working.
-const CODEX_PANE_WORKING_RE = /esc to interrupt/i;
-
-function classifyCodexPane(pane: string): SessionState {
-  const lines = normalizePaneLines(pane);
-  if (isWaitingInput(lines)) return "needs_input";
-  const tail = lines.slice(-WAITING_INPUT_TAIL_LINES).join(" ");
-  if (CODEX_QUESTION_RE.test(tail)) return "needs_input";
-  if (CODEX_PANE_WORKING_RE.test(pane)) return "working";
-  return "waiting";
-}
-
-async function classifyCodexAgentState(tmuxSession: string): Promise<SessionState> {
-  const title = await getTmuxPaneTitle(tmuxSession);
-  const titleState = classifyCodexTitle(title);
-  if (titleState !== null) return titleState;
-  const pane = await captureTmuxPane(tmuxSession, 80);
-  return classifyCodexPane(pane);
 }
 
 export function isRestorableSession(
@@ -2404,31 +2313,24 @@ export class SessionService {
         });
       }
     } else {
-      // Codex: hook + pane classification (unchanged).
-      stateSource = "pane";
+      // Codex: hook-based state classification.
+      stateSource = "pane"; // keep "pane" for now as the source label
       const hookState = readAgentHookState(this.config.dataDir, session.id);
       if (hookState) {
-        const paneState = await classifyCodexAgentState(session.tmuxSession);
-        if (paneState === "needs_input") {
-          state = "needs_input";
-        } else if (hookState.state === "working" && paneState === "waiting") {
-          state = "waiting";
-        } else {
-          state = hookState.state;
-        }
+        state = hookState.state;
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
           projectId: session.project,
-          message: `State: ${state} (hook=${hookState.state}, pane=${paneState}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
+          message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
-        state = await classifyCodexAgentState(session.tmuxSession);
+        state = "working";
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
           projectId: session.project,
-          message: `State: ${state} (no hook, pane-only)`,
+          message: `State: ${state} (no hook)`,
         });
       }
     }
@@ -2494,13 +2396,8 @@ export class SessionService {
       return "working";
     }
 
-    // Codex: hook + pane
+    // Codex: hooks only
     const hookState = readAgentHookState(this.config.dataDir, session.id);
-    if (hookState?.state === "working") {
-      const paneState = await classifyCodexAgentState(session.tmuxSession);
-      // Trust pane over stale hook when Codex title says waiting
-      return paneState === "waiting" ? "waiting" : "working";
-    }
-    return classifyCodexAgentState(session.tmuxSession);
+    return hookState?.state ?? "working";
   }
 }
