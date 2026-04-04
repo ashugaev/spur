@@ -26,7 +26,9 @@ export async function POST(request: NextRequest) {
     }
 
     const filteredSteps = Array.isArray(body.steps)
-      ? body.steps.filter((s): s is string => typeof s === "string" && s.trim().length > 0).map((s) => s.trim())
+      ? body.steps
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map((s) => s.trim())
       : undefined;
 
     const rawOverrides =

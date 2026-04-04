@@ -117,7 +117,9 @@ export function Dashboard() {
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
-  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">("default");
+  const [spawnWorkspaceMode, setSpawnWorkspaceMode] = useState<"default" | "worktree" | "shared">(
+    "default",
+  );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -475,7 +477,9 @@ export function Dashboard() {
                 <select
                   aria-label="workspace mode"
                   className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")}
+                  onChange={(event) =>
+                    setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
+                  }
                   value={spawnWorkspaceMode}
                 >
                   <option value="default">Default</option>
@@ -489,7 +493,9 @@ export function Dashboard() {
                     onChange={(event) => setSpawnPlanMode(event.target.checked)}
                     type="checkbox"
                   />
-                  <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">Plan</span>
+                  <span className="text-xs font-bold uppercase text-[var(--color-text-primary)]">
+                    Plan
+                  </span>
                 </label>
               </div>
               {spawnWorkspaceMode === "worktree" ? (
