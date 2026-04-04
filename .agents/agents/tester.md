@@ -31,7 +31,7 @@ V2 CLI scenarios: [v2/TEST_SCENARIOS.md](../../v2/TEST_SCENARIOS.md)
 
 ### 4. UI flow
 - Skip when UI did not change
-- Verify dev server running at `http://localhost:3000`
+- Run UI on your branch. Don't kill other ports. Reuse your server if already running.
 - Navigate to each affected page
 - Use accessibility snapshot as primary signal
 - Test expected interactions and console errors
