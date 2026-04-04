@@ -108,10 +108,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         {/* Daemon status */}
         <div className="flex items-center gap-1.5">
           {gitError ? (
-            <span
-              className="font-bold text-[var(--color-status-error)]"
-              title={gitError}
-            >
+            <span className="font-bold text-[var(--color-status-error)]" title={gitError}>
               Git Error
             </span>
           ) : (
@@ -131,13 +128,8 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
             {/* Tooltip */}
             <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
               {prEntries.slice(0, 8).map((entry) => (
-                <div
-                  key={entry.url}
-                  className="flex items-center gap-2 py-0.5"
-                >
-                  <span className="truncate text-[var(--color-text-secondary)]">
-                    {entry.label}
-                  </span>
+                <div key={entry.url} className="flex items-center gap-2 py-0.5">
+                  <span className="truncate text-[var(--color-text-secondary)]">{entry.label}</span>
                   <CiStatusDot status={entry.info.ciStatus} />
                   <PrStateLabel state={entry.info.state} />
                 </div>
