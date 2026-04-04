@@ -476,7 +476,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (
             <div
-              className="fixed inset-0 z-50 flex flex-col bg-[var(--color-bg-base)]"
+              className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[var(--color-bg-base)]"
+              onWheel={(e) => e.stopPropagation()}
               role="dialog"
               aria-label={`Terminal ${session.id}`}
             >
@@ -492,8 +493,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1">
-                <DirectTerminal sessionId={session.id} />
+              <div className="min-h-0 flex-1">
+                <DirectTerminal sessionId={session.tmuxSession ?? session.id} />
               </div>
             </div>
           ) : null}
