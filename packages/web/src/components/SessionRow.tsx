@@ -11,7 +11,7 @@ import {
   usePrInfo,
 } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
-import { isTerminalSession, type DashboardSession } from "@/lib/types";
+import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
 
 interface SessionRowProps {
   session: DashboardSession;
@@ -79,26 +79,41 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
         {formatRelativeTime(session.lastActivityAt)}
       </span>
 
-      <button
-        aria-label={`Open web terminal for ${session.id}`}
-        className={`inline-flex h-6 w-6 shrink-0 items-center justify-center border transition ${canAttach ? "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed"}`}
-        disabled={!canAttach}
-        onClick={() => canAttach && onOpenTerminal?.(session)}
-        type="button"
-      >
-        <svg
-          aria-hidden="true"
-          className="h-3.5 w-3.5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          viewBox="0 0 24 24"
+      {prInfo.state === "merged" && canComplete(session) ? (
+        <button
+          aria-label={`Mark ${session.id} as done`}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center border border-[var(--color-border-default)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
+          onClick={async () => {
+            await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, { method: "POST" });
+          }}
+          type="button"
         >
-          <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
-          <path d="m8 10 2.5 2L8 14.5" />
-          <path d="M13 15h3" />
-        </svg>
-      </button>
+          <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
+        </button>
+      ) : (
+        <button
+          aria-label={`Open web terminal for ${session.id}`}
+          className={`inline-flex h-6 w-6 shrink-0 items-center justify-center border transition ${canAttach ? "border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]" : "border-transparent text-[var(--color-text-tertiary)] opacity-25 cursor-not-allowed"}`}
+          disabled={!canAttach}
+          onClick={() => canAttach && onOpenTerminal?.(session)}
+          type="button"
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            viewBox="0 0 24 24"
+          >
+            <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
+            <path d="m8 10 2.5 2L8 14.5" />
+            <path d="M13 15h3" />
+          </svg>
+        </button>
+      )}
     </div>
   );
 }
