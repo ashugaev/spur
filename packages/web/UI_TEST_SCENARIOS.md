@@ -30,6 +30,15 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
 
+### D4b: Merged-PR done button
+
+- Sessions with merged PR + completable status: checkmark icon button replaces terminal button
+- Checkmark button same size (h-6 w-6) as terminal button
+- Hover: green border + text (`--color-status-ready`)
+- Click: calls complete API, button disables immediately (no double-click)
+- On error: button re-enables
+- On success: button stays disabled until dashboard poll refreshes session to done zone
+
 ### D5: Tracker and PR links
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
