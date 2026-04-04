@@ -16,7 +16,10 @@ export async function GET() {
   );
   return NextResponse.json(
     {
-      directTerminalPort: normalizePort(process.env["DIRECT_TERMINAL_PUBLIC_PORT"], Number(bindPort)),
+      directTerminalPort: normalizePort(
+        process.env["DIRECT_TERMINAL_PUBLIC_PORT"],
+        Number(bindPort),
+      ),
     },
     { headers: { "Cache-Control": "no-store" } },
   );
