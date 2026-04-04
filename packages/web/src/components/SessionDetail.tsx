@@ -67,11 +67,29 @@ function sanitizeFilename(name: string): string {
 }
 
 async function fileToBase64(file: File): Promise<string> {
-  const buffer = await file.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      resolve(result.split(",")[1] ?? "");
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+interface Attachment {
+  file: File;
+  preview: string;
 }
 
 interface LogEntry {
@@ -110,7 +128,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<File[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   const loadSession = useCallback(async () => {
     try {
@@ -186,16 +204,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const addImageFiles = (files: FileList | null) => {
     if (!files) return;
     const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
-    if (images.length > 0) setAttachments((prev) => [...prev, ...images]);
+    if (images.length === 0) return;
+    void Promise.all(
+      images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })),
+    ).then((entries) => setAttachments((prev) => [...prev, ...entries]));
   };
 
   const doSend = async () => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
     const encoded = await Promise.all(
-      attachments.map(async (f) => ({
-        name: sanitizeFilename(f.name),
-        data: await fileToBase64(f),
+      attachments.map(async (att) => ({
+        name: sanitizeFilename(att.file.name),
+        data: await fileToBase64(att.file),
       })),
     );
     const body: Record<string, unknown> = { message: trimmed };
@@ -366,11 +387,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     />
                     {attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
-                        {attachments.map((file, i) => (
-                          <div key={`${file.name}-${i}`} className="group relative">
+                        {attachments.map((att, i) => (
+                          <div key={`${att.file.name}-${i}`} className="group relative">
                             <img
-                              src={URL.createObjectURL(file)}
-                              alt={file.name}
+                              src={att.preview}
+                              alt={att.file.name}
                               className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
                             />
                             <button

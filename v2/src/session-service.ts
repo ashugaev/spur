@@ -113,6 +113,11 @@ const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
 const INTERVIEW_OPTION_RE = /^\d+[.:]\s/;
 // Codex interactive question UI: "tab to add notes | enter to submit answer"
 const CODEX_QUESTION_RE = /\benter to submit\b/i;
+
+const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
+const NAME_RE = /^[\w.-]+$/;
+const MAX_DECODED_SIZE = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS = 10;
 const RESTORE_PLAN_WAIT_MS = 5_000;
 const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
@@ -1270,13 +1275,13 @@ export class SessionService {
 
     let finalMessage = message;
     if (hasAttachments) {
-      const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
-      const NAME_RE = /^[\w.-]+$/;
-      const MAX_DECODED_SIZE = 5 * 1024 * 1024;
+      const attachments = request.attachments ?? [];
+      if (attachments.length > MAX_ATTACHMENTS) {
+        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+      }
       const attachDir = join(session.worktreePath, ".spur", "attachments");
       mkdirSync(attachDir, { recursive: true });
       const prefixLines: string[] = [];
-      const attachments = request.attachments ?? [];
       for (const att of attachments) {
         if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
           throw new Error(`Invalid attachment name: ${String(att.name)}`);
