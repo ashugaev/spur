@@ -43,7 +43,7 @@ function StatItem({
 }) {
   return (
     <button
-      className={`flex items-center gap-1.5 border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
       onClick={onClick}
       type="button"
     >
@@ -339,7 +339,7 @@ export function Dashboard() {
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <span className="text-lg text-[var(--color-accent)]">𖤓</span>
             <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
               {activeProjectName}
