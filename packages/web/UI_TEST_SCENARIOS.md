@@ -116,7 +116,7 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 - Tooltip accessible via keyboard focus (tabIndex)
 - Tooltip max-width 90vw (no overflow on mobile)
 - Right: live clock in HH:MM:SS format, updates every second
-- Main content has enough bottom padding (pb-8) to not be hidden behind footer
+- Main content has bottom padding (pb-8) so it is not hidden behind footer
 
 ## Responsive
 

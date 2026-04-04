@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   CiStatusDot,
   fetchPrInfo,
@@ -35,7 +35,7 @@ function worstStatus(entries: PrEntry[]): CiStatus {
   return worst;
 }
 
-function useAggregatePr(sessions: SpurSessionView[]) {
+function useAggregatePr(sessions: SpurSessionView[]): PrEntry[] {
   const prUrlsKey = useMemo(() => {
     const urls = new Set<string>();
     for (const s of sessions) {
@@ -79,7 +79,7 @@ function useAggregatePr(sessions: SpurSessionView[]) {
   return entries;
 }
 
-function useClock() {
+function useClock(): string {
   const [now, setNow] = useState(new Date());
   useEffect(() => {
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -88,7 +88,7 @@ function useClock() {
   return now.toLocaleTimeString("en-GB", { hour12: false });
 }
 
-function PrStateLabel({ state }: { state: PrInfo["state"] }) {
+function PrStateLabel({ state }: { state: PrInfo["state"] }): React.ReactNode {
   if (!state) return null;
   return (
     <span className="uppercase" style={{ color: prStateColor(state) }}>
@@ -97,16 +97,15 @@ function PrStateLabel({ state }: { state: PrInfo["state"] }) {
   );
 }
 
-export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
+export function StatusBar({ sessions }: { sessions: SpurSessionView[] }): React.ReactNode {
   const gitError = useGitError();
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
   const clock = useClock();
 
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
+    <footer className="fixed inset-x-0 bottom-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
       <div className="flex items-center gap-6">
-        {/* Daemon status */}
         <div className="flex items-center gap-1.5">
           {gitError ? (
             <span
@@ -123,13 +122,11 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
           )}
         </div>
 
-        {/* Aggregate CI */}
         {prEntries.length > 0 ? (
           <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
             <GithubIcon />
             <CiStatusDot status={aggregate} />
 
-            {/* Tooltip */}
             <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
               {prEntries.slice(0, 8).map((entry) => (
                 <div
@@ -153,7 +150,6 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         ) : null}
       </div>
 
-      {/* Clock */}
       <div className="text-[var(--color-text-tertiary)]">{clock}</div>
     </footer>
   );

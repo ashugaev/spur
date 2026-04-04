@@ -50,7 +50,6 @@ body {
   color: var(--color-text-primary);
   min-height: 100vh;
   letter-spacing: 0.02em;
-  padding-bottom: 1.5rem;
 }
 
 a {
