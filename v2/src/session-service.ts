@@ -95,17 +95,6 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const PIPELINE_READY_GRACE_MS = 2_000;
 const STATE_HOLD_MS = 4_000;
-const PERMISSION_PROMPTS = [
-  /approval required/i,
-  /Do you want to proceed\?/i,
-  /\((?:y|Y)\)es.*\((?:n|N)\)o/i,
-  /Would you like to (?:run|grant|make|approve)\b/i,
-];
-const INTERVIEW_ENTER_RE = /\bEnter to select\b/i;
-const INTERVIEW_ESCAPE_RE = /\bEsc to cancel\b/i;
-const INTERVIEW_OPTION_RE = /^\d+[.:]\s/;
-// Codex interactive question UI: "tab to add notes | enter to submit answer"
-const CODEX_QUESTION_RE = /\benter to submit\b/i;
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
