@@ -7,16 +7,16 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 
 ### D1: Header renders correctly
 
-- 𖤓 icon + "FLEET OVERVIEW" title visible
+- 𖤓 icon + project title visible
 - Project filter dropdown with "All projects" default
 - SPAWN_NEW_SESSION button visible
 
-### D2: Stats bar shows correct counts
+### D2: Header stats show correct counts
 
-- TOTAL, INPUT, REVIEW, PENDING, WORKING labels visible with values
-- Labels use secondary text color (#A1A1A1), values use primary (#E1E1E1)
-- Non-zero INPUT/REVIEW/PENDING/WORKING values show colored
-- "Online" indicator with green dot on right (hidden on mobile)
+- Needs Input, Working, Waiting stat buttons in header after title, before search input
+- Labels use secondary text color, values use primary
+- Non-zero values show colored (error/working/attention)
+- Clicking a stat button filters sessions to that attention level; clicking again clears filter
 
 ### D3: Session rows render with correct columns
 
@@ -111,7 +111,7 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 ### R1: Mobile (<640px)
 
 - Header stacks vertically (title above controls)
-- Stats bar wraps, status indicator hidden
+- Header stats wrap below title
 - Session rows: project column hidden, only dot + title + time + terminal btn
 - Attention zones use accordion (tap to expand/collapse)
 
@@ -125,4 +125,4 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 ### R3: Desktop (>1024px)
 
 - Full layout: all columns visible
-- Stats bar single line with status indicator
+- Header stats inline with title

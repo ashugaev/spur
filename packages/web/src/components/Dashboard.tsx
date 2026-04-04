@@ -124,6 +124,8 @@ export function Dashboard() {
   const [spawnOpen, setSpawnOpen] = useState(false);
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
+  const toggleStatFilter = (level: AttentionLevel) =>
+    setActiveStatFilter((current) => (current === level ? null : level));
   const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
@@ -231,7 +233,7 @@ export function Dashboard() {
 
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
-    : "All projects";
+    : "All Projects";
 
   useEffect(() => {
     if (spawnProjectId && filterProjectOptions.some((project) => project.id === spawnProjectId)) {
@@ -340,8 +342,34 @@ export function Dashboard() {
         <div className="flex items-center gap-3">
           <span className="text-lg text-[var(--color-accent)]">𖤓</span>
           <h1 className="text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-            {activeProjectName === "All projects" ? "All Projects" : activeProjectName}
+            {activeProjectName}
           </h1>
+          <div className="flex items-center gap-3 uppercase tracking-[0.06em] sm:gap-4">
+            <StatItem
+              icon={<IconChat />}
+              label="Needs Input"
+              value={stats.respond}
+              color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+              active={activeStatFilter === "respond"}
+              onClick={() => toggleStatFilter("respond")}
+            />
+            <StatItem
+              icon={<IconBolt />}
+              label="Working"
+              value={stats.working}
+              color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+              active={activeStatFilter === "working"}
+              onClick={() => toggleStatFilter("working")}
+            />
+            <StatItem
+              icon={<IconClock />}
+              label="Waiting"
+              value={stats.pending}
+              color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+              active={activeStatFilter === "pending"}
+              onClick={() => toggleStatFilter("pending")}
+            />
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
@@ -383,33 +411,6 @@ export function Dashboard() {
           </button>
         </div>
       </header>
-
-      <div className="flex flex-wrap items-center gap-4 border-y border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-2 uppercase tracking-[0.06em] sm:gap-6 sm:px-2.5 sm:py-2.5">
-        <StatItem
-          icon={<IconChat />}
-          label="Needs Input"
-          value={stats.respond}
-          color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-          active={activeStatFilter === "respond"}
-          onClick={() => setActiveStatFilter((c) => (c === "respond" ? null : "respond"))}
-        />
-        <StatItem
-          icon={<IconBolt />}
-          label="Working"
-          value={stats.working}
-          color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-          active={activeStatFilter === "working"}
-          onClick={() => setActiveStatFilter((c) => (c === "working" ? null : "working"))}
-        />
-        <StatItem
-          icon={<IconClock />}
-          label="Waiting"
-          value={stats.pending}
-          color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-          active={activeStatFilter === "pending"}
-          onClick={() => setActiveStatFilter((c) => (c === "pending" ? null : "pending"))}
-        />
-      </div>
 
       {spawnOpen ? (
         <div
