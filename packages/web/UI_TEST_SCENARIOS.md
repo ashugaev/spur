@@ -97,6 +97,8 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 - Terminal button opens full-screen terminal overlay
 - ✕ closes overlay
 - DirectTerminal component renders inside
+- Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
+- Terminal scrollback works like a native terminal (scroll up/down through history)
 
 ## Responsive
 
