@@ -236,8 +236,14 @@ export interface SpawnSessionRequest {
   configPath?: string;
 }
 
+export interface SendMessageAttachment {
+  name: string;
+  data: string; // base64
+}
+
 export interface SendMessageRequest {
   message: string;
+  attachments?: SendMessageAttachment[];
 }
 
 export interface RunServiceRequest {

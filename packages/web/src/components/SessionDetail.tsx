@@ -60,6 +60,20 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
 
 const POLL_INTERVAL_MS = 4_000;
 
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function sanitizeFilename(name: string): string {
+  return name.replace(/[^\w.-]/g, "_");
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+
 interface LogEntry {
   timestamp: string;
   event: string;
@@ -96,6 +110,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+  const [attachments, setAttachments] = useState<File[]>([]);
 
   const loadSession = useCallback(async () => {
     try {
@@ -142,6 +157,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       if (!response.ok) throw new Error(await response.text());
       if (action === "send") {
         setMessage("");
+        setAttachments([]);
       }
       await loadSession();
     } catch (actionError) {
@@ -165,6 +181,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     } catch {
       // Non-critical.
     }
+  };
+
+  const addImageFiles = (files: FileList | null) => {
+    if (!files) return;
+    const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
+    if (images.length > 0) setAttachments((prev) => [...prev, ...images]);
+  };
+
+  const doSend = async () => {
+    const trimmed = message.trim();
+    if (!trimmed && attachments.length === 0) return;
+    const encoded = await Promise.all(
+      attachments.map(async (f) => ({
+        name: sanitizeFilename(f.name),
+        data: await fileToBase64(f),
+      })),
+    );
+    const body: Record<string, unknown> = { message: trimmed };
+    if (encoded.length > 0) body.attachments = encoded;
+    await handleAction("send", body);
   };
 
   const title = useMemo(
@@ -310,20 +346,54 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       onChange={(event) => setMessage(event.target.value)}
                       onKeyDown={(event) => {
                         if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                          void handleAction("send", { message: message.trim() });
+                          void doSend();
                         }
                       }}
+                      onPaste={(e) => {
+                        const files = e.clipboardData.files;
+                        if (files.length > 0) {
+                          e.preventDefault();
+                          addImageFiles(files);
+                        }
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        addImageFiles(e.dataTransfer.files);
+                      }}
+                      onDragOver={(e) => e.preventDefault()}
                       placeholder="Message to the running agent..."
                       value={message}
                     />
+                    {attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-2">
+                        {attachments.map((file, i) => (
+                          <div key={`${file.name}-${i}`} className="group relative">
+                            <img
+                              src={URL.createObjectURL(file)}
+                              alt={file.name}
+                              className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setAttachments((prev) => prev.filter((_, j) => j !== i))
+                              }
+                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[8px] text-white opacity-0 transition group-hover:opacity-100"
+                            >
+                              x
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         ⌘/Ctrl + Enter
                       </span>
                       <button
                         type="button"
-                        disabled={busyAction !== null || !message.trim()}
-                        onClick={() => void handleAction("send", { message: message.trim() })}
+                        disabled={busyAction !== null || (!message.trim() && attachments.length === 0)}
+                        onClick={() => void doSend()}
                         className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       >
                         {busyAction === "send" ? "Sending..." : "Send"}

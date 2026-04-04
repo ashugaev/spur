@@ -7,24 +7,28 @@ interface RouteContext {
 
 interface SendBody {
   message?: string;
+  attachments?: Array<{ name: string; data: string }>;
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
   const { id } = await context.params;
   try {
     const body = (await request.json()) as SendBody;
-    const message = body.message?.trim();
-    if (!message) {
-      return NextResponse.json({ error: "message is required" }, { status: 400 });
+    const message = body.message?.trim() ?? "";
+    const hasAttachments = Array.isArray(body.attachments) && body.attachments.length > 0;
+    if (!message && !hasAttachments) {
+      return NextResponse.json({ error: "message or attachments required" }, { status: 400 });
     }
+    const payload: Record<string, unknown> = { message };
+    if (hasAttachments) payload.attachments = body.attachments;
     const result = await spurRequestJson<{ ok: true }>(
       `/sessions/${encodeURIComponent(id)}/send`,
-      spurJsonInit("POST", { message }),
+      spurJsonInit("POST", payload),
     );
     return NextResponse.json(result);
   } catch (error) {
-    const message =
+    const msg =
       error instanceof Error ? error.message : "Failed to send message to Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

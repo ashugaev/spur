@@ -34,10 +34,16 @@ const DEFAULT_LOGGER: ServiceLogger = {
   warn: writeStderr,
 };
 
-async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
+async function readJsonBody<T>(request: IncomingMessage, maxBytes = 1_000_000): Promise<T> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.length;
+    if (totalBytes > maxBytes) {
+      throw new Error(`Request body exceeds ${maxBytes} bytes`);
+    }
+    chunks.push(buf);
   }
 
   const body = Buffer.concat(chunks).toString("utf-8").trim();
@@ -45,7 +51,11 @@ async function readJsonBody<T>(request: IncomingMessage): Promise<T> {
     return {} as T;
   }
 
-  return JSON.parse(body) as T;
+  try {
+    return JSON.parse(body) as T;
+  } catch {
+    throw new Error("Invalid JSON in request body");
+  }
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
@@ -228,7 +238,7 @@ export async function startServer(
 
       const sendSessionId = path.match(/^\/sessions\/([^/]+)\/send$/)?.[1];
       if (method === "POST" && sendSessionId) {
-        const body = await readJsonBody<SendMessageRequest>(request);
+        const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);
         sendJson(response, 200, await service.send(sendSessionId, body));
         return;
       }
