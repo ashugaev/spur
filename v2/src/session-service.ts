@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   buildAgentLaunchPlan,
@@ -1286,8 +1286,7 @@ export class SessionService {
         if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
           throw new Error(`Invalid attachment name: ${String(att.name)}`);
         }
-        const dotParts = att.name.split(".");
-        const ext = dotParts.length > 1 ? `.${dotParts[dotParts.length - 1]?.toLowerCase() ?? ""}` : "";
+        const ext = extname(att.name).toLowerCase();
         if (!ALLOWED_EXT.has(ext)) {
           throw new Error(`Unsupported attachment extension: ${ext}`);
         }

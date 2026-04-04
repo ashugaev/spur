@@ -19,11 +19,9 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (!message && !hasAttachments) {
       return NextResponse.json({ error: "message or attachments required" }, { status: 400 });
     }
-    const payload: Record<string, unknown> = { message };
-    if (hasAttachments) payload.attachments = body.attachments;
     const result = await spurRequestJson<{ ok: true }>(
       `/sessions/${encodeURIComponent(id)}/send`,
-      spurJsonInit("POST", payload),
+      spurJsonInit("POST", { message, attachments: body.attachments }),
     );
     return NextResponse.json(result);
   } catch (error) {
