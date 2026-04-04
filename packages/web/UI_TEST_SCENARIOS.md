@@ -16,7 +16,7 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 - TOTAL, INPUT, REVIEW, PENDING, WORKING labels visible with values
 - Labels use secondary text color (#A1A1A1), values use primary (#E1E1E1)
 - Non-zero INPUT/REVIEW/PENDING/WORKING values show colored
-- "Online" indicator with green dot on right (hidden on mobile)
+- No online indicator in stats bar (moved to footer StatusBar)
 
 ### D3: Session rows render with correct columns
 
@@ -106,12 +106,25 @@ Run against a live daemon with `SPUR_DAEMON_URL` set.
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 
+### D8: Bottom status bar (StatusBar)
+
+- Fixed footer at viewport bottom: h-6, border-top, dark surface bg, 9px uppercase monospace
+- Left: green dot + "ONLINE" when daemon reachable
+- Left: red "GIT ERROR" with title tooltip when GitHub API errors
+- Left: GitHub icon + aggregate CI dot when sessions have PR links
+- GitHub icon hover/focus tooltip: lists up to 8 PRs with repo#number, CI status dot, PR state label (colored)
+- Tooltip accessible via keyboard focus (tabIndex)
+- Tooltip max-width 90vw (no overflow on mobile)
+- Right: live clock in HH:MM:SS format, updates every second
+- Main content has enough bottom padding (pb-8) to not be hidden behind footer
+
 ## Responsive
 
 ### R1: Mobile (<640px)
 
 - Header stacks vertically (title above controls)
-- Stats bar wraps, status indicator hidden
+- Stats bar wraps
+- Status bar footer visible at bottom on all screen sizes
 - Session rows: project column hidden, only dot + title + time + terminal btn
 - Attention zones use accordion (tap to expand/collapse)
 
