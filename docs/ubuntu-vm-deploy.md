@@ -262,4 +262,3 @@ systemctl status spur-web.service
 journalctl -u spur-daemon.service -n 100 --no-pager
 journalctl -u spur-web.service -n 100 --no-pager
 ```
-
