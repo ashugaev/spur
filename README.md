@@ -62,6 +62,7 @@ pnpm --dir v2 test:smoke
 
 - [v2/README.md](v2/README.md) — Spur commands, config, automation, validation
 - [SETUP.md](SETUP.md) — local repo setup and web UI development
+- [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — current failure modes and fixes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution scope and required checks
 - [docs/architecture-v2.md](docs/architecture-v2.md) — high-level architecture intent
