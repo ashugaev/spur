@@ -71,6 +71,8 @@ The UI is optional. It does not own runtime logic or persistence; it proxies to 
 For reverse-proxy deployments, leave Next.js and the terminal server on loopback and advertise the proxy port with
 `DIRECT_TERMINAL_PUBLIC_PORT`.
 
+For a generic Ubuntu VM deployment and release flow, use [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md).
+
 ## Local Validation
 
 Run the cheapest complete set that crosses your change boundary:
