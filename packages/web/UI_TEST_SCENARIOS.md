@@ -54,6 +54,12 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
+### D6b: Footer clock hydrates cleanly
+
+- Footer clock area renders without Next.js recoverable hydration error overlay
+- Initial footer clock value may briefly show a deterministic placeholder before client time appears
+- Footer clock updates to local time after hydration
+
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal

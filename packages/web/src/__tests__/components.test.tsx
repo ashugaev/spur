@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
+import { StatusBar } from "@/components/StatusBar";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(""),
@@ -133,5 +135,12 @@ describe("Dashboard", () => {
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("StatusBar", () => {
+  it("uses a deterministic initial clock value for SSR to avoid hydration drift", () => {
+    const html = renderToString(<StatusBar sessions={[]} />);
+    expect(html).toContain("--:--:--");
   });
 });
