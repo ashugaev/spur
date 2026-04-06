@@ -1,9 +1,3 @@
-server:
-  host: 127.0.0.1
-  port: 4311
-
-defaultAgent: codex
-
 projects:
   sp:
     path: .

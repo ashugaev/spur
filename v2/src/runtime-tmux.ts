@@ -13,9 +13,22 @@ import type { AgentName, SessionSlots } from "./types.js";
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
+let activeTmuxSocketName: string | null = null;
+
+export function setTmuxSocketName(socketName: string | undefined): void {
+  activeTmuxSocketName = socketName?.trim() || null;
+}
+
+export function getTmuxSocketName(): string | null {
+  return activeTmuxSocketName;
+}
+
+export function withTmuxSocketArgs(args: string[]): string[] {
+  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+}
 
 async function tmux(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("tmux", args);
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
   return stdout.trimEnd();
 }
 
@@ -148,6 +161,7 @@ export async function createTmuxSession(input: {
   const envArgs = buildEnvArgs(input.env);
 
   await execFileAsync("tmux", [
+    ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,
     "new-session",
@@ -181,6 +195,7 @@ export async function createTmuxCommandSession(input: {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
   await execFileAsync("tmux", [
+    ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,
     "new-session",

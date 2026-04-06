@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import { loadConfig } from "../../src/config.js";
+import { loadConfig, loadProjectConfig } from "../../src/config.js";
 import { EventBus } from "../../src/event-bus.js";
 import { githubSourceModule } from "../../src/event-sources/github.js";
 import { SessionService } from "../../src/session-service.js";
@@ -68,6 +68,7 @@ function runtimeEnv(context: RuntimeTestContext) {
   return {
     HOME: context.env.HOME,
     PATH: context.env.PATH,
+    SPUR_TMUX_SOCKET_NAME: context.env.SPUR_TMUX_SOCKET_NAME,
     SPUR_CLAUDE_BIN: context.env.SPUR_CLAUDE_BIN,
     SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
     SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
@@ -82,6 +83,7 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
   const originalEnv = {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
+    SPUR_TMUX_SOCKET_NAME: process.env.SPUR_TMUX_SOCKET_NAME,
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
     SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
@@ -448,7 +450,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         accept: (value) => value.includes("initial github ci runtime prompt"),
       });
 
-      const config = loadConfig(configPath);
+      const config = loadProjectConfig(configPath, loadConfig(configPath));
       const bus = new EventBus();
       const controller = startConfiguredTriggers({
         config,
@@ -755,7 +757,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         accept: (value) => value.includes("initial github merge conflict runtime prompt"),
       });
 
-      const config = loadConfig(configPath);
+      const config = loadProjectConfig(configPath, loadConfig(configPath));
       const bus = new EventBus();
       const controller = startConfiguredTriggers({
         config,

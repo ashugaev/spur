@@ -137,6 +137,13 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 ## Config
 
+Spur now has two config layers:
+
+- global instance config: `~/.spur/config.yaml` by default. This owns daemon host/port, data dirs, tmux socket, default agent, and UI port.
+- local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
+
+`spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
+
 ```yaml
 server:
   port: 4310
@@ -144,6 +151,10 @@ server:
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
 defaultAgent: claude
+tmux:
+  socketName: spur-4310
+ui:
+  port: 5555
 
 projects:
   backend-api:

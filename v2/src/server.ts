@@ -7,12 +7,13 @@ import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
+  ConnectProjectConfigRequest,
+  DisconnectProjectConfigRequest,
   KillSessionRequest,
   PreflightRequest,
   RunServiceRequest,
   SendMessageRequest,
   SpawnSessionRequest,
-  SyncProjectsRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -105,8 +106,11 @@ export async function startServer(
       throw error;
     }
   };
-  const reloadAutomation = async (requestConfigPath: string): Promise<void> => {
-    const preview = service.previewConfigSync(requestConfigPath);
+  const reloadAutomation = async (
+    preview: ReturnType<SessionService["previewConfigConnect"]>,
+    requestConfigPath: string,
+    action: "connect" | "disconnect",
+  ): Promise<void> => {
     for (const message of preview.warnings) {
       logEvent("daemon.registry.warning", {
         level: "warn",
@@ -140,7 +144,10 @@ export async function startServer(
 
     logEvent("daemon.registry.reloaded", {
       level: "info",
-      message: `Reloaded daemon project registry from ${requestConfigPath}`,
+      message:
+        action === "connect"
+          ? `Connected daemon project registry from ${requestConfigPath}`
+          : `Disconnected daemon project registry from ${requestConfigPath}`,
       details: {
         configPaths: preview.registryPaths,
         projectCount: Object.keys(preview.config.projects).length,
@@ -198,13 +205,40 @@ export async function startServer(
         return;
       }
 
-      if (method === "POST" && path === "/projects/sync") {
-        const body = await readJsonBody<SyncProjectsRequest>(request);
+      if (method === "GET" && path === "/projects") {
+        sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "POST" && path === "/projects/connect") {
+        const body = await readJsonBody<ConnectProjectConfigRequest>(request);
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        await reloadAutomation(body.configPath);
-        sendJson(response, 200, { ok: true });
+        const preview = service.previewConfigConnect(body.configPath);
+        await reloadAutomation(preview, body.configPath, "connect");
+        sendJson(response, 200, {
+          ok: true,
+          changed: preview.changed,
+          configPath: body.configPath,
+          projects: service.listProjects(),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/projects/disconnect") {
+        const body = await readJsonBody<DisconnectProjectConfigRequest>(request);
+        if (typeof body.configPath !== "string" || !body.configPath.trim()) {
+          throw new Error("configPath must be a non-empty string");
+        }
+        const preview = service.previewConfigDisconnect(body.configPath);
+        await reloadAutomation(preview, body.configPath, "disconnect");
+        sendJson(response, 200, {
+          ok: true,
+          changed: preview.changed,
+          configPath: body.configPath,
+          projects: service.listProjects(),
+        });
         return;
       }
 

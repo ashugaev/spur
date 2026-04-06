@@ -10,6 +10,7 @@ const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
@@ -69,6 +70,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
+  setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
   syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
@@ -125,6 +127,8 @@ function baseConfig() {
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
     defaultAgent: "claude",
+    tmux: { socketName: "spur-4310" },
+    ui: { port: 5555 },
     projects: {
       api: {
         path: "/repo/api",

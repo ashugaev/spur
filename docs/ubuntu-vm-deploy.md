@@ -68,7 +68,7 @@ pnpm build
 
 ## Runtime Config
 
-Create a VM-local Spur config such as `~/projects/spur/spur.vm.yaml`:
+Create a VM-local Spur instance config such as `~/.spur/config.yaml`:
 
 ```yaml
 server:
@@ -78,7 +78,15 @@ server:
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
 defaultAgent: codex
+tmux:
+  socketName: spur-4311
+ui:
+  port: 5555
+```
 
+Then keep the repo-local project config in the checkout, for example `~/projects/spur/spur.yaml`:
+
+```yaml
 projects:
   spur:
     path: ~/projects/spur
@@ -92,6 +100,7 @@ projects:
 Notes:
 
 - keep the daemon on loopback
+- keep the instance config global and the project config repo-local
 - point `projects.<id>.path` at the real checkout
 - keep `node_modules` as a symlink when using worktrees for this repo
 - add GitHub sources or triggers only after `gh auth login` is working on the VM
@@ -111,7 +120,7 @@ User=<vm-user>
 WorkingDirectory=<repo-path>
 Environment=HOME=<home-dir>
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/node <repo-path>/v2/dist/cli.js daemon start --config <repo-path>/spur.vm.yaml
+ExecStart=/usr/bin/node <repo-path>/v2/dist/cli.js daemon start --config <home-dir>/.spur/config.yaml
 Restart=always
 RestartSec=3
 
@@ -133,13 +142,10 @@ User=<vm-user>
 WorkingDirectory=<repo-path>
 Environment=HOME=<home-dir>
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-Environment=SPUR_CONFIG=<repo-path>/spur.vm.yaml
-Environment=SPUR_DAEMON_URL=http://127.0.0.1:4311
 Environment=WEB_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_PORT=14801
 Environment=DIRECT_TERMINAL_PUBLIC_PORT=3011
-Environment=PORT=3012
 ExecStart=/usr/bin/pnpm ui:start
 Restart=always
 RestartSec=3
@@ -225,22 +231,14 @@ Recommended release flow:
 
 1. Merge the repo change to `main` through GitHub.
 2. SSH into the VM.
-3. Pull the new `main`.
-4. Reinstall dependencies if the lockfile changed.
-5. Rebuild.
-6. Restart the services.
-7. Re-run local and remote probes.
+3. Run the explicit deploy command.
+4. Re-run local and remote probes.
 
 Example:
 
 ```bash
 cd ~/projects/spur
-git fetch origin
-git checkout main
-git pull --ff-only origin main
-pnpm install
-pnpm build
-sudo systemctl restart spur-daemon.service spur-web.service
+pnpm main:deploy
 curl http://127.0.0.1:4311/sessions
 curl http://127.0.0.1:3011/api/runtime/terminal
 ```
