@@ -151,3 +151,13 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 
 - Full layout: all columns visible
 - Header stats inline with title
+
+## PWA
+
+### P1: App is installable from browser chrome
+
+- `GET /manifest.webmanifest` returns Spur manifest with `name`, `short_name`, `display=standalone`, `start_url=/`, dark `theme_color`, and 192/512 PNG icons
+- Browser devtools Application tab shows the manifest without missing required fields
+- Chromium shows install/save-app affordance for the dashboard when opened on `localhost`
+- Installed window opens on `/` with Spur name/icon instead of a generic browser shortcut
+- iOS-sized pass uses the provided Apple icon when saving to home screen

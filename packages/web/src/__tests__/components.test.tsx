@@ -3,9 +3,15 @@ import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
+import manifest from "@/app/manifest";
+import { generateMetadata } from "@/app/layout";
 
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(""),
+}));
+
+vi.mock("next/font/google", () => ({
+  JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
@@ -135,6 +141,43 @@ describe("Dashboard", () => {
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "Spur Core" }),
     ).toBeInTheDocument();
+  });
+
+  it("exposes install metadata for PWA installability", async () => {
+    const metadata = await generateMetadata();
+    const appManifest = manifest();
+
+    expect(metadata.manifest).toBe("/manifest.webmanifest");
+    expect(metadata.applicationName).toBe("Spur");
+    expect(metadata.appleWebApp).toMatchObject({
+      capable: true,
+      title: "Spur",
+      statusBarStyle: "black-translucent",
+    });
+    expect(metadata.icons).toMatchObject({
+      icon: [{ url: "/icon-192" }, { url: "/icon-512" }],
+      apple: [{ url: "/apple-icon" }],
+    });
+
+    expect(appManifest).toMatchObject({
+      name: "Spur",
+      short_name: "Spur",
+      start_url: "/",
+      display: "standalone",
+      background_color: "#0D0D0E",
+      theme_color: "#0D0D0E",
+    });
+    expect(appManifest.icons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ src: "/icon-192", sizes: "192x192" }),
+        expect.objectContaining({ src: "/icon-512", sizes: "512x512" }),
+        expect.objectContaining({
+          src: "/icon-512",
+          sizes: "512x512",
+          purpose: "maskable",
+        }),
+      ]),
+    );
   });
 });
 
