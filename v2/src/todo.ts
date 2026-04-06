@@ -35,7 +35,7 @@ export function parseTodoFile(content: string): TodoItem[] {
     if (m) {
       items.push({
         id: Number(m[2]),
-        text: m[3]!,
+        text: m[3] ?? "",
         done: m[1] === "x",
       });
     }
