@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as FsPromises from "node:fs/promises";
@@ -53,21 +53,14 @@ const PROJECT: ProjectConfig = {
 const PROJECT_PREFLIGHT_PROMPT = PROJECT.preflight?.prompt ?? "";
 
 describe("runSpawnPreflight", () => {
-  let homeDir: string;
-  const originalHome = process.env.HOME;
-
   beforeEach(() => {
     mockExecFileAsync.mockReset();
     mockRm.mockReset();
     mockRm.mockResolvedValue(undefined);
-    homeDir = mkdtempSync(join(tmpdir(), "spur-preflight-home-"));
-    process.env.HOME = homeDir;
   });
 
   afterEach(() => {
     delete process.env.CLAUDECODE;
-    process.env.HOME = originalHome;
-    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it("runs claude in print mode and parses a branch suggestion", async () => {
@@ -110,26 +103,6 @@ describe("runSpawnPreflight", () => {
   });
 
   it("runs codex exec with output-last-message and reads the branch line", async () => {
-    mkdirSync(join(homeDir, ".codex"), { recursive: true });
-    writeFileSync(join(homeDir, ".codex", "auth.json"), '{"token":"ok"}', {
-      encoding: "utf8",
-      flag: "w",
-    });
-    writeFileSync(
-      join(homeDir, ".codex", "config.toml"),
-      `model = "gpt-5.4"
-model_reasoning_effort = "medium"
-
-[mcp_servers.atlassian]
-command = "npx"
-args = ["-y", "mcp-remote", "https://mcp.atlassian.com/v1/sse"]
-
-[agents.default]
-config_file = "agents/default.toml"
-`,
-      "utf8",
-    );
-    let isolatedConfig = "";
     mockExecFileAsync.mockImplementationOnce(
       async (
         _command: string,
@@ -139,10 +112,6 @@ config_file = "agents/default.toml"
         const outputPath = options?.env?.["SPUR_PREFLIGHT_OUTPUT"];
         if (!outputPath) {
           throw new Error("Expected codex preflight to receive --output-last-message <path>");
-        }
-        const codexHome = options?.env?.["CODEX_HOME"];
-        if (typeof codexHome === "string") {
-          isolatedConfig = readFileSync(join(codexHome, "config.toml"), "utf8");
         }
         writeFileSync(outputPath, "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
@@ -170,22 +139,13 @@ config_file = "agents/default.toml"
     expect((args as string[]).at(-1)).toContain(" -");
     expect(args).not.toContain("--permission-mode");
     expect(args).not.toContain("plan");
-    const codexHome = options?.env?.["CODEX_HOME"];
-    expect(typeof codexHome).toBe("string");
-    expect(codexHome).toContain("spur-preflight-");
     expect(options?.env?.["SPUR_CODEX_BIN"]).toBe("/mock/bin/codex");
     expect(options?.env?.["SPUR_PREFLIGHT_PROMPT"]).toContain("Fix runtime regression from INT-42");
     expect(options?.env?.["SPUR_PREFLIGHT_PROMPT"]).toContain(PROJECT_PREFLIGHT_PROMPT);
-    expect(isolatedConfig).toContain('model = "gpt-5.4"');
-    expect(isolatedConfig).toContain('model_reasoning_effort = "medium"');
-    expect(isolatedConfig).not.toContain("[mcp_servers.atlassian]");
-    expect(isolatedConfig).not.toContain("[agents.default]");
+    expect(options?.env?.["CODEX_HOME"]).toBeUndefined();
     expect(options).toEqual(
       expect.objectContaining({
         cwd: PROJECT.path,
-        env: expect.objectContaining({
-          CODEX_HOME: expect.any(String),
-        }),
         timeout: 60_000,
       }),
     );

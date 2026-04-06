@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
@@ -11,7 +11,6 @@ import type { AgentName, ProjectConfig } from "./types.js";
 const execFileAsync = promisify(execFile);
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
-const CODEX_PREFLIGHT_HOME_DIR = "codex-home";
 const PREFLIGHT_RM_RETRIES = 5;
 const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
 
@@ -72,26 +71,6 @@ function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   return { branch: trimmed };
 }
 
-async function createCodexPreflightHome(rootDir: string): Promise<string> {
-  const codexHomePath = join(rootDir, CODEX_PREFLIGHT_HOME_DIR);
-  const userCodexDir = join(homedir(), ".codex");
-  await mkdir(codexHomePath, { recursive: true });
-  await copyFile(join(userCodexDir, "auth.json"), join(codexHomePath, "auth.json")).catch(() => {});
-  await writeFile(
-    join(codexHomePath, "config.toml"),
-    [
-      'model = "gpt-5.4"',
-      'model_reasoning_effort = "medium"',
-      'approval_policy = "never"',
-      'sandbox_mode = "danger-full-access"',
-      "suppress_unstable_features_warning = true",
-      "",
-    ].join("\n"),
-    "utf8",
-  );
-  return codexHomePath;
-}
-
 async function runClaudePreflight(prompt: string, cwd: string): Promise<string> {
   const { stdout } = await execFileAsync(
     claudeCommand(),
@@ -114,7 +93,6 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
   const outputPath = join(tempDir, "output.txt");
 
   try {
-    const codexHomePath = await createCodexPreflightHome(tempDir);
     const { stdout } = await execFileAsync(
       "/bin/sh",
       [
@@ -125,7 +103,6 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
         cwd,
         env: {
           ...process.env,
-          CODEX_HOME: codexHomePath,
           SPUR_CODEX_BIN: codexCommand(),
           SPUR_PREFLIGHT_OUTPUT: outputPath,
           SPUR_PREFLIGHT_PROMPT: prompt,
