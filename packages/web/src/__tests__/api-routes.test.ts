@@ -10,12 +10,7 @@ vi.mock("@/lib/spur-daemon", () => ({
   })),
 }));
 
-vi.mock("@/lib/spur-projects", () => ({
-  readSpurProjectOptions: vi.fn(() => [{ id: "sp", name: "Spur Core" }]),
-}));
-
 import { spurRequestJson } from "@/lib/spur-daemon";
-import { readSpurProjectOptions } from "@/lib/spur-projects";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
@@ -26,7 +21,6 @@ import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
-const mockedReadSpurProjectOptions = vi.mocked(readSpurProjectOptions);
 
 function sessionFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -53,28 +47,31 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
 describe("Spur web API routes", () => {
   beforeEach(() => {
     mockedSpurRequestJson.mockReset();
-    mockedReadSpurProjectOptions.mockReset();
-    mockedReadSpurProjectOptions.mockReturnValue([{ id: "sp", name: "Spur Core" }]);
     delete process.env["DIRECT_TERMINAL_PORT"];
     delete process.env["DIRECT_TERMINAL_BIND_PORT"];
     delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   it("GET /api/sessions filters by project", async () => {
-    mockedSpurRequestJson.mockResolvedValue([
-      sessionFixture(),
-      sessionFixture({
-        id: "web-b2",
-        project: "web",
-        agent: "codex",
-        prompt: "Polish UI",
-        branch: "feat/ui",
-        tmuxSession: "web-b2",
-        status: "paused",
-        state: "waiting",
-        worktreePath: "/tmp/web-b2",
-      }),
-    ]);
+    mockedSpurRequestJson
+      .mockResolvedValueOnce([
+        sessionFixture(),
+        sessionFixture({
+          id: "web-b2",
+          project: "web",
+          agent: "codex",
+          prompt: "Polish UI",
+          branch: "feat/ui",
+          tmuxSession: "web-b2",
+          status: "paused",
+          state: "waiting",
+          worktreePath: "/tmp/web-b2",
+        }),
+      ])
+      .mockResolvedValueOnce([
+        { id: "api", name: "API" },
+        { id: "web", name: "Web" },
+      ]);
 
     const response = await listSessions(
       new NextRequest("http://localhost:3000/api/sessions?project=api"),
@@ -87,15 +84,17 @@ describe("Spur web API routes", () => {
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
-    mockedSpurRequestJson.mockResolvedValue([
-      sessionFixture(),
-      sessionFixture({
-        id: "ops-a1",
-        project: "ops",
-        tmuxSession: "ops-a1",
-        worktreePath: "/tmp/ops-a1",
-      }),
-    ]);
+    mockedSpurRequestJson
+      .mockResolvedValueOnce([
+        sessionFixture(),
+        sessionFixture({
+          id: "ops-a1",
+          project: "ops",
+          tmuxSession: "ops-a1",
+          worktreePath: "/tmp/ops-a1",
+        }),
+      ])
+      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as {

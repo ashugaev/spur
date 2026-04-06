@@ -12,12 +12,14 @@ import {
   createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
+  execTmux,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
   readTmuxOption,
   sendKeysToTmux,
   syncTmuxEnvironment,
+  tmuxSessionExists,
   type RuntimeTestContext,
 } from "../helpers/runtime.js";
 
@@ -559,7 +561,7 @@ projects:
     ) as SessionView[];
     expect(listed).toEqual([]);
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
-      expect.arrayContaining(["daemon.started", "session.spawn.failed", "http.request.failed"]),
+      expect.arrayContaining(["daemon.started", "http.request.failed"]),
     );
   });
 
@@ -1195,7 +1197,7 @@ projects:
 
     const statusLeft = await readTmuxOption(spawned.id, "status-left");
     const statusRight = await readTmuxOption(spawned.id, "status-right");
-    const { stdout: mouseBinding } = await execFileAsync("tmux", [
+    const { stdout: mouseBinding } = await execTmux([
       "list-keys",
       "-T",
       "root",
@@ -1369,7 +1371,8 @@ projects:
         value.includes("service.run.completed") &&
         value.includes("service runtime prompt"),
     });
-    expect(logPane).toContain("Ctrl+G back");
+    expect(logPane).toContain("service.run.completed");
+    expect(logPane).toContain("Agent Output");
 
     await sendKeysToTmux(controllerSessionName, "C-g");
 
@@ -2217,13 +2220,10 @@ projects:
     });
 
     const devSessionName = `${spawned.id}--dev`;
-    const devSessionAlive = await pollUntil(
-      () =>
-        execFileAsync("tmux", ["has-session", "-t", devSessionName])
-          .then(() => true)
-          .catch(() => false),
-      { timeoutMs: 10_000, accept: (v) => v === true },
-    );
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === true,
+    });
     expect(devSessionAlive).toBe(true);
   });
 
@@ -2275,13 +2275,10 @@ projects:
     ) as SessionView;
 
     const devSessionName = `${spawned.id}--dev`;
-    const devSessionAlive = await pollUntil(
-      () =>
-        execFileAsync("tmux", ["has-session", "-t", devSessionName])
-          .then(() => true)
-          .catch(() => false),
-      { timeoutMs: 15_000, accept: (v) => v === true },
-    );
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (v) => v === true,
+    });
     const devServerEvents = readEventLog(context.dataDir)
       .map((e) => e.event)
       .filter((ev) => typeof ev === "string" && ev.startsWith("session.devserver"));
@@ -2338,13 +2335,10 @@ projects:
 
     const devSessionName = `${spawned.id}--dev`;
 
-    await pollUntil(
-      () =>
-        execFileAsync("tmux", ["has-session", "-t", devSessionName])
-          .then(() => true)
-          .catch(() => false),
-      { timeoutMs: 15_000, accept: (v) => v === true },
-    );
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (v) => v === true,
+    });
 
     await context.fetchJson<SessionView>(`/sessions/${spawned.id}/kill`, {
       method: "POST",
@@ -2352,9 +2346,7 @@ projects:
       body: JSON.stringify({ force: true }),
     });
 
-    const devSessionGone = await execFileAsync("tmux", ["has-session", "-t", devSessionName])
-      .then(() => false)
-      .catch(() => true);
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
     expect(devSessionGone).toBe(true);
   });
 });

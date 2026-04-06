@@ -1,7 +1,7 @@
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, resolveConfigPath } from "../../src/config.js";
+import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -434,7 +434,7 @@ projects:
     const canonicalConfigPath = await realpath(configPath);
 
     expect(resolveConfigPath()).toBe(canonicalConfigPath);
-    expect(loadConfig().configPath).toBe(canonicalConfigPath);
+    expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
   it("reports the default spur.yaml path when no default config file exists", async () => {

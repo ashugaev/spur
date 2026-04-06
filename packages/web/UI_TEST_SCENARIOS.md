@@ -1,7 +1,7 @@
 # Web UI Test Scenarios
 
 Browser-based test scenarios for the Spur web dashboard.
-Run against a live daemon with `SPUR_DAEMON_URL` set.
+Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
 When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
 
 ## Dashboard

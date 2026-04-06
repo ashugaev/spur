@@ -130,6 +130,7 @@ export interface ServiceProblemEventData {
 }
 
 export interface ProjectConfig {
+  name?: string;
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
@@ -152,6 +153,12 @@ export interface AppConfig {
   dataDir: string;
   worktreeDir: string;
   defaultAgent: AgentName;
+  tmux: {
+    socketName: string;
+  };
+  ui: {
+    port: number;
+  };
   projects: Record<string, ProjectConfig>;
 }
 
@@ -271,8 +278,24 @@ export interface UpdateSessionSlotsRequest {
   unlinkLabels?: string[];
 }
 
-export interface SyncProjectsRequest {
+export interface ProjectListEntry {
+  id: string;
+  name: string;
+}
+
+export interface ConnectProjectConfigRequest {
   configPath: string;
+}
+
+export interface DisconnectProjectConfigRequest {
+  configPath: string;
+}
+
+export interface ProjectConfigMutationResponse {
+  ok: true;
+  changed: boolean;
+  configPath: string;
+  projects: ProjectListEntry[];
 }
 
 export interface RuntimeInfo {
@@ -284,6 +307,8 @@ export interface RuntimeInfo {
   dataDir: string;
   worktreeDir: string;
   configPath: string;
+  tmuxSocketName: string;
+  uiPort: number;
   startedAt: string;
 }
 

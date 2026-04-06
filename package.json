@@ -24,7 +24,7 @@
     "test:integration": "pnpm --dir v2 test:runtime",
     "clean": "pnpm --dir packages/web clean && pnpm --dir v2 clean",
     "prepare": "husky",
-    "dev:auto-pull": "bash scripts/dev-autoupdate.sh"
+    "main:deploy": "bash scripts/main-deploy.sh"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

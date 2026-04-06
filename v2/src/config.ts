@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -9,9 +9,9 @@ import {
   type CronSourceConfig,
   type DevServerConfig,
   type GitHubSourceConfig,
+  type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
-  type ProjectConfig,
   type SendTriggerConfig,
   type ServiceRuleConfig,
   type ServiceSourceConfig,
@@ -21,8 +21,26 @@ import {
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
-const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
+const DEFAULT_SERVER_HOST = "127.0.0.1";
+const DEFAULT_SERVER_PORT = 4310;
+const DEFAULT_DATA_DIR = "~/.spur";
+const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
+const DEFAULT_UI_PORT = 5555;
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+type ConfigMode = "instance" | "project";
+
+interface ConfigDefaults {
+  serverHost: string;
+  serverPort: number;
+  dataDir: string;
+  worktreeDir: string;
+  defaultAgent: AgentName;
+  tmuxSocketName: string;
+  uiPort: number;
+}
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -85,6 +103,41 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
     return value;
   }
   throw new Error(`${label} must be "claude" or "codex"`);
+}
+
+function defaultTmuxSocketName(port: number): string {
+  return `spur-${port}`;
+}
+
+function defaultConfigDefaults(configDir: string): ConfigDefaults {
+  return {
+    serverHost: DEFAULT_SERVER_HOST,
+    serverPort: DEFAULT_SERVER_PORT,
+    dataDir: resolveFrom(configDir, DEFAULT_DATA_DIR),
+    worktreeDir: resolveFrom(configDir, DEFAULT_WORKTREE_DIR),
+    defaultAgent: "claude",
+    tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
+    uiPort: DEFAULT_UI_PORT,
+  };
+}
+
+function defaultInstanceConfigYaml(): string {
+  return [
+    "server:",
+    `  host: ${DEFAULT_SERVER_HOST}`,
+    `  port: ${DEFAULT_SERVER_PORT}`,
+    "",
+    `dataDir: ${DEFAULT_DATA_DIR}`,
+    `worktreeDir: ${DEFAULT_WORKTREE_DIR}`,
+    "defaultAgent: claude",
+    "",
+    "tmux:",
+    `  socketName: ${defaultTmuxSocketName(DEFAULT_SERVER_PORT)}`,
+    "",
+    "ui:",
+    `  port: ${DEFAULT_UI_PORT}`,
+    "",
+  ].join("\n");
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
@@ -317,30 +370,25 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     );
   }
 
-  const raw = asObject(value, `projects.${projectId}`);
-  const path = resolveFrom(configDir, asString(raw["path"], `projects.${projectId}.path`));
-  const defaultBranch =
-    asOptionalString(raw["defaultBranch"], `projects.${projectId}.defaultBranch`) ?? "main";
+  const label = `projects.${projectId}`;
+  const raw = asObject(value, label);
+  const path = resolveFrom(configDir, asString(raw["path"], `${label}.path`));
+  const name = asOptionalString(raw["name"], `${label}.name`);
+  const defaultBranch = asOptionalString(raw["defaultBranch"], `${label}.defaultBranch`) ?? "main";
   const sessionPrefix =
-    asOptionalString(raw["sessionPrefix"], `projects.${projectId}.sessionPrefix`) ??
-    derivePrefix(projectId);
-  const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
-  const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
+    asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
+  const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const devServer = parseDevServer(projectId, raw["devServer"]);
-  const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
-  const sourcesRaw = raw["sources"]
-    ? asObject(raw["sources"], `projects.${projectId}.sources`)
-    : {};
+  const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
-    const parsedSource = parseSource(projectId, sourceId, sourceValue);
-    sources[sourceId] = parsedSource;
+    sources[sourceId] = parseSource(projectId, sourceId, sourceValue);
   }
-  const triggersRaw = raw["triggers"]
-    ? asObject(raw["triggers"], `projects.${projectId}.triggers`)
-    : {};
+  const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
@@ -351,6 +399,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   }
 
   return {
+    ...(name !== undefined ? { name } : {}),
     path,
     defaultBranch,
     sessionPrefix,
@@ -365,43 +414,28 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   };
 }
 
-export function resolveConfigPath(input?: string): string {
-  const candidate = input ?? process.env["SPUR_CONFIG"];
-  if (candidate) {
-    const resolved = resolveFrom(process.cwd(), candidate);
-    if (!existsSync(resolved)) {
-      throw new Error(`Config file not found: ${resolved}`);
-    }
-    return resolved;
-  }
-
-  for (const filename of DEFAULT_CONFIG_FILES) {
-    const resolved = resolveFrom(process.cwd(), filename);
-    if (existsSync(resolved)) {
-      return resolved;
-    }
-  }
-
-  throw new Error(`Config file not found: ${resolveFrom(process.cwd(), DEFAULT_CONFIG_FILES[0])}`);
-}
-
-export function loadConfig(input?: string): AppConfig {
-  const configPath = resolveConfigPath(input);
+function parseConfigFile(
+  configPath: string,
+  mode: ConfigMode,
+  defaults?: ConfigDefaults,
+): AppConfig {
   const configDir = dirname(configPath);
   const raw = parseYaml(readFileSync(configPath, "utf-8")) as unknown;
   const root = asObject(raw, "config");
+
+  const resolvedDefaults = defaults ?? defaultConfigDefaults(configDir);
   const server = root["server"] ? asObject(root["server"], "server") : {};
-  const projects = asObject(root["projects"], "projects");
-  const defaultAgent = asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? "claude";
-  const dataDir = resolveFrom(configDir, asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur");
-  const worktreeDir = resolveFrom(
-    configDir,
-    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur/worktrees",
-  );
+  const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
+  const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const projectsRaw =
+    root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
+  if (mode === "project" && projectsRaw === undefined) {
+    throw new Error("projects must be an object");
+  }
 
   const normalizedProjects: Record<string, ProjectConfig> = {};
   const prefixOwners = new Map<string, string>();
-  for (const [projectId, projectValue] of Object.entries(projects)) {
+  for (const [projectId, projectValue] of Object.entries(projectsRaw ?? {})) {
     const parsedProject = parseProject(configDir, projectId, projectValue);
     const existingOwner = prefixOwners.get(parsedProject.sessionPrefix);
     if (existingOwner) {
@@ -413,15 +447,141 @@ export function loadConfig(input?: string): AppConfig {
     normalizedProjects[projectId] = parsedProject;
   }
 
+  const serverPort =
+    mode === "instance"
+      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
+      : resolvedDefaults.serverPort;
+
   return {
     configPath,
     server: {
-      host: asOptionalString(server["host"], "server.host") ?? "127.0.0.1",
-      port: asOptionalNumber(server["port"], "server.port") ?? 4310,
+      host:
+        mode === "instance"
+          ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
+          : resolvedDefaults.serverHost,
+      port: serverPort,
     },
-    dataDir,
-    worktreeDir,
-    defaultAgent,
+    dataDir:
+      mode === "instance"
+        ? resolveFrom(
+            configDir,
+            asOptionalString(root["dataDir"], "dataDir") ?? resolvedDefaults.dataDir,
+          )
+        : resolvedDefaults.dataDir,
+    worktreeDir:
+      mode === "instance"
+        ? resolveFrom(
+            configDir,
+            asOptionalString(root["worktreeDir"], "worktreeDir") ?? resolvedDefaults.worktreeDir,
+          )
+        : resolvedDefaults.worktreeDir,
+    defaultAgent:
+      mode === "instance"
+        ? (asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? resolvedDefaults.defaultAgent)
+        : resolvedDefaults.defaultAgent,
+    tmux: {
+      socketName:
+        mode === "instance"
+          ? (asOptionalString(tmux["socketName"], "tmux.socketName") ??
+            defaultTmuxSocketName(serverPort))
+          : resolvedDefaults.tmuxSocketName,
+    },
+    ui: {
+      port:
+        mode === "instance"
+          ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
+          : resolvedDefaults.uiPort,
+    },
     projects: normalizedProjects,
   };
+}
+
+function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
+  let current = resolve(startDir);
+  for (;;) {
+    for (const filename of filenames) {
+      const candidate = join(current, filename);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+export function defaultInstanceConfigPath(): string {
+  return DEFAULT_INSTANCE_CONFIG_PATH;
+}
+
+export function resolveInstanceConfigPath(input?: string): string {
+  const candidate = input?.trim() || process.env["SPUR_CONFIG"]?.trim();
+  return candidate
+    ? resolveFrom(process.cwd(), candidate)
+    : resolveFrom(process.cwd(), DEFAULT_INSTANCE_CONFIG_PATH);
+}
+
+export function instanceConfigExists(input?: string): boolean {
+  return existsSync(resolveInstanceConfigPath(input));
+}
+
+export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
+  const configPath = resolveInstanceConfigPath(input);
+  if (existsSync(configPath)) {
+    return { configPath, initialized: false };
+  }
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
+  return { configPath, initialized: true };
+}
+
+export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
+  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
+export function resolveConfigPath(input?: string): string {
+  const candidate = input?.trim();
+  if (candidate) {
+    const resolved = resolveFrom(process.cwd(), candidate);
+    if (!existsSync(resolved)) {
+      throw new Error(`Config file not found: ${resolved}`);
+    }
+    return resolved;
+  }
+
+  const found = findProjectConfigPath(process.cwd());
+  if (found) {
+    return found;
+  }
+
+  throw new Error(
+    `Config file not found: ${resolveFrom(process.cwd(), DEFAULT_PROJECT_CONFIG_FILES[0])}`,
+  );
+}
+
+export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConfig {
+  const configPath = resolveConfigPath(input);
+  return parseConfigFile(
+    configPath,
+    "project",
+    defaults
+      ? {
+          serverHost: defaults.server.host,
+          serverPort: defaults.server.port,
+          dataDir: defaults.dataDir,
+          worktreeDir: defaults.worktreeDir,
+          defaultAgent: defaults.defaultAgent,
+          tmuxSocketName: defaults.tmux.socketName,
+          uiPort: defaults.ui.port,
+        }
+      : undefined,
+  );
+}
+
+export function loadConfig(input?: string): AppConfig {
+  const { configPath } = ensureInstanceConfig(input);
+  return parseConfigFile(configPath, "instance");
 }
