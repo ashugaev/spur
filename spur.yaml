@@ -10,14 +10,10 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     symlinks: [node_modules, .env]
-    preflight:
-      prompt: "Choose a branch name based on the project's branch naming conventions."
+    preflight: {}
     spawn:
       steps:
         - "run $manager"
-        - "run $reviewer"
-        - "run $code-simplifier"
-        - "run $self-verify"
     sources:
       gh:
         type: github

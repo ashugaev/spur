@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
+import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { generateMetadata } from "@/app/layout";
 
@@ -176,5 +178,12 @@ describe("Dashboard", () => {
         }),
       ]),
     );
+  });
+});
+
+describe("StatusBar", () => {
+  it("uses a deterministic initial clock value for SSR to avoid hydration drift", () => {
+    const html = renderToString(<StatusBar sessions={[]} />);
+    expect(html).toContain("--:--:--");
   });
 });
