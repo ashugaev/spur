@@ -114,7 +114,11 @@ jsonl_append() {
       break
     fi
   done
-  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  preflight_input="$*"
+  if [[ "\${args[\${#args[@]}-1]:-}" == "-" ]]; then
+    preflight_input="$(cat)"
+  fi
+  branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"

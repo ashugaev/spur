@@ -59,12 +59,19 @@ For a production-like UI server:
 pnpm ui:build
 SPUR_CONFIG=./spur.yaml \
 SPUR_DAEMON_URL=http://127.0.0.1:4310 \
-DIRECT_TERMINAL_PORT=14801 \
+WEB_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_PORT=14801 \
+DIRECT_TERMINAL_PUBLIC_PORT=3011 \
 PORT=3011 \
 pnpm ui:start
 ```
 
 The UI is optional. It does not own runtime logic or persistence; it proxies to the daemon.
+For reverse-proxy deployments, leave Next.js and the terminal server on loopback and advertise the proxy port with
+`DIRECT_TERMINAL_PUBLIC_PORT`.
+
+For a generic Ubuntu VM deployment and release flow, use [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md).
 
 ## Local Validation
 

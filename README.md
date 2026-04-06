@@ -24,12 +24,17 @@ For a production-like UI server:
 pnpm ui:build
 SPUR_CONFIG=./spur.yaml \
 SPUR_DAEMON_URL=http://127.0.0.1:4310 \
-DIRECT_TERMINAL_PORT=14801 \
+WEB_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_PORT=14801 \
+DIRECT_TERMINAL_PUBLIC_PORT=3011 \
 PORT=3011 \
 pnpm ui:start
 ```
 
 The web package also reads `SPUR_CONFIG` (or `SPUR_CONFIG_PATH`) to populate project filters and branding from a real Spur config.
+For reverse-proxy deployments, keep the Next.js app and direct terminal server bound to loopback and set
+`DIRECT_TERMINAL_PUBLIC_PORT` to the externally reachable proxy port.
 
 ## Repo Layout
 
@@ -57,6 +62,7 @@ pnpm --dir v2 test:smoke
 
 - [v2/README.md](v2/README.md) — Spur commands, config, automation, validation
 - [SETUP.md](SETUP.md) — local repo setup and web UI development
+- [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — current failure modes and fixes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution scope and required checks
 - [docs/architecture-v2.md](docs/architecture-v2.md) — high-level architecture intent
