@@ -13,9 +13,9 @@ It assumes:
 
 Run three pieces:
 
-- Spur daemon on loopback, for example `127.0.0.1:4311`
-- web UI on loopback, for example `127.0.0.1:3012`
-- reverse proxy on the VM, for example `nginx`, bound only where you want the UI reachable
+- Spur daemon on loopback: `127.0.0.1:4310`
+- web UI on loopback: `127.0.0.1:3012`
+- reverse proxy (`nginx`) on Tailscale IP: `100.80.107.19:5555`
 
 Keep the direct terminal websocket server on loopback and advertise the externally reachable proxy port with `DIRECT_TERMINAL_PUBLIC_PORT`.
 
@@ -73,13 +73,13 @@ Create a VM-local Spur instance config such as `~/.spur/config.yaml`:
 ```yaml
 server:
   host: 127.0.0.1
-  port: 4311
+  port: 4310
 
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
 defaultAgent: codex
 tmux:
-  socketName: spur-4311
+  socketName: spur-4310
 ui:
   port: 5555
 ```
@@ -120,7 +120,7 @@ User=<vm-user>
 WorkingDirectory=<repo-path>
 Environment=HOME=<home-dir>
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/bin/node <repo-path>/v2/dist/cli.js daemon start --config <home-dir>/.spur/config.yaml
+ExecStart=/usr/bin/node <repo-path>/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
 
@@ -145,7 +145,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_PORT=14801
-Environment=DIRECT_TERMINAL_PUBLIC_PORT=3011
+Environment=DIRECT_TERMINAL_PUBLIC_PORT=5555
 ExecStart=/usr/bin/pnpm ui:start
 Restart=always
 RestartSec=3
@@ -169,8 +169,8 @@ Example: localhost plus a private Tailscale IP.
 
 ```nginx
 server {
-    listen 127.0.0.1:3011;
-    listen 100.x.y.z:3011;
+    listen 127.0.0.1:5555;
+    listen 100.80.107.19:5555;
     server_name _;
 
     location /ws {
@@ -210,17 +210,17 @@ sudo systemctl reload nginx
 Check local process boundaries first:
 
 ```bash
-curl http://127.0.0.1:4311/sessions
-curl -I http://127.0.0.1:3011
-curl http://127.0.0.1:3011/api/runtime/terminal
-ss -ltnp | egrep ':(3011|3012|4311|14801)\b'
+curl http://127.0.0.1:4310/sessions
+curl -I http://127.0.0.1:5555
+curl http://127.0.0.1:5555/api/runtime/terminal
+ss -ltnp | egrep ':(4310|3012|5555|14801)\b'
 ```
 
 For a private Tailscale deployment, verify the UI from another tailnet device:
 
 ```bash
-curl -I http://100.x.y.z:3011
-curl http://100.x.y.z:3011/api/runtime/terminal
+curl -I http://100.80.107.19:5555
+curl http://100.80.107.19:5555/api/runtime/terminal
 ```
 
 If the deployment should not be public, confirm the public VM IP does not answer on the proxy port.
@@ -239,8 +239,8 @@ Example:
 ```bash
 cd ~/projects/spur
 pnpm main:deploy
-curl http://127.0.0.1:4311/sessions
-curl http://127.0.0.1:3011/api/runtime/terminal
+curl http://127.0.0.1:4310/sessions
+curl http://127.0.0.1:5555/api/runtime/terminal
 ```
 
 ## Operational Notes
