@@ -120,6 +120,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let resizeHandler: (() => void) | null = null;
     let terminalElement: HTMLElement | null = null;
     let terminalViewport: HTMLDivElement | null = null;
+    let wheelTarget: HTMLElement | null = null;
     let wheelHandler: ((event: WheelEvent) => void) | null = null;
     const wheelPartialScroll = { current: 0 };
 
@@ -170,11 +171,12 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         terminalViewport = terminalElement?.querySelector(".xterm-viewport") as HTMLDivElement | null;
         fit.fit();
 
-        if (terminalElement) {
-          wheelHandler = (event) => {
+        wheelTarget = terminalRef.current;
+        if (wheelTarget) {
+          wheelHandler = (event: WheelEvent) => {
             if (!terminal) return;
             event.preventDefault();
-            event.stopPropagation();
+            event.stopImmediatePropagation();
             const activeBuffer = terminal.buffer.active;
             if (activeBuffer.type !== "normal" || activeBuffer.baseY <= 0) {
               wheelPartialScroll.current = 0;
@@ -188,7 +190,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
               terminal.scrollLines(lines);
             }
           };
-          terminalElement.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
+          wheelTarget.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
         }
 
         const port = await readTerminalPort();
@@ -259,8 +261,8 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
-      if (terminalElement && wheelHandler) {
-        terminalElement.removeEventListener("wheel", wheelHandler, true);
+      if (wheelTarget && wheelHandler) {
+        wheelTarget.removeEventListener("wheel", wheelHandler, true);
       }
       inputDisposable?.dispose();
       websocketRef.current?.close();
