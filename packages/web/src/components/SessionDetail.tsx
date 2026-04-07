@@ -157,10 +157,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const loadConversation = useCallback(async () => {
     if (!session || session.agent !== "claude") return;
     try {
-      const res = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/conversation`,
-        { cache: "no-store" },
-      );
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`, {
+        cache: "no-store",
+      });
       if (res.ok) {
         setConversation((await res.json()) as ConversationResponse);
       }

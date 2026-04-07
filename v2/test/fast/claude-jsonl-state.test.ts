@@ -146,7 +146,14 @@ describe("parseConversationLines", () => {
   it("extracts text from user and assistant messages", () => {
     const lines = jsonl(
       { type: "user", message: { role: "user", content: [{ type: "text", text: "hello" }] } },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "hi" }], stop_reason: "end_turn" } },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        },
+      },
     );
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(2);
@@ -155,55 +162,67 @@ describe("parseConversationLines", () => {
   });
 
   it("excludes tool_result-only user messages", () => {
-    const lines = jsonl(
-      { type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }] } },
-    );
+    const lines = jsonl({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
+      },
+    });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
   it("excludes tool_use-only assistant messages", () => {
-    const lines = jsonl(
-      { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "x", name: "Read", input: {} }] } },
-    );
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "x", name: "Read", input: {} }],
+      },
+    });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
   it("extracts only text from mixed content", () => {
-    const lines = jsonl(
-      { type: "assistant", message: { role: "assistant", content: [
-        { type: "text", text: "Let me read that." },
-        { type: "tool_use", id: "x", name: "Read", input: {} },
-      ] } },
-    );
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me read that." },
+          { type: "tool_use", id: "x", name: "Read", input: {} },
+        ],
+      },
+    });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(1);
     expect(messages[0]!.text).toBe("Let me read that.");
   });
 
   it("handles string content (user prompt via spur send)", () => {
-    const lines = jsonl(
-      { type: "user", message: { role: "user", content: "fix the bug" } },
-    );
+    const lines = jsonl({ type: "user", message: { role: "user", content: "fix the bug" } });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "user", text: "fix the bug" });
   });
 
   it("returns empty for file with no conversation records", () => {
-    const lines = jsonl(
-      { type: "progress" },
-      { type: "system" },
-    );
+    const lines = jsonl({ type: "progress" }, { type: "system" });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(0);
   });
 
   it("classifies state alongside conversation extraction", () => {
-    const lines = jsonl(
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }], stop_reason: "end_turn" } },
-    );
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stop_reason: "end_turn",
+      },
+    });
     const { state } = parseConversationLines(lines, NOW);
     expect(state).toBe("waiting");
   });

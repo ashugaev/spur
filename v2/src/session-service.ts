@@ -10,7 +10,11 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { readClaudeConversation, readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import {
+  readClaudeConversation,
+  readClaudeJsonlState,
+  type ClaudeJsonlReaderState,
+} from "./claude-jsonl-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";

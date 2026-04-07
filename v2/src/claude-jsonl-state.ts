@@ -110,8 +110,7 @@ function contentBlocks(message: Record<string, unknown>): unknown[] {
 
 function hasBlockType(blocks: unknown[], type: string): boolean {
   return blocks.some(
-    (b) =>
-      typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
+    (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
   );
 }
 
