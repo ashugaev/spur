@@ -67,6 +67,29 @@ async function readTerminalPort(): Promise<string> {
   }
 }
 
+function consumeWheelLines(
+  event: WheelEvent,
+  rows: number,
+  rowHeight: number,
+  partialScrollRef: { current: number },
+): number {
+  if (event.deltaY === 0 || event.shiftKey) return 0;
+
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return Math.trunc(event.deltaY);
+  }
+
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return Math.trunc(event.deltaY * rows);
+  }
+
+  const pixelsPerLine = rowHeight > 0 ? rowHeight : 16;
+  partialScrollRef.current += event.deltaY / pixelsPerLine;
+  const lines = Math.trunc(partialScrollRef.current);
+  partialScrollRef.current -= lines;
+  return lines;
+}
+
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
   port: string,
@@ -78,19 +101,27 @@ export function buildDirectTerminalWsUrl(
 
 export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const terminalInstance = useRef<TerminalType | null>(null);
-  const fitAddon = useRef<FitAddonType | null>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
+
+  const sendTerminalInput = (data: string) => {
+    if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+    websocketRef.current.send(data);
+  };
 
   useEffect(() => {
     if (!terminalRef.current) return;
 
     let mounted = true;
     let terminal: TerminalType | null = null;
+    let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
+    let terminalElement: HTMLElement | null = null;
+    let terminalViewport: HTMLDivElement | null = null;
+    let wheelHandler: ((event: WheelEvent) => void) | null = null;
+    const wheelPartialScroll = { current: 0 };
 
     Promise.all([
       import("xterm").then((module) => module.Terminal),
@@ -110,8 +141,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           allowProposedApi: true,
         });
 
-        const fit = new FitAddon();
-        fitAddon.current = fit;
+        fit = new FitAddon();
         terminal.loadAddon(fit);
 
         terminal.parser.registerCsiHandler({ prefix: ">", final: "q" }, () => {
@@ -136,8 +166,30 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         });
 
         terminal.open(terminalRef.current);
-        terminalInstance.current = terminal;
+        terminalElement = terminal.element ?? null;
+        terminalViewport = terminalElement?.querySelector(".xterm-viewport") as HTMLDivElement | null;
         fit.fit();
+
+        if (terminalElement) {
+          wheelHandler = (event) => {
+            if (!terminal) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const activeBuffer = terminal.buffer.active;
+            if (activeBuffer.type !== "normal" || activeBuffer.baseY <= 0) {
+              wheelPartialScroll.current = 0;
+              return;
+            }
+
+            const rowHeight =
+              terminalViewport && terminal.rows > 0 ? terminalViewport.clientHeight / terminal.rows : 0;
+            const lines = consumeWheelLines(event, terminal.rows, rowHeight, wheelPartialScroll);
+            if (lines !== 0) {
+              terminal.scrollLines(lines);
+            }
+          };
+          terminalElement.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
+        }
 
         const port = await readTerminalPort();
         if (!mounted) return;
@@ -184,7 +236,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         });
 
         resizeHandler = () => {
-          if (!terminal || websocket.readyState !== WebSocket.OPEN) return;
+          if (!terminal || !fit || websocket.readyState !== WebSocket.OPEN) return;
           fit.fit();
           websocket.send(
             JSON.stringify({
@@ -207,11 +259,12 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
+      if (terminalElement && wheelHandler) {
+        terminalElement.removeEventListener("wheel", wheelHandler, true);
+      }
       inputDisposable?.dispose();
       websocketRef.current?.close();
       terminal?.dispose();
-      terminalInstance.current = null;
-      fitAddon.current = null;
     };
   }, [sessionId]);
 
@@ -224,6 +277,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
 
   const statusText =
     status === "connected" ? "Connected" : status === "error" ? (error ?? "Error") : "Connecting…";
+  const terminalControlButtonClass =
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+  const terminalControlIconButtonClass =
+    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[#0a0a0f]">
@@ -261,7 +318,94 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         ) : null}
       </div>
 
-      <div ref={terminalRef} className="min-h-0 flex-1 p-1.5" />
+      <div className="min-h-0 flex-1 p-1.5">
+        <div ref={terminalRef} className="h-full min-h-0" />
+      </div>
+
+      <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
+        <div className="flex items-center gap-1">
+          <button
+            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
+            onClick={() => sendTerminalInput("\x1b")}
+            type="button"
+          >
+            Esc
+          </button>
+          <button
+            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
+            onClick={() => sendTerminalInput("\r")}
+            type="button"
+          >
+            Enter
+          </button>
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              aria-label="Arrow Left"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[D")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Up"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[A")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Down"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[B")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Right"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[C")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
