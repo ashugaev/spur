@@ -19,6 +19,7 @@ import {
 
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const DEFAULT_SPAWN_MEMBER = { id: 1, agent: "claude" as const };
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -112,7 +113,9 @@ export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnMembers, setSpawnMembers] = useState<{ id: number; agent: "claude" | "codex" }[]>([
+    DEFAULT_SPAWN_MEMBER,
+  ]);
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -258,6 +261,12 @@ export function Dashboard() {
     });
   }, [grouped, isMobile]);
 
+  useEffect(() => {
+    if (spawnMembers.length > 1 && spawnWorkspaceMode === "shared") {
+      setSpawnWorkspaceMode("default");
+    }
+  }, [spawnMembers.length, spawnWorkspaceMode]);
+
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
     if (typeof window === "undefined") return;
@@ -276,6 +285,14 @@ export function Dashboard() {
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
+  const addMember = () =>
+    setSpawnMembers((prev) => [...prev, { id: Date.now(), agent: "claude" }]);
+  const removeMember = (id: number) =>
+    setSpawnMembers((prev) => (prev.length <= 1 ? prev : prev.filter((member) => member.id !== id)));
+  const updateMember = (id: number, agent: "claude" | "codex") =>
+    setSpawnMembers((prev) =>
+      prev.map((member) => (member.id === id ? { ...member, agent } : member)),
+    );
   const removeStep = (id: number) => setSpawnSteps((prev) => prev.filter((s) => s.id !== id));
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
@@ -287,6 +304,7 @@ export function Dashboard() {
 
     setSpawning(true);
     try {
+      const filteredMembers = spawnMembers.map((member) => ({ agent: member.agent }));
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
       let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
       if (spawnWorkspaceMode === "worktree") {
@@ -299,9 +317,13 @@ export function Dashboard() {
       const payload: Record<string, unknown> = {
         projectId: nextProjectId,
         prompt: nextPrompt,
-        agent: spawnAgent,
       };
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      if (filteredMembers.length > 1) {
+        payload.members = filteredMembers;
+      } else {
+        payload.agent = filteredMembers[0]?.agent ?? "claude";
+        if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      }
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
@@ -313,6 +335,7 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       setSpawnPrompt("");
+      setSpawnMembers([DEFAULT_SPAWN_MEMBER]);
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSteps([]);
@@ -446,23 +469,53 @@ export function Dashboard() {
                       </option>
                     ))}
                   </select>
-                  <select
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
-                    value={spawnAgent}
+                  <button
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)]"
+                    onClick={addMember}
+                    type="button"
                   >
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
-                  </select>
+                    + Member
+                  </button>
+                </div>
+                <div className="max-h-32 space-y-2 overflow-y-auto">
+                  {spawnMembers.map((member, index) => (
+                    <div className="flex gap-2" key={member.id}>
+                      <select
+                        aria-label={`member ${index + 1} agent`}
+                        className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                        onChange={(event) =>
+                          updateMember(member.id, event.target.value as "claude" | "codex")
+                        }
+                        value={member.agent}
+                      >
+                        <option value="claude">claude</option>
+                        <option value="codex">codex</option>
+                      </select>
+                      <button
+                        className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)] disabled:opacity-40"
+                        disabled={spawnMembers.length <= 1}
+                        onClick={() => removeMember(member.id)}
+                        type="button"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
                 </div>
                 <div className="flex gap-2">
-                  <input
-                    aria-label="branch name"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnBranch(event.target.value)}
-                    placeholder="branch name"
-                    value={spawnBranch}
-                  />
+                  {spawnMembers.length <= 1 ? (
+                    <input
+                      aria-label="branch name"
+                      className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                      onChange={(event) => setSpawnBranch(event.target.value)}
+                      placeholder="branch name"
+                      value={spawnBranch}
+                    />
+                  ) : (
+                    <div className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-tertiary)]">
+                      grouped sessions use auto branches
+                    </div>
+                  )}
                   <select
                     aria-label="workspace mode"
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
@@ -473,7 +526,9 @@ export function Dashboard() {
                   >
                     <option value="default">Default</option>
                     <option value="worktree">Worktree</option>
-                    <option value="shared">Shared</option>
+                    <option disabled={spawnMembers.length > 1} value="shared">
+                      Shared
+                    </option>
                   </select>
                   <label className="flex items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 cursor-pointer">
                     <input

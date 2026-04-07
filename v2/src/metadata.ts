@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import type {
   GitHubSignal,
   SessionQueuedMessagesState,
+  SessionGroupRecord,
   ServiceInstanceRecord,
   ServiceSourceState,
   SessionPipelineState,
@@ -19,6 +20,10 @@ import type {
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
+}
+
+function sessionGroupFilePath(dataDir: string, groupId: string): string {
+  return join(dataDir, "session-groups", `${groupId}.json`);
 }
 
 function githubSnapshotDir(dataDir: string, projectId: string, sourceId: string): string {
@@ -124,6 +129,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: session.id,
     project: session.project,
     agent: session.agent,
+    ...(session.group ? { group: session.group } : {}),
     ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
     prompt: session.prompt,
     branch: session.branch,
@@ -141,6 +147,24 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { queuedMessages: normalizeQueuedMessagesState(session.queuedMessages) }
       : {}),
     ...(session.error ? { error: session.error } : {}),
+  };
+}
+
+function normalizeSessionGroupRecord(group: SessionGroupRecord): SessionGroupRecord {
+  return {
+    id: group.id,
+    project: group.project,
+    prompt: group.prompt,
+    ...(group.steps ? { steps: group.steps } : {}),
+    planMode: group.planMode,
+    members: group.members.map((member) => ({
+      sessionId: member.sessionId,
+      agent: member.agent,
+      branch: member.branch,
+      ...(member.name ? { name: member.name } : {}),
+    })),
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
   };
 }
 
@@ -189,6 +213,14 @@ export function listSessions(dataDir: string): SessionRecord[] {
 export function readSession(dataDir: string, sessionId: string): SessionRecord | null {
   const path = findSessionFilePath(dataDir, sessionId);
   return path ? readSessionFile(path) : null;
+}
+
+export function writeSessionGroup(dataDir: string, group: SessionGroupRecord): void {
+  writeJsonFile(sessionGroupFilePath(dataDir, group.id), normalizeSessionGroupRecord(group));
+}
+
+export function deleteSessionGroup(dataDir: string, groupId: string): void {
+  rmSync(sessionGroupFilePath(dataDir, groupId), { force: true });
 }
 
 export function writeServiceInstance(dataDir: string, service: ServiceInstanceRecord): void {

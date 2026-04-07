@@ -30,10 +30,18 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export interface SpurSessionGroupRef {
+  id: string;
+  index: number;
+  total: number;
+  name?: string;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
   agent: "claude" | "codex";
+  group?: SpurSessionGroupRef;
   prompt: string;
   branch: string;
   worktree: boolean;
@@ -60,6 +68,11 @@ export interface ProjectInfo {
   name: string;
 }
 
+export interface SpurSpawnResult extends SpurSessionView {
+  sessions: SpurSessionView[];
+  groupId?: string;
+}
+
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
@@ -72,6 +85,7 @@ export interface DashboardSession {
   projectId: string;
   projectName: string;
   agent: "claude" | "codex";
+  group?: SpurSessionGroupRef;
   title: string | null;
   prompt: string;
   branch: string | null;
@@ -100,6 +114,7 @@ export function toDashboardSession(
     projectId: session.project,
     projectName,
     agent: session.agent,
+    ...(session.group ? { group: session.group } : {}),
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
     branch: session.branch?.trim() || null,

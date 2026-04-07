@@ -15,6 +15,7 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  deleteSessionGroup,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
@@ -25,6 +26,7 @@ import {
   readServiceInstance,
   readSession,
   writeServiceInstance,
+  writeSessionGroup,
   writeSession,
 } from "./metadata.js";
 import { runSpawnPreflight } from "./preflight.js";
@@ -69,12 +71,15 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type SessionGroupRecord,
   type SessionRecord,
   type SessionStatus,
   type SessionState,
   type SessionView,
   type SessionStateTransition,
+  type SpawnResult,
   type SpawnOverrides,
+  type SpawnSessionMemberRequest,
   type SpawnSessionRequest,
   type StateSource,
   type UpdateSessionSlotsRequest,
@@ -152,9 +157,13 @@ function normalizeSpawnRequest(request: SpawnSessionRequest): {
   prompt: string;
   steps?: string[];
   planMode: boolean;
+  members?: SpawnSessionMemberRequest[];
 } {
   if (typeof request.prompt !== "string" || !request.prompt.trim()) {
     throw new Error("prompt must be a non-empty string");
+  }
+  if (request.agent !== undefined && request.members !== undefined) {
+    throw new Error("agent and members cannot be combined");
   }
   const steps = request.steps?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
@@ -162,14 +171,42 @@ function normalizeSpawnRequest(request: SpawnSessionRequest): {
     }
     return step.trim();
   });
+  const members = request.members?.map((member, index) => {
+    if (!member || typeof member !== "object") {
+      throw new Error(`members[${index}] must be an object`);
+    }
+    const parsedAgent = parseAgentName(member.agent);
+    if (member.branch !== undefined && (typeof member.branch !== "string" || !member.branch.trim())) {
+      throw new Error(`members[${index}].branch must be a non-empty string when provided`);
+    }
+    if (member.name !== undefined && (typeof member.name !== "string" || !member.name.trim())) {
+      throw new Error(`members[${index}].name must be a non-empty string when provided`);
+    }
+    return {
+      agent: parsedAgent,
+      ...(member.branch?.trim() ? { branch: member.branch.trim() } : {}),
+      ...(member.name?.trim() ? { name: member.name.trim() } : {}),
+    };
+  });
+  if (members !== undefined && members.length === 0) {
+    throw new Error("members must contain at least one entry");
+  }
   const normalized = {
     prompt: request.prompt.trim(),
     planMode: request.planMode === true,
+    ...(members ? { members } : {}),
   };
   if (!steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
+}
+
+class LoggedSpawnFailureError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "LoggedSpawnFailureError";
+  }
 }
 
 function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
@@ -910,52 +947,46 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+  private async spawnSingleSession(args: {
+    projectId: string;
+    project: ProjectConfig;
+    prompt: string;
+    steps?: string[];
+    planMode: boolean;
+    agent: SessionRecord["agent"];
+    branch?: string;
+    worktree: boolean;
+    overrides?: SpawnOverrides;
+  }): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
-    let project: ProjectConfig | undefined;
-    let agent: SessionRecord["agent"] | undefined;
     let worktree = false;
     let workspacePath = "";
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let createdAt: string | undefined;
     let placeholderWritten = false;
-    let prompt = "";
-    let steps: string[] | undefined;
-    let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
     try {
-      project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest({
-        ...request,
-        ...(request.steps === undefined && project.spawn?.steps !== undefined
-          ? { steps: project.spawn.steps }
-          : {}),
-      }));
-      if (
-        request.branch !== undefined &&
-        (typeof request.branch !== "string" || !request.branch.trim())
-      ) {
+      if (args.branch !== undefined && !args.branch.trim()) {
         throw new Error("branch must be a non-empty string when provided");
       }
 
-      const overrides = parseSpawnOverrides(request.overrides, "overrides");
-      worktree = resolveSpawnWorktree(project, overrides);
-      const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
-      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
-      let effectiveBranch = request.branch;
+      const overrides = args.overrides;
+      worktree = args.worktree;
+      const defaultBranch = resolveSpawnDefaultBranch({ project: args.project, worktree, overrides });
+      let effectiveBranch = args.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
-        request.branch ? "explicit" : undefined;
-      if (!effectiveBranch && worktree && project.preflight) {
+        args.branch ? "explicit" : undefined;
+      if (!effectiveBranch && worktree && args.project.preflight) {
         stage = "preflight";
         const preflight = await runSpawnPreflight({
-          agent,
-          projectId: request.project,
-          project,
+          agent: args.agent,
+          projectId: args.projectId,
+          project: args.project,
           baseBranch: defaultBranch,
           worktree,
-          prompt,
+          prompt: args.prompt,
         });
         if (preflight.branch) {
           preflightOutcome = "branch";
@@ -968,14 +999,14 @@ export class SessionService {
       }
       sessionId = await reserveNextSessionId(
         this.config.dataDir,
-        request.project,
-        project.sessionPrefix,
+        args.projectId,
+        args.project.sessionPrefix,
       );
       if (preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
           sessionId,
-          projectId: request.project,
+          projectId: args.projectId,
           message:
             preflightOutcome === "branch"
               ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
@@ -988,7 +1019,7 @@ export class SessionService {
         });
       }
       resolvedBranch = await resolveSpawnBranch({
-        repoPath: project.path,
+        repoPath: args.project.path,
         requestBranch: effectiveBranch,
         ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
         worktree,
@@ -1000,10 +1031,10 @@ export class SessionService {
       this.logEvent("session.spawn.started", {
         level: "info",
         sessionId,
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Spawning ${sessionId}`,
         details: {
-          agent,
+          agent: args.agent,
           branch: resolvedBranch.branch,
           worktree,
           defaultBranch,
@@ -1013,14 +1044,14 @@ export class SessionService {
 
       const placeholder: SessionRecord = {
         id: sessionId,
-        project: request.project,
-        agent,
-        planMode,
-        prompt,
+        project: args.projectId,
+        agent: args.agent,
+        planMode: args.planMode,
+        prompt: args.prompt,
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         worktree,
-        worktreePath: worktree ? "" : project.path,
+        worktreePath: worktree ? "" : args.project.path,
         tmuxSession,
         launchCommand: "",
         status: "spawning",
@@ -1036,35 +1067,35 @@ export class SessionService {
         dataDir: this.config.dataDir,
         sessionId,
         configPath: this.config.configPath,
-        agent,
+        agent: args.agent,
       });
 
       if (worktree) {
         stage = "worktree.create";
         workspacePath = await createWorktree({
-          repoPath: project.path,
+          repoPath: args.project.path,
           worktreeBaseDir: this.config.worktreeDir,
-          projectId: request.project,
+          projectId: args.projectId,
           sessionId,
           defaultBranch,
           branch: resolvedBranch.branch,
-          symlinks: project.symlinks,
+          symlinks: args.project.symlinks,
         });
         this.logEvent("session.spawn.worktree_created", {
           level: "info",
           sessionId,
-          projectId: request.project,
+          projectId: args.projectId,
           message: `Created worktree for ${sessionId}`,
           details: {
             worktreePath: workspacePath,
-            symlinkCount: project.symlinks.length,
+            symlinkCount: args.project.symlinks.length,
           },
         });
       } else {
         this.logEvent("session.spawn.shared_workspace", {
           level: "info",
           sessionId,
-          projectId: request.project,
+          projectId: args.projectId,
           message: `Using shared workspace for ${sessionId}`,
           details: {
             workspacePath,
@@ -1073,24 +1104,24 @@ export class SessionService {
         });
       }
 
-      const firstStage = steps?.[0];
+      const firstStage = args.steps?.[0];
       const initialMessage =
-        steps && firstStage
-          ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
-          : prompt;
+        args.steps && firstStage
+          ? formatPipelineStepMessage(args.prompt, firstStage, 0, args.steps.length)
+          : args.prompt;
       const hookSetup = await setupAgentHooks({
-        agent,
+        agent: args.agent,
         worktreePath: workspacePath,
         sessionToolDir,
       });
       const launchPlan = buildAgentLaunchPlan(
-        agent,
+        args.agent,
         initialMessage,
-        withPlanMode(hookSetup, planMode),
+        withPlanMode(hookSetup, args.planMode),
       );
-      const pipeline = steps
+      const pipeline = args.steps
         ? {
-            steps,
+            steps: args.steps,
             nextStepIndex: 1,
             awaitingStepIndex: 0,
             status: "running" as const,
@@ -1098,7 +1129,7 @@ export class SessionService {
         : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
-        planMode,
+        planMode: args.planMode,
         worktreePath: workspacePath,
         launchCommand: launchPlan.launchCommand,
         status: "running",
@@ -1112,19 +1143,19 @@ export class SessionService {
         cwd: workspacePath,
         launchCommand: launchPlan.launchCommand,
         env: buildSessionEnv({
-          agent,
-          projectId: request.project,
+          agent: args.agent,
+          projectId: args.projectId,
           sessionId,
           sessionToolDir,
           configPath: this.config.configPath,
-          repoPath: project.path,
-          symlinks: project.symlinks,
+          repoPath: args.project.path,
+          symlinks: args.project.symlinks,
         }),
       });
       this.logEvent("session.spawn.tmux_created", {
         level: "info",
         sessionId,
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Created tmux session for ${sessionId}`,
         details: {
           tmuxSession,
@@ -1138,20 +1169,20 @@ export class SessionService {
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Agent prompt is ready for ${sessionId}`,
       });
 
       stage = "prompt.send";
       const spawnInitialMessage = buildInitialMessage(
         launchPlan.initialMessage,
-        !!project.devServer,
+        !!args.project.devServer,
       );
       await sendMessageToTmux(tmuxSession, spawnInitialMessage);
       this.logEvent("session.spawn.initial_prompt_sent", {
         level: "info",
         sessionId,
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Sent initial prompt to ${sessionId}`,
         details: {
           messageLength: launchPlan.initialMessage.length,
@@ -1164,20 +1195,20 @@ export class SessionService {
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
 
-      if (project.devServer?.autoStart) {
+      if (args.project.devServer?.autoStart) {
         try {
           await createTmuxDevServerSession({
             sessionId,
             cwd: workspacePath,
-            command: project.devServer.command,
+            command: args.project.devServer.command,
           });
           this.logEvent("session.devserver.started", {
             level: "info",
             sessionId,
-            projectId: request.project,
+            projectId: args.projectId,
             message: `Auto-started dev server for ${sessionId}`,
             details: {
-              command: project.devServer.command,
+              command: args.project.devServer.command,
               tmuxSession: devServerTmuxSession(sessionId),
             },
           });
@@ -1186,7 +1217,7 @@ export class SessionService {
           this.logEvent("session.devserver.autostart.failed", {
             level: "warn",
             sessionId,
-            projectId: request.project,
+            projectId: args.projectId,
             message: `Auto-start dev server failed for ${sessionId}: ${devMessage}`,
           });
         }
@@ -1196,12 +1227,12 @@ export class SessionService {
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Spawned ${sessionId}`,
         details: {
           worktreePath: workspacePath,
           tmuxSession,
-          agent,
+          agent: args.agent,
           agentSessionId: persistedRecord.agentSessionId ?? null,
         },
       });
@@ -1211,23 +1242,21 @@ export class SessionService {
 
       return await this.enrich(persistedRecord);
     } catch (error) {
-      if (sessionId && project && placeholderWritten) {
+      if (sessionId && placeholderWritten) {
         await killTmuxSession(sessionId);
         await killDevServerTmux(sessionId);
         deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
         if (worktree && workspacePath) {
-          await removeWorktree(project.path, workspacePath);
+          await removeWorktree(args.project.path, workspacePath);
         }
 
         const message = error instanceof Error ? error.message : String(error);
         const erroredRecord: SessionRecord = {
           id: sessionId,
-          project: request.project,
-          agent:
-            agent ??
-            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-          prompt,
+          project: args.projectId,
+          agent: args.agent,
+          prompt: args.prompt,
           branch: resolvedBranch?.branch ?? sessionId,
           ...(resolvedBranch?.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
           worktree,
@@ -1244,7 +1273,7 @@ export class SessionService {
         this.logEvent("session.spawn.failed", {
           level: "error",
           sessionId,
-          projectId: request.project,
+          projectId: args.projectId,
           message: `Failed to spawn ${sessionId}: ${message}`,
           details: {
             stage,
@@ -1255,27 +1284,192 @@ export class SessionService {
           },
         });
 
-        throw new Error(`Failed to spawn ${sessionId}: ${message}`, { cause: error });
+        throw new LoggedSpawnFailureError(`Failed to spawn ${sessionId}: ${message}`, error);
       }
 
       const message = error instanceof Error ? error.message : String(error);
       if (stage === "preflight") {
         this.logEvent("session.preflight.failed", {
           level: "error",
-          projectId: request.project,
-          message: `Spawn preflight failed for ${request.project}: ${message}`,
+          projectId: args.projectId,
+          message: `Spawn preflight failed for ${args.projectId}: ${message}`,
           details: {
-            requestedAgent: request.agent ?? null,
+            requestedAgent: args.agent,
           },
         });
       }
       this.logEvent("session.spawn.failed", {
         level: "error",
-        projectId: request.project,
+        projectId: args.projectId,
         message: `Failed to spawn session: ${message}`,
         details: {
           stage,
-          requestedAgent: request.agent ?? null,
+          requestedAgent: args.agent,
+        },
+      });
+      throw new LoggedSpawnFailureError(message, error);
+    }
+  }
+
+  async spawn(request: SpawnSessionRequest): Promise<SpawnResult> {
+    try {
+      const project = this.getProject(request.project);
+      const { prompt, steps, planMode, members } = normalizeSpawnRequest({
+        ...request,
+        ...(request.steps === undefined && project.spawn?.steps !== undefined
+          ? { steps: project.spawn.steps }
+          : {}),
+      });
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      const worktree = resolveSpawnWorktree(project, overrides);
+      if (members && request.branch !== undefined) {
+        throw new Error("branch cannot be combined with members");
+      }
+      if (members && members.length > 1 && !worktree) {
+        throw new Error("multi-agent spawn requires worktree mode");
+      }
+
+      const spawnMembers =
+        members
+          ? members
+          : [
+              {
+                agent: parseAgentName(
+                  request.agent ?? project.defaultAgent ?? this.config.defaultAgent,
+                ),
+                ...(request.branch?.trim() ? { branch: request.branch.trim() } : {}),
+              },
+            ];
+
+      if (spawnMembers.length === 1) {
+        const session = await this.spawnSingleSession({
+          projectId: request.project,
+          project,
+          prompt,
+          planMode,
+          agent: spawnMembers[0]!.agent,
+          worktree,
+          ...(steps ? { steps } : {}),
+          ...(spawnMembers[0]!.branch ? { branch: spawnMembers[0]!.branch } : {}),
+          ...(overrides ? { overrides } : {}),
+        });
+        return {
+          ...session,
+          sessions: [session],
+        };
+      }
+
+      const spawned: SessionView[] = [];
+      let groupId: string | undefined;
+      try {
+        this.logEvent("session.group.spawn.started", {
+          level: "info",
+          projectId: request.project,
+          message: `Spawning ${spawnMembers.length} grouped sessions for ${request.project}`,
+          details: {
+            agents: spawnMembers.map((member) => member.agent),
+          },
+        });
+        for (const member of spawnMembers) {
+          spawned.push(
+            await this.spawnSingleSession({
+              projectId: request.project,
+              project,
+              prompt,
+              planMode,
+              agent: member.agent,
+              worktree,
+              ...(steps ? { steps } : {}),
+              ...(member.branch ? { branch: member.branch } : {}),
+              ...(overrides ? { overrides } : {}),
+            }),
+          );
+        }
+
+        groupId = `${spawned[0]!.id}-group`;
+        const updatedSessions: SessionView[] = [];
+        for (const [index, spawnedSession] of spawned.entries()) {
+          const current = readSession(this.config.dataDir, spawnedSession.id);
+          if (!current) {
+            throw new Error(`Session not found after grouped spawn: ${spawnedSession.id}`);
+          }
+          writeSession(this.config.dataDir, {
+            ...current,
+            group: {
+              id: groupId,
+              index,
+              total: spawned.length,
+              ...(spawnMembers[index]?.name ? { name: spawnMembers[index]!.name } : {}),
+            },
+            updatedAt: nowIso(),
+          });
+          updatedSessions.push(await this.get(spawnedSession.id));
+        }
+
+        const groupRecord: SessionGroupRecord = {
+          id: groupId,
+          project: request.project,
+          prompt,
+          ...(steps ? { steps } : {}),
+          planMode,
+          members: updatedSessions.map((session, index) => ({
+            sessionId: session.id,
+            agent: session.agent,
+            branch: session.branch,
+            ...(spawnMembers[index]?.name ? { name: spawnMembers[index]!.name } : {}),
+          })),
+          createdAt: updatedSessions[0]!.createdAt,
+          updatedAt: nowIso(),
+        };
+        writeSessionGroup(this.config.dataDir, groupRecord);
+        this.logEvent("session.group.spawn.completed", {
+          level: "info",
+          projectId: request.project,
+          message: `Spawned group ${groupId}`,
+          details: {
+            groupId,
+            sessionIds: updatedSessions.map((session) => session.id),
+          },
+        });
+        return {
+          ...updatedSessions[0]!,
+          sessions: updatedSessions,
+          groupId,
+        };
+      } catch (error) {
+        if (groupId) {
+          deleteSessionGroup(this.config.dataDir, groupId);
+        }
+        for (const session of spawned) {
+          try {
+            await this.kill(session.id, { force: true });
+          } catch {
+            // Best effort rollback only.
+          }
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.group.spawn.failed", {
+          level: "error",
+          projectId: request.project,
+          message: `Failed grouped spawn for ${request.project}: ${message}`,
+          details: {
+            groupId: groupId ?? null,
+            rolledBackSessionIds: spawned.map((session) => session.id),
+          },
+        });
+        throw new LoggedSpawnFailureError(message, error);
+      }
+    } catch (error) {
+      if (error instanceof LoggedSpawnFailureError) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        projectId: request.project,
+        message: `Failed to spawn session: ${message}`,
+        details: {
+          requestedAgent: request.agent ?? request.members?.[0]?.agent ?? null,
         },
       });
       throw error;

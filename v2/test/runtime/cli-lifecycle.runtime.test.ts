@@ -4,7 +4,7 @@ import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
+import type { RuntimeInfo, ServiceInstanceView, SessionView, SpawnResult } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -1670,6 +1670,85 @@ projects:
 
     expect(pane).toContain("ship the task");
     expect(log).toContain("ship the task");
+  });
+
+  it("spawns grouped sibling sessions through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-group-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("grouped.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "compare approaches",
+          "--member",
+          "claude",
+          "--member",
+          "codex",
+          "--json",
+        ])
+      ).stdout,
+    ) as SpawnResult;
+
+    expect(spawned.groupId).toBeTruthy();
+    expect(spawned.sessions).toHaveLength(2);
+    expect(new Set(spawned.sessions.map((session) => session.group?.id))).toEqual(
+      new Set([spawned.groupId]),
+    );
+    for (const session of spawned.sessions) {
+      const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("compare approaches"),
+      });
+      expect(pane).toContain("compare approaches");
+    }
+  });
+
+  it("honors a single --member agent through the built CLI", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-member-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("single-member.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "one member",
+          "--member",
+          "codex",
+          "--json",
+        ])
+      ).stdout,
+    ) as SpawnResult;
+
+    expect(spawned.sessions).toHaveLength(1);
+    expect(spawned.agent).toBe("codex");
+    expect(spawned.sessions[0]?.agent).toBe("codex");
   });
 
   it.each([

@@ -28,6 +28,7 @@ import {
   renderRuntimeInfo,
   renderSessionCard,
   renderInteractiveSessionList,
+  renderSpawnResult,
   renderWaitingInputAlert,
   withSpinner,
 } from "./cli-view.js";
@@ -43,6 +44,7 @@ import type {
   SessionLink,
   ServiceInstanceView,
   SessionView,
+  SpawnResult,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -1090,6 +1092,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<project>", "Configured project id")
     .argument("<prompt...>", "Task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
+    .option("--member <name>", "Add one grouped member agent: claude or codex", appendOptionValue)
     .option(
       "--plan",
       "Start in plan mode (Claude startup uses --permission-mode plan; Codex launch is unchanged)",
@@ -1109,11 +1112,20 @@ export function createProgram(cliEntrypoint: string): Command {
         throw new Error("spawn requires a non-empty prompt");
       }
       const configPath = getConfigPath(command.parent as Command);
+      const members = options.member as string[] | undefined;
+      if (options.agent && members?.length) {
+        throw new Error("--agent cannot be combined with --member");
+      }
 
       let branch: string | undefined = options.branch;
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
-      const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
+      const interactive =
+        !options.json &&
+        !branch &&
+        !members?.length &&
+        process.stdin.isTTY &&
+        process.stdout.isTTY;
       if (interactive) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
@@ -1141,7 +1153,9 @@ export function createProgram(cliEntrypoint: string): Command {
         project,
         prompt,
         ...(options.step !== undefined ? { steps: options.step as string[] } : {}),
-        agent: options.agent,
+        ...(members?.length
+          ? { members: members.map((member) => ({ agent: member as "claude" | "codex" })) }
+          : { agent: options.agent }),
         ...(options.plan ? { planMode: true } : {}),
         ...(branch !== undefined ? { branch } : {}),
         ...(overrides !== undefined ? { overrides } : {}),
@@ -1149,8 +1163,8 @@ export function createProgram(cliEntrypoint: string): Command {
       await outputResult({
         json: Boolean(options.json),
         label: "starting session",
-        action: () => postJson<SessionView>(cliEntrypoint, "/sessions", payload, configPath),
-        render: renderSessionCard,
+        action: () => postJson<SpawnResult>(cliEntrypoint, "/sessions", payload, configPath),
+        render: renderSpawnResult,
       });
     });
 

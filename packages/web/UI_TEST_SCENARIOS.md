@@ -58,6 +58,9 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 
 - SPAWN_NEW_SESSION button opens centered modal
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
+- Modal has: project select, members list, branch input (single-session only), workspace select, plan checkbox, steps list, multiline textarea, Spawn button
+- `+ MEMBER` adds another agent row; each row has its own claude/codex select and remove button
+- When 2+ members are present: branch input is replaced by grouped-session helper text and Shared workspace is disabled
 - Branch input: placeholder "branch name", optional
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"

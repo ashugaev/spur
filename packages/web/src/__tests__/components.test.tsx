@@ -141,6 +141,42 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("supports grouped member selection in spawn modal", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, _init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        return new Response(
+          JSON.stringify({
+            ...sessionsPayload().sessions[0],
+            groupId: "api-a1-group",
+            sessions: [
+              sessionsPayload().sessions[0],
+              { ...sessionsPayload().sessions[0], id: "api-b2", agent: "codex" },
+            ],
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Member" }));
+
+    expect(screen.getByLabelText("member 1 agent")).toBeInTheDocument();
+    expect(screen.getByLabelText("member 2 agent")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Shared" })).toBeDisabled();
+  });
+
   it("exposes install metadata for PWA installability", async () => {
     const metadata = await generateMetadata();
     const appManifest = manifest();

@@ -15,6 +15,7 @@ const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const deleteSessionGroupMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
@@ -23,6 +24,7 @@ const listActiveServiceProblemsMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
+const writeSessionGroupMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
@@ -88,6 +90,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  deleteSessionGroup: deleteSessionGroupMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
@@ -98,6 +101,7 @@ vi.mock("../../src/metadata.js", () => ({
   readServiceInstance: readServiceInstanceMock,
   readSession: readSessionMock,
   writeServiceInstance: writeServiceInstanceMock,
+  writeSessionGroup: writeSessionGroupMock,
   writeSession: writeSessionMock,
 }));
 
@@ -287,6 +291,8 @@ describe("SessionService", () => {
     listSessionsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
     writeSessionMock.mockReset();
+    writeSessionGroupMock.mockReset();
+    deleteSessionGroupMock.mockReset();
     deleteServiceInstanceMock.mockReset();
     deleteServiceInstancesForSessionMock.mockReset();
     deleteServiceSourceStatesForServiceMock.mockReset();
@@ -414,6 +420,108 @@ describe("SessionService", () => {
       "session.agent_session_id.discovered",
       "session.spawn.completed",
     ]);
+  });
+
+  it("spawns grouped sessions with per-member agents and shared group metadata", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    reserveNextSessionIdMock
+      .mockReset()
+      .mockResolvedValueOnce("api-1")
+      .mockResolvedValueOnce("api-2");
+    createWorktreeMock
+      .mockReset()
+      .mockResolvedValueOnce("/tmp/spur-worktrees/api/api-1")
+      .mockResolvedValueOnce("/tmp/spur-worktrees/api/api-2");
+    ensureSessionSlotToolMock
+      .mockReset()
+      .mockReturnValueOnce("/tmp/spur-tools/api-1")
+      .mockReturnValueOnce("/tmp/spur-tools/api-2");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      members: [{ agent: "claude" }, { agent: "codex" }],
+    });
+
+    expect(result.groupId).toBe("api-1-group");
+    expect(result.sessions).toHaveLength(2);
+    expect(result.sessions.map((session) => session.agent)).toEqual(["claude", "codex"]);
+    expect(result.sessions.map((session) => session.group)).toEqual([
+      { id: "api-1-group", index: 0, total: 2 },
+      { id: "api-1-group", index: 1, total: 2 },
+    ]);
+    expect(writeSessionGroupMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        id: "api-1-group",
+        project: "api",
+        members: [
+          expect.objectContaining({ sessionId: "api-1", agent: "claude" }),
+          expect.objectContaining({ sessionId: "api-2", agent: "codex" }),
+        ],
+      }),
+    );
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.group.spawn.completed"),
+    ).toBe(true);
+  });
+
+  it("honors a single member entry for one-session spawn", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "hello",
+      members: [{ agent: "codex" }],
+    });
+
+    expect(result.sessions).toHaveLength(1);
+    expect(result.agent).toBe("codex");
+    expect(result.sessions[0]?.agent).toBe("codex");
+    expect(result.groupId).toBeUndefined();
+  });
+
+  it("rolls back grouped sessions when a later member fails to spawn", async () => {
+    createSessionStore();
+    reserveNextSessionIdMock
+      .mockReset()
+      .mockResolvedValueOnce("api-1")
+      .mockResolvedValueOnce("api-2");
+    createWorktreeMock
+      .mockReset()
+      .mockResolvedValueOnce("/tmp/spur-worktrees/api/api-1")
+      .mockResolvedValueOnce("/tmp/spur-worktrees/api/api-2");
+    ensureSessionSlotToolMock
+      .mockReset()
+      .mockReturnValueOnce("/tmp/spur-tools/api-1")
+      .mockReturnValueOnce("/tmp/spur-tools/api-2");
+    createTmuxSessionMock
+      .mockReset()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("tmux boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+        members: [{ agent: "claude" }, { agent: "codex" }],
+      }),
+    ).rejects.toThrow("Failed to spawn api-2: tmux boom");
+
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-2");
+    expect(deleteSessionGroupMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.group.spawn.failed"),
+    ).toBe(true);
   });
 
   it("passes planMode to launch planning and persists it on the session", async () => {
@@ -658,6 +766,20 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.spawn.shared_workspace",
     );
+  });
+
+  it("rejects grouped spawn in shared workspace mode", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+        members: [{ agent: "claude" }, { agent: "codex" }],
+        overrides: { worktree: false },
+      }),
+    ).rejects.toThrow("multi-agent spawn requires worktree mode");
   });
 
   it("logs message delivery after updating tmux and metadata", async () => {
@@ -2019,7 +2141,12 @@ describe("SessionService", () => {
       status: "errored",
       error: "tmux boom",
     });
-    expect(logSpurEventMock.mock.calls.at(-1)?.[1]).toMatchObject({
+    expect(
+      logSpurEventMock.mock.calls.findLast(
+        ([, entry]) =>
+          entry.event === "session.spawn.failed" && entry.details && "stage" in entry.details,
+      )?.[1],
+    ).toMatchObject({
       event: "session.spawn.failed",
       details: expect.objectContaining({
         stage: "tmux.create",

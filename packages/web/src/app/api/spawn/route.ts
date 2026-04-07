@@ -1,16 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView } from "@/lib/types";
+import type { SpurSpawnResult } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
   prompt?: string;
   agent?: "claude" | "codex";
+  members?: Array<{ agent?: "claude" | "codex"; name?: string }>;
   branch?: string;
   planMode?: boolean;
   steps?: string[];
   overrides?: { worktree?: boolean; defaultBranch?: string };
 }
+
+class SpawnRequestError extends Error {}
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,6 +33,42 @@ export async function POST(request: NextRequest) {
           .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
           .map((s) => s.trim())
       : undefined;
+    const filteredMembers = Array.isArray(body.members)
+      ? body.members.map((member, index) => {
+          if (
+            !member ||
+            typeof member.agent !== "string" ||
+            (member.agent !== "claude" && member.agent !== "codex")
+          ) {
+            throw new SpawnRequestError(`members[${index}].agent must be claude or codex`);
+          }
+          if (
+            member.name !== undefined &&
+            (typeof member.name !== "string" || !member.name.trim())
+          ) {
+            throw new SpawnRequestError(
+              `members[${index}].name must be a non-empty string when provided`,
+            );
+          }
+          return {
+            agent: member.agent,
+            ...(member.name?.trim() ? { name: member.name.trim() } : {}),
+          };
+        })
+      : undefined;
+    if (body.agent && filteredMembers?.length) {
+      return NextResponse.json(
+        { error: "agent cannot be combined with members" },
+        { status: 400 },
+      );
+    }
+    if (
+      !body.agent &&
+      body.members !== undefined &&
+      (!filteredMembers || filteredMembers.length === 0)
+    ) {
+      return NextResponse.json({ error: "members must contain at least one entry" }, { status: 400 });
+    }
 
     const rawOverrides =
       typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
@@ -37,13 +76,17 @@ export async function POST(request: NextRequest) {
       rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
 
     const payload: Record<string, unknown> = { project, prompt };
-    if (body.agent) payload.agent = body.agent;
+    if (filteredMembers?.length) {
+      payload.members = filteredMembers;
+    } else if (body.agent) {
+      payload.agent = body.agent;
+    }
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;
     if (filteredSteps && filteredSteps.length > 0) payload.steps = filteredSteps;
     if (overrides) payload.overrides = overrides;
 
-    const session = await spurRequestJson<SpurSessionView>(
+    const session = await spurRequestJson<SpurSpawnResult>(
       "/sessions",
       spurJsonInit("POST", payload),
     );
@@ -51,6 +94,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(session, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to spawn Spur session";
-    return NextResponse.json({ error: message }, { status: 502 });
+    const status = error instanceof SpawnRequestError ? 400 : 502;
+    return NextResponse.json({ error: message }, { status });
   }
 }

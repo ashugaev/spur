@@ -13,14 +13,17 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> <prompt...> [--agent claude|codex | --member claude|codex ...] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` always takes one task prompt. Optional `steps` are a pipeline skeleton around that task:
 
 - The positional `<prompt...>` is the task.
+- `--agent` starts one session; repeat `--member` to start several sibling sessions for the same task.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
+- Grouped spawn keeps one shared task prompt but creates one session per listed member agent.
+- Grouped spawn uses owned worktrees only; `--shared` stays single-session only.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -29,6 +32,7 @@ spur spawn <project> <prompt...> [--agent claude|codex] [--plan] [--branch <name
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
 spur spawn backend-api "Fix the flaky auth test" --step research --step test
+spur spawn backend-api "Compare two approaches" --member claude --member codex
 ```
 
 ```yaml
@@ -253,6 +257,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
+- `spawn --member <agent>`: optional repeatable grouped spawn member list; cannot be combined with `--agent` or `--shared`.
 - `spawn --plan`: optional CLI-only startup mode toggle. Claude startup enters plan mode; Codex currently accepts this flag but startup behavior is unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.

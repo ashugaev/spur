@@ -5,6 +5,7 @@ import type {
   ServiceInstanceState,
   ServiceInstanceView,
   SessionState,
+  SpawnResult,
   SessionView,
 } from "./types.js";
 
@@ -294,6 +295,16 @@ export function renderSessionList(sessions: SessionView[]): string {
 
   const widths = measureSessionColumns(sessions);
   return sessions.map((session) => renderSessionCard(session, widths)).join("\n");
+}
+
+export function renderSpawnResult(result: SpawnResult): string {
+  if (result.sessions.length <= 1) {
+    return renderSessionCard(result.sessions[0] ?? result);
+  }
+  const heading = result.groupId
+    ? brandLine(`Spawned group ${result.groupId} (${result.sessions.length} sessions)`)
+    : brandLine(`Spawned ${result.sessions.length} sessions`);
+  return `${heading}\n${renderSessionList(result.sessions)}`;
 }
 
 export function renderRuntimeInfo(info: RuntimeInfo): string {

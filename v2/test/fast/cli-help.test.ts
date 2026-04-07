@@ -70,9 +70,11 @@ describe("spur help", () => {
 
     expect(help).toContain("--branch <name>");
     expect(help).toContain("--plan");
+    expect(help).toContain("--member <name>");
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
+    expect(help).toContain("Add one grouped member agent");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
     expect(help).toContain("Use the project path directly for this session (no worktree)");

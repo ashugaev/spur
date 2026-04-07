@@ -24,6 +24,13 @@ export interface SessionSlots {
   links: SessionLink[];
 }
 
+export interface SessionGroupRef {
+  id: string;
+  index: number;
+  total: number;
+  name?: string;
+}
+
 export type SourceType = "cron" | "github" | "service";
 
 export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
@@ -173,6 +180,7 @@ export interface SessionRecord {
   id: string;
   project: string;
   agent: AgentName;
+  group?: SessionGroupRef;
   planMode?: boolean;
   agentSessionId?: string;
   prompt: string;
@@ -189,6 +197,24 @@ export interface SessionRecord {
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   error?: string;
+}
+
+export interface SessionGroupMemberRecord {
+  sessionId: string;
+  agent: AgentName;
+  branch: string;
+  name?: string;
+}
+
+export interface SessionGroupRecord {
+  id: string;
+  project: string;
+  prompt: string;
+  steps?: string[];
+  planMode: boolean;
+  members: SessionGroupMemberRecord[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ServiceInstanceRecord {
@@ -238,10 +264,22 @@ export interface SpawnSessionRequest {
   prompt: string;
   steps?: string[];
   agent?: AgentName;
+  members?: SpawnSessionMemberRequest[];
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;
+}
+
+export interface SpawnSessionMemberRequest {
+  agent: AgentName;
+  branch?: string;
+  name?: string;
+}
+
+export interface SpawnResult extends SessionView {
+  sessions: SessionView[];
+  groupId?: string;
 }
 
 export interface SendMessageAttachment {

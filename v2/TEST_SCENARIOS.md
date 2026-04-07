@@ -26,6 +26,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - `spawn` requires one positional `<prompt...>` task.
+- `spawn --member <agent>` repeats to create grouped sibling sessions for one task, persists one shared `group.id` on each session, and rolls back earlier siblings if a later member fails.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
@@ -34,6 +35,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Unfinished running pipelines resume after daemon restart without restarting the session.
 - Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
+- Grouped spawn rejects shared workspace mode and top-level `branch`, so each sibling keeps its own worktree-backed branch lifecycle.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, accepts either one branch name or the `NO_PROJECT_RULES` sentinel, and fails before reserving a session id when preflight output is invalid.
 - `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
 - `SessionService.preflight()` returns null when worktree is disabled or the project has no preflight config.
@@ -83,6 +85,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list --json` auto-starts the daemon and returns `[]` on a fresh config, and `ls --json` does the same.
 - Normal CLI session commands sync their current config into the running daemon registry before they hit `/sessions`.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
+- `spawn --json --member claude --member codex` creates grouped sibling sessions through the built CLI, returns them in one response, and each session carries the same `groupId`.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
