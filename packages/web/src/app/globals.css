@@ -61,6 +61,10 @@ a:hover {
   text-decoration: underline;
 }
 
+button {
+  white-space: nowrap;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

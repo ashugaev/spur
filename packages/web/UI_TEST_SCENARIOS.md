@@ -57,6 +57,7 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal
+- Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
 - Branch input: placeholder "branch name", optional
 - Workspace select: Default / Worktree / Shared options
@@ -87,6 +88,7 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
+- Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 

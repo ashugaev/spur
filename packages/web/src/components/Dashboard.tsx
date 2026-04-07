@@ -43,7 +43,7 @@ function StatItem({
 }) {
   return (
     <button
-      className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      className={`flex shrink-0 items-center gap-1.5 border px-1.5 py-0.5 transition ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
       onClick={onClick}
       type="button"
     >
