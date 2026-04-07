@@ -1907,18 +1907,25 @@ export class SessionService {
         restorePrompt,
         withPlanMode(hookSetup, planMode),
       );
+      const effectivePlan =
+        launchPlan ??
+        buildAgentLaunchPlan(
+          current.agent,
+          restorePrompt,
+          withPlanMode(hookSetup, planMode),
+        );
       if (!launchPlan) {
-        this.logEvent("session.restore.failed", {
-          level: "error",
+        this.logEvent("session.restore.started", {
+          level: "info",
           sessionId,
           projectId: current.project,
-          message: `Failed to restore ${sessionId}: no native resume state`,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
         });
-        throw new Error(`No native resume state found for ${current.agent} session ${sessionId}`);
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
+      let restoreLaunchCommand = effectivePlan.launchCommand;
+      let restoreReadyMarkers = effectivePlan.readyMarkers;
       if (current.agent === "claude") {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
@@ -1928,7 +1935,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            launchPlan.launchCommand,
+            effectivePlan.launchCommand,
             withPlanMode(hookSetup, planMode),
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -1957,7 +1964,7 @@ export class SessionService {
       }
       const restoreProject = this.config.projects[current.project];
       const restoreInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
+        effectivePlan.initialMessage,
         !!restoreProject?.devServer,
       );
       await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
