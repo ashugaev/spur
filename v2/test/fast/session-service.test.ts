@@ -2970,4 +2970,117 @@ describe("SessionService", () => {
       );
     });
   });
+
+  describe("respawn", () => {
+    it("respawns a completed session by calling spawn with original params", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.id).toBe("api-1");
+      expect(result.status).toBe("running");
+      expect(createWorktreeMock).toHaveBeenCalled();
+      expect(createTmuxSessionMock).toHaveBeenCalled();
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "fix the bug", {});
+      expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+        "session.respawn.started",
+      );
+    });
+
+    it("respawns a completed session with pipeline steps", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        pipeline: {
+          steps: ["write tests", "implement feature"],
+          nextStepIndex: 2,
+          status: "completed",
+        },
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.id).toBe("api-1");
+      expect(result.status).toBe("running");
+    });
+
+    it("rejects respawn of a running session", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("api-1")).rejects.toThrow(
+        "Session api-1 is not in a terminal state",
+      );
+    });
+
+    it("rejects respawn of a paused session", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "paused",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("api-1")).rejects.toThrow(
+        "Session api-1 is not in a terminal state",
+      );
+    });
+  });
 });
