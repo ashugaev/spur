@@ -2323,13 +2323,7 @@ export class SessionService {
         return "ready";
       }
 
-      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-      if (!runtimeAlive) {
-        return "exited";
-      }
-
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
+      if (await this.confirmAgentExited(session)) {
         return "exited";
       }
 
@@ -2364,13 +2358,7 @@ export class SessionService {
         return "ready";
       }
 
-      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-      if (!runtimeAlive) {
-        return "exited";
-      }
-
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
+      if (await this.confirmAgentExited(session)) {
         return "exited";
       }
 
@@ -2391,6 +2379,22 @@ export class SessionService {
 
       await sleep(PIPELINE_POLL_INTERVAL_MS);
     }
+  }
+
+  private async confirmAgentExited(
+    session: Pick<SessionRecord, "tmuxSession" | "agent">,
+  ): Promise<boolean> {
+    if (await tmuxSessionExists(session.tmuxSession)) {
+      if (await isProcessRunningInTmux(session.tmuxSession, session.agent)) {
+        return false;
+      }
+    }
+    // Retry once after a short delay to guard against transient tmux/ps failures.
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    if (await tmuxSessionExists(session.tmuxSession)) {
+      return !(await isProcessRunningInTmux(session.tmuxSession, session.agent));
+    }
+    return true;
   }
 
   private markPipelineErrored(sessionId: string, message: string): void {

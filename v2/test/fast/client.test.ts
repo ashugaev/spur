@@ -154,7 +154,7 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("restarts a running daemon without using ensureServer as a stop path", async () => {
+  it("restarts a running daemon and waits for external restart first", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     vi.mocked(fetch)
       .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
@@ -174,30 +174,29 @@ describe("client.ensureServer", () => {
       runtime: runtimeInfo(undefined, 8888),
     });
     expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
-    expect(spawnMock).toHaveBeenCalledWith(
-      process.execPath,
-      ["/tmp/dist/cli.js", "--config", "/tmp/spur.yaml", "daemon", "start"],
-      {
-        detached: true,
-        stdio: "ignore",
-      },
-    );
+    // Should NOT spawn — external manager (e.g. systemd) restarted the daemon
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("waits through an extended starting window after restart", async () => {
+  it("falls back to spawnDaemon when external restart does not appear", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);
-    fetchMock
-      .mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }))
-      .mockRejectedValueOnce(new Error("daemon stopped"));
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      fetchMock.mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: "Daemon is starting" }), { status: 503 }),
-      );
-    }
+    // Probe: running daemon
     fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+      new Response(JSON.stringify(runtimeInfo()), { status: 200 }),
     );
+    // waitUntilDaemonPidChanges: daemon stopped
+    fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
+    // First waitForReadyDaemon: all 160 attempts fail (no external restart)
+    for (let attempt = 0; attempt < 160; attempt += 1) {
+      fetchMock.mockRejectedValueOnce(new Error("still down"));
+    }
+    // Second waitForReadyDaemon (after spawnDaemon): daemon comes up
+    fetchMock
+      .mockRejectedValueOnce(new Error("starting"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(runtimeInfo(undefined, 8888)), { status: 200 }),
+      );
 
     const { restartDaemonIfRunning } = await loadClientModule();
     const result = await restartDaemonIfRunning("/tmp/dist/cli.js", "/tmp/spur.yaml");

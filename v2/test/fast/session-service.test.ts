@@ -2525,9 +2525,18 @@ describe("SessionService", () => {
     );
   });
 
-  it("fails restore when native resume state is unavailable", async () => {
+  it("does not throw when native resume state is unavailable (falls back to fresh launch)", async () => {
+    // This test uses real timers because waitForRestorePlan polls with
+    // node:timers/promises setTimeout which fake timers do not intercept.
+    vi.useRealTimers();
+
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
+    buildAgentLaunchPlanMock.mockReturnValue({
+      launchCommand: "claude --dangerously-skip-permissions",
+      initialMessage: "hello",
+      readyMarkers: ["$"],
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2542,24 +2551,18 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
 
-    const restorePromise = service.restore("api-1");
-    await vi.advanceTimersByTimeAsync(5_000);
+    const restored = await service.restore("api-1");
 
-    await expect(restorePromise).rejects.toThrow(
-      "No native resume state found for claude session api-1",
-    );
-
-    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
-    expect(createTmuxSessionMock).not.toHaveBeenCalled();
-    expect(logSpurEventMock.mock.calls.at(-1)?.[1]).toMatchObject({
-      event: "session.restore.failed",
-      sessionId: "api-1",
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalled();
+    expect(createTmuxSessionMock).toHaveBeenCalled();
+    expect(restored.id).toBe("api-1");
   });
 
   it("waits for native resume state to appear before restoring", async () => {
