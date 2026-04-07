@@ -118,7 +118,6 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
-    let terminalElement: HTMLElement | null = null;
     let terminalViewport: HTMLDivElement | null = null;
     let wheelTarget: HTMLElement | null = null;
     let wheelHandler: ((event: WheelEvent) => void) | null = null;
@@ -167,8 +166,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         });
 
         terminal.open(terminalRef.current);
-        terminalElement = terminal.element ?? null;
-        terminalViewport = terminalElement?.querySelector(".xterm-viewport") as HTMLDivElement | null;
+        terminalViewport = (terminal.element?.querySelector(".xterm-viewport") as HTMLDivElement) ?? null;
         fit.fit();
 
         wheelTarget = terminalRef.current;

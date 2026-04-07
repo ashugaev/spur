@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityDot } from "@/components/ActivityDot";
-import { DirectTerminal } from "@/components/DirectTerminal";
+import { TerminalModal } from "@/components/TerminalModal";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -554,28 +554,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (
-            <div
-              className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[var(--color-bg-base)]"
-              onWheel={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-label={`Terminal ${session.id}`}
-            >
-              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                  Terminal — {session.id}
-                </span>
-                <button
-                  type="button"
-                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                  onClick={() => setTerminalOpen(false)}
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="min-h-0 flex-1">
-                <DirectTerminal sessionId={session.tmuxSession ?? session.id} />
-              </div>
-            </div>
+            <TerminalModal onClose={() => setTerminalOpen(false)} session={session} />
           ) : null}
         </>
       ) : (

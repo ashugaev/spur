@@ -83,8 +83,14 @@ a:hover {
 
 /* ── xterm.js ────────────────────────────────────────────────────────── */
 
-.xterm-viewport {
+.xterm .xterm-viewport {
+  overflow-y: auto !important;
   overscroll-behavior: contain;
+}
+
+.xterm .xterm-helper-textarea {
+  caret-color: transparent;
+  outline: none;
 }
 
 /* ── Animations ──────────────────────────────────────────────────────── */

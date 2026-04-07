@@ -120,11 +120,14 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - Worktree path in bordered box
 - Error shown in red box when present
 
-### S6: Terminal modal (detail page)
+### S6: Terminal modal (dashboard + detail page)
 
-- Terminal button opens full-screen terminal overlay
+- Terminal button opens the shared full-screen terminal overlay from both dashboard and detail page
 - ✕ closes overlay
 - DirectTerminal component renders inside
+- Bottom control bar uses black terminal surface styling, not elevated gray
+- Control bar shows `ESC`, `ENTER`, and arrow buttons with bordered square button styling
+- Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 
