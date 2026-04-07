@@ -79,12 +79,16 @@ function useAggregatePr(sessions: SpurSessionView[]) {
 }
 
 function useClock() {
-  const [now, setNow] = useState(new Date());
+  const [clock, setClock] = useState("--:--:--");
+
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
+    const formatClock = () => new Date().toLocaleTimeString("en-GB", { hour12: false });
+    setClock(formatClock());
+    const timer = setInterval(() => setClock(formatClock()), 1000);
     return () => clearInterval(timer);
   }, []);
-  return now.toLocaleTimeString("en-GB", { hour12: false });
+
+  return clock;
 }
 
 function PrStateLabel({ state }: { state: PrInfo["state"] }) {

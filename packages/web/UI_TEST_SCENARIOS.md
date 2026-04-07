@@ -1,7 +1,7 @@
 # Web UI Test Scenarios
 
 Browser-based test scenarios for the Spur web dashboard.
-Run against a live daemon with `SPUR_DAEMON_URL` set.
+Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
 When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
 
 ## Dashboard
@@ -53,6 +53,12 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - Each has colored dot + uppercase label + divider line + count
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
+
+### D6b: Footer clock hydrates cleanly
+
+- Footer clock area renders without Next.js recoverable hydration error overlay
+- Initial footer clock value may briefly show a deterministic placeholder before client time appears
+- Footer clock updates to local time after hydration
 
 ### D7: Spawn modal
 
@@ -128,8 +134,11 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 
 ### R1: Mobile (<640px)
 
-- Header stacks vertically (title above controls)
-- Header stats wrap below title
+- Header is split into 3 rows in order:
+- Row 1: logo + project title
+- Row 2: Needs Input / Working / Waiting stats
+- Row 3: search input + project filter + Spawn Session button
+- No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
 - Attention zones use accordion (tap to expand/collapse)
 
@@ -144,3 +153,13 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 
 - Full layout: all columns visible
 - Header stats inline with title
+
+## PWA
+
+### P1: App is installable from browser chrome
+
+- `GET /manifest.webmanifest` returns Spur manifest with `name`, `short_name`, `display=standalone`, `start_url=/`, dark `theme_color`, and 192/512 PNG icons
+- Browser devtools Application tab shows the manifest without missing required fields
+- Chromium shows install/save-app affordance for the dashboard when opened on `localhost`
+- Installed window opens on `/` with Spur name/icon instead of a generic browser shortcut
+- iOS-sized pass uses the provided Apple icon when saving to home screen

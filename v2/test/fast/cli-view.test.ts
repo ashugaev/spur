@@ -41,6 +41,8 @@ function runtimeInfo(overrides: Partial<RuntimeInfo> = {}): RuntimeInfo {
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
     configPath: "/tmp/spur.yaml",
+    tmuxSocketName: "spur-4311",
+    uiPort: 5555,
     startedAt: "2026-03-18T10:00:00.000Z",
     ...overrides,
   };

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { homedir, userInfo } from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
-import { findTmux, tmuxSessionExists, validateSessionId } from "./tmux-utils.js";
+import { findTmux, tmuxSessionExists, tmuxSocketArgs, validateSessionId } from "./tmux-utils.js";
 
 interface Pty {
   onData(listener: (data: string) => void): void;
@@ -99,17 +99,31 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       return;
     }
 
-    const mouseProcess = spawn(tmuxPath, ["set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+    const mouseProcess = spawn(tmuxPath, [
+      ...tmuxSocketArgs(),
+      "set-option",
+      "-t",
+      `=${sessionId}`,
+      "mouse",
+      "on",
+    ]);
     mouseProcess.on("error", () => {
       // Best effort only.
     });
 
-    const statusProcess = spawn(tmuxPath, ["set-option", "-t", `=${sessionId}`, "status", "off"]);
+    const statusProcess = spawn(tmuxPath, [
+      ...tmuxSocketArgs(),
+      "set-option",
+      "-t",
+      `=${sessionId}`,
+      "status",
+      "off",
+    ]);
     statusProcess.on("error", () => {
       // Best effort only.
     });
 
-    const pty = ptySpawn(tmuxPath, ["attach-session", "-t", `=${sessionId}`], {
+    const pty = ptySpawn(tmuxPath, [...tmuxSocketArgs(), "attach-session", "-t", `=${sessionId}`], {
       name: "xterm-256color",
       cols: 80,
       rows: 24,

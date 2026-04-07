@@ -23,6 +23,17 @@ export async function generateMetadata(): Promise<Metadata> {
       default: "Spur | Dashboard",
     },
     description: "Spur dashboard UI",
+    manifest: "/manifest.webmanifest",
+    applicationName: "Spur",
+    appleWebApp: {
+      capable: true,
+      title: "Spur",
+      statusBarStyle: "black-translucent",
+    },
+    icons: {
+      icon: [{ url: "/icon-192" }, { url: "/icon-512" }],
+      apple: [{ url: "/apple-icon" }],
+    },
   };
 }
 

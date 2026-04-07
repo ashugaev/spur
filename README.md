@@ -11,19 +11,18 @@ The old AO/v1 backend, mobile app, plugin tree, example configs, and parallel do
 
 ```bash
 bash scripts/setup.sh
-cp v2/spur.yaml.example spur.yaml
-SPUR_CONFIG=./spur.yaml spur daemon start
-SPUR_CONFIG=./spur.yaml pnpm dev
+spur list
+pnpm dev
 ```
 
-If the daemon is not running on `http://127.0.0.1:4310`, set `SPUR_DAEMON_URL` before starting the web UI.
+The first Spur command auto-initializes the global instance config at `~/.spur/config.yaml`.
+Use repo-local `spur.yaml` only for project definitions; `spur list` / `spur spawn` auto-connect it when present.
+The web UI defaults to the instance `ui.port` from that same global config; the default is `5555`.
 
 For a production-like UI server:
 
 ```bash
 pnpm ui:build
-SPUR_CONFIG=./spur.yaml \
-SPUR_DAEMON_URL=http://127.0.0.1:4310 \
 WEB_HOST=127.0.0.1 \
 DIRECT_TERMINAL_BIND_HOST=127.0.0.1 \
 DIRECT_TERMINAL_BIND_PORT=14801 \
@@ -32,17 +31,23 @@ PORT=3011 \
 pnpm ui:start
 ```
 
-The web package also reads `SPUR_CONFIG` (or `SPUR_CONFIG_PATH`) to populate project filters and branding from a real Spur config.
 For reverse-proxy deployments, keep the Next.js app and direct terminal server bound to loopback and set
 `DIRECT_TERMINAL_PUBLIC_PORT` to the externally reachable proxy port.
+
+For an explicit production update on a host that runs `spur-daemon.service` and `spur-web.service`:
+
+```bash
+pnpm main:deploy
+```
 
 ## Repo Layout
 
 - `v2/` — Spur daemon, CLI, automation runtime, tests, config example
 - `packages/web/` — Next.js UI over the Spur daemon API
 - `scripts/setup.sh` — bootstrap for local development and dogfooding
+- `scripts/main-deploy.sh` — explicit pull/build/restart flow for a `main`-based production host
 - `tests/integration/` — onboarding smoke environment
-- `spur.yaml` — repo-local dogfood config for this checkout
+- `spur.yaml` — repo-local project config for this checkout
 
 ## Validation
 

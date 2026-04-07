@@ -40,6 +40,7 @@ import {
   isProcessRunningInTmux,
   killDevServerTmux,
   killTmuxSession,
+  setTmuxSocketName,
   sendMessageToTmux,
   syncTmuxStatus,
   tmuxPaneDead,
@@ -61,6 +62,7 @@ import {
   type BranchSource,
   type DevServerConfig,
   type KillSessionRequest,
+  type ProjectListEntry,
   type PreflightRequest,
   type PreflightResponse,
   type ProjectConfig,
@@ -193,6 +195,8 @@ function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
     dataDir: config.dataDir,
     worktreeDir: config.worktreeDir,
     configPath: config.configPath,
+    tmuxSocketName: config.tmux.socketName,
+    uiPort: config.ui.port,
     startedAt,
   };
 }
@@ -404,29 +408,28 @@ export class SessionService {
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
-    const initial = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"] ?? "", [], {
+    const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
       skipInvalid: false,
     });
-    this.bootstrapConfigPath = initial.config.configPath;
+    this.bootstrapConfigPath = bootstrap.config.configPath;
     this.startedAt = startedAt;
-    mkdirSync(initial.config.dataDir, { recursive: true });
-    mkdirSync(initial.config.worktreeDir, { recursive: true });
+    mkdirSync(bootstrap.config.dataDir, { recursive: true });
+    mkdirSync(bootstrap.config.worktreeDir, { recursive: true });
     this.registryPaths = upsertConfigRegistryPath(
-      initial.config.dataDir,
-      initial.config.configPath,
+      bootstrap.config.dataDir,
+      bootstrap.config.configPath,
     );
     const merged = buildMergedConfig(this.bootstrapConfigPath, this.registryPaths, {
       skipInvalid: true,
       warn: (message) => {
-        logSpurEvent(initial.config.dataDir, {
+        logSpurEvent(bootstrap.config.dataDir, {
           event: "daemon.registry.warning",
           level: "warn",
           message,
         });
       },
     });
-    this.config = initial.config;
-    this.registryPaths = [];
+    this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
   }
@@ -438,16 +441,34 @@ export class SessionService {
     }
   }
 
-  previewConfigSync(configPath: string): {
+  previewConfigConnect(configPath: string): {
     config: AppConfig;
     registryPaths: string[];
     changed: boolean;
     warnings: string[];
   } {
-    const nextRegistryPaths = [...this.registryPaths];
-    if (!nextRegistryPaths.includes(configPath)) {
-      nextRegistryPaths.push(configPath);
-    }
+    return this.previewRegistryPaths(
+      this.registryPaths.includes(configPath)
+        ? this.registryPaths
+        : [...this.registryPaths, configPath],
+    );
+  }
+
+  previewConfigDisconnect(configPath: string): {
+    config: AppConfig;
+    registryPaths: string[];
+    changed: boolean;
+    warnings: string[];
+  } {
+    return this.previewRegistryPaths(this.registryPaths.filter((path) => path !== configPath));
+  }
+
+  private previewRegistryPaths(nextRegistryPaths: string[]): {
+    config: AppConfig;
+    registryPaths: string[];
+    changed: boolean;
+    warnings: string[];
+  } {
     const warnings: string[] = [];
     const merged = buildMergedConfig(this.bootstrapConfigPath, nextRegistryPaths, {
       skipInvalid: true,
@@ -469,6 +490,7 @@ export class SessionService {
   applyConfig(config: AppConfig, registryPaths: string[]): void {
     this.config = config;
     this.registryPaths = [...new Set(registryPaths)];
+    setTmuxSocketName(this.config.tmux.socketName);
     mkdirSync(this.config.dataDir, { recursive: true });
     mkdirSync(this.config.worktreeDir, { recursive: true });
     writeConfigRegistry(this.config.dataDir, this.registryPaths);
@@ -477,6 +499,17 @@ export class SessionService {
 
   getRegistryPaths(): string[] {
     return [...this.registryPaths];
+  }
+
+  listProjects(): ProjectListEntry[] {
+    return Object.entries(this.config.projects)
+      .map(([id, project]) => ({
+        id,
+        name: project.name?.trim() || id,
+      }))
+      .sort((left, right) =>
+        left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+      );
   }
 
   info(): RuntimeInfo {
