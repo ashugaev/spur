@@ -15,7 +15,7 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - `v2/` is `Spur`.
 - Spur is separate from the current `ao`.
 - Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
-- Spur is CLI plus local HTTP daemon. No UI layer in the current milestone.
+- Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI layer (thin Next.js frontend over daemon HTTP API).
 - Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
@@ -130,6 +130,28 @@ cron source
 - Never silently retarget `Enter`, `p`, `c`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
 - Empty states should be one sentence plus one dim next-step hint.
 - Optional animation is only a one-line transient spinner during wait states, cleared before final output.
+
+## Deployment (openclaw-dev VM)
+
+- VM: `openclaw-dev`, Tailscale IP `100.80.107.19`, public IP `136.107.236.142`
+- Nothing binds to `0.0.0.0`. All services on loopback or Tailscale IP only.
+- Instance config: `~/.spur/config.yaml`
+- Project config: `~/projects/ao/spur.yaml`
+
+Port map:
+
+| Service | Bind address | Port |
+|---------|-------------|------|
+| Daemon API | `127.0.0.1` | 4310 |
+| Next.js (web) | `127.0.0.1` | 3012 |
+| Terminal WS | `127.0.0.1` | 14801 |
+| Nginx proxy | `127.0.0.1` + `100.80.107.19` | 5555 |
+
+- Systemd units: `spur-daemon.service`, `spur-web.service`
+- Nginx config: `/etc/nginx/sites-enabled/spur-ao`
+- Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
+- `DIRECT_TERMINAL_PUBLIC_PORT=5555` tells the browser to connect WebSocket through the nginx proxy port.
+- Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation
 
