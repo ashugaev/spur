@@ -302,6 +302,12 @@ export async function startServer(
         return;
       }
 
+      const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
+      if (method === "POST" && respawnSessionId) {
+        sendJson(response, 200, await service.respawn(respawnSessionId));
+        return;
+      }
+
       const slotsSessionId = path.match(/^\/sessions\/([^/]+)\/slots$/)?.[1];
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);

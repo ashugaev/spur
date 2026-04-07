@@ -2010,6 +2010,37 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
+  async respawn(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (
+      session.status !== "completed" &&
+      session.status !== "killed" &&
+      session.status !== "errored"
+    ) {
+      throw new Error(`Session ${sessionId} is not in a terminal state (status: ${session.status})`);
+    }
+
+    this.logEvent("session.respawn.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Respawning ${sessionId}`,
+      details: { agent: session.agent },
+    });
+
+    const request: SpawnSessionRequest = {
+      project: session.project,
+      prompt: session.prompt,
+      agent: session.agent,
+      ...(session.planMode !== undefined && { planMode: session.planMode }),
+      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+    };
+    return this.spawn(request);
+  }
+
   private resumeSessionDelivery(): void {
     for (const session of listSessions(this.config.dataDir)) {
       this.ensureDeliveryRunner(session.id);
