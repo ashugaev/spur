@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import {
@@ -19,10 +20,11 @@ import {
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
-import { buildDashboardPath } from "@/lib/project-routes";
+import { buildDashboardPath, buildSessionPath } from "@/lib/project-routes";
 import {
   canComplete,
   canPause,
+  canRespawn,
   canSendMessage,
   hasServiceProblems,
   isRestorable,
@@ -109,6 +111,7 @@ interface SessionDetailProps {
 }
 
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
+  const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -168,6 +171,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       await loadSession();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleRespawn = async () => {
+    setBusyAction("respawn");
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/respawn`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      router.push(buildSessionPath(data.id, projectId ?? data.project));
+    } catch (respawnError) {
+      setError(
+        respawnError instanceof Error ? respawnError.message : "Failed to respawn session",
+      );
     } finally {
       setBusyAction(null);
     }
@@ -326,6 +348,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
               >
                 {busyAction === "kill" ? "Killing..." : "Kill"}
+              </button>
+            ) : null}
+            {canRespawn(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleRespawn()}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+              >
+                {busyAction === "respawn" ? "Respawning..." : "Respawn"}
               </button>
             ) : null}
             <button
