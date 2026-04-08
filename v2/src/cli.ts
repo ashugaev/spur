@@ -1105,6 +1105,7 @@ async function runInteractiveSessionList(
       if (key.name === "s" || key.sequence === "s") {
         pendingKillConfirmationSessionId = null;
         void respawnSelectedSession().catch(fail);
+        return;
       }
     };
 
