@@ -10,10 +10,18 @@ vi.mock("@/lib/spur-daemon", () => ({
   })),
 }));
 
+vi.mock("@/lib/voice", () => ({
+  readVoiceStatus: vi.fn(),
+  transcribeAudio: vi.fn(),
+}));
+
 import { spurRequestJson } from "@/lib/spur-daemon";
+import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
+import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
+import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
@@ -21,6 +29,8 @@ import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
+const mockedReadVoiceStatus = vi.mocked(readVoiceStatus);
+const mockedTranscribeAudio = vi.mocked(transcribeAudio);
 
 function sessionFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -47,6 +57,8 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
 describe("Spur web API routes", () => {
   beforeEach(() => {
     mockedSpurRequestJson.mockReset();
+    mockedReadVoiceStatus.mockReset();
+    mockedTranscribeAudio.mockReset();
     delete process.env["DIRECT_TERMINAL_PORT"];
     delete process.env["DIRECT_TERMINAL_BIND_PORT"];
     delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
@@ -190,5 +202,46 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toEqual({ directTerminalPort: "443" });
+  });
+
+  it("GET /api/runtime/voice returns availability from server-side voice checks", async () => {
+    mockedReadVoiceStatus.mockReturnValue({
+      available: true,
+      modelPath: "/models/ggml-base.en.bin",
+    });
+
+    const response = await runtimeVoiceStatus();
+    const payload = (await response.json()) as { available: boolean; modelPath: string };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      available: true,
+      modelPath: "/models/ggml-base.en.bin",
+    });
+  });
+
+  it("POST /api/runtime/voice/transcribe validates audio and returns transcription", async () => {
+    mockedTranscribeAudio.mockResolvedValue({
+      text: "Fix the flaky test",
+      modelPath: "/models/ggml-base.en.bin",
+    });
+
+    const formData = new FormData();
+    formData.append("audio", new File(["audio-bytes"], "voice.webm", { type: "audio/webm" }));
+
+    const response = await transcribeVoice(
+      new Request("http://localhost:3000/api/runtime/voice/transcribe", {
+        method: "POST",
+        body: formData,
+      }),
+    );
+    const payload = (await response.json()) as { text: string; modelPath: string };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      text: "Fix the flaky test",
+      modelPath: "/models/ggml-base.en.bin",
+    });
+    expect(mockedTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), "voice.webm");
   });
 });
