@@ -143,6 +143,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
+Voice input in `packages/web` is disabled until the host has `whisper-cli`, `ffmpeg`, and a local Whisper model at `voice.modelPath`.
 
 ```yaml
 server:
@@ -155,6 +156,8 @@ tmux:
   socketName: spur-4310
 ui:
   port: 5555
+voice:
+  modelPath: ~/.cache/whisper.cpp/ggml-base.en.bin
 
 projects:
   backend-api:

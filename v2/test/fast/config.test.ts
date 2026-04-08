@@ -55,6 +55,7 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
+    expect(config.voice.modelPath).toContain(".cache/whisper.cpp/ggml-base.en.bin");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
     expect(config.projects["backend"]?.worktree).toBe(true);
@@ -248,6 +249,21 @@ projects:
     expect(config.projects["backend"]?.spawn).toEqual({
       steps: ["research", "test"],
     });
+  });
+
+  it("parses a custom voice model path from the instance config", async () => {
+    const configPath = await writeConfig(`
+voice:
+  modelPath: ~/models/ggml-small.bin
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
   });
 
   it("parses an optional project spawn preflight prompt", async () => {

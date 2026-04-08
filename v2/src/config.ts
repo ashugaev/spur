@@ -28,6 +28,7 @@ const DEFAULT_SERVER_PORT = 4310;
 const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
 const DEFAULT_UI_PORT = 5555;
+const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.en.bin";
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 type ConfigMode = "instance" | "project";
@@ -40,6 +41,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
+  voiceModelPath: string;
 }
 
 function expandHome(value: string): string {
@@ -118,6 +120,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
   };
 }
 
@@ -136,6 +139,9 @@ function defaultInstanceConfigYaml(): string {
     "",
     "ui:",
     `  port: ${DEFAULT_UI_PORT}`,
+    "",
+    "voice:",
+    `  modelPath: ${DEFAULT_VOICE_MODEL_PATH}`,
     "",
   ].join("\n");
 }
@@ -427,6 +433,7 @@ function parseConfigFile(
   const server = root["server"] ? asObject(root["server"], "server") : {};
   const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
   const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
   const projectsRaw =
     root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
   if (mode === "project" && projectsRaw === undefined) {
@@ -492,6 +499,16 @@ function parseConfigFile(
           ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
           : resolvedDefaults.uiPort,
     },
+    voice: {
+      modelPath:
+        mode === "instance"
+          ? resolveFrom(
+              configDir,
+              asOptionalString(voice["modelPath"], "voice.modelPath") ??
+                resolvedDefaults.voiceModelPath,
+            )
+          : resolvedDefaults.voiceModelPath,
+    },
     projects: normalizedProjects,
   };
 }
@@ -515,6 +532,10 @@ function findConfigUpwards(startDir: string, filenames: readonly string[]): stri
 
 export function defaultInstanceConfigPath(): string {
   return DEFAULT_INSTANCE_CONFIG_PATH;
+}
+
+export function defaultVoiceModelPath(): string {
+  return DEFAULT_VOICE_MODEL_PATH;
 }
 
 export function resolveInstanceConfigPath(input?: string): string {
@@ -576,6 +597,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
+          voiceModelPath: defaults.voice.modelPath,
         }
       : undefined,
   );

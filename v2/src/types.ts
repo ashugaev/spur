@@ -159,6 +159,9 @@ export interface AppConfig {
   ui: {
     port: number;
   };
+  voice: {
+    modelPath: string;
+  };
   projects: Record<string, ProjectConfig>;
 }
 

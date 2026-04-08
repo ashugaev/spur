@@ -19,6 +19,7 @@ import {
   type StopDaemonResult,
 } from "./client.js";
 import {
+  defaultVoiceModelPath,
   ensureInstanceConfig,
   findProjectConfigPath,
   loadConfig,
@@ -256,6 +257,15 @@ async function maybeAutoConnectProject(
 function printBootstrapNotice(initialized: boolean, json: boolean, configPath: string): void {
   if (initialized && !json) {
     writeStdout(brandLine(`Initialized Spur instance config at ${configPath}.`));
+    writeStdout(brandLine(`Voice input is off until local dependencies are installed.`));
+    writeStdout(
+      brandLine(`Install \`whisper-cli\` and \`ffmpeg\`, then download a model to ${defaultVoiceModelPath()}.`),
+    );
+    writeStdout(
+      brandLine(
+        `Set a custom model path in \`voice.modelPath\` inside the instance config when needed.`,
+      ),
+    );
   }
 }
 

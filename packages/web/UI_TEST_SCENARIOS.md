@@ -101,6 +101,11 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 ### S3: Message section
 
 - Textarea for sending messages when session accepts input
+- Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
+- First microphone click starts recording; button switches to stop state
+- Second microphone click stops recording and opens a confirmation popup with the transcribed text
+- Confirmation popup does not send anything automatically; Insert only copies the text into the message textarea
+- Cancelling the popup keeps the agent untouched and leaves the existing textarea content unchanged
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
