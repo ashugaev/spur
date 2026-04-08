@@ -103,7 +103,8 @@ function applySymlink(repoPath: string, worktreePath: string, relativePath: stri
   const targetPath = join(worktreePath, relativePath);
 
   if (!existsSync(sourcePath)) {
-    throw new Error(`Symlink source not found: ${sourcePath}`);
+    console.warn(`Symlink source not found (skipping): ${sourcePath}`);
+    return;
   }
 
   mkdirSync(dirname(targetPath), { recursive: true });
