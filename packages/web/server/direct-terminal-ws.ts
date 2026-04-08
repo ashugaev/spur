@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { homedir, userInfo } from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
@@ -99,29 +99,14 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       return;
     }
 
-    const mouseProcess = spawn(tmuxPath, [
-      ...tmuxSocketArgs(),
-      "set-option",
-      "-t",
-      `=${sessionId}`,
-      "mouse",
-      "on",
-    ]);
-    mouseProcess.on("error", () => {
+    // Ensure mouse mode is enabled for the session before attaching.
+    // This allows xterm.js to correctly handle wheel scrolling as mouse sequences.
+    try {
+      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "status", "off"]);
+    } catch {
       // Best effort only.
-    });
-
-    const statusProcess = spawn(tmuxPath, [
-      ...tmuxSocketArgs(),
-      "set-option",
-      "-t",
-      `=${sessionId}`,
-      "status",
-      "off",
-    ]);
-    statusProcess.on("error", () => {
-      // Best effort only.
-    });
+    }
 
     const pty = ptySpawn(tmuxPath, [...tmuxSocketArgs(), "attach-session", "-t", `=${sessionId}`], {
       name: "xterm-256color",

@@ -138,6 +138,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         });
 
         terminal.open(terminalRef.current);
+        terminal.focus();
         fit.fit();
 
         const port = await readTerminalPort();
