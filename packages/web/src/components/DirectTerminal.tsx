@@ -67,29 +67,6 @@ async function readTerminalPort(): Promise<string> {
   }
 }
 
-function consumeWheelLines(
-  event: WheelEvent,
-  rows: number,
-  rowHeight: number,
-  partialScrollRef: { current: number },
-): number {
-  if (event.deltaY === 0 || event.shiftKey) return 0;
-
-  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
-    return Math.trunc(event.deltaY);
-  }
-
-  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
-    return Math.trunc(event.deltaY * rows);
-  }
-
-  const pixelsPerLine = rowHeight > 0 ? rowHeight : 16;
-  partialScrollRef.current += event.deltaY / pixelsPerLine;
-  const lines = Math.trunc(partialScrollRef.current);
-  partialScrollRef.current -= lines;
-  return lines;
-}
-
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
   port: string,
@@ -118,11 +95,6 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
-    let terminalViewport: HTMLDivElement | null = null;
-    let wheelTarget: HTMLElement | null = null;
-    let wheelHandler: ((event: WheelEvent) => void) | null = null;
-    const wheelPartialScroll = { current: 0 };
-
     Promise.all([
       import("xterm").then((module) => module.Terminal),
       import("@xterm/addon-fit").then((module) => module.FitAddon),
@@ -166,30 +138,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         });
 
         terminal.open(terminalRef.current);
-        terminalViewport = (terminal.element?.querySelector(".xterm-viewport") as HTMLDivElement) ?? null;
         fit.fit();
-
-        wheelTarget = terminalRef.current;
-        if (wheelTarget) {
-          wheelHandler = (event: WheelEvent) => {
-            if (!terminal) return;
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            const activeBuffer = terminal.buffer.active;
-            if (activeBuffer.type !== "normal" || activeBuffer.baseY <= 0) {
-              wheelPartialScroll.current = 0;
-              return;
-            }
-
-            const rowHeight =
-              terminalViewport && terminal.rows > 0 ? terminalViewport.clientHeight / terminal.rows : 0;
-            const lines = consumeWheelLines(event, terminal.rows, rowHeight, wheelPartialScroll);
-            if (lines !== 0) {
-              terminal.scrollLines(lines);
-            }
-          };
-          wheelTarget.addEventListener("wheel", wheelHandler, { capture: true, passive: false });
-        }
 
         const port = await readTerminalPort();
         if (!mounted) return;
@@ -258,9 +207,6 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       mounted = false;
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
-      }
-      if (wheelTarget && wheelHandler) {
-        wheelTarget.removeEventListener("wheel", wheelHandler, true);
       }
       inputDisposable?.dispose();
       websocketRef.current?.close();
