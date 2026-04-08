@@ -147,6 +147,13 @@ export function canComplete(session: DashboardSession): boolean {
   return !isTerminalSession(session);
 }
 
+export function canRespawn(session: DashboardSession): boolean {
+  return (
+    (session.status === "completed" || session.status === "killed" || session.status === "errored") &&
+    !session.runtimeAlive
+  );
+}
+
 export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
 }

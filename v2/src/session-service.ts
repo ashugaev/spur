@@ -1907,18 +1907,25 @@ export class SessionService {
         restorePrompt,
         withPlanMode(hookSetup, planMode),
       );
+      const effectivePlan =
+        launchPlan ??
+        buildAgentLaunchPlan(
+          current.agent,
+          restorePrompt,
+          withPlanMode(hookSetup, planMode),
+        );
       if (!launchPlan) {
-        this.logEvent("session.restore.failed", {
-          level: "error",
+        this.logEvent("session.restore.started", {
+          level: "info",
           sessionId,
           projectId: current.project,
-          message: `Failed to restore ${sessionId}: no native resume state`,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
         });
-        throw new Error(`No native resume state found for ${current.agent} session ${sessionId}`);
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
+      let restoreLaunchCommand = effectivePlan.launchCommand;
+      let restoreReadyMarkers = effectivePlan.readyMarkers;
       if (current.agent === "claude") {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
@@ -1928,7 +1935,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            launchPlan.launchCommand,
+            effectivePlan.launchCommand,
             withPlanMode(hookSetup, planMode),
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -1957,7 +1964,7 @@ export class SessionService {
       }
       const restoreProject = this.config.projects[current.project];
       const restoreInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
+        effectivePlan.initialMessage,
         !!restoreProject?.devServer,
       );
       await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
@@ -2001,6 +2008,37 @@ export class SessionService {
       this.scheduleDeliveryRunner(persistedRestored.id);
     }
     return this.enrich(persistedRestored);
+  }
+
+  async respawn(sessionId: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (
+      session.status !== "completed" &&
+      session.status !== "killed" &&
+      session.status !== "errored"
+    ) {
+      throw new Error(`Session ${sessionId} is not in a terminal state (status: ${session.status})`);
+    }
+
+    this.logEvent("session.respawn.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Respawning ${sessionId}`,
+      details: { agent: session.agent },
+    });
+
+    const request: SpawnSessionRequest = {
+      project: session.project,
+      prompt: session.prompt,
+      agent: session.agent,
+      ...(session.planMode !== undefined && { planMode: session.planMode }),
+      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+    };
+    return this.spawn(request);
   }
 
   private resumeSessionDelivery(): void {
@@ -2316,13 +2354,7 @@ export class SessionService {
         return "ready";
       }
 
-      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-      if (!runtimeAlive) {
-        return "exited";
-      }
-
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
+      if (await this.confirmAgentExited(session)) {
         return "exited";
       }
 
@@ -2357,13 +2389,7 @@ export class SessionService {
         return "ready";
       }
 
-      const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-      if (!runtimeAlive) {
-        return "exited";
-      }
-
-      const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-      if (!processAlive) {
+      if (await this.confirmAgentExited(session)) {
         return "exited";
       }
 
@@ -2384,6 +2410,22 @@ export class SessionService {
 
       await sleep(PIPELINE_POLL_INTERVAL_MS);
     }
+  }
+
+  private async confirmAgentExited(
+    session: Pick<SessionRecord, "tmuxSession" | "agent">,
+  ): Promise<boolean> {
+    if (await tmuxSessionExists(session.tmuxSession)) {
+      if (await isProcessRunningInTmux(session.tmuxSession, session.agent)) {
+        return false;
+      }
+    }
+    // Retry once after a short delay to guard against transient tmux/ps failures.
+    await sleep(PIPELINE_POLL_INTERVAL_MS);
+    if (await tmuxSessionExists(session.tmuxSession)) {
+      return !(await isProcessRunningInTmux(session.tmuxSession, session.agent));
+    }
+    return true;
   }
 
   private markPipelineErrored(sessionId: string, message: string): void {

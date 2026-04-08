@@ -251,8 +251,13 @@ export async function restartDaemonIfRunning(
     return { baseUrl, restarted: false };
   }
 
-  spawnDaemon(cliEntrypoint, resolvedConfigPath);
-  const runtime = await waitForReadyDaemon(baseUrl);
+  // Wait for an external service manager (e.g. systemd) to restart the daemon.
+  // Only spawn a new process as fallback if nothing comes up.
+  let runtime = await waitForReadyDaemon(baseUrl).catch(() => null);
+  if (!runtime) {
+    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    runtime = await waitForReadyDaemon(baseUrl);
+  }
   if (!runtime) {
     throw new Error(`Timed out waiting for daemon restart at ${baseUrl}`);
   }

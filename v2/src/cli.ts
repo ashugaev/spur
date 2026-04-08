@@ -550,7 +550,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -981,6 +981,44 @@ async function runInteractiveSessionList(
     }
   };
 
+  const respawnSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    if (
+      session.status !== "completed" &&
+      session.status !== "killed" &&
+      session.status !== "errored"
+    ) {
+      statusMessage = brandLine(`Session ${session.id} is not in a terminal state.`);
+      render();
+      return;
+    }
+
+    busy = true;
+    statusMessage = brandLine(`Respawning ${session.id}...`);
+    render();
+
+    try {
+      const respawned = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${session.id}/respawn`,
+        {},
+        configPath,
+      );
+      sessions = sortSessionsForList([...sessions, respawned]);
+      selectedSessionId = respawned.id;
+      pendingKillConfirmationSessionId = null;
+      statusMessage = brandLine(`Respawned as ${respawned.id}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
   await new Promise<void>((resolve, reject) => {
     const finish = (): void => {
       cleanup();
@@ -1062,6 +1100,11 @@ async function runInteractiveSessionList(
       }
       if (key.name === "k" || key.sequence === "k") {
         void killSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "s" || key.sequence === "s") {
+        pendingKillConfirmationSessionId = null;
+        void respawnSelectedSession().catch(fail);
       }
     };
 
@@ -1394,6 +1437,28 @@ export function createProgram(cliEntrypoint: string): Command {
             options.force ? { force: true } : {},
           ),
         success: (session) => `Killed ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  program
+    .command("respawn")
+    .description("Spawn a new session with the same config as a terminal session.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "respawning session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/respawn`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Respawned as ${session.id}.`,
         render: renderSessionCard,
       });
     });

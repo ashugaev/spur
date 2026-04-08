@@ -3,6 +3,12 @@
 import { spawnSync } from "node:child_process";
 import { env, execPath, exit } from "node:process";
 
+// Skip daemon restart when running inside a Spur session (worktree build).
+// Restarting the daemon kills pipeline loops for all active sessions.
+if (env.SPUR_SESSION) {
+  exit(0);
+}
+
 const { instanceConfigExists, resolveInstanceConfigPath } = await import("../dist/config.js");
 
 if (!instanceConfigExists()) {
