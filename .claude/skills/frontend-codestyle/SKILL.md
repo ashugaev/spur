@@ -100,3 +100,10 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - Use `text-sm`, `text-xs` etc. — body is 12px, components inherit
 - Add gradient overlays or shadows heavier than `shadow-[0_8px_30px_rgba(0,0,0,0.3)]`
 - Show empty attention zones — filter them out
+
+### Visual verification
+
+- Every UI change must include a manual browser test via Playwright before completion.
+- Create a dedicated task/step for visual verification in every UI update checklist.
+- Take screenshots of each touched state (idle, active, error, loading) and review them.
+- Test on the Tailscale HTTPS URL, not just localhost, to catch secure-context issues.
