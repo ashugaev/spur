@@ -85,6 +85,13 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - Button text is always uppercase via `uppercase` class.
 - Placeholder text uses normal casing: "Filter sessions...", "Prompt for the new session..."
 
+### Voice input
+
+- Voice transcription inserts text directly into the target textarea (spawn prompt, session message) — no confirmation popup.
+- Terminal is the exception: voice opens a confirmation popup before typing into tmux, because terminal input is irreversible.
+- During transcription, the mic button shows a red spinning loader replacing the mic icon.
+- Recording state: red border + red tint on the button.
+
 ### Do not
 
 - Use `UNDER_SCORE` style in visible UI text — always use spaces

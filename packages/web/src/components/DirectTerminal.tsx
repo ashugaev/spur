@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { TerminalMicButton } from "@/components/VoiceInput";
+import { TerminalMicButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
@@ -102,9 +102,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     websocketRef.current.send(data);
   }, []);
 
-  const voice = useVoiceInput({
-    onTranscribed: (text) => sendTerminalInput(text),
-  });
+  const voice = useVoiceInput();
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -425,6 +423,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           <TerminalMicButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
+      <VoiceConfirmModal voice={voice} onInsert={(text) => sendTerminalInput(text)} />
     </div>
   );
 }

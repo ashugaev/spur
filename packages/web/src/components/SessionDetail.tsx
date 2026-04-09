@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import {
@@ -118,7 +118,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const voice = useVoiceInput();
+  const voice = useVoiceInput({
+    onTranscribed: (text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
@@ -550,10 +552,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             </section>
           </div>
 
-          <VoiceConfirmModal
-            voice={voice}
-            onInsert={(text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text))}
-          />
 
           {/* Logs modal */}
           {logsOpen ? (
