@@ -18,6 +18,7 @@ interface DirectTerminalProps {
 interface TerminalLocation {
   protocol: string;
   hostname: string;
+  port: string;
 }
 
 interface RuntimeTerminalConfig {
@@ -74,11 +75,12 @@ async function readTerminalPort(): Promise<string> {
 
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
-  port: string,
+  _port: string,
   sessionId: string,
 ): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.hostname}:${port}/ws?session=${encodeURIComponent(sessionId)}`;
+  const portSuffix = location.port ? `:${location.port}` : "";
+  return `${protocol}//${location.hostname}${portSuffix}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
 /**
