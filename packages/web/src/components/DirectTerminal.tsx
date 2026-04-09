@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { TerminalMicButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
@@ -19,10 +19,6 @@ interface TerminalLocation {
   protocol: string;
   hostname: string;
   port: string;
-}
-
-interface RuntimeTerminalConfig {
-  directTerminalPort?: unknown;
 }
 
 const terminalTheme: ITheme = {
@@ -53,29 +49,8 @@ const terminalTheme: ITheme = {
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
 
-function normalizePortValue(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65_535) return undefined;
-  return String(parsed);
-}
-
-async function readTerminalPort(): Promise<string> {
-  try {
-    const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = (await response.json()) as RuntimeTerminalConfig;
-    return normalizePortValue(payload.directTerminalPort) ?? "14801";
-  } catch {
-    return "14801";
-  }
-}
-
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
-  _port: string,
   sessionId: string,
 ): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -121,7 +96,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       import("xterm").then((module) => module.Terminal),
       import("@xterm/addon-fit").then((module) => module.FitAddon),
     ])
-      .then(async ([Terminal, FitAddon]) => {
+      .then(([Terminal, FitAddon]) => {
         if (!mounted || !terminalRef.current) return;
 
         terminal = new Terminal({
@@ -204,10 +179,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           touchTarget.removeEventListener("touchmove", onTouchMove);
         };
 
-        const port = await readTerminalPort();
-        if (!mounted) return;
-
-        const wsUrl = buildDirectTerminalWsUrl(window.location, port, sessionId);
+        const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
         const websocket = new WebSocket(wsUrl);
         websocketRef.current = websocket;
         websocket.binaryType = "arraybuffer";
@@ -422,7 +394,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
               </svg>
             </button>
           </div>
-          <TerminalMicButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
       <VoiceConfirmModal voice={voice} onInsert={(text) => sendTerminalInput(text)} />

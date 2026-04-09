@@ -22,38 +22,22 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
   return <MicIcon />;
 }
 
-export function VoiceButton({ voice }: { voice: UseVoiceInput }) {
-  if (!voice.canUseVoice) return null;
-  const transcribing = voice.voiceBusy === "transcribing";
-  return (
-    <button
-      aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border transition ${
-        voice.recording || transcribing
-          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
-          : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]"
-      } disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={transcribing}
-      onClick={voice.toggleRecording}
-      type="button"
-    >
-      <MicOrSpinner voice={voice} />
-    </button>
-  );
-}
+const ACTIVE_STYLE = "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 
-export function TerminalMicButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
+export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
   if (!voice.canUseVoice) return null;
-  const transcribing = voice.voiceBusy === "transcribing";
+  const active = voice.recording || voice.voiceBusy === "transcribing";
+  const baseClass = className
+    ?? `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${
+      active
+        ? ""
+        : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]"
+    }`;
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`${className ?? ""} transition ${
-        voice.recording || transcribing
-          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
-          : ""
-      } disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={transcribing}
+      className={`${baseClass} transition ${active ? ACTIVE_STYLE : ""} disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={voice.voiceBusy === "transcribing"}
       onClick={voice.toggleRecording}
       type="button"
     >
