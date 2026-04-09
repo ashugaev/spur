@@ -2,74 +2,62 @@
 
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
-type MicState = "idle" | "recording" | "transcribing";
+const MicIcon = () => (
+  <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+    <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
+    <path d="M19 11a7 7 0 0 1-14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+);
 
-function MicIcon({ state }: { state: MicState }) {
-  return (
-    <svg
-      aria-hidden="true"
-      className={`voice-icon h-4 w-4 ${state === "recording" ? "voice-recording" : state === "transcribing" ? "voice-transcribing" : ""}`}
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      viewBox="0 0 24 24"
-    >
-      <path className="mic-capsule" d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
-      <path className="mic-arc" d="M19 11a7 7 0 0 1-14 0" />
-      <g className="mic-base">
-        <path d="M12 18v3" />
-        <path d="M8 21h8" />
-      </g>
-    </svg>
-  );
-}
+const Spinner = () => (
+  <svg aria-hidden="true" className="voice-spinner h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+    <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
+  </svg>
+);
 
-function getMicState(voice: UseVoiceInput): MicState {
-  if (voice.voiceBusy === "transcribing") return "transcribing";
-  if (voice.recording) return "recording";
-  return "idle";
+function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
+  if (voice.voiceBusy === "transcribing") return <Spinner />;
+  return <MicIcon />;
 }
 
 export function VoiceButton({ voice }: { voice: UseVoiceInput }) {
   if (!voice.canUseVoice) return null;
-  const state = getMicState(voice);
+  const transcribing = voice.voiceBusy === "transcribing";
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border text-[var(--color-text-primary)] transition-colors duration-300 ${
-        state === "recording"
+      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border transition ${
+        voice.recording || transcribing
           ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
-          : state === "transcribing"
-            ? "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)]"
-            : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5"
-      } disabled:cursor-not-allowed`}
-      disabled={voice.voiceBusy === "transcribing"}
+          : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]"
+      } disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={transcribing}
       onClick={voice.toggleRecording}
       type="button"
     >
-      <MicIcon state={state} />
+      <MicOrSpinner voice={voice} />
     </button>
   );
 }
 
 export function TerminalMicButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
   if (!voice.canUseVoice) return null;
-  const state = getMicState(voice);
+  const transcribing = voice.voiceBusy === "transcribing";
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`${className ?? ""} transition-colors duration-300 ${
-        state === "recording"
+      className={`${className ?? ""} transition ${
+        voice.recording || transcribing
           ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
           : ""
-      }`}
-      disabled={voice.voiceBusy === "transcribing"}
+      } disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={transcribing}
       onClick={voice.toggleRecording}
       type="button"
     >
-      <MicIcon state={state} />
+      <MicOrSpinner voice={voice} />
     </button>
   );
 }
