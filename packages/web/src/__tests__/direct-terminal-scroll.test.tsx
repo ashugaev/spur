@@ -1,12 +1,23 @@
-import { render, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { render, waitFor, act } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+
+let onBinaryCallback: ((data: string) => void) | null = null;
+let onDataCallback: ((data: string) => void) | null = null;
 
 const mockTerminal = {
   loadAddon: vi.fn(),
   open: vi.fn(),
+  focus: vi.fn(),
   write: vi.fn(),
   dispose: vi.fn(),
-  onData: vi.fn(() => ({ dispose: vi.fn() })),
+  onData: vi.fn((cb: (data: string) => void) => {
+    onDataCallback = cb;
+    return { dispose: vi.fn() };
+  }),
+  onBinary: vi.fn((cb: (data: string) => void) => {
+    onBinaryCallback = cb;
+    return { dispose: vi.fn() };
+  }),
   cols: 80,
   rows: 24,
   buffer: { active: { type: "alternate", baseY: 0 } },
@@ -31,26 +42,86 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(""),
 }));
 
-describe("DirectTerminal scroll", () => {
-  it("does not register a capture-phase wheel handler (lets xterm.js forward to tmux)", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ directTerminalPort: 14801 })),
-    );
+// Shared send spy — persists across WebSocket instances within a test.
+const wsSend = vi.fn();
 
-    const { DirectTerminal } = await import("@/components/DirectTerminal");
+const MockWebSocket = vi.fn(() => {
+  const ws: Record<string, unknown> = {
+    readyState: 1,
+    binaryType: "arraybuffer",
+    send: wsSend,
+    close: vi.fn(),
+    onopen: null,
+    onmessage: null,
+    onerror: null,
+    onclose: null,
+  };
+  queueMicrotask(() => {
+    (ws.onopen as (ev: unknown) => void)?.({});
+  });
+  return ws;
+});
+// Component checks websocket.readyState === WebSocket.OPEN.
+(MockWebSocket as unknown as Record<string, number>).OPEN = 1;
 
-    const { container } = render(
-      <DirectTerminal sessionId="test-session" label="test" />,
-    );
+vi.stubGlobal("WebSocket", MockWebSocket);
+
+beforeEach(() => {
+  onBinaryCallback = null;
+  onDataCallback = null;
+  wsSend.mockClear();
+  mockTerminal.onBinary.mockClear();
+  mockTerminal.onData.mockClear();
+  mockTerminal.open.mockClear();
+  vi.spyOn(global, "fetch").mockResolvedValue(
+    new Response(JSON.stringify({ directTerminalPort: 14801 })),
+  );
+});
+
+async function mountTerminal(sessionId = "test-session") {
+  const { DirectTerminal } = await import("@/components/DirectTerminal");
+  let result!: ReturnType<typeof render>;
+  await act(async () => {
+    result = render(<DirectTerminal sessionId={sessionId} label="test" />);
+  });
+  await act(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  return result;
+}
+
+describe("DirectTerminal scroll integration", () => {
+  it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
+    await mountTerminal();
+
+    await waitFor(() => {
+      expect(mockTerminal.onBinary).toHaveBeenCalled();
+    });
+
+    // Simulate xterm.js emitting an SGR mouse scroll-up sequence via onBinary.
+    const sgrMouseUp = "\x1b[<65;10;5M";
+    onBinaryCallback?.(sgrMouseUp);
+
+    // send is called first with resize JSON on open, then with our binary data.
+    expect(wsSend).toHaveBeenCalledWith(sgrMouseUp);
+  });
+
+  it("forwards keyboard input via onData to WebSocket", async () => {
+    await mountTerminal("test-data");
+
+    await waitFor(() => {
+      expect(onDataCallback).not.toBeNull();
+    });
+
+    onDataCallback?.("hello");
+    expect(wsSend).toHaveBeenCalledWith("hello");
+  });
+
+  it("does not prevent wheel events (lets xterm.js handle them natively)", async () => {
+    const { container } = await mountTerminal("test-wheel");
 
     const terminalDiv = container.querySelector("div > div:nth-child(2) > div");
 
-    await waitFor(() => {
-      expect(mockTerminal.open).toHaveBeenCalled();
-    });
-
-    // Verify no capture-phase wheel handler blocks xterm.js from forwarding scroll to tmux.
-    // Dispatch a wheel event and confirm it is NOT prevented (xterm.js gets to handle it).
     const wheelEvent = new WheelEvent("wheel", {
       deltaY: -120,
       bubbles: true,
