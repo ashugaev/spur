@@ -4,6 +4,25 @@ Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
 When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
 
+## Voice Input Prerequisites
+
+Voice input requires HTTPS (browser `getUserMedia` policy). On `localhost` it works over plain HTTP.
+For remote access via Tailscale:
+
+```bash
+# One-time: enable HTTPS proxy via tailscale serve
+sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
+
+# Access at: https://<hostname>.tail90e846.ts.net/
+# Only reachable within the tailnet (not publicly exposed).
+
+# To disable:
+tailscale serve --https=443 off
+```
+
+Server-side dependencies: `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default `~/.cache/whisper.cpp/ggml-base.bin`).
+Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `ru`).
+
 ## Dashboard
 
 ### D1: Header renders correctly
@@ -70,6 +89,8 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
+- Microphone button in top-right corner of prompt textarea when voice available on host
+- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Click outside modal (backdrop) closes it
@@ -133,7 +154,8 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - ✕ closes overlay
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `ESC`, `ENTER`, and arrow buttons with bordered square button styling
+- Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and types transcribed text directly into the terminal
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
