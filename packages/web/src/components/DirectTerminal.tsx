@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
@@ -47,6 +48,9 @@ const terminalTheme: ITheme = {
   brightWhite: "#eeeef5",
 };
 
+/** Pixels of touch movement that count as one scroll line. */
+const TOUCH_SCROLL_THRESHOLD = 20;
+
 function normalizePortValue(value: unknown): string | undefined {
   if (typeof value !== "string" && typeof value !== "number") return undefined;
   const parsed = Number.parseInt(String(value), 10);
@@ -76,16 +80,30 @@ export function buildDirectTerminalWsUrl(
   return `${protocol}//${location.hostname}:${port}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
+/**
+ * Build an SGR mouse scroll sequence.
+ * Button 64 = scroll up, 65 = scroll down.  Position (1,1) is fine — tmux
+ * only cares about the button for WheelUpPane / WheelDownPane.
+ */
+function sgrScroll(up: boolean): string {
+  const button = up ? 64 : 65;
+  return `\x1b[<${button};1;1M`;
+}
+
 export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
 
-  const sendTerminalInput = (data: string) => {
+  const sendTerminalInput = useCallback((data: string) => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
     websocketRef.current.send(data);
-  };
+  }, []);
+
+  const voice = useVoiceInput({
+    onTranscribed: (text) => sendTerminalInput(text),
+  });
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -94,7 +112,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let terminal: TerminalType | null = null;
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
+    let binaryDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
+    let touchCleanup: (() => void) | null = null;
+
     Promise.all([
       import("xterm").then((module) => module.Terminal),
       import("@xterm/addon-fit").then((module) => module.FitAddon),
@@ -141,6 +162,47 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         terminal.focus();
         fit.fit();
 
+        // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
+        // so tmux enters copy-mode and scrolls history on touch devices (iPad, phone).
+        const touchTarget = terminalRef.current.querySelector(".xterm-screen") ?? terminalRef.current;
+        let touchStartY = 0;
+        let touchAccum = 0;
+
+        const onTouchStart = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          touchStartY = te.touches[0].clientY;
+          touchAccum = 0;
+        };
+
+        const onTouchMove = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          const dy = touchStartY - te.touches[0].clientY;
+          touchAccum += dy;
+          touchStartY = te.touches[0].clientY;
+
+          const lines = Math.trunc(touchAccum / TOUCH_SCROLL_THRESHOLD);
+          if (lines === 0) return;
+          touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
+
+          const up = lines > 0;
+          const seq = sgrScroll(up);
+          const count = Math.abs(lines);
+          for (let i = 0; i < count; i++) {
+            sendTerminalInput(seq);
+          }
+          te.preventDefault();
+        };
+
+        touchTarget.addEventListener("touchstart", onTouchStart, { passive: true });
+        touchTarget.addEventListener("touchmove", onTouchMove, { passive: false });
+
+        touchCleanup = () => {
+          touchTarget.removeEventListener("touchstart", onTouchStart);
+          touchTarget.removeEventListener("touchmove", onTouchMove);
+        };
+
         const port = await readTerminalPort();
         if (!mounted) return;
 
@@ -185,6 +247,12 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           }
         });
 
+        binaryDisposable = terminal.onBinary((data) => {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
         resizeHandler = () => {
           if (!terminal || !fit || websocket.readyState !== WebSocket.OPEN) return;
           fit.fit();
@@ -209,7 +277,9 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
+      touchCleanup?.();
       inputDisposable?.dispose();
+      binaryDisposable?.dispose();
       websocketRef.current?.close();
       terminal?.dispose();
     };
@@ -351,6 +421,33 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
               </svg>
             </button>
           </div>
+          {voice.canUseVoice ? (
+            <button
+              aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
+              className={cn(
+                terminalControlIconButtonClass,
+                "ml-2",
+                voice.recording && "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12",
+              )}
+              disabled={voice.voiceBusy === "transcribing"}
+              onClick={voice.toggleRecording}
+              type="button"
+            >
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
+                <path d="M19 11a7 7 0 0 1-14 0" />
+                <path d="M12 18v3" />
+                <path d="M8 21h8" />
+              </svg>
+            </button>
+          ) : null}
         </div>
       </div>
     </div>
