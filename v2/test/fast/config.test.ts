@@ -55,7 +55,8 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
-    expect(config.voice.modelPath).toContain(".cache/whisper.cpp/ggml-base.en.bin");
+    expect(config.voice.modelPath).toContain(".cache/whisper.cpp/ggml-base.bin");
+    expect(config.voice.language).toBe("ru");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
     expect(config.projects["backend"]?.worktree).toBe(true);

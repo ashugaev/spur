@@ -8,17 +8,20 @@ import YAML from "yaml";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
-const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-base.en.bin");
+const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-base.bin");
+const DEFAULT_VOICE_LANGUAGE = "ru";
 
 interface SpurInstanceShape {
   voice?: {
     modelPath?: string;
+    language?: string;
   };
 }
 
 export interface VoiceStatus {
   available: boolean;
   modelPath: string;
+  language: string;
   reason?: "missing_model" | "missing_whisper_cli" | "missing_ffmpeg";
 }
 
@@ -33,21 +36,24 @@ function resolveConfigPath(): string {
   return candidate.startsWith("/") ? candidate : resolve(process.cwd(), candidate);
 }
 
-function resolveModelPath(): string {
+function resolveVoiceConfig(): { modelPath: string; language: string } {
   const configPath = resolveConfigPath();
   if (!existsSync(configPath)) {
-    return DEFAULT_VOICE_MODEL_PATH;
+    return { modelPath: DEFAULT_VOICE_MODEL_PATH, language: DEFAULT_VOICE_LANGUAGE };
   }
   const configDir = dirname(configPath);
   const parsed = YAML.parse(readFileSync(configPath, "utf8")) as SpurInstanceShape | null;
   const configured = parsed?.voice?.modelPath?.trim();
-  if (!configured) {
-    return DEFAULT_VOICE_MODEL_PATH;
+  let modelPath = DEFAULT_VOICE_MODEL_PATH;
+  if (configured) {
+    modelPath = configured.startsWith("~/")
+      ? join(homedir(), configured.slice(2))
+      : configured.startsWith("/")
+        ? configured
+        : resolve(configDir, configured);
   }
-  if (configured.startsWith("~/")) {
-    return join(homedir(), configured.slice(2));
-  }
-  return configured.startsWith("/") ? configured : resolve(configDir, configured);
+  const language = parsed?.voice?.language?.trim() || DEFAULT_VOICE_LANGUAGE;
+  return { modelPath, language };
 }
 
 function commandExists(command: string): boolean {
@@ -59,17 +65,17 @@ function commandExists(command: string): boolean {
 }
 
 export function readVoiceStatus(): VoiceStatus {
-  const modelPath = resolveModelPath();
+  const { modelPath, language } = resolveVoiceConfig();
   if (!existsSync(modelPath)) {
-    return { available: false, modelPath, reason: "missing_model" };
+    return { available: false, modelPath, language, reason: "missing_model" };
   }
   if (!commandExists("whisper-cli")) {
-    return { available: false, modelPath, reason: "missing_whisper_cli" };
+    return { available: false, modelPath, language, reason: "missing_whisper_cli" };
   }
   if (!commandExists("ffmpeg")) {
-    return { available: false, modelPath, reason: "missing_ffmpeg" };
+    return { available: false, modelPath, language, reason: "missing_ffmpeg" };
   }
-  return { available: true, modelPath };
+  return { available: true, modelPath, language };
 }
 
 export async function transcribeAudio(
@@ -96,7 +102,7 @@ export async function transcribeAudio(
     );
     await execFileAsync(
       "whisper-cli",
-      ["-m", status.modelPath, "-f", wavPath, "-otxt", "-of", outputBasePath],
+      ["-m", status.modelPath, "-l", status.language, "-f", wavPath, "-otxt", "-of", outputBasePath],
       { timeout: 120_000 },
     );
 

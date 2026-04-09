@@ -28,7 +28,8 @@ const DEFAULT_SERVER_PORT = 4310;
 const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
 const DEFAULT_UI_PORT = 5555;
-const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.en.bin";
+const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
+const DEFAULT_VOICE_LANGUAGE = "ru";
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 type ConfigMode = "instance" | "project";
@@ -42,6 +43,7 @@ interface ConfigDefaults {
   tmuxSocketName: string;
   uiPort: number;
   voiceModelPath: string;
+  voiceLanguage: string;
 }
 
 function expandHome(value: string): string {
@@ -121,6 +123,7 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
+    voiceLanguage: DEFAULT_VOICE_LANGUAGE,
   };
 }
 
@@ -142,6 +145,7 @@ function defaultInstanceConfigYaml(): string {
     "",
     "voice:",
     `  modelPath: ${DEFAULT_VOICE_MODEL_PATH}`,
+    `  language: ${DEFAULT_VOICE_LANGUAGE}`,
     "",
   ].join("\n");
 }
@@ -508,6 +512,10 @@ function parseConfigFile(
                 resolvedDefaults.voiceModelPath,
             )
           : resolvedDefaults.voiceModelPath,
+      language:
+        mode === "instance"
+          ? (asOptionalString(voice["language"], "voice.language") ?? resolvedDefaults.voiceLanguage)
+          : resolvedDefaults.voiceLanguage,
     },
     projects: normalizedProjects,
   };
@@ -598,6 +606,7 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
           voiceModelPath: defaults.voice.modelPath,
+          voiceLanguage: defaults.voice.language,
         }
       : undefined,
   );
