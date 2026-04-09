@@ -2,30 +2,74 @@
 
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
-const MicIcon = () => (
-  <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
-    <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
-    <path d="M19 11a7 7 0 0 1-14 0" />
-    <path d="M12 18v3" />
-    <path d="M8 21h8" />
-  </svg>
-);
+type MicState = "idle" | "recording" | "transcribing";
+
+function MicIcon({ state }: { state: MicState }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`voice-icon h-4 w-4 ${state === "recording" ? "voice-recording" : state === "transcribing" ? "voice-transcribing" : ""}`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      viewBox="0 0 24 24"
+    >
+      <path className="mic-capsule" d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
+      <path className="mic-arc" d="M19 11a7 7 0 0 1-14 0" />
+      <g className="mic-base">
+        <path d="M12 18v3" />
+        <path d="M8 21h8" />
+      </g>
+    </svg>
+  );
+}
+
+function getMicState(voice: UseVoiceInput): MicState {
+  if (voice.voiceBusy === "transcribing") return "transcribing";
+  if (voice.recording) return "recording";
+  return "idle";
+}
 
 export function VoiceButton({ voice }: { voice: UseVoiceInput }) {
   if (!voice.canUseVoice) return null;
+  const state = getMicState(voice);
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border text-[var(--color-text-primary)] transition ${
-        voice.recording
-          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12"
-          : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5"
-      } disabled:cursor-not-allowed disabled:opacity-50`}
+      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border text-[var(--color-text-primary)] transition-colors duration-300 ${
+        state === "recording"
+          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
+          : state === "transcribing"
+            ? "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)]"
+            : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5"
+      } disabled:cursor-not-allowed`}
       disabled={voice.voiceBusy === "transcribing"}
       onClick={voice.toggleRecording}
       type="button"
     >
-      <MicIcon />
+      <MicIcon state={state} />
+    </button>
+  );
+}
+
+export function TerminalMicButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
+  if (!voice.canUseVoice) return null;
+  const state = getMicState(voice);
+  return (
+    <button
+      aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
+      className={`${className ?? ""} transition-colors duration-300 ${
+        state === "recording"
+          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]"
+          : ""
+      }`}
+      disabled={voice.voiceBusy === "transcribing"}
+      onClick={voice.toggleRecording}
+      type="button"
+    >
+      <MicIcon state={state} />
     </button>
   );
 }

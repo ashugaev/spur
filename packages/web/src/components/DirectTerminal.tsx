@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { TerminalMicButton } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
@@ -421,33 +422,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
               </svg>
             </button>
           </div>
-          {voice.canUseVoice ? (
-            <button
-              aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-              className={cn(
-                terminalControlIconButtonClass,
-                "ml-2",
-                voice.recording && "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12",
-              )}
-              disabled={voice.voiceBusy === "transcribing"}
-              onClick={voice.toggleRecording}
-              type="button"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-4 w-4"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                viewBox="0 0 24 24"
-              >
-                <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
-                <path d="M19 11a7 7 0 0 1-14 0" />
-                <path d="M12 18v3" />
-                <path d="M8 21h8" />
-              </svg>
-            </button>
-          ) : null}
+          <TerminalMicButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
     </div>
