@@ -1,0 +1,98 @@
+"use client";
+
+import type { UseVoiceInput } from "@/hooks/useVoiceInput";
+
+const MicIcon = () => (
+  <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+    <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
+    <path d="M19 11a7 7 0 0 1-14 0" />
+    <path d="M12 18v3" />
+    <path d="M8 21h8" />
+  </svg>
+);
+
+export function VoiceButton({ voice }: { voice: UseVoiceInput }) {
+  if (!voice.canUseVoice) return null;
+  return (
+    <button
+      aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
+      className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border text-[var(--color-text-primary)] transition ${
+        voice.recording
+          ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12"
+          : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5"
+      } disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={voice.voiceBusy === "transcribing"}
+      onClick={voice.toggleRecording}
+      type="button"
+    >
+      <MicIcon />
+    </button>
+  );
+}
+
+export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
+  if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
+  if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
+  if (voice.recording) return <>Recording... click the mic to stop</>;
+  return null;
+}
+
+export function VoiceConfirmModal({
+  voice,
+  onInsert,
+}: {
+  voice: UseVoiceInput;
+  onInsert: (text: string) => void;
+}) {
+  if (!voice.voiceModalOpen) return null;
+  return (
+    <div
+      aria-label="Confirm voice input"
+      aria-modal="true"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+    >
+      <div className="w-full max-w-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
+        <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
+          <span className="font-bold uppercase text-[var(--color-text-primary)]">
+            Confirm voice input
+          </span>
+          <button
+            type="button"
+            className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+            onClick={voice.dismissModal}
+          >
+            ✕
+          </button>
+        </div>
+        <div className="space-y-3 px-4 py-4">
+          <p className="text-[var(--color-text-secondary)]">
+            Review the transcription before inserting it into the message box.
+          </p>
+          <textarea
+            className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+            onChange={(event) => voice.setVoiceDraft(event.target.value)}
+            value={voice.voiceDraft}
+          />
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+              onClick={voice.dismissModal}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+              disabled={!voice.voiceDraft.trim()}
+              onClick={() => voice.confirmDraft(onInsert)}
+            >
+              Insert
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

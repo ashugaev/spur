@@ -1,7 +1,9 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { VoiceButton, VoiceConfirmModal, VoiceStatusHint } from "@/components/VoiceInput";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import {
@@ -90,12 +92,6 @@ interface LogEntry {
   sessionId?: string;
 }
 
-interface VoiceStatus {
-  available: boolean;
-  modelPath: string;
-  reason?: string;
-}
-
 function formatLogTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -122,18 +118,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
-  const [voiceModalOpen, setVoiceModalOpen] = useState(false);
-  const [voiceDraft, setVoiceDraft] = useState("");
-  const [recording, setRecording] = useState(false);
-  const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
+  const voice = useVoiceInput();
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaChunksRef = useRef<Blob[]>([]);
 
   const loadSession = useCallback(async () => {
     try {
@@ -159,35 +148,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadSession]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const loadVoiceStatus = async () => {
-      try {
-        const response = await fetch("/api/runtime/voice", { cache: "no-store" });
-        if (!response.ok) return;
-        const payload = (await response.json()) as VoiceStatus;
-        if (!cancelled) {
-          setVoiceStatus(payload);
-        }
-      } catch {
-        if (!cancelled) {
-          setVoiceStatus({ available: false, modelPath: "", reason: "unavailable" });
-        }
-      }
-    };
-
-    void loadVoiceStatus();
-    return () => {
-      cancelled = true;
-      if (mediaRecorderRef.current?.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-      mediaRecorderRef.current = null;
-      mediaStreamRef.current = null;
-      mediaChunksRef.current = [];
-    };
-  }, []);
 
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
@@ -276,96 +236,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     await handleAction("send", body);
   };
 
-  const stopRecordingStream = useCallback(() => {
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
-    mediaRecorderRef.current = null;
-    mediaChunksRef.current = [];
-    setRecording(false);
-  }, []);
-
-  const toggleVoiceRecording = useCallback(async () => {
-    if (recording) {
-      mediaRecorderRef.current?.stop();
-      return;
-    }
-    if (
-      !voiceStatus?.available ||
-      typeof window === "undefined" ||
-      typeof MediaRecorder === "undefined" ||
-      !navigator.mediaDevices?.getUserMedia
-    ) {
-      return;
-    }
-
-    setError(null);
-    setVoiceBusy("starting");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaStreamRef.current = stream;
-      mediaRecorderRef.current = recorder;
-      mediaChunksRef.current = [];
-
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data.size > 0) {
-          mediaChunksRef.current.push(event.data);
-        }
-      });
-
-      recorder.addEventListener("stop", () => {
-        const chunks = [...mediaChunksRef.current];
-        stopRecordingStream();
-        if (chunks.length === 0) {
-          return;
-        }
-        void (async () => {
-          setVoiceBusy("transcribing");
-          try {
-            const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-            const formData = new FormData();
-            formData.append("audio", audio, "voice-input.webm");
-            const response = await fetch("/api/runtime/voice/transcribe", {
-              method: "POST",
-              body: formData,
-            });
-            if (!response.ok) {
-              throw new Error(await response.text());
-            }
-            const payload = (await response.json()) as { text?: string };
-            const text = payload.text?.trim() ?? "";
-            if (!text) {
-              throw new Error("Transcription returned empty text");
-            }
-            setVoiceDraft(text);
-            setVoiceModalOpen(true);
-          } catch (voiceError) {
-            setError(
-              voiceError instanceof Error ? voiceError.message : "Failed to transcribe audio",
-            );
-          } finally {
-            setVoiceBusy(null);
-          }
-        })();
-      });
-
-      recorder.start();
-      setRecording(true);
-    } catch (voiceError) {
-      stopRecordingStream();
-      setError(voiceError instanceof Error ? voiceError.message : "Failed to start recording");
-    } finally {
-      setVoiceBusy((current) => (current === "starting" ? null : current));
-    }
-  }, [recording, stopRecordingStream, voiceStatus]);
-
-  const confirmVoiceDraft = useCallback(() => {
-    const trimmed = voiceDraft.trim();
-    if (!trimmed) return;
-    setMessage((current) => (current.trim() ? `${current}\n${trimmed}` : trimmed));
-    setVoiceModalOpen(false);
-    setVoiceDraft("");
-  }, [voiceDraft]);
 
   const title = useMemo(
     () => (session ? getSessionTitle(session) : sessionId),
@@ -376,11 +246,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
-  const canUseVoice =
-    Boolean(voiceStatus?.available) &&
-    typeof window !== "undefined" &&
-    typeof MediaRecorder !== "undefined" &&
-    Boolean(navigator.mediaDevices?.getUserMedia);
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -391,9 +256,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         ← Back
       </a>
 
-      {error ? (
+      {error || voice.voiceError ? (
         <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
-          {error}
+          {error || voice.voiceError}
         </div>
       ) : null}
 
@@ -544,33 +409,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         placeholder="Message to the running agent..."
                         value={message}
                       />
-                      {canUseVoice ? (
-                        <button
-                          aria-label={recording ? "Stop voice recording" : "Start voice recording"}
-                          className={`absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border text-[var(--color-text-primary)] transition ${
-                            recording
-                              ? "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12"
-                              : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5"
-                          } disabled:cursor-not-allowed disabled:opacity-50`}
-                          disabled={voiceBusy === "transcribing"}
-                          onClick={() => void toggleVoiceRecording()}
-                          type="button"
-                        >
-                          <svg
-                            aria-hidden="true"
-                            className="h-4 w-4"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            viewBox="0 0 24 24"
-                          >
-                            <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
-                            <path d="M19 11a7 7 0 0 1-14 0" />
-                            <path d="M12 18v3" />
-                            <path d="M8 21h8" />
-                          </svg>
-                        </button>
-                      ) : null}
+                      <VoiceButton voice={voice} />
                     </div>
                     {attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
@@ -596,13 +435,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     )}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        {voiceBusy === "starting"
-                          ? "Starting microphone..."
-                          : voiceBusy === "transcribing"
-                            ? "Transcribing audio..."
-                            : recording
-                              ? "Recording... click the mic to stop"
-                              : "⌘/Ctrl + Enter"}
+                        <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <button
                         type="button"
@@ -717,62 +550,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             </section>
           </div>
 
-          {voiceModalOpen ? (
-            <div
-              aria-label="Confirm voice input"
-              aria-modal="true"
-              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-              role="dialog"
-            >
-              <div className="w-full max-w-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
-                <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                  <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                    Confirm voice input
-                  </span>
-                  <button
-                    type="button"
-                    className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                    onClick={() => {
-                      setVoiceModalOpen(false);
-                      setVoiceDraft("");
-                    }}
-                  >
-                    ✕
-                  </button>
-                </div>
-                <div className="space-y-3 px-4 py-4">
-                  <p className="text-[var(--color-text-secondary)]">
-                    Review the transcription before inserting it into the message box.
-                  </p>
-                  <textarea
-                    className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                    onChange={(event) => setVoiceDraft(event.target.value)}
-                    value={voiceDraft}
-                  />
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
-                      onClick={() => {
-                        setVoiceModalOpen(false);
-                        setVoiceDraft("");
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={!voiceDraft.trim()}
-                      onClick={confirmVoiceDraft}
-                    >
-                      Insert
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
+          <VoiceConfirmModal
+            voice={voice}
+            onInsert={(text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text))}
+          />
 
           {/* Logs modal */}
           {logsOpen ? (
