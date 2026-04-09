@@ -102,8 +102,16 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
     // Ensure mouse mode is enabled for the session before attaching.
     // This allows xterm.js to correctly handle wheel scrolling as mouse sequences.
     try {
-      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
-      execFileSync(tmuxPath, [...tmuxSocketArgs(), "set-option", "-t", `=${sessionId}`, "status", "off"]);
+      const socketArgs = tmuxSocketArgs();
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "status", "off"]);
+      // Bind scroll-up to enter copy mode so wheel scrolls through history.
+      execFileSync(tmuxPath, [
+        ...socketArgs, "bind-key", "-n", "WheelUpPane",
+        "if-shell", "-F", "-t", "=", "#{mouse_any_flag}",
+        "send-keys -M",
+        "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e; send-keys -M'",
+      ]);
     } catch {
       // Best effort only.
     }

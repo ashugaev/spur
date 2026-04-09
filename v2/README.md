@@ -104,6 +104,50 @@ node dist/cli.js complete api-a1b2 --config spur.yaml
 node dist/cli.js send api-a1b2 "Run the focused test and report back." --config spur.yaml
 ```
 
+## Voice Input
+
+Voice input lets you dictate prompts and messages in the web UI via a microphone button (spawn modal, session message box, terminal controls).
+
+### Server dependencies
+
+```bash
+# 1. Build and install whisper.cpp CLI
+git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+cd /tmp/whisper.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cli
+
+# 2. Install ffmpeg (if not present)
+sudo apt install -y ffmpeg   # or brew install ffmpeg
+
+# 3. Download a multilingual whisper model
+mkdir -p ~/.cache/whisper.cpp
+curl -L -o ~/.cache/whisper.cpp/ggml-base.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+```
+
+### Config
+
+In `~/.spur/config.yaml`:
+
+```yaml
+voice:
+  modelPath: ~/.cache/whisper.cpp/ggml-base.bin  # default
+  language: ru  # whisper language code, default "ru"
+```
+
+`voice.language` is passed as `-l <code>` to `whisper-cli`. Use `en` for English, `auto` for auto-detect, etc.
+
+### HTTPS requirement
+
+Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale:
+
+```bash
+sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
+# Access at: https://<hostname>.tail90e846.ts.net/
+# Only reachable within the tailnet.
+# To disable: tailscale serve --https=443 off
+```
+
 ## Validate
 
 ```
@@ -143,7 +187,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until the host has `whisper-cli`, `ffmpeg`, and a local Whisper model at `voice.modelPath`.
+Voice input in `packages/web` is disabled until the host has `whisper-cli`, `ffmpeg`, and a local Whisper model at `voice.modelPath`. See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -157,7 +201,8 @@ tmux:
 ui:
   port: 5555
 voice:
-  modelPath: ~/.cache/whisper.cpp/ggml-base.en.bin
+  modelPath: ~/.cache/whisper.cpp/ggml-base.bin
+  language: ru
 
 projects:
   backend-api:
@@ -242,6 +287,8 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex`, default `claude`.
+- `voice.modelPath`: optional, default `~/.cache/whisper.cpp/ggml-base.bin`.
+- `voice.language`: optional whisper language code, default `ru`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.

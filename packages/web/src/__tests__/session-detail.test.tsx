@@ -75,7 +75,7 @@ describe("SessionDetail voice input", () => {
     });
   });
 
-  it("records audio, opens a confirmation popup, and inserts text without sending", async () => {
+  it("records audio, inserts transcribed text directly into textarea without sending", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
 
@@ -117,18 +117,12 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
-      expect(screen.getByDisplayValue("Fix the flaky tests before release")).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
       expect(
         screen.getByDisplayValue("Fix the flaky tests before release"),
       ).toBeInTheDocument();
     });
+
+    expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/runtime/voice/transcribe",

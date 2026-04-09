@@ -52,7 +52,11 @@ describe("Dashboard", () => {
   });
 
   it("renders Spur dashboard sessions from API", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(new Response(JSON.stringify(sessionsPayload())));
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      return new Response(JSON.stringify(sessionsPayload()));
+    });
 
     render(<Dashboard />);
 
@@ -69,6 +73,7 @@ describe("Dashboard", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
@@ -104,21 +109,22 @@ describe("Dashboard", () => {
   });
 
   it("shows all projects (configured and discovered) in both filter and spawn", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          projects: [{ id: "sp", name: "Spur Core" }],
-          sessions: [
-            {
-              ...sessionsPayload().sessions[0],
-              id: "spur-local-1",
-              project: "spur-local",
-              tmuxSession: "spur-local-1",
-            },
-          ],
-        }),
-      ),
-    );
+    const sessionsData = {
+      projects: [{ id: "sp", name: "Spur Core" }],
+      sessions: [
+        {
+          ...sessionsPayload().sessions[0],
+          id: "spur-local-1",
+          project: "spur-local",
+          tmuxSession: "spur-local-1",
+        },
+      ],
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      return new Response(JSON.stringify(sessionsData));
+    });
 
     render(<Dashboard />);
 

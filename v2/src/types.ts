@@ -161,6 +161,7 @@ export interface AppConfig {
   };
   voice: {
     modelPath: string;
+    language: string;
   };
   projects: Record<string, ProjectConfig>;
 }

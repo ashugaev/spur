@@ -4,6 +4,25 @@ Browser-based test scenarios for the Spur web dashboard.
 Run against a live daemon backed by the active global Spur instance config (`~/.spur/config.yaml` by default).
 When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the externally reachable proxy port.
 
+## Voice Input Prerequisites
+
+Voice input requires HTTPS (browser `getUserMedia` policy). On `localhost` it works over plain HTTP.
+For remote access via Tailscale:
+
+```bash
+# One-time: enable HTTPS proxy via tailscale serve
+sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
+
+# Access at: https://<hostname>.tail90e846.ts.net/
+# Only reachable within the tailnet (not publicly exposed).
+
+# To disable:
+tailscale serve --https=443 off
+```
+
+Server-side dependencies: `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default `~/.cache/whisper.cpp/ggml-base.bin`).
+Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `ru`).
+
 ## Dashboard
 
 ### D1: Header renders correctly
@@ -70,6 +89,8 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
+- Microphone button in top-right corner of prompt textarea when voice available on host
+- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Click outside modal (backdrop) closes it
@@ -103,9 +124,8 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - First microphone click starts recording; button switches to stop state
-- Second microphone click stops recording and opens a confirmation popup with the transcribed text
-- Confirmation popup does not send anything automatically; Insert only copies the text into the message textarea
-- Cancelling the popup keeps the agent untouched and leaves the existing textarea content unchanged
+- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- During transcription the mic button shows a red spinning loader
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
@@ -133,7 +153,9 @@ When testing behind a reverse proxy, ensure `/api/runtime/terminal` returns the 
 - ✕ closes overlay
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `ESC`, `ENTER`, and arrow buttons with bordered square button styling
+- Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
+- Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)

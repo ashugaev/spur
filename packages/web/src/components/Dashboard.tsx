@@ -6,7 +6,9 @@ import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { TerminalModal } from "@/components/TerminalModal";
+import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
 import {
   getAttentionLevel,
   toDashboardSession,
@@ -122,6 +124,9 @@ export function Dashboard() {
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const voice = useVoiceInput({
+    onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
@@ -526,19 +531,27 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <textarea
-                  className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                  onChange={(event) => setSpawnPrompt(event.target.value)}
-                  onKeyDown={(event) => {
-                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                      void handleSpawn();
-                  }}
-                  placeholder="Prompt for the new session..."
-                  value={spawnPrompt}
-                />
+                <div className="relative">
+                  <textarea
+                    className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                    onChange={(event) => setSpawnPrompt(event.target.value)}
+                    onKeyDown={(event) => {
+                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                        void handleSpawn();
+                    }}
+                    placeholder="Prompt for the new session..."
+                    value={spawnPrompt}
+                  />
+                  <VoiceButton voice={voice} />
+                </div>
+                {voice.voiceError ? (
+                  <div className="border border-red-500/30 bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-100">
+                    {voice.voiceError}
+                  </div>
+                ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    ⌘/Ctrl + Enter to submit
+                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter to submit" : null}
                   </span>
                   <button
                     className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"

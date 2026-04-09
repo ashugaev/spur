@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
@@ -16,10 +18,7 @@ interface DirectTerminalProps {
 interface TerminalLocation {
   protocol: string;
   hostname: string;
-}
-
-interface RuntimeTerminalConfig {
-  directTerminalPort?: unknown;
+  port: string;
 }
 
 const terminalTheme: ITheme = {
@@ -47,33 +46,26 @@ const terminalTheme: ITheme = {
   brightWhite: "#eeeef5",
 };
 
-function normalizePortValue(value: unknown): string | undefined {
-  if (typeof value !== "string" && typeof value !== "number") return undefined;
-  const parsed = Number.parseInt(String(value), 10);
-  if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65_535) return undefined;
-  return String(parsed);
-}
-
-async function readTerminalPort(): Promise<string> {
-  try {
-    const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = (await response.json()) as RuntimeTerminalConfig;
-    return normalizePortValue(payload.directTerminalPort) ?? "14801";
-  } catch {
-    return "14801";
-  }
-}
+/** Pixels of touch movement that count as one scroll line. */
+const TOUCH_SCROLL_THRESHOLD = 20;
 
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
-  port: string,
   sessionId: string,
 ): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${location.hostname}:${port}/ws?session=${encodeURIComponent(sessionId)}`;
+  const portSuffix = location.port ? `:${location.port}` : "";
+  return `${protocol}//${location.hostname}${portSuffix}/ws?session=${encodeURIComponent(sessionId)}`;
+}
+
+/**
+ * Build an SGR mouse scroll sequence.
+ * Button 64 = scroll up, 65 = scroll down.  Position (1,1) is fine — tmux
+ * only cares about the button for WheelUpPane / WheelDownPane.
+ */
+function sgrScroll(up: boolean): string {
+  const button = up ? 64 : 65;
+  return `\x1b[<${button};1;1M`;
 }
 
 export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
@@ -82,10 +74,12 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
   const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
 
-  const sendTerminalInput = (data: string) => {
+  const sendTerminalInput = useCallback((data: string) => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
     websocketRef.current.send(data);
-  };
+  }, []);
+
+  const voice = useVoiceInput();
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -94,12 +88,15 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let terminal: TerminalType | null = null;
     let fit: FitAddonType | null = null;
     let inputDisposable: { dispose(): void } | null = null;
+    let binaryDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
+    let touchCleanup: (() => void) | null = null;
+
     Promise.all([
       import("xterm").then((module) => module.Terminal),
       import("@xterm/addon-fit").then((module) => module.FitAddon),
     ])
-      .then(async ([Terminal, FitAddon]) => {
+      .then(([Terminal, FitAddon]) => {
         if (!mounted || !terminalRef.current) return;
 
         terminal = new Terminal({
@@ -141,10 +138,48 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         terminal.focus();
         fit.fit();
 
-        const port = await readTerminalPort();
-        if (!mounted) return;
+        // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
+        // so tmux enters copy-mode and scrolls history on touch devices (iPad, phone).
+        const touchTarget = terminalRef.current.querySelector(".xterm-screen") ?? terminalRef.current;
+        let touchStartY = 0;
+        let touchAccum = 0;
 
-        const wsUrl = buildDirectTerminalWsUrl(window.location, port, sessionId);
+        const onTouchStart = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          touchStartY = te.touches[0].clientY;
+          touchAccum = 0;
+        };
+
+        const onTouchMove = (e: Event) => {
+          const te = e as TouchEvent;
+          if (te.touches.length !== 1) return;
+          const dy = touchStartY - te.touches[0].clientY;
+          touchAccum += dy;
+          touchStartY = te.touches[0].clientY;
+
+          const lines = Math.trunc(touchAccum / TOUCH_SCROLL_THRESHOLD);
+          if (lines === 0) return;
+          touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
+
+          const up = lines > 0;
+          const seq = sgrScroll(up);
+          const count = Math.abs(lines);
+          for (let i = 0; i < count; i++) {
+            sendTerminalInput(seq);
+          }
+          te.preventDefault();
+        };
+
+        touchTarget.addEventListener("touchstart", onTouchStart, { passive: true });
+        touchTarget.addEventListener("touchmove", onTouchMove, { passive: false });
+
+        touchCleanup = () => {
+          touchTarget.removeEventListener("touchstart", onTouchStart);
+          touchTarget.removeEventListener("touchmove", onTouchMove);
+        };
+
+        const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
         const websocket = new WebSocket(wsUrl);
         websocketRef.current = websocket;
         websocket.binaryType = "arraybuffer";
@@ -185,6 +220,12 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           }
         });
 
+        binaryDisposable = terminal.onBinary((data) => {
+          if (websocket.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
         resizeHandler = () => {
           if (!terminal || !fit || websocket.readyState !== WebSocket.OPEN) return;
           fit.fit();
@@ -209,7 +250,9 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
+      touchCleanup?.();
       inputDisposable?.dispose();
+      binaryDisposable?.dispose();
       websocketRef.current?.close();
       terminal?.dispose();
     };
@@ -351,8 +394,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
               </svg>
             </button>
           </div>
+          <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
+      <VoiceConfirmModal voice={voice} onInsert={(text) => sendTerminalInput(text)} />
     </div>
   );
 }
