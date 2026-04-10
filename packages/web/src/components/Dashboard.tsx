@@ -22,6 +22,7 @@ import {
 
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -269,20 +270,49 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
 
+  const isValidSpawnProject = (candidateProjectId: string) =>
+    filterProjectOptions.some((project) => project.id === candidateProjectId);
+
+  const resolvePreferredSpawnProjectId = () => {
+    const selectedFilterProjectId =
+      filterProjectOptions.find((project) => project.id === projectId)?.id ?? "";
+
+    if (selectedFilterProjectId) {
+      return selectedFilterProjectId;
+    }
+
+    if (typeof window !== "undefined") {
+      const storedProjectId =
+        window.localStorage.getItem(LAST_SPAWN_PROJECT_STORAGE_KEY)?.trim() ?? "";
+      if (storedProjectId && isValidSpawnProject(storedProjectId)) {
+        return storedProjectId;
+      }
+    }
+
+    return filterProjectOptions[0]?.id ?? "";
+  };
+
   useEffect(() => {
-    if (spawnProjectId && filterProjectOptions.some((project) => project.id === spawnProjectId)) {
+    if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
 
-    const nextProjectId =
-      filterProjectOptions.find((project) => project.id === projectId)?.id ??
-      filterProjectOptions[0]?.id ??
-      "";
-
+    const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
   }, [projectId, spawnProjectId, filterProjectOptions]);
+
+  const syncSpawnProject = (nextProjectId: string) => {
+    const normalizedProjectId = nextProjectId.trim();
+    setSpawnProjectId(normalizedProjectId);
+    if (typeof window === "undefined") return;
+    if (normalizedProjectId) {
+      window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
+      return;
+    }
+    window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
+  };
 
   useEffect(() => {
     if (!isMobile) return;
@@ -294,6 +324,9 @@ export function Dashboard() {
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
+    if (!spawnOpen && nextProjectId) {
+      setSpawnProjectId(nextProjectId);
+    }
     if (typeof window === "undefined") return;
 
     const params = new URLSearchParams(window.location.search);
@@ -362,8 +395,8 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnOpen(false);
+      syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
-      setSpawnProjectId(nextProjectId);
       await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
@@ -376,6 +409,11 @@ export function Dashboard() {
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
     setError(null);
+  };
+
+  const openSpawnModal = () => {
+    setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnOpen(true);
   };
 
   const terminalSession = useMemo(() => {
@@ -469,7 +507,7 @@ export function Dashboard() {
             </select>
             <button
               className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={() => setSpawnOpen(true)}
+              onClick={openSpawnModal}
               type="button"
             >
               Spawn Session
@@ -501,7 +539,7 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <select
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnProjectId(event.target.value)}
+                    onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
                   >
                     <option value="">Select project</option>
