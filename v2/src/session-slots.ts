@@ -168,6 +168,7 @@ export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
+  agentConfigPath?: string;
   agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
@@ -177,7 +178,7 @@ export function ensureSessionSlotTool(args: {
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.agentConfigPath ?? args.configPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

@@ -10,6 +10,7 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import { findAvailableAgentPort, ensureAgentIsolatedConfig, removeAgentIsolatedConfig } from "./agent-isolation.js";
 import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -300,6 +301,7 @@ function buildSessionEnv(args: {
   sessionId: string;
   sessionToolDir: string;
   configPath: string;
+  agentPort: number;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -307,7 +309,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
-    SPUR_CONFIG: args.configPath,
+    SPUR_AGENT_PORT: String(args.agentPort),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
@@ -1064,11 +1066,20 @@ export class SessionService {
       placeholderWritten = true;
       workspacePath = placeholder.worktreePath;
 
+      stage = "isolation.setup";
+      const agentPort = await findAvailableAgentPort();
+      const agentConfigPath = ensureAgentIsolatedConfig({
+        parentDataDir: this.config.dataDir,
+        sessionId,
+        port: agentPort,
+      });
+
       stage = "slot_tool";
       const sessionToolDir = ensureSessionSlotTool({
         dataDir: this.config.dataDir,
         sessionId,
         configPath: this.config.configPath,
+        agentConfigPath,
         agent,
       });
 
@@ -1150,6 +1161,7 @@ export class SessionService {
           sessionId,
           sessionToolDir,
           configPath: this.config.configPath,
+          agentPort,
           repoPath: project.path,
           symlinks: project.symlinks,
         }),
@@ -1249,6 +1261,7 @@ export class SessionService {
         await killDevServerTmux(sessionId);
         deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
+        removeAgentIsolatedConfig(this.config.dataDir, sessionId);
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -1558,6 +1571,7 @@ export class SessionService {
         }
         deleteAgentHookState(this.config.dataDir, sessionId);
         removeSessionSlotTool(this.config.dataDir, sessionId);
+        removeAgentIsolatedConfig(this.config.dataDir, sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1621,6 +1635,7 @@ export class SessionService {
       }
       deleteAgentHookState(this.config.dataDir, sessionId);
       removeSessionSlotTool(this.config.dataDir, sessionId);
+      removeAgentIsolatedConfig(this.config.dataDir, sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -1739,10 +1754,17 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
+    const resumeAgentPort = await findAvailableAgentPort();
+    const resumeAgentConfigPath = ensureAgentIsolatedConfig({
+      parentDataDir: this.config.dataDir,
+      sessionId: session.id,
+      port: resumeAgentPort,
+    });
     const sessionToolDir = ensureSessionSlotTool({
       dataDir: this.config.dataDir,
       sessionId: session.id,
       configPath: this.config.configPath,
+      agentConfigPath: resumeAgentConfigPath,
       agent: session.agent,
     });
     const hookSetup = await setupAgentHooks({
@@ -1782,6 +1804,7 @@ export class SessionService {
       sessionId: session.id,
       sessionToolDir,
       configPath: this.config.configPath,
+      agentPort: resumeAgentPort,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -1888,10 +1911,17 @@ export class SessionService {
     let restoredLaunchCommand: string;
 
     try {
+      const restoreAgentPort = await findAvailableAgentPort();
+      const restoreAgentConfigPath = ensureAgentIsolatedConfig({
+        parentDataDir: this.config.dataDir,
+        sessionId: current.id,
+        port: restoreAgentPort,
+      });
       const sessionToolDir = ensureSessionSlotTool({
         dataDir: this.config.dataDir,
         sessionId: current.id,
         configPath: this.config.configPath,
+        agentConfigPath: restoreAgentConfigPath,
         agent: current.agent,
       });
       const hookSetup = await setupAgentHooks({
@@ -1953,6 +1983,7 @@ export class SessionService {
           sessionId: current.id,
           sessionToolDir,
           configPath: this.config.configPath,
+          agentPort: restoreAgentPort,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),
