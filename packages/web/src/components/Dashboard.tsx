@@ -132,9 +132,17 @@ export function Dashboard() {
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
+  const [preflightBusy, setPreflightBusy] = useState(false);
+  const [awaitingBranchConfirm, setAwaitingBranchConfirm] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const voice = useVoiceInput({
-    onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) => {
+      if (awaitingBranchConfirm) {
+        setSpawnBranch("");
+      }
+      setAwaitingBranchConfirm(false);
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
+    },
   });
   const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
@@ -300,12 +308,20 @@ export function Dashboard() {
     const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
+      if (awaitingBranchConfirm) {
+        setSpawnBranch("");
+      }
+      setAwaitingBranchConfirm(false);
     }
-  }, [projectId, spawnProjectId, filterProjectOptions]);
+  }, [awaitingBranchConfirm, projectId, spawnProjectId, filterProjectOptions]);
 
   const syncSpawnProject = (nextProjectId: string) => {
     const normalizedProjectId = nextProjectId.trim();
     setSpawnProjectId(normalizedProjectId);
+    if (awaitingBranchConfirm) {
+      setSpawnBranch("");
+    }
+    setAwaitingBranchConfirm(false);
     if (typeof window === "undefined") return;
     if (normalizedProjectId) {
       window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
@@ -356,28 +372,82 @@ export function Dashboard() {
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
 
+  const clearBranchConfirmation = useCallback(
+    (clearBranch = awaitingBranchConfirm) => {
+      if (clearBranch) {
+        setSpawnBranch("");
+      }
+      setAwaitingBranchConfirm(false);
+    },
+    [awaitingBranchConfirm],
+  );
+
+  const closeSpawnModal = (force = false) => {
+    if (!force && (spawning || preflightBusy)) {
+      return;
+    }
+    setSpawnOpen(false);
+    setPreflightBusy(false);
+    clearBranchConfirmation();
+  };
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId) return;
+    if (!nextProjectId || spawning || preflightBusy) return;
+
+    const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
+    let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
+    if (spawnWorkspaceMode === "worktree") {
+      overrides = { worktree: true };
+      if (spawnDefaultBranch.trim()) overrides.defaultBranch = spawnDefaultBranch.trim();
+    } else if (spawnWorkspaceMode === "shared") {
+      overrides = { worktree: false };
+    }
+
+    const explicitBranch = spawnBranch.trim();
+    const needsPreflight = !explicitBranch && Boolean(nextPrompt) && !awaitingBranchConfirm;
+    if (needsPreflight) {
+      setPreflightBusy(true);
+      try {
+        const preflightPayload: Record<string, unknown> = {
+          projectId: nextProjectId,
+          prompt: nextPrompt,
+          agent: spawnAgent,
+        };
+        if (overrides) preflightPayload.overrides = overrides;
+        const preflightResponse = await fetch("/api/preflight", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(preflightPayload),
+        });
+        if (!preflightResponse.ok) throw new Error(await preflightResponse.text());
+        const preflight = (await preflightResponse.json()) as { branch: string | null };
+        if (preflight.branch) {
+          setSpawnBranch(preflight.branch);
+          setAwaitingBranchConfirm(true);
+          setError(null);
+          return;
+        }
+      } catch (preflightError) {
+        setError(
+          preflightError instanceof Error ? preflightError.message : "Failed to run spawn preflight",
+        );
+        return;
+      } finally {
+        setPreflightBusy(false);
+      }
+    }
 
     setSpawning(true);
     try {
-      const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
-      let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
-      if (spawnWorkspaceMode === "worktree") {
-        overrides = { worktree: true };
-        if (spawnDefaultBranch.trim()) overrides.defaultBranch = spawnDefaultBranch.trim();
-      } else if (spawnWorkspaceMode === "shared") {
-        overrides = { worktree: false };
-      }
-
       const payload: Record<string, unknown> = {
         projectId: nextProjectId,
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
+      const finalBranch = spawnBranch.trim();
+      if (finalBranch) payload.branch = finalBranch;
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
       if (overrides) payload.overrides = overrides;
@@ -394,7 +464,7 @@ export function Dashboard() {
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
-      setSpawnOpen(false);
+      closeSpawnModal(true);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
       await fetchSessions(nextProjectId, true);
@@ -413,6 +483,7 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    clearBranchConfirmation();
     setSpawnOpen(true);
   };
 
@@ -521,7 +592,7 @@ export function Dashboard() {
           <div
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
             onClick={(event) => {
-              if (event.target === event.currentTarget) setSpawnOpen(false);
+              if (event.target === event.currentTarget) closeSpawnModal();
             }}
           >
             <div className="h-full w-full overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:h-auto sm:max-w-lg sm:p-5">
@@ -531,7 +602,7 @@ export function Dashboard() {
                 </h2>
                 <button
                   className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
-                  onClick={() => setSpawnOpen(false)}
+                  onClick={() => closeSpawnModal()}
                   type="button"
                 >
                   ✕
@@ -553,7 +624,10 @@ export function Dashboard() {
                   </select>
                   <select
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnAgent(event.target.value as "claude" | "codex");
+                    }}
                     value={spawnAgent}
                   >
                     <option value="claude">claude</option>
@@ -571,9 +645,10 @@ export function Dashboard() {
                   <select
                     aria-label="workspace mode"
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) =>
-                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
-                    }
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared");
+                    }}
                     value={spawnWorkspaceMode}
                   >
                     <option value="default">Default</option>
@@ -595,10 +670,18 @@ export function Dashboard() {
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnDefaultBranch(event.target.value)}
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnDefaultBranch(event.target.value);
+                    }}
                     placeholder="base branch (defaults to project default)"
                     value={spawnDefaultBranch}
                   />
+                ) : null}
+                {awaitingBranchConfirm ? (
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-1.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)]">
+                    Preflight suggested a branch. Edit if needed, then confirm spawn.
+                  </div>
                 ) : null}
                 <div>
                   <div className="max-h-48 space-y-2 overflow-y-auto">
@@ -632,7 +715,10 @@ export function Dashboard() {
                 <div className="relative">
                   <textarea
                     className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
+                    onChange={(event) => {
+                      clearBranchConfirmation();
+                      setSpawnPrompt(event.target.value);
+                    }}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
@@ -653,11 +739,17 @@ export function Dashboard() {
                   </span>
                   <button
                     className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim()}
+                    disabled={spawning || preflightBusy || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
                   >
-                    {spawning ? "Spawning..." : "Spawn"}
+                    {preflightBusy
+                      ? "Running preflight..."
+                      : spawning
+                        ? "Spawning..."
+                        : awaitingBranchConfirm
+                          ? "Confirm & Spawn"
+                          : "Spawn"}
                   </button>
                 </div>
               </div>

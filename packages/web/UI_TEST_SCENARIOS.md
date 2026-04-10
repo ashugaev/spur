@@ -105,12 +105,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Optional prompt for the new session..."
 - Helper text says leaving prompt empty opens the agent session directly
+- With prompt + empty branch, first submit calls preflight and does not spawn yet when preflight returns a branch
+- Preflight branch suggestion is previewed in the branch input and an inline confirmation hint is shown
+- After a suggested branch is shown, button label changes to "Confirm & Spawn"
+- Editing the suggested branch is allowed before confirmation
+- Second submit after suggestion spawns with the current branch input value
+- Empty prompt bypasses preflight and spawns directly
+- Manually filled branch bypasses preflight and spawns directly
+- Preflight error shows an error banner and blocks spawn until user retries
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
-- Spawn button disabled only when project is empty
+- Spawn button disabled when project is empty or a preflight/spawn request is in flight
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
-- All new fields reset on successful spawn
+- Successful spawn resets prompt/branch/plan/steps/workspace/base-branch and clears preflight confirmation state
 
 ## Session Detail
 
