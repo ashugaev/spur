@@ -103,8 +103,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
-- Prompt textarea placeholder is "Optional prompt for the new session..."
-- Helper text says leaving prompt empty opens the agent session directly
+- Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
+- Spawn button shows inline hotkey badge "⌘/Ctrl+Enter"
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled only when project is empty
