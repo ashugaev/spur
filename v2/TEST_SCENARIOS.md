@@ -177,6 +177,23 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `service run` outside a live Spur session.
 - `service status` for an unknown session id.
 
+### Agent isolation
+
+**Tier: fast**
+- `findAvailableAgentPort` returns first free port in range 4320-4399
+- `findAvailableAgentPort` skips ports with active listeners
+- `findAvailableAgentPort` throws when entire range is exhausted
+- `ensureAgentIsolatedConfig` creates config.yaml with correct port, dataDir, tmux socket
+- `removeAgentIsolatedConfig` removes instance directory
+- `buildSessionEnv` does not include `SPUR_CONFIG`
+- `buildSessionEnv` includes `SPUR_AGENT_PORT`
+- `ensureSessionSlotTool` with `agentConfigPath` writes spur wrapper using agent config, spur-slots using prod config
+
+**Tier: runtime integration**
+- Spawned session spur wrapper targets isolated port, not 4310
+- Two concurrent sessions get different ports
+- Kill/complete cleans up agent instance directory
+
 ## Regression Rule
 
 - When a new Spur feature or failure mode is added, extend this file in the same change.

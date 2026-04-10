@@ -50,6 +50,15 @@
   `claude --dangerously-skip-permissions` and
   `codex --dangerously-bypass-approvals-and-sandbox`.
 
+
+## Agent Isolation
+
+- The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.
+- Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
+- Do not override `--config` to point at `~/.spur/config.yaml` (root config).
+- Do not kill processes or ports you did not start. Your allocated port is in `$SPUR_AGENT_PORT`.
+- Do not modify files under `~/.spur/agent-instances/`.
+
 ## Spur Validation
 
 - Always run `pnpm --dir v2 build` after changing Spur code.
