@@ -44,7 +44,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper";
+  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
@@ -160,12 +160,12 @@ function defaultInstanceConfigYaml(): string {
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | undefined {
+): "whisper_cpp" | "faster_whisper" | "azure_openai" | undefined {
   if (value === undefined) return undefined;
-  if (value === "whisper_cpp" || value === "faster_whisper") {
+  if (value === "whisper_cpp" || value === "faster_whisper" || value === "azure_openai") {
     return value;
   }
-  throw new Error(`${label} must be "whisper_cpp" or "faster_whisper"`);
+  throw new Error(`${label} must be "whisper_cpp", "faster_whisper", or "azure_openai"`);
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
@@ -534,12 +534,8 @@ function parseConfigFile(
       const configuredModelPath =
         mode === "instance"
           ? asOptionalString(voice["modelPath"], "voice.modelPath")
-          : resolvedDefaults.voiceModelPath;
-      const modelPath = configuredModelPath
-        ? resolveFrom(configDir, configuredModelPath)
-        : provider === "whisper_cpp"
-          ? resolvedDefaults.voiceModelPath
-          : undefined;
+          : asOptionalString(voice["modelPath"], "voice.modelPath");
+      const modelPath = configuredModelPath ? resolveFrom(configDir, configuredModelPath) : undefined;
 
       return {
         provider,

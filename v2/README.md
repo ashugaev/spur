@@ -129,6 +129,14 @@ curl -L -o ~/.cache/whisper.cpp/ggml-base.bin \
 # faster_whisper provider dependencies
 python3 -m venv ~/.spur/venvs/faster-whisper
 ~/.spur/venvs/faster-whisper/bin/python -m pip install --upgrade pip faster-whisper
+
+# azure_openai provider credentials
+cat >> ~/.spur/.env <<'EOF'
+AZURE_OPENAI_ENDPOINT=https://<resource>.services.ai.azure.com
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_API_VERSION=2024-10-21
+EOF
+chmod 600 ~/.spur/.env
 ```
 
 ### Config
@@ -146,6 +154,7 @@ voice:
 `voice.modelPath` has priority when set. If omitted, Spur uses `voice.model`.
 For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
 For `faster_whisper`, `voice.language` is used as the transcription language hint.
+For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
 
 ### HTTPS requirement
@@ -198,7 +207,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`). See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -299,7 +308,7 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex`, default `claude`.
-- `voice.provider`: optional, `whisper_cpp|faster_whisper`, default `whisper_cpp`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
 - `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
