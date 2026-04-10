@@ -45,11 +45,12 @@ function IconButton({
 }
 
 interface SessionRowProps {
+  projectFilterId?: string;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
 }
 
-export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
+export function SessionRow({ projectFilterId, session, onOpenTerminal }: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -72,7 +73,7 @@ export function SessionRow({ session, onOpenTerminal }: SessionRowProps) {
 
       <a
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-        href={buildSessionPath(session.id, session.projectId)}
+        href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
       </a>

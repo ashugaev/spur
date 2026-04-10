@@ -717,6 +717,7 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
+                projectFilterId={projectId || undefined}
                 onToggle={
                   isMobile
                     ? (nextLevel) =>

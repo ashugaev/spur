@@ -205,7 +205,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       );
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
-      router.push(buildSessionPath(data.id, projectId ?? data.project));
+      router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(
         respawnError instanceof Error ? respawnError.message : "Failed to respawn session",
@@ -257,7 +257,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const effectiveProjectId = projectId ?? session?.projectId ?? "";
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -293,7 +292,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
       <a
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-        href={buildDashboardPath(effectiveProjectId)}
+        href={buildDashboardPath(projectId)}
       >
         ← Back
       </a>

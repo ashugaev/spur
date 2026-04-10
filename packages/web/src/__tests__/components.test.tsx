@@ -108,10 +108,7 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute(
-      "href",
-      "/sessions/api-a1?project=api",
-    );
+    expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute("href", "/sessions/api-a1");
 
     fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
 
@@ -188,6 +185,25 @@ describe("Dashboard", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
+  });
+
+  it("preserves the explicit project filter in session links", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const sessionLink = await screen.findByRole("link", { name: "Fix auth" });
+    expect(sessionLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
   });
 
   it("does not open terminal from query params when session is not attachable", async () => {
