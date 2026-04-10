@@ -85,6 +85,9 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     websocketRef.current.send(data);
     return true;
   }, []);
+  const submitVoiceDraft = useCallback((text: string) => {
+    return sendTerminalInput(`${text}\r`);
+  }, [sendTerminalInput]);
 
   const voice = useVoiceInput();
 
@@ -510,7 +513,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
-      <VoiceConfirmModal voice={voice} onInsert={(text) => sendTerminalInput(text)} />
+      <VoiceConfirmModal voice={voice} onInsert={submitVoiceDraft} />
     </div>
   );
 }

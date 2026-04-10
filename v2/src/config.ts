@@ -7,7 +7,6 @@ import {
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
-  type DevServerConfig,
   type GitHubSourceConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
@@ -15,6 +14,7 @@ import {
   type SendTriggerConfig,
   type ServiceRuleConfig,
   type ServiceSourceConfig,
+  type SidecarConfig,
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
@@ -309,6 +309,12 @@ function parseProjectPreflight(
   };
 }
 
+/** Backward-compat shape for the legacy `devServer` YAML key. */
+interface DevServerConfig {
+  command: string;
+  autoStart: boolean;
+}
+
 function parseDevServer(projectId: string, value: unknown): DevServerConfig | undefined {
   if (value === undefined) {
     return undefined;
@@ -319,6 +325,49 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   return {
     command: asString(raw["command"], `${label}.command`),
     autoStart: asOptionalBoolean(raw["autoStart"], `${label}.autoStart`) ?? false,
+  };
+}
+
+function parseSidecars(
+  projectId: string,
+  value: unknown,
+): Record<string, SidecarConfig> {
+  if (value === undefined) return {};
+  const label = `projects.${projectId}.sidecars`;
+  const raw = asObject(value, label);
+  const result: Record<string, SidecarConfig> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!VALID_ID_RE.test(name)) {
+      throw new Error(
+        `${label}.${name} is invalid: sidecar names must match ${VALID_ID_RE.source}`,
+      );
+    }
+    const entryLabel = `${label}.${name}`;
+    const entryRaw = asObject(entry, entryLabel);
+    const command = asString(entryRaw["command"], `${entryLabel}.command`);
+    const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
+    const envRaw = entryRaw["env"];
+    let env: Record<string, string> | undefined;
+    if (envRaw !== undefined) {
+      const envObj = asObject(envRaw, `${entryLabel}.env`);
+      env = {};
+      for (const [k, v] of Object.entries(envObj)) {
+        env[k] = asString(v, `${entryLabel}.env.${k}`);
+      }
+    }
+    result[name] = { command, autoStart, ...(env ? { env } : {}) };
+  }
+  return result;
+}
+
+function parseDevServerAsSidecar(
+  devServer: DevServerConfig,
+): Record<string, SidecarConfig> {
+  return {
+    dev: {
+      command: devServer.command,
+      autoStart: devServer.autoStart,
+    },
   };
 }
 
@@ -410,6 +459,18 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const devServer = parseDevServer(projectId, raw["devServer"]);
+  const hasDevServerKey = raw["devServer"] !== undefined;
+  const hasSidecarsKey = raw["sidecars"] !== undefined;
+  if (hasDevServerKey && hasSidecarsKey) {
+    throw new Error(
+      `projects.${projectId} defines both "devServer" and "sidecars"; pick one`,
+    );
+  }
+  const sidecars = hasSidecarsKey
+    ? parseSidecars(projectId, raw["sidecars"])
+    : devServer
+      ? parseDevServerAsSidecar(devServer)
+      : {};
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
@@ -435,7 +496,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     symlinks,
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
-    ...(devServer !== undefined ? { devServer } : {}),
+    sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
     triggers,

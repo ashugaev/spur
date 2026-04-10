@@ -44,7 +44,7 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
-import { devServerTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
+import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
@@ -562,7 +562,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -860,20 +860,28 @@ async function runInteractiveSessionList(
     }
   };
 
-  const startOrAttachDevServer = async (): Promise<void> => {
+  const startOrAttachSidecar = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
 
+    const firstSidecar = session.sidecars[0];
+    if (!firstSidecar) {
+      statusMessage = brandLine(`No sidecars configured for ${session.id}`);
+      render();
+      return;
+    }
+    const scName = firstSidecar.name;
+
     busy = true;
-    statusMessage = brandLine(`Starting dev server for ${session.id}...`);
+    statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const devTmuxSession = devServerTmuxSession(session.id);
+    const scTmuxSession = sidecarTmuxSession(session.id, scName);
     try {
-      if (!session.devServerAlive) {
+      if (!firstSidecar.alive) {
         await postJson<SessionView>(
           cliEntrypoint,
-          `/sessions/${session.id}/dev-server/start`,
+          `/sessions/${session.id}/sidecars/${scName}/start`,
           {},
           configPath,
         );
@@ -884,13 +892,13 @@ async function runInteractiveSessionList(
 
       if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
         busy = false;
-        openAttachedPane(devTmuxSession, `Dev Server ${session.id}`);
+        openAttachedPane(scTmuxSession, `Sidecar ${scName} ${session.id}`);
         return;
       }
 
       disableTerminal();
       try {
-        attachTmuxTargetFromList(devTmuxSession);
+        attachTmuxTargetFromList(scTmuxSession);
       } finally {
         if (!closed) {
           enableTerminal();
@@ -1092,7 +1100,7 @@ async function runInteractiveSessionList(
       }
       if (key.name === "d" || key.sequence === "d") {
         pendingKillConfirmationSessionId = null;
-        void startOrAttachDevServer().catch(fail);
+        void startOrAttachSidecar().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
@@ -1578,23 +1586,27 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("dev-server", { hidden: true })
-    .description("Internal dev server management.")
+    .command("sidecar", { hidden: true })
+    .description("Internal sidecar management.")
+    .command("start")
     .requiredOption("--session <id>", "Session id")
+    .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
       await outputResult({
         json: Boolean(options.json),
-        label: "starting dev server",
+        label: "starting sidecar",
         action: () =>
           postJson<SessionView>(
             cliEntrypoint,
-            `/sessions/${options.session as string}/dev-server/start`,
+            `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
             {},
             configPath,
           ),
-        success: (session) => `Started dev server for ${session.id}.`,
+        success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
     });

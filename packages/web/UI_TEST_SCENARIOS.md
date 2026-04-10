@@ -103,8 +103,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
-- Prompt textarea placeholder is "Optional prompt for the new session..."
-- Helper text says leaving prompt empty opens the agent session directly
+- Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
+- Spawn button shows inline hotkey badge "⌘/Ctrl+Enter"
 - With prompt + empty branch, first submit calls preflight and does not spawn yet when preflight returns a branch
 - Preflight branch suggestion is previewed in the branch input and an inline confirmation hint is shown
 - After a suggested branch is shown, button label changes to "Confirm & Spawn"
@@ -181,6 +181,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
+- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
@@ -213,6 +214,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Full layout: all columns visible
 - Header stats inline with title
+
+## Sidecar Terminal
+
+### SC1: Sidecar terminal buttons
+
+- Sidecars section visible in session detail sidebar when session has sidecars
+- Each sidecar shows name and alive/offline status
+- Terminal button visible only when sidecar is alive and session is attachable
+- Clicking terminal button opens terminal modal for sidecar tmux session
+- No sidecars section shown when sidecars array is empty
 
 ## PWA
 

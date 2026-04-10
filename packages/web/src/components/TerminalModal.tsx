@@ -7,9 +7,13 @@ import type { DashboardSession } from "@/lib/types";
 interface TerminalModalProps {
   session: DashboardSession;
   onClose: () => void;
+  /** Override the tmux session name (e.g. for sidecar terminals). */
+  tmuxSessionOverride?: string;
+  /** Override the modal title suffix (e.g. sidecar name). */
+  titleSuffix?: string;
 }
 
-export function TerminalModal({ session, onClose }: TerminalModalProps) {
+export function TerminalModal({ session, onClose, tmuxSessionOverride, titleSuffix }: TerminalModalProps) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -26,10 +30,10 @@ export function TerminalModal({ session, onClose }: TerminalModalProps) {
       role="dialog"
     >
       <DirectTerminal
-        label={session.id}
+        label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
-        sessionId={session.tmuxSession ?? session.id}
-        title={`${session.projectName} • ${session.agent}`}
+        sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
+        title={`${session.projectName} • ${titleSuffix ?? session.agent}`}
       />
     </div>
   );

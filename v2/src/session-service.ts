@@ -32,13 +32,13 @@ import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
   createTmuxCommandSession,
-  createTmuxDevServerSession,
+  createTmuxSidecarSession,
   createTmuxSession,
-  devServerTmuxAlive,
-  devServerTmuxSession,
+  sidecarTmuxAlive,
+  sidecarTmuxSession,
   getTmuxSessionActivity,
   isProcessRunningInTmux,
-  killDevServerTmux,
+  killSidecarTmux,
   killTmuxSession,
   setTmuxSocketName,
   sendMessageToTmux,
@@ -58,9 +58,9 @@ import {
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
+  type AgentName,
   type AppConfig,
   type BranchSource,
-  type DevServerConfig,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -220,11 +220,11 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function buildInitialMessage(initialMessage: string, hasDevServer: boolean): string {
+function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
   const base = withSessionSlotInstructions(initialMessage);
-  return hasDevServer
-    ? `${base}\n\nDev server: run \`spur-dev-server\` to start the project dev server in a side pane.`
-    : base;
+  if (sidecarNames.length === 0) return base;
+  const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
+  return `${base}\n\nSidecars: run \`spur-sidecar --name <name>\` to start a sidecar. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -298,7 +298,6 @@ function buildSessionEnv(args: {
   projectId: string;
   sessionId: string;
   sessionToolDir: string;
-  configPath: string;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -306,7 +305,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION: args.sessionId,
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
-    SPUR_CONFIG: args.configPath,
+    SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
@@ -1058,13 +1057,8 @@ export class SessionService {
       placeholderWritten = true;
       workspacePath = placeholder.worktreePath;
 
-      stage = "slot_tool";
-      const sessionToolDir = ensureSessionSlotTool({
-        dataDir: this.config.dataDir,
-        sessionId,
-        configPath: this.config.configPath,
-        agent,
-      });
+      stage = "tools.setup";
+      const sessionToolDir = this.prepareSessionTools(sessionId, agent);
 
       if (worktree) {
         stage = "worktree.create";
@@ -1134,19 +1128,19 @@ export class SessionService {
       };
 
       stage = "tmux.create";
+      const sessionEnv = buildSessionEnv({
+        agent,
+        projectId: request.project,
+        sessionId,
+        sessionToolDir,
+        repoPath: project.path,
+        symlinks: project.symlinks,
+      });
       await createTmuxSession({
         sessionName: tmuxSession,
         cwd: workspacePath,
         launchCommand: launchPlan.launchCommand,
-        env: buildSessionEnv({
-          agent,
-          projectId: request.project,
-          sessionId,
-          sessionToolDir,
-          configPath: this.config.configPath,
-          repoPath: project.path,
-          symlinks: project.symlinks,
-        }),
+        env: sessionEnv,
       });
       this.logEvent("session.spawn.tmux_created", {
         level: "info",
@@ -1171,9 +1165,10 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
+        const sidecarNames = Object.keys(project.sidecars);
         const spawnInitialMessage = buildInitialMessage(
           launchPlan.initialMessage,
-          !!project.devServer,
+          sidecarNames,
         );
         await sendMessageToTmux(tmuxSession, spawnInitialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
@@ -1193,30 +1188,36 @@ export class SessionService {
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
 
-      if (project.devServer?.autoStart) {
+      const projectSidecars = project.sidecars;
+      for (const [name, sidecar] of Object.entries(projectSidecars)) {
+        if (!sidecar.autoStart) continue;
         try {
-          await createTmuxDevServerSession({
+          await createTmuxSidecarSession({
             sessionId,
+            sidecarName: name,
             cwd: workspacePath,
-            command: project.devServer.command,
+            command: sidecar.command,
+            env: { ...sessionEnv, ...(sidecar.env ?? {}) },
           });
-          this.logEvent("session.devserver.started", {
+          this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
             projectId: request.project,
-            message: `Auto-started dev server for ${sessionId}`,
+            message: `Auto-started sidecar ${name} for ${sessionId}`,
             details: {
-              command: project.devServer.command,
-              tmuxSession: devServerTmuxSession(sessionId),
+              sidecarName: name,
+              command: sidecar.command,
+              tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
-        } catch (devError) {
-          const devMessage = devError instanceof Error ? devError.message : String(devError);
-          this.logEvent("session.devserver.autostart.failed", {
+        } catch (sidecarError) {
+          const sidecarMessage =
+            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+          this.logEvent("session.sidecar.autostart.failed", {
             level: "warn",
             sessionId,
             projectId: request.project,
-            message: `Auto-start dev server failed for ${sessionId}: ${devMessage}`,
+            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
           });
         }
       }
@@ -1242,9 +1243,10 @@ export class SessionService {
     } catch (error) {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
-        await killDevServerTmux(sessionId);
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        removeSessionSlotTool(this.config.dataDir, sessionId);
+        for (const scName of Object.keys(project.sidecars)) {
+          await killSidecarTmux(sessionId, scName).catch(() => {});
+        }
+        this.removeSessionArtifacts(sessionId);
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -1477,7 +1479,7 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startDevServer(sessionId: string): Promise<SessionView> {
+  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1489,43 +1491,73 @@ export class SessionService {
       throw new Error(`Session workspace is not available: ${sessionId}`);
     }
     const project = this.getProject(session.project);
-    const devServer: DevServerConfig | undefined = project.devServer;
-    if (!devServer) {
-      throw new Error(`Project ${session.project} has no devServer configured`);
+    const sidecar = project.sidecars[sidecarName];
+    if (!sidecar) {
+      throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
 
-    if (await devServerTmuxAlive(sessionId)) {
+    if (await sidecarTmuxAlive(sessionId, sidecarName)) {
       return this.enrich(session);
     }
 
-    await createTmuxDevServerSession({
+    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
+    const sessionEnv = buildSessionEnv({
+      agent: session.agent,
+      projectId: session.project,
+      sessionId: session.id,
+      sessionToolDir,
+      repoPath: project.path,
+      symlinks: project.symlinks,
+    });
+
+    await createTmuxSidecarSession({
       sessionId,
+      sidecarName,
       cwd: session.worktreePath,
-      command: devServer.command,
+      command: sidecar.command,
+      env: { ...sessionEnv, ...(sidecar.env ?? {}) },
     });
 
     const updated: SessionRecord = { ...session, updatedAt: nowIso() };
     writeSession(this.config.dataDir, updated);
-    this.logEvent("session.devserver.started", {
+    this.logEvent("session.sidecar.started", {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `Started dev server for ${sessionId}`,
+      message: `Started sidecar ${sidecarName} for ${sessionId}`,
       details: {
-        command: devServer.command,
-        tmuxSession: devServerTmuxSession(sessionId),
+        sidecarName,
+        command: sidecar.command,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
     return this.enrich(updated);
   }
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
-    await killDevServerTmux(session.id);
+    const project = this.config.projects[session.project];
+    for (const scName of Object.keys(project?.sidecars ?? {})) {
+      await killSidecarTmux(session.id, scName).catch(() => {});
+    }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
       await killTmuxSession(service.tmuxSession);
     }
     deleteServiceSourceStatesForSession(this.config.dataDir, session.project, session.id);
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
+  }
+
+  private prepareSessionTools(sessionId: string, agent: AgentName): string {
+    return ensureSessionSlotTool({
+      dataDir: this.config.dataDir,
+      sessionId,
+      configPath: this.config.configPath,
+      agent,
+    });
+  }
+
+  private removeSessionArtifacts(sessionId: string): void {
+    deleteAgentHookState(this.config.dataDir, sessionId);
+    removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
   private async applyManualStatus(
@@ -1552,8 +1584,7 @@ export class SessionService {
           const cleanup = await this.resolveCleanupContext(session);
           await removeWorktree(cleanup.repoPath, session.worktreePath);
         }
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        removeSessionSlotTool(this.config.dataDir, sessionId);
+        this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1615,8 +1646,7 @@ export class SessionService {
         const cleanup = await this.resolveCleanupContext(session);
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
-      deleteAgentHookState(this.config.dataDir, sessionId);
-      removeSessionSlotTool(this.config.dataDir, sessionId);
+      this.removeSessionArtifacts(sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -1735,12 +1765,7 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const sessionToolDir = ensureSessionSlotTool({
-      dataDir: this.config.dataDir,
-      sessionId: session.id,
-      configPath: this.config.configPath,
-      agent: session.agent,
-    });
+    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -1777,7 +1802,6 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
-      configPath: this.config.configPath,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -1881,12 +1905,7 @@ export class SessionService {
     let restoredLaunchCommand: string;
 
     try {
-      const sessionToolDir = ensureSessionSlotTool({
-        dataDir: this.config.dataDir,
-        sessionId: current.id,
-        configPath: this.config.configPath,
-        agent: current.agent,
-      });
+      const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,
@@ -1945,7 +1964,6 @@ export class SessionService {
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
-          configPath: this.config.configPath,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),
@@ -1956,9 +1974,10 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreProject = this.config.projects[current.project];
+      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
       const restoreInitialMessage = buildInitialMessage(
         effectivePlan.initialMessage,
-        !!restoreProject?.devServer,
+        restoreSidecarNames,
       );
       await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
     } catch (error) {
@@ -2587,7 +2606,12 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
-    const devServerAlive = await devServerTmuxAlive(session.id);
+    const project = this.config.projects[session.project];
+    const projectSidecars = project?.sidecars ?? {};
+    const sidecars: { name: string; alive: boolean }[] = [];
+    for (const name of Object.keys(projectSidecars)) {
+      sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
+    }
 
     return {
       ...session,
@@ -2598,7 +2622,7 @@ export class SessionService {
       ...(history.length > 0 ? { stateHistory: history } : {}),
       lastActivityAt,
       services,
-      devServerAlive,
+      sidecars,
     };
   }
 

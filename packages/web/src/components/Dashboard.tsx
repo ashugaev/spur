@@ -23,6 +23,24 @@ import {
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
+const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+
+function readCollapsedCategories(): Set<AttentionLevel> {
+  if (typeof window === "undefined") return new Set();
+  const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const valid = parsed.filter(
+      (item): item is AttentionLevel =>
+        typeof item === "string" && LANE_ORDER.includes(item as AttentionLevel),
+    );
+    return new Set(valid);
+  } catch {
+    return new Set();
+  }
+}
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -133,6 +151,7 @@ export function Dashboard() {
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [preflightBusy, setPreflightBusy] = useState(false);
+  const [preflightSuggestedBranch, setPreflightSuggestedBranch] = useState("");
   const [awaitingBranchConfirm, setAwaitingBranchConfirm] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const voice = useVoiceInput({
@@ -144,7 +163,7 @@ export function Dashboard() {
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text));
     },
   });
-  const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
@@ -330,14 +349,6 @@ export function Dashboard() {
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
 
-  useEffect(() => {
-    if (!isMobile) return;
-    setExpandedLevel((current) => {
-      if (current && grouped[current].length > 0) return current;
-      return LANE_ORDER.find((level) => grouped[level].length > 0) ?? null;
-    });
-  }, [grouped, isMobile]);
-
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
     if (!spawnOpen && nextProjectId) {
@@ -377,6 +388,7 @@ export function Dashboard() {
       if (clearBranch) {
         setSpawnBranch("");
       }
+      setPreflightSuggestedBranch("");
       setAwaitingBranchConfirm(false);
     },
     [awaitingBranchConfirm],
@@ -424,6 +436,7 @@ export function Dashboard() {
         if (!preflightResponse.ok) throw new Error(await preflightResponse.text());
         const preflight = (await preflightResponse.json()) as { branch: string | null };
         if (preflight.branch) {
+          setPreflightSuggestedBranch(preflight.branch);
           setSpawnBranch(preflight.branch);
           setAwaitingBranchConfirm(true);
           setError(null);
@@ -446,7 +459,8 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
-      const finalBranch = spawnBranch.trim();
+      const finalBranch =
+        spawnBranch.trim() || (awaitingBranchConfirm ? preflightSuggestedBranch : "");
       if (finalBranch) payload.branch = finalBranch;
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
@@ -723,7 +737,7 @@ export function Dashboard() {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Optional prompt for the new session..."
+                    placeholder="Optional prompt (leave empty to open the agent session)..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -735,21 +749,31 @@ export function Dashboard() {
                 ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "Leave empty to open the agent session. ⌘/Ctrl + Enter to submit" : null}
+                    <VoiceStatusHint voice={voice} />
                   </span>
                   <button
-                    className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={spawning || preflightBusy || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
                   >
-                    {preflightBusy
-                      ? "Running preflight..."
-                      : spawning
-                        ? "Spawning..."
-                        : awaitingBranchConfirm
-                          ? "Confirm & Spawn"
-                          : "Spawn"}
+                    <span>
+                      {preflightBusy
+                        ? "Running preflight..."
+                        : spawning
+                          ? "Spawning..."
+                          : awaitingBranchConfirm
+                            ? "Confirm & Spawn"
+                            : "Spawn"}
+                    </span>
+                    {!spawning && !preflightBusy ? (
+                      <span
+                        aria-hidden="true"
+                        className="border border-black/30 px-1 py-0.5 font-mono text-[9px] font-semibold normal-case tracking-normal text-black/80"
+                      >
+                        ⌘/Ctrl+Enter
+                      </span>
+                    ) : null}
                   </button>
                 </div>
               </div>
@@ -788,13 +812,22 @@ export function Dashboard() {
             ).map((level) => (
               <AttentionZone
                 key={level}
-                collapsed={isMobile ? expandedLevel !== level : undefined}
+                collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
                 onToggle={
                   isMobile
                     ? (nextLevel) =>
-                        setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
+                        setCollapsedLevels((current) => {
+                          const next = new Set(current);
+                          if (next.has(nextLevel)) next.delete(nextLevel);
+                          else next.add(nextLevel);
+                          window.localStorage.setItem(
+                            COLLAPSED_CATEGORIES_STORAGE_KEY,
+                            JSON.stringify([...next]),
+                          );
+                          return next;
+                        })
                     : undefined
                 }
                 sessions={grouped[level]}

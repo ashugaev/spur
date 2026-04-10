@@ -338,28 +338,29 @@ export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
   }
 }
 
-export function devServerTmuxSession(sessionId: string): string {
-  return `${sessionId}--dev`;
+export function sidecarTmuxSession(sessionId: string, sidecarName: string): string {
+  return `${sessionId}--${sidecarName}`;
 }
 
-export async function createTmuxDevServerSession(input: {
+export async function createTmuxSidecarSession(input: {
   sessionId: string;
+  sidecarName: string;
   cwd: string;
   command: string;
   env?: Record<string, string>;
 }): Promise<void> {
   await createTmuxCommandSession({
-    sessionName: devServerTmuxSession(input.sessionId),
+    sessionName: sidecarTmuxSession(input.sessionId, input.sidecarName),
     cwd: input.cwd,
     launchCommand: input.command,
     ...(input.env ? { env: input.env } : {}),
   });
 }
 
-export async function devServerTmuxAlive(sessionId: string): Promise<boolean> {
-  return tmuxSessionExists(devServerTmuxSession(sessionId));
+export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
+  return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
 }
 
-export async function killDevServerTmux(sessionId: string): Promise<void> {
-  await killTmuxSession(devServerTmuxSession(sessionId));
+export async function killSidecarTmux(sessionId: string, sidecarName: string): Promise<void> {
+  await killTmuxSession(sidecarTmuxSession(sessionId, sidecarName));
 }

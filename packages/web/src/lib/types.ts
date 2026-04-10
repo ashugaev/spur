@@ -47,7 +47,7 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
-  devServerAlive?: boolean;
+  sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -86,6 +86,7 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
   error?: string;
 }
@@ -114,6 +115,7 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    sidecars: session.sidecars ?? [],
     links,
     error: session.error,
   };

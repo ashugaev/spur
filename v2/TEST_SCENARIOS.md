@@ -90,11 +90,6 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 
-- Config parses `devServer` with `command` and `autoStart`; absent key returns `undefined`.
-- `startDevServer` rejects sessions without `devServer` config, inactive sessions, and missing workspace.
-- `startDevServer` is idempotent when the dev server tmux session is already alive.
-- Cleanup (`kill`, `complete`, `pause`) kills the dev server tmux session alongside the main session.
-
 ## Runtime Integration
 
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.
@@ -144,10 +139,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
 
-- `POST /sessions/:id/dev-server/start` creates the `${sessionId}--dev` tmux session for the configured dev server command.
-- `spawn --json` with `autoStart: true` creates the dev server tmux session alongside the agent session.
-- `kill --json` cleans up both the agent tmux and the `--dev` tmux session.
-- Agent `spur-dev-server` tool starts the dev server from inside a live session.
+- Sidecar auto-starts on spawn when `autoStart: true`.
+- Multiple sidecars per session get separate tmux panes.
+- Sidecar cleanup on kill/complete.
+- Manual sidecar start via `spur sidecar start --session <id> --name <name>`.
+- Sidecar status reported in session view.
 
 ## Real-Agent Smoke
 
@@ -177,6 +173,24 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Trigger referencing an unknown source.
 - `service run` outside a live Spur session.
 - `service status` for an unknown session id.
+
+### Sidecars
+
+**Tier: fast**
+- `sidecars` config parsing: named sidecar entries with command, autoStart, env
+- `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
+- Both `devServer` and `sidecars` defined: throws error
+- Sidecar tmux session naming: `{sessionId}--{sidecarName}`
+- `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
+- Sidecar env merges session env with sidecar config env
+- `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
+
+**Tier: runtime integration**
+- Sidecar auto-starts on spawn when `autoStart: true`
+- Multiple sidecars per session get separate tmux panes
+- Sidecar cleanup on kill/complete
+- Manual sidecar start via `spur sidecar start --session <id> --name <name>`
+- Sidecar status reported in session view
 
 ## Regression Rule
 

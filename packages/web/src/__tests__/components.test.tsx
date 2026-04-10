@@ -55,6 +55,8 @@ function sessionsPayload() {
   };
 }
 
+const SPAWN_PROMPT_PLACEHOLDER = "Optional prompt (leave empty to open the agent session)...";
+
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -290,7 +292,7 @@ describe("Dashboard", () => {
 
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
     expect(spawnButton).toBeEnabled();
-    expect(screen.getByPlaceholderText("Optional prompt for the new session...")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
 
     fireEvent.click(spawnButton);
 
@@ -345,7 +347,7 @@ describe("Dashboard", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
 
@@ -362,7 +364,9 @@ describe("Dashboard", () => {
       );
     });
     expect(screen.getByDisplayValue("feature/api-fix-auth")).toBeInTheDocument();
-    expect(screen.getByText("Preflight suggested a branch. Edit if needed, then confirm spawn.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Preflight suggested a branch. Edit if needed, then confirm spawn."),
+    ).toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/spawn")).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Confirm & Spawn" }));
@@ -381,6 +385,66 @@ describe("Dashboard", () => {
           }),
         }),
       );
+    });
+  });
+
+  it.each([
+    {
+      label: "Ctrl+Enter",
+      prompt: "Ship hotkey",
+      keydown: { key: "Enter", ctrlKey: true },
+    },
+    {
+      label: "Cmd+Enter",
+      prompt: "Ship cmd hotkey",
+      keydown: { key: "Enter", metaKey: true },
+    },
+  ])("submits spawn when pressing $label in prompt textarea", async ({ keydown, prompt: value }) => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/sessions?project=api")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url === "/api/spawn")
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value } });
+    fireEvent.keyDown(prompt, keydown);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/preflight",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
+        }),
+      );
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
+        }),
+      );
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
     });
   });
 
@@ -421,7 +485,7 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByPlaceholderText("branch name"), {
       target: { value: "feature/manual-branch" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
@@ -469,7 +533,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
@@ -479,7 +543,7 @@ describe("Dashboard", () => {
       expect(screen.getByDisplayValue("feature/api-fix-auth")).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth quickly" },
     });
 
@@ -513,7 +577,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
@@ -530,7 +594,7 @@ describe("Dashboard", () => {
     expect(screen.getByRole("button", { name: "Spawn" })).toBeInTheDocument();
   });
 
-  it("allows clearing the suggested branch before confirm spawn", async () => {
+  it("falls back to the suggested branch when confirm is submitted with an empty branch input", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/voice") {
@@ -548,6 +612,7 @@ describe("Dashboard", () => {
             projectId: "api",
             prompt: "Fix auth",
             agent: "claude",
+            branch: "feature/api-fix-auth",
           }),
         );
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
@@ -562,7 +627,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
@@ -587,6 +652,7 @@ describe("Dashboard", () => {
             projectId: "api",
             prompt: "Fix auth",
             agent: "claude",
+            branch: "feature/api-fix-auth",
           }),
         }),
       );
@@ -618,7 +684,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Fix auth" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
@@ -627,6 +693,36 @@ describe("Dashboard", () => {
       expect(screen.getByText("preflight failed")).toBeInTheDocument();
     });
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/spawn")).toHaveLength(0);
+  });
+
+  it("does not submit spawn on plain Enter in prompt textarea", async () => {
+    let spawnCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/spawn") {
+        spawnCalls += 1;
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "Do not submit" } });
+    fireEvent.keyDown(prompt, { key: "Enter" });
+
+    expect(spawnCalls).toBe(0);
   });
 
   it("defaults spawn project to the selected dashboard filter project", async () => {
@@ -757,16 +853,17 @@ describe("Dashboard", () => {
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
 
-    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
-      target: { value: "Ship it" },
-    });
+    fireEvent.change(
+      screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER),
+      {
+        target: { value: "Ship it" },
+      },
+    );
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
-      expect(
-        screen.queryByPlaceholderText("Optional prompt for the new session..."),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
     });
   });
 

@@ -45,6 +45,7 @@ const PROJECT: ProjectConfig = {
   preflight: {
     prompt: "Suggest a branch from the task and repo rules.",
   },
+  sidecars: {},
   sources: {},
   triggers: {},
 };
