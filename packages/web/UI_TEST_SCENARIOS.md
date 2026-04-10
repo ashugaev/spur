@@ -165,6 +165,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
+- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ## Responsive
 
