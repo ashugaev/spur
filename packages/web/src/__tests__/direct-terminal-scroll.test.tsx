@@ -1,4 +1,4 @@
-import { render, waitFor, act, screen } from "@testing-library/react";
+import { render, waitFor, act, screen, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 let onBinaryCallback: ((data: string) => void) | null = null;
@@ -34,6 +34,37 @@ const mockTerminal = {
 };
 
 const mockFit = { fit: vi.fn(), dispose: vi.fn() };
+
+class MockMediaRecorder {
+  mimeType = "audio/webm";
+  state = "inactive";
+  private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+  addEventListener(type: string, listener: (event?: unknown) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  start() {
+    this.state = "recording";
+  }
+
+  stop() {
+    this.state = "inactive";
+    this.emit(
+      "dataavailable",
+      new Blob(["voice-audio"], {
+        type: this.mimeType,
+      }),
+    );
+    this.emit("stop");
+  }
+
+  private emit(type: string, data?: Blob) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(data ? { data } : undefined);
+    }
+  }
+}
 
 vi.mock("xterm", () => ({
   Terminal: vi.fn(() => mockTerminal),
@@ -95,6 +126,15 @@ beforeEach(() => {
   vi.spyOn(global, "fetch").mockResolvedValue(
     new Response(JSON.stringify({ directTerminalPort: 14801 })),
   );
+  vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn().mockResolvedValue({
+        getTracks: () => [{ stop: vi.fn() }],
+      }),
+    },
+  });
   Object.defineProperty(document, "visibilityState", {
     configurable: true,
     value: "visible",
@@ -235,5 +275,44 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("shows a visible error when terminal voice text cannot be inserted", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "terminal voice text" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    await mountTerminal("test-voice-insert");
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Start voice recording" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+    });
+
+    wsInstances[0].readyState = 3;
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
 });

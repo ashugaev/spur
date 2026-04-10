@@ -140,6 +140,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
+- If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
@@ -173,6 +174,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
+- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)

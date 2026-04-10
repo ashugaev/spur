@@ -80,9 +80,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
 
-  const sendTerminalInput = useCallback((data: string) => {
-    if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+  const sendTerminalInput = useCallback((data: string): boolean => {
+    if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
     websocketRef.current.send(data);
+    return true;
   }, []);
 
   const voice = useVoiceInput();
@@ -418,6 +419,11 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
+      {voice.voiceError ? (
+        <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
+          {voice.voiceError}
+        </div>
+      ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
         <div className="flex items-center gap-1">
