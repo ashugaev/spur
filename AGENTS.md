@@ -58,6 +58,7 @@
 - Do not override `--config` to point at `~/.spur/config.yaml` (root config).
 - Do not kill processes or ports you did not start. Your allocated port is in `$SPUR_AGENT_PORT`.
 - Do not modify files under `~/.spur/agent-instances/`.
+- For `packages/web` work, use `spur-dev-server` (or the project `devServer` config) so the frontend rebuilds automatically in your worktree.
 
 ## Spur Validation
 

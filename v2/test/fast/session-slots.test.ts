@@ -80,10 +80,11 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-1",
       configPath: "/tmp/spur.yaml",
+      agentConfigPath: "/tmp/agent-spur.yaml",
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
-    expect(wrapper).toContain("--config '/tmp/spur.yaml'");
+    expect(wrapper).toContain("--config '/tmp/agent-spur.yaml'");
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       "slots --session 'api-1'",

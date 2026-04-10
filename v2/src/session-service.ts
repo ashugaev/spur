@@ -59,6 +59,7 @@ import {
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
+  type AgentName,
   type AppConfig,
   type BranchSource,
   type DevServerConfig,
@@ -1067,21 +1068,7 @@ export class SessionService {
       workspacePath = placeholder.worktreePath;
 
       stage = "isolation.setup";
-      const agentPort = await findAvailableAgentPort();
-      const agentConfigPath = ensureAgentIsolatedConfig({
-        parentDataDir: this.config.dataDir,
-        sessionId,
-        port: agentPort,
-      });
-
-      stage = "slot_tool";
-      const sessionToolDir = ensureSessionSlotTool({
-        dataDir: this.config.dataDir,
-        sessionId,
-        configPath: this.config.configPath,
-        agentConfigPath,
-        agent,
-      });
+      const { agentPort, sessionToolDir } = await this.prepareIsolatedSession(sessionId, agent);
 
       if (worktree) {
         stage = "worktree.create";
@@ -1259,9 +1246,7 @@ export class SessionService {
       if (sessionId && project && placeholderWritten) {
         await killTmuxSession(sessionId);
         await killDevServerTmux(sessionId);
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        removeSessionSlotTool(this.config.dataDir, sessionId);
-        removeAgentIsolatedConfig(this.config.dataDir, sessionId);
+        this.removeSessionArtifacts(sessionId);
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -1545,6 +1530,32 @@ export class SessionService {
     deleteServiceInstancesForSession(this.config.dataDir, session.id);
   }
 
+  private async prepareIsolatedSession(
+    sessionId: string,
+    agent: AgentName,
+  ): Promise<{ agentPort: number; sessionToolDir: string }> {
+    const agentPort = await findAvailableAgentPort();
+    const agentConfigPath = ensureAgentIsolatedConfig({
+      parentDataDir: this.config.dataDir,
+      sessionId,
+      port: agentPort,
+    });
+    const sessionToolDir = ensureSessionSlotTool({
+      dataDir: this.config.dataDir,
+      sessionId,
+      configPath: this.config.configPath,
+      agentConfigPath,
+      agent,
+    });
+    return { agentPort, sessionToolDir };
+  }
+
+  private removeSessionArtifacts(sessionId: string): void {
+    deleteAgentHookState(this.config.dataDir, sessionId);
+    removeSessionSlotTool(this.config.dataDir, sessionId);
+    removeAgentIsolatedConfig(this.config.dataDir, sessionId);
+  }
+
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
@@ -1569,9 +1580,7 @@ export class SessionService {
           const cleanup = await this.resolveCleanupContext(session);
           await removeWorktree(cleanup.repoPath, session.worktreePath);
         }
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        removeSessionSlotTool(this.config.dataDir, sessionId);
-        removeAgentIsolatedConfig(this.config.dataDir, sessionId);
+        this.removeSessionArtifacts(sessionId);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1633,9 +1642,7 @@ export class SessionService {
         const cleanup = await this.resolveCleanupContext(session);
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
-      deleteAgentHookState(this.config.dataDir, sessionId);
-      removeSessionSlotTool(this.config.dataDir, sessionId);
-      removeAgentIsolatedConfig(this.config.dataDir, sessionId);
+      this.removeSessionArtifacts(sessionId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -1754,19 +1761,8 @@ export class SessionService {
     await killTmuxSession(session.tmuxSession);
     const sessionWithAgentId = await this.captureAgentSessionId(session, 0);
     let recoveredAgentSessionId = sessionWithAgentId.agentSessionId;
-    const resumeAgentPort = await findAvailableAgentPort();
-    const resumeAgentConfigPath = ensureAgentIsolatedConfig({
-      parentDataDir: this.config.dataDir,
-      sessionId: session.id,
-      port: resumeAgentPort,
-    });
-    const sessionToolDir = ensureSessionSlotTool({
-      dataDir: this.config.dataDir,
-      sessionId: session.id,
-      configPath: this.config.configPath,
-      agentConfigPath: resumeAgentConfigPath,
-      agent: session.agent,
-    });
+    const { agentPort: resumeAgentPort, sessionToolDir } =
+      await this.prepareIsolatedSession(session.id, session.agent);
     const hookSetup = await setupAgentHooks({
       agent: session.agent,
       worktreePath: session.worktreePath,
@@ -1911,19 +1907,8 @@ export class SessionService {
     let restoredLaunchCommand: string;
 
     try {
-      const restoreAgentPort = await findAvailableAgentPort();
-      const restoreAgentConfigPath = ensureAgentIsolatedConfig({
-        parentDataDir: this.config.dataDir,
-        sessionId: current.id,
-        port: restoreAgentPort,
-      });
-      const sessionToolDir = ensureSessionSlotTool({
-        dataDir: this.config.dataDir,
-        sessionId: current.id,
-        configPath: this.config.configPath,
-        agentConfigPath: restoreAgentConfigPath,
-        agent: current.agent,
-      });
+      const { agentPort: restoreAgentPort, sessionToolDir } =
+        await this.prepareIsolatedSession(current.id, current.agent);
       const hookSetup = await setupAgentHooks({
         agent: current.agent,
         worktreePath: current.worktreePath,

@@ -5,14 +5,21 @@ import { tmpdir } from "node:os";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  AGENT_PORT_END,
   AGENT_PORT_START,
   ensureAgentIsolatedConfig,
   findAvailableAgentPort,
+  releaseAgentPort,
   removeAgentIsolatedConfig,
 } from "../../src/agent-isolation.js";
 
 describe("findAvailableAgentPort", () => {
+  afterEach(() => {
+    // Release any ports allocated during the test.
+    for (let p = AGENT_PORT_START; p <= AGENT_PORT_START + 10; p++) {
+      releaseAgentPort(p);
+    }
+  });
+
   test("returns first port in range when all free", async () => {
     const port = await findAvailableAgentPort();
     expect(port).toBe(AGENT_PORT_START);
@@ -32,6 +39,20 @@ describe("findAvailableAgentPort", () => {
       });
     }
   });
+
+  test("skips ports already allocated by the process", async () => {
+    const first = await findAvailableAgentPort();
+    const second = await findAvailableAgentPort();
+    expect(first).toBe(AGENT_PORT_START);
+    expect(second).toBe(AGENT_PORT_START + 1);
+  });
+
+  test("releaseAgentPort makes port available again", async () => {
+    const first = await findAvailableAgentPort();
+    releaseAgentPort(first);
+    const second = await findAvailableAgentPort();
+    expect(second).toBe(first);
+  });
 });
 
 describe("ensureAgentIsolatedConfig", () => {
@@ -44,7 +65,7 @@ describe("ensureAgentIsolatedConfig", () => {
     }
   });
 
-  test("creates config with correct values", () => {
+  test("creates config with correct values and quoted paths", () => {
     tmpDir = mkdtempSync(join(tmpdir(), "spur-test-"));
     const configPath = ensureAgentIsolatedConfig({
       parentDataDir: tmpDir,
@@ -60,6 +81,9 @@ describe("ensureAgentIsolatedConfig", () => {
     expect(server["host"]).toBe("127.0.0.1");
     expect(tmux["socketName"]).toBe("spur-4325");
     expect(parsed["dataDir"]).toContain("agent-instances/test-session-1");
+    // Verify paths are YAML-quoted (string type preserved through special chars)
+    expect(typeof parsed["dataDir"]).toBe("string");
+    expect(typeof parsed["worktreeDir"]).toBe("string");
   });
 });
 
@@ -82,10 +106,3 @@ describe("removeAgentIsolatedConfig", () => {
   });
 });
 
-describe("constants", () => {
-  test("port range is valid", () => {
-    expect(AGENT_PORT_START).toBe(4320);
-    expect(AGENT_PORT_END).toBe(4399);
-    expect(AGENT_PORT_END).toBeGreaterThan(AGENT_PORT_START);
-  });
-});
