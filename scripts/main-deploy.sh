@@ -24,6 +24,9 @@ fi
 git pull --ff-only origin main
 pnpm install --frozen-lockfile
 pnpm build
+# Safe to restart: the systemd unit uses KillMode=process, so only the
+# daemon's node process is stopped. Tmux sessions and agents survive.
+# The daemon re-discovers living sessions on startup.
 sudo systemctl restart spur-daemon.service spur-web.service
 sudo systemctl is-active --quiet spur-daemon.service
 sudo systemctl is-active --quiet spur-web.service

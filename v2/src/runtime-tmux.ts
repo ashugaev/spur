@@ -10,6 +10,17 @@ import { shellEscape } from "./agents/shell-escape.js";
 import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
 
+// ── Session survival across daemon restarts ──
+// The daemon spawns tmux sessions via execFileAsync. By default, systemd
+// places child processes in the service's cgroup. If the unit uses the
+// default KillMode=control-group, `systemctl restart` sends SIGTERM to
+// every process in the cgroup — including tmux and the agents running
+// inside it. To prevent this, the systemd unit MUST use KillMode=process
+// so only the daemon's node process receives the stop signal.
+// After restart, the daemon re-discovers living sessions through
+// applyConfig() → resumeSessionDelivery().
+// See deploy/spur-daemon.service for the unit template.
+
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
