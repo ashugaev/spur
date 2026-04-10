@@ -23,6 +23,24 @@ import {
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
+const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+
+function readCollapsedCategories(): Set<AttentionLevel> {
+  if (typeof window === "undefined") return new Set();
+  const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    const valid = parsed.filter(
+      (item): item is AttentionLevel =>
+        typeof item === "string" && LANE_ORDER.includes(item as AttentionLevel),
+    );
+    return new Set(valid);
+  } catch {
+    return new Set();
+  }
+}
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -136,7 +154,7 @@ export function Dashboard() {
   const voice = useVoiceInput({
     onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
-  const [expandedLevel, setExpandedLevel] = useState<AttentionLevel | null>(null);
+  const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
@@ -313,14 +331,6 @@ export function Dashboard() {
     }
     window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
   };
-
-  useEffect(() => {
-    if (!isMobile) return;
-    setExpandedLevel((current) => {
-      if (current && grouped[current].length > 0) return current;
-      return LANE_ORDER.find((level) => grouped[level].length > 0) ?? null;
-    });
-  }, [grouped, isMobile]);
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
@@ -704,13 +714,22 @@ export function Dashboard() {
             ).map((level) => (
               <AttentionZone
                 key={level}
-                collapsed={isMobile ? expandedLevel !== level : undefined}
+                collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
                 onToggle={
                   isMobile
                     ? (nextLevel) =>
-                        setExpandedLevel((current) => (current === nextLevel ? null : nextLevel))
+                        setCollapsedLevels((current) => {
+                          const next = new Set(current);
+                          if (next.has(nextLevel)) next.delete(nextLevel);
+                          else next.add(nextLevel);
+                          window.localStorage.setItem(
+                            COLLAPSED_CATEGORIES_STORAGE_KEY,
+                            JSON.stringify([...next]),
+                          );
+                          return next;
+                        })
                     : undefined
                 }
                 sessions={grouped[level]}
