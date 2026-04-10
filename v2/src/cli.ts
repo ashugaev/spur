@@ -259,11 +259,13 @@ function printBootstrapNotice(initialized: boolean, json: boolean, configPath: s
     writeStdout(brandLine(`Initialized Spur instance config at ${configPath}.`));
     writeStdout(brandLine(`Voice input is off until local dependencies are installed.`));
     writeStdout(
-      brandLine(`Install \`whisper-cli\` and \`ffmpeg\`, then download a model to ${defaultVoiceModelPath()}.`),
+      brandLine(
+        `Default voice uses \`whisper_cpp\`: install \`whisper-cli\`, \`ffmpeg\`, and a model at ${defaultVoiceModelPath()}.`,
+      ),
     );
     writeStdout(
       brandLine(
-        `Set a custom model path in \`voice.modelPath\` inside the instance config when needed.`,
+        `Switch providers with \`voice.provider\`, or set \`voice.modelPath\` to override the model source.`,
       ),
     );
   }

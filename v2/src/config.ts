@@ -29,7 +29,9 @@ const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
 const DEFAULT_UI_PORT = 5555;
 const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
+const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_VOICE_LANGUAGE = "auto";
+const DEFAULT_VOICE_MODEL = "base";
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 type ConfigMode = "instance" | "project";
@@ -42,8 +44,10 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceModelPath: string;
+  voiceProvider: "whisper_cpp" | "faster_whisper";
+  voiceModelPath?: string;
   voiceLanguage: string;
+  voiceModel: string;
 }
 
 function expandHome(value: string): string {
@@ -122,8 +126,10 @@ function defaultConfigDefaults(configDir: string): ConfigDefaults {
     defaultAgent: "claude",
     tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
     uiPort: DEFAULT_UI_PORT,
+    voiceProvider: DEFAULT_VOICE_PROVIDER,
     voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
     voiceLanguage: DEFAULT_VOICE_LANGUAGE,
+    voiceModel: DEFAULT_VOICE_MODEL,
   };
 }
 
@@ -144,10 +150,22 @@ function defaultInstanceConfigYaml(): string {
     `  port: ${DEFAULT_UI_PORT}`,
     "",
     "voice:",
-    `  modelPath: ${DEFAULT_VOICE_MODEL_PATH}`,
+    `  provider: ${DEFAULT_VOICE_PROVIDER}`,
     `  language: ${DEFAULT_VOICE_LANGUAGE}`,
+    `  model: ${DEFAULT_VOICE_MODEL}`,
     "",
   ].join("\n");
+}
+
+function asOptionalVoiceProvider(
+  value: unknown,
+  label: string,
+): "whisper_cpp" | "faster_whisper" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "whisper_cpp" || value === "faster_whisper") {
+    return value;
+  }
+  throw new Error(`${label} must be "whisper_cpp" or "faster_whisper"`);
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
@@ -503,20 +521,37 @@ function parseConfigFile(
           ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
           : resolvedDefaults.uiPort,
     },
-    voice: {
-      modelPath:
+    voice: (() => {
+      const provider =
         mode === "instance"
-          ? resolveFrom(
-              configDir,
-              asOptionalString(voice["modelPath"], "voice.modelPath") ??
-                resolvedDefaults.voiceModelPath,
-            )
-          : resolvedDefaults.voiceModelPath,
-      language:
+          ? (asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
+            resolvedDefaults.voiceProvider)
+          : resolvedDefaults.voiceProvider;
+      const model =
         mode === "instance"
-          ? (asOptionalString(voice["language"], "voice.language") ?? resolvedDefaults.voiceLanguage)
-          : resolvedDefaults.voiceLanguage,
-    },
+          ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
+          : resolvedDefaults.voiceModel;
+      const configuredModelPath =
+        mode === "instance"
+          ? asOptionalString(voice["modelPath"], "voice.modelPath")
+          : resolvedDefaults.voiceModelPath;
+      const modelPath = configuredModelPath
+        ? resolveFrom(configDir, configuredModelPath)
+        : provider === "whisper_cpp"
+          ? resolvedDefaults.voiceModelPath
+          : undefined;
+
+      return {
+        provider,
+        language:
+          mode === "instance"
+            ? (asOptionalString(voice["language"], "voice.language") ??
+              resolvedDefaults.voiceLanguage)
+            : resolvedDefaults.voiceLanguage,
+        model,
+        ...(modelPath !== undefined ? { modelPath } : {}),
+      };
+    })(),
     projects: normalizedProjects,
   };
 }
@@ -605,8 +640,12 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           defaultAgent: defaults.defaultAgent,
           tmuxSocketName: defaults.tmux.socketName,
           uiPort: defaults.ui.port,
-          voiceModelPath: defaults.voice.modelPath,
+          voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
+          voiceModel: defaults.voice.model,
+          ...(defaults.voice.modelPath !== undefined
+            ? { voiceModelPath: defaults.voice.modelPath }
+            : {}),
         }
       : undefined,
   );

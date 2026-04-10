@@ -65,7 +65,7 @@ describe("Dashboard", () => {
   it("renders Spur dashboard sessions from API", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsPayload()));
     });
 
@@ -84,7 +84,7 @@ describe("Dashboard", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
@@ -231,7 +231,7 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsData));
     });
 

@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  return NextResponse.json(readVoiceStatus(), {
+  return NextResponse.json(await readVoiceStatus(), {
     headers: { "Cache-Control": "no-store" },
   });
 }

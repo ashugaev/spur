@@ -55,6 +55,8 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
+    expect(config.voice.provider).toBe("whisper_cpp");
+    expect(config.voice.model).toBe("base");
     expect(config.voice.modelPath).toContain(".cache/whisper.cpp/ggml-base.bin");
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
@@ -265,6 +267,61 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
+  });
+
+  it("parses voice provider and model with minimal config", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: faster_whisper
+  language: auto
+  model: small
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "faster_whisper",
+      language: "auto",
+      model: "small",
+    });
+  });
+
+  it("keeps legacy voice configs backwards compatible", async () => {
+    const configPath = await writeConfig(`
+voice:
+  modelPath: ~/models/ggml-base.bin
+  language: ru
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice.provider).toBe("whisper_cpp");
+    expect(config.voice.model).toBe("base");
+    expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
+    expect(config.voice.language).toBe("ru");
+  });
+
+  it("rejects unsupported voice providers", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: whisperx
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider must be "whisper_cpp" or "faster_whisper"',
+    );
   });
 
   it("parses an optional project spawn preflight prompt", async () => {

@@ -12,11 +12,8 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "audio file is required" }, { status: 400 });
     }
 
-    const { text, modelPath } = await transcribeAudio(
-      Buffer.from(await audio.arrayBuffer()),
-      audio.name,
-    );
-    return NextResponse.json({ text, modelPath });
+    const result = await transcribeAudio(Buffer.from(await audio.arrayBuffer()), audio.name);
+    return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to transcribe audio";
     return NextResponse.json({ error: message }, { status: 502 });

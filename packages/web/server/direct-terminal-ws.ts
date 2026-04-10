@@ -1,4 +1,4 @@
-import { spawn, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { homedir, userInfo } from "node:os";
 import { WebSocketServer, WebSocket } from "ws";

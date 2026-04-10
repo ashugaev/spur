@@ -160,8 +160,10 @@ export interface AppConfig {
     port: number;
   };
   voice: {
-    modelPath: string;
+    provider: "whisper_cpp" | "faster_whisper";
     language: string;
+    model: string;
+    modelPath?: string;
   };
   projects: Record<string, ProjectConfig>;
 }
