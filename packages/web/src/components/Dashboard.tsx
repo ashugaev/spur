@@ -391,23 +391,25 @@ export function Dashboard() {
     if (!project || !prompt) return;
 
     let cancelled = false;
-    const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
-    const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
-    if (overrides) payload.overrides = overrides;
+    const timer = setTimeout(() => {
+      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
+      const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
+      if (overrides) payload.overrides = overrides;
 
-    fetch("/api/preflight", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((result: { branch: string | null } | null) => {
-        if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+      fetch("/api/preflight", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       })
-      .catch(() => {});
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: { branch: string | null } | null) => {
+          if (!cancelled && result?.branch) setSpawnBranch(result.branch);
+        })
+        .catch(() => {});
+    }, 500);
 
-    return () => { cancelled = true; };
-  }, [spawnProjectId, spawnAgent]);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
