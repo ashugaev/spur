@@ -257,6 +257,62 @@ describe("SessionDetail voice input", () => {
     expect(screen.queryByText('{"error":"Voice API unavailable"}')).not.toBeInTheDocument();
   });
 
+  it("shows a permission error instead of the raw browser getUserMedia message", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockRejectedValue(
+          Object.assign(new Error(
+            "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission.",
+          ), {
+            name: "NotAllowedError",
+          }),
+        ),
+      },
+    });
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Start voice recording" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Microphone access is blocked. Allow microphone permission in your browser and try again.",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole("button", { name: "Start voice recording" }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the back link on the default dashboard route when no project query is present", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
