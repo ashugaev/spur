@@ -9,7 +9,7 @@ import YAML from "yaml";
 const execFileAsync = promisify(execFile);
 const DEFAULT_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
 const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-base.bin");
-const DEFAULT_VOICE_LANGUAGE = "ru";
+const DEFAULT_VOICE_LANGUAGE = "auto";
 
 interface SpurInstanceShape {
   voice?: {

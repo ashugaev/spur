@@ -22,7 +22,12 @@ import {
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
-import { buildDashboardPath, buildSessionPath } from "@/lib/project-routes";
+import {
+  buildDashboardPath,
+  buildSessionPath,
+  getTerminalQuerySessionId,
+  withTerminalQuery,
+} from "@/lib/project-routes";
 import {
   canComplete,
   canPause,
@@ -121,7 +126,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const voice = useVoiceInput({
     onTranscribed: (text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -149,6 +154,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadSession]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncSearch = () => setLocationSearch(window.location.search);
+    syncSearch();
+    window.addEventListener("popstate", syncSearch);
+    return () => {
+      window.removeEventListener("popstate", syncSearch);
+    };
+  }, []);
 
 
   const handleAction = async (
@@ -245,9 +260,30 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
   const effectiveProjectId = projectId ?? session?.projectId ?? "";
+  const requestedTerminalSessionId = useMemo(
+    () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
+    [locationSearch],
+  );
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
+  const terminalOpen = Boolean(canAttach && requestedTerminalSessionId === session.id);
+
+  useEffect(() => {
+    if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
+    if (requestedTerminalSessionId === session.id && canAttach) return;
+
+    const query = withTerminalQuery(window.location.search, null);
+    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
+  }, [canAttach, requestedTerminalSessionId, session]);
+
+  const syncTerminalFilter = (terminalSessionId: string | null) => {
+    if (typeof window === "undefined") return;
+    const query = withTerminalQuery(window.location.search, terminalSessionId);
+    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
+  };
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -312,7 +348,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={() => setTerminalOpen(true)}
+                onClick={() => syncTerminalFilter(session.id)}
               >
                 Terminal
               </button>
@@ -597,7 +633,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (
-            <TerminalModal onClose={() => setTerminalOpen(false)} session={session} />
+            <TerminalModal onClose={() => syncTerminalFilter(null)} session={session} />
           ) : null}
         </>
       ) : (

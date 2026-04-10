@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -9,8 +8,10 @@ import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import {
   getAttentionLevel,
+  isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
   type DashboardSession,
@@ -103,13 +104,20 @@ function IconBolt() {
   );
 }
 
+function readLocationSearch(): string {
+  if (typeof window === "undefined") return "";
+  return window.location.search;
+}
+
 export function Dashboard() {
-  const searchParams = useSearchParams();
-  const requestedProject = searchParams.get("project")?.trim() ?? "";
+  const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
   const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [projectId, setProjectId] = useState(requestedProject);
+  const [projectId, setProjectId] = useState(() => {
+    const params = new URLSearchParams(readLocationSearch());
+    return params.get("project")?.trim() ?? "";
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -132,7 +140,25 @@ export function Dashboard() {
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
-  const [terminalSession, setTerminalSession] = useState<DashboardSession | null>(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncSearch = () => setLocationSearch(readLocationSearch());
+    syncSearch();
+    window.addEventListener("popstate", syncSearch);
+    return () => {
+      window.removeEventListener("popstate", syncSearch);
+    };
+  }, []);
+
+  const requestedProject = useMemo(
+    () => new URLSearchParams(locationSearch).get("project")?.trim() ?? "",
+    [locationSearch],
+  );
+  const requestedTerminalSessionId = useMemo(
+    () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
+    [locationSearch],
+  );
 
   const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
     if (!silent) {
@@ -197,13 +223,16 @@ export function Dashboard() {
     [filterProjectOptions],
   );
 
+  const allSessions = useMemo(
+    () =>
+      rawSessions.map((session) => toDashboardSession(session, projectNameMap.get(session.project))),
+    [projectNameMap, rawSessions],
+  );
+
   const sessions = useMemo(() => {
-    const all = rawSessions.map((session) =>
-      toDashboardSession(session, projectNameMap.get(session.project)),
-    );
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter(
+    if (!q) return allSessions;
+    return allSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -211,7 +240,7 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [projectNameMap, rawSessions, searchQuery]);
+  }, [allSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -306,9 +335,18 @@ export function Dashboard() {
     } else {
       params.delete("project");
     }
+    params.delete("terminal");
 
     const query = params.toString();
     window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+    setLocationSearch(window.location.search);
+  };
+
+  const syncTerminalFilter = (terminalSessionId: string | null) => {
+    if (typeof window === "undefined") return;
+    const query = withTerminalQuery(window.location.search, terminalSessionId);
+    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
   };
 
   const addStep = () => {
@@ -369,7 +407,7 @@ export function Dashboard() {
   };
 
   const openTerminal = (session: DashboardSession) => {
-    setTerminalSession(session);
+    syncTerminalFilter(session.id);
     setError(null);
   };
 
@@ -377,6 +415,26 @@ export function Dashboard() {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
+
+  const terminalSession = useMemo(() => {
+    if (!requestedTerminalSessionId) return null;
+    const session = allSessions.find((entry) => entry.id === requestedTerminalSessionId);
+    if (!session) return null;
+    if (!session.runtimeAlive || isTerminalSession(session) || !session.tmuxSession) {
+      return null;
+    }
+    return session;
+  }, [allSessions, requestedTerminalSessionId]);
+
+  useEffect(() => {
+    if (loading || !requestedTerminalSessionId || terminalSession || typeof window === "undefined") {
+      return;
+    }
+
+    const query = withTerminalQuery(window.location.search, null);
+    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
+  }, [loading, requestedTerminalSessionId, terminalSession]);
 
   return (
     <>
@@ -464,7 +522,7 @@ export function Dashboard() {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="mx-4 w-full max-w-lg border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:mx-0 sm:p-5">
+            <div className="h-full w-full overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:h-auto sm:max-w-lg sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -652,7 +710,7 @@ export function Dashboard() {
         ) : null}
 
         {terminalSession ? (
-          <TerminalModal onClose={() => setTerminalSession(null)} session={terminalSession} />
+          <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
       <StatusBar sessions={rawSessions} />
