@@ -49,6 +49,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
+- Opening terminal appends `terminal=<session-id>` query param
+- Closing terminal removes `terminal` query param
+- Reload with `terminal=<session-id>` restores modal only when that session is attachable
 
 ### D4b: Merged-PR done button
 
@@ -151,6 +154,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Terminal button opens the shared full-screen terminal overlay from both dashboard and detail page
 - ✕ closes overlay
+- Open/close always syncs `terminal=<session-id>` in query params
+- Reload restores terminal overlay from query on both pages when attachable
+- Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling

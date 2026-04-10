@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
@@ -6,17 +6,26 @@ import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { generateMetadata } from "@/app/layout";
 
-vi.mock("next/navigation", () => ({
-  useSearchParams: () => new URLSearchParams(""),
-}));
-
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
-  DirectTerminal: ({ label, sessionId }: { label?: string; sessionId: string }) => (
-    <div>{`Direct terminal ${label ?? sessionId}`}</div>
+  DirectTerminal: ({
+    label,
+    onClose,
+    sessionId,
+  }: {
+    label?: string;
+    onClose?: () => void;
+    sessionId: string;
+  }) => (
+    <div>
+      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <button onClick={onClose} type="button">
+        Close terminal
+      </button>
+    </div>
   ),
 }));
 
@@ -49,6 +58,7 @@ function sessionsPayload() {
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.history.replaceState(null, "", "/");
   });
 
   it("renders Spur dashboard sessions from API", async () => {
@@ -69,7 +79,7 @@ describe("Dashboard", () => {
     });
   });
 
-  it("renders compact cards with a direct terminal action", async () => {
+  it("renders compact cards with a direct terminal action and keeps it in query params", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
@@ -105,6 +115,104 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
+    });
+
+    expect(window.location.search).toContain("terminal=api-a1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close terminal" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    });
+    expect(window.location.search).not.toContain("terminal=");
+
+    act(() => {
+      window.history.back();
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    act(() => {
+      window.history.forward();
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("restores terminal from query params for attachable sessions", async () => {
+    window.history.replaceState(null, "", "/?terminal=api-a1");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+  });
+
+  it("loads the initial project filter from query params before the first fetch", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "API" })).toBeInTheDocument();
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
+  });
+
+  it("does not open terminal from query params when session is not attachable", async () => {
+    window.history.replaceState(null, "", "/?terminal=api-a1");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            ...sessionsPayload(),
+            sessions: [{ ...sessionsPayload().sessions[0], runtimeAlive: false }],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeDisabled();
+    });
+    expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.location.search).not.toContain("terminal=");
     });
   });
 
