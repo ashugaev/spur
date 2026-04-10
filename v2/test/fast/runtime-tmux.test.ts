@@ -10,13 +10,14 @@ const execFileMock: ((...args: unknown[]) => void) & {
 } = Object.assign(vi.fn(), {
   [promisify.custom]: execFileAsyncMock,
 });
+const sleepMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
 vi.mock("node:timers/promises", () => ({
-  setTimeout: vi.fn().mockResolvedValue(undefined),
+  setTimeout: sleepMock,
 }));
 
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
@@ -24,6 +25,7 @@ const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.
 describe("runtime-tmux", () => {
   afterEach(() => {
     execFileAsyncMock.mockReset();
+    sleepMock.mockReset().mockResolvedValue(undefined);
     vi.resetModules();
   });
 
@@ -108,5 +110,35 @@ describe("runtime-tmux", () => {
     const rendered = args.at(-1);
     expect(rendered).toContain("]pr ##42#[");
     expect(rendered).toContain("tracker API-7");
+  });
+
+  it("keeps the default submit delay for non-codex sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
+  it("waits longer before pressing Enter for codex sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
+
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
   });
 });
