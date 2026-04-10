@@ -1170,7 +1170,7 @@ export class SessionService {
           launchPlan.initialMessage,
           sidecarNames,
         );
-        await sendMessageToTmux(tmuxSession, spawnInitialMessage);
+        await sendMessageToTmux(tmuxSession, spawnInitialMessage, { agent: runningRecord.agent });
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -1407,7 +1407,10 @@ export class SessionService {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
-      await sendMessageToTmux(readySession.tmuxSession, message, { interrupt });
+      await sendMessageToTmux(readySession.tmuxSession, message, {
+        interrupt,
+        agent: readySession.agent,
+      });
       this.stateCache.delete(sessionId);
       const updated: SessionRecord = {
         ...readySession,
@@ -1979,7 +1982,9 @@ export class SessionService {
         effectivePlan.initialMessage,
         restoreSidecarNames,
       );
-      await sendMessageToTmux(current.tmuxSession, restoreInitialMessage);
+      await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
+        agent: current.agent,
+      });
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -2108,7 +2113,10 @@ export class SessionService {
       return false;
     }
 
-    await sendMessageToTmux(latest.tmuxSession, nextMessage, { interrupt: false });
+    await sendMessageToTmux(latest.tmuxSession, nextMessage, {
+      interrupt: false,
+      agent: latest.agent,
+    });
     this.stateCache.delete(sessionId);
     const updated = withQueuedMessages(
       {
@@ -2307,6 +2315,7 @@ export class SessionService {
         await sendMessageToTmux(
           session.tmuxSession,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
+          { agent: session.agent },
         );
 
         const latest = readSession(this.config.dataDir, sessionId);

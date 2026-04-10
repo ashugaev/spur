@@ -394,7 +394,9 @@ describe("SessionService", () => {
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {});
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello");
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello", {
+      agent: "claude",
+    });
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -445,14 +447,17 @@ describe("SessionService", () => {
       expect.stringContaining(
         'Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one.',
       ),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("Do not start app, dev server, or test helper processes directly"),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("Available: `dev`."),
+      { agent: "claude" },
     );
   });
 
@@ -564,6 +569,7 @@ describe("SessionService", () => {
       1,
       "api-1",
       expect.stringContaining("[Spur step 1/2: research]"),
+      { agent: "claude" },
     );
   });
 
@@ -599,6 +605,7 @@ describe("SessionService", () => {
       1,
       "api-1",
       expect.stringContaining("[Spur step 1/1: review]"),
+      { agent: "claude" },
     );
   });
 
@@ -748,7 +755,10 @@ describe("SessionService", () => {
     const result = await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { interrupt: false });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      interrupt: false,
+      agent: "claude",
+    });
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -764,6 +774,40 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("passes the codex agent to tmux delivery", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      interrupt: false,
+      agent: "codex",
+    });
   });
 
   it("queues manual send messages while the agent is busy", async () => {
@@ -833,6 +877,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
     expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(1, "api-1", "follow up", {
       interrupt: false,
+      agent: "claude",
     });
   });
 
@@ -1766,6 +1811,7 @@ describe("SessionService", () => {
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
       interrupt: false,
+      agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
@@ -2496,6 +2542,7 @@ describe("SessionService", () => {
       expect.stringContaining(
         "slot-instructions\nThis session was restored after the agent exited.",
       ),
+      { agent: "claude" },
     );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");

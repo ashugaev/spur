@@ -275,10 +275,14 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
   await tmux("send-keys", "-t", target, "-l", message);
 }
 
+function submitDelayMs(agent: AgentName | undefined): number {
+  return agent === "codex" ? 1_000 : 300;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean },
+  options?: { interrupt?: boolean; agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (options?.interrupt) {
@@ -287,7 +291,7 @@ export async function sendMessageToTmux(
   }
   await tmux("send-keys", "-t", target, "C-u");
   await sendLiteral(sessionName, message);
-  await sleep(300);
+  await sleep(submitDelayMs(options?.agent));
   await tmux("send-keys", "-t", target, "Enter");
 }
 
