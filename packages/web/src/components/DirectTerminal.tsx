@@ -7,9 +7,11 @@ import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
 import { cn } from "@/lib/cn";
+import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
 
 interface DirectTerminalProps {
   sessionId: string;
+  agent?: AgentName;
   label?: string;
   title?: string;
   onClose?: () => void;
@@ -74,10 +76,13 @@ function sgrScroll(up: boolean): string {
   return `\x1b[<${button};1;1M`;
 }
 
-export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
+export function DirectTerminal({ sessionId, agent = "claude", label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const hotkeyMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
+  const hotkeys = getAgentHotkeys(agent);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
+  const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sendTerminalInput = useCallback((data: string): boolean => {
@@ -88,6 +93,26 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
   const submitVoiceDraft = useCallback((text: string) => sendTerminalInput(`${text}\r`), [sendTerminalInput]);
 
   const voice = useVoiceInput();
+
+  useEffect(() => {
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!hotkeysOpen) return;
+      if (hotkeyMenuRef.current?.contains(event.target as Node)) return;
+      setHotkeysOpen(false);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (!hotkeysOpen || event.key !== "Escape") return;
+      setHotkeysOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -435,6 +460,55 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           >
             Esc
           </button>
+          <div className="relative" ref={hotkeyMenuRef}>
+            <button
+              aria-expanded={hotkeysOpen}
+              aria-haspopup="menu"
+              aria-label={`Open ${agent} shortcuts`}
+              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              onClick={() => setHotkeysOpen((current) => !current)}
+              type="button"
+            >
+              ...
+            </button>
+            {hotkeysOpen ? (
+              <div
+                aria-label={`${agent} shortcuts`}
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+                role="menu"
+              >
+                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                </div>
+                {hotkeys.map((hotkey) => (
+                  <button
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-white/5"
+                    key={hotkey.id}
+                    onClick={() => {
+                      sendTerminalInput(hotkey.sequence);
+                      setHotkeysOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
+                        {hotkey.label}
+                      </span>
+                      <span className="block text-[11px] text-[var(--color-text-secondary)]">
+                        {hotkey.detail}
+                      </span>
+                    </span>
+                    {hotkey.shortcut ? (
+                      <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
+                        {hotkey.shortcut}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}

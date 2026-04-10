@@ -30,6 +30,7 @@ export function TerminalModal({ session, onClose, tmuxSessionOverride, titleSuff
       role="dialog"
     >
       <DirectTerminal
+        agent={session.agent}
         label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}

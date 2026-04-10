@@ -2,8 +2,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionDetail } from "@/components/SessionDetail";
 
+const pushMock = vi.fn();
+const replaceMock = vi.fn();
+const backMock = vi.fn();
+
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: pushMock, replace: replaceMock, back: backMock }),
 }));
 
 vi.mock("@/components/DirectTerminal", () => ({
@@ -90,6 +94,9 @@ function sessionFixture() {
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
     window.history.replaceState(null, "", "/sessions/api-a1");
     vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
     Object.defineProperty(navigator, "mediaDevices", {
@@ -248,6 +255,80 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByText("Voice API unavailable")).toBeInTheDocument();
     });
     expect(screen.queryByText('{"error":"Voice API unavailable"}')).not.toBeInTheDocument();
+  });
+
+  it("keeps the back link on the default dashboard route when no project query is present", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const backLink = await screen.findByRole("link", { name: "← Back" });
+    expect(backLink).toHaveAttribute("href", "/");
+  });
+
+  it("preserves an explicit project query in the back link", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail projectId="sp" sessionId="api-a1" />);
+
+    const backLink = await screen.findByRole("link", { name: "← Back" });
+    expect(backLink).toHaveAttribute("href", "/?project=sp");
+  });
+
+  it("respawns without forcing a project query when the detail page had none", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            id: "api-b2",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const respawnButton = await screen.findByRole("button", { name: "Respawn" });
+    fireEvent.click(respawnButton);
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+    });
   });
 
   it("syncs terminal modal with query params", async () => {
