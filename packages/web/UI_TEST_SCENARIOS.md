@@ -20,8 +20,11 @@ sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 tailscale serve --https=443 off
 ```
 
-Server-side dependencies: `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default `~/.cache/whisper.cpp/ggml-base.bin`).
-Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `ru`).
+Server-side dependencies are provider-specific:
+- `voice.provider=whisper_cpp`: requires `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default path `~/.cache/whisper.cpp/ggml-base.bin`).
+- `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
+
+Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
 ## Dashboard
 
