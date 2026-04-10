@@ -262,6 +262,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
+  const sidecarUiLink = useMemo(
+    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+    [session],
+  );
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -613,15 +617,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           {sc.alive ? "alive" : "offline"}
                         </span>
                       </div>
-                      {sc.alive && canAttach ? (
-                        <button
-                          type="button"
-                          className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
-                          onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
-                        >
-                          Terminal
-                        </button>
-                      ) : null}
+                      <div className="flex items-center gap-2">
+                        {sc.alive && canAttach ? (
+                          <button
+                            type="button"
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                          >
+                            Terminal
+                          </button>
+                        ) : null}
+                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
+                          <a
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 hover:no-underline"
+                            href={sidecarUiLink}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            Open
+                          </a>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>

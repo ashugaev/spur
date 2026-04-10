@@ -216,6 +216,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sidecars section visible in session detail sidebar when session has sidecars
 - Each sidecar shows name and alive/offline status
 - Terminal button visible only when sidecar is alive and session is attachable
+- `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - No sidecars section shown when sidecars array is empty
 

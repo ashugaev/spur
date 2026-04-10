@@ -343,4 +343,35 @@ describe("SessionDetail voice input", () => {
       expect(window.location.search).not.toContain("terminal=");
     });
   });
+
+  it("shows an open link for the isolated UI sidecar", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-ui", alive: true }],
+            slots: {
+              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute(
+        "href",
+        "http://openclaw-dev.tail90e846.ts.net:5601",
+      );
+    });
+  });
 });

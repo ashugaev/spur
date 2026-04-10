@@ -82,6 +82,8 @@ spur service status api-a1b2
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
 If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
 
+For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session.
+
 ## Start
 
 ```bash
