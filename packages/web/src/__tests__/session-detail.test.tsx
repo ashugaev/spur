@@ -49,10 +49,17 @@ class MockMediaRecorder {
     this.emit("stop");
   }
 
-  private emit(type: string, data?: Blob) {
+  protected emit(type: string, data?: Blob) {
     for (const listener of this.listeners.get(type) ?? []) {
       listener(data ? { data } : undefined);
     }
+  }
+}
+
+class EmptyAudioMediaRecorder extends MockMediaRecorder {
+  override stop() {
+    this.state = "inactive";
+    this.emit("stop");
   }
 }
 
@@ -152,6 +159,95 @@ describe("SessionDetail voice input", () => {
       "/api/sessions/api-a1/send",
       expect.anything(),
     );
+  });
+
+  it("shows an inline error when stopping recording yields no audio", async () => {
+    vi.stubGlobal("MediaRecorder", EmptyAudioMediaRecorder as unknown as typeof MediaRecorder);
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Start voice recording" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Voice recording captured no audio. Check your microphone input and try again."),
+      ).toBeInTheDocument();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/runtime/voice/transcribe",
+      expect.anything(),
+    );
+  });
+
+  it("shows the transcribe API error message instead of a raw JSON blob", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ error: "Voice API unavailable" }), { status: 502 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Start voice recording" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Voice API unavailable")).toBeInTheDocument();
+    });
+    expect(screen.queryByText('{"error":"Voice API unavailable"}')).not.toBeInTheDocument();
   });
 
   it("syncs terminal modal with query params", async () => {
