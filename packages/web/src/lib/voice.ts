@@ -217,8 +217,7 @@ function readVoiceSecrets(): Record<string, string> {
   }
 }
 
-function resolveVoiceSecret(...keys: string[]): string | undefined {
-  const fileSecrets = readVoiceSecrets();
+function resolveVoiceSecret(fileSecrets: Record<string, string>, ...keys: string[]): string | undefined {
   for (const key of keys) {
     const fileValue = fileSecrets[key]?.trim();
     if (fileValue) {
@@ -233,12 +232,14 @@ function resolveVoiceSecret(...keys: string[]): string | undefined {
 }
 
 function resolveAzureOpenAICredentials(): AzureOpenAICredentials | null {
-  const endpoint = resolveVoiceSecret("AZURE_OPENAI_ENDPOINT");
-  const apiKey = resolveVoiceSecret("AZURE_OPENAI_API_KEY");
+  const fileSecrets = readVoiceSecrets();
+  const endpoint = resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_ENDPOINT");
+  const apiKey = resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_API_KEY");
   if (!endpoint || !apiKey) {
     return null;
   }
-  const apiVersion = resolveVoiceSecret("AZURE_OPENAI_API_VERSION") ?? DEFAULT_AZURE_OPENAI_API_VERSION;
+  const apiVersion =
+    resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_API_VERSION") ?? DEFAULT_AZURE_OPENAI_API_VERSION;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     apiKey,
