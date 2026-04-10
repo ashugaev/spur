@@ -114,6 +114,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - All new fields reset on successful spawn
+- Preview button appears next to Spawn button
+- Preview button disabled when project or prompt is empty
+- Clicking Preview calls preflight and shows predicted branch inline above the action row
+- Branch preview clears when prompt text changes
+- Preview error shown inline in red when preflight fails
+- Preview is advisory — Spawn button always works independently of preview
 
 ### D7b: Branch preflight suggest
 

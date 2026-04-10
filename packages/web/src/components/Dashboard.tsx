@@ -161,7 +161,8 @@ export function Dashboard() {
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
-  const [preflighting, setPreflighting] = useState(false);
+  const [preflightBranch, setPreflightBranch] = useState<string | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightError, setPreflightError] = useState<string | null>(null);
   const voice = useVoiceInput({
     onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
@@ -387,13 +388,19 @@ export function Dashboard() {
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
 
+  const clearPreflight = () => {
+    setPreflightBranch(null);
+    setPreflightError(null);
+  };
+
   const handlePreflight = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || !nextPrompt || preflighting) return;
+    if (!nextProjectId || !nextPrompt) return;
 
-    setPreflighting(true);
+    setPreflightLoading(true);
     setPreflightError(null);
+    setPreflightBranch(null);
     try {
       const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
       const payload: Record<string, unknown> = {
@@ -413,17 +420,11 @@ export function Dashboard() {
         throw new Error(body.error ?? "preflight failed");
       }
       const result = (await response.json()) as { branch: string | null };
-      if (result.branch) {
-        setSpawnBranch(result.branch);
-      } else {
-        setPreflightError("no branch suggestion");
-      }
-    } catch (preflightErr) {
-      setPreflightError(
-        preflightErr instanceof Error ? preflightErr.message : "preflight failed",
-      );
+      setPreflightBranch(result.branch);
+    } catch (err) {
+      setPreflightError(err instanceof Error ? err.message : "Preflight failed");
     } finally {
-      setPreflighting(false);
+      setPreflightLoading(false);
     }
   };
 
@@ -459,7 +460,7 @@ export function Dashboard() {
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
-      setPreflightError(null);
+      clearPreflight();
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
@@ -636,11 +637,11 @@ export function Dashboard() {
                   />
                   <button
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={!spawnProjectId.trim() || !spawnPrompt.trim() || preflighting}
+                    disabled={!spawnProjectId.trim() || !spawnPrompt.trim() || preflightLoading}
                     onClick={() => void handlePreflight()}
                     type="button"
                   >
-                    {preflighting ? "..." : "Suggest"}
+                    {preflightLoading ? "..." : "Suggest"}
                   </button>
                   <select
                     aria-label="workspace mode"
@@ -709,7 +710,10 @@ export function Dashboard() {
                 <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
                     className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] sm:min-h-[10rem]"
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
+                    onChange={(event) => {
+                      setSpawnPrompt(event.target.value);
+                      clearPreflight();
+                    }}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
@@ -724,26 +728,47 @@ export function Dashboard() {
                     {voice.voiceError}
                   </div>
                 ) : null}
+                {preflightBranch !== null ? (
+                  <div className="flex items-center gap-2 border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/[0.08] px-2.5 py-1.5 text-xs text-[var(--color-text-primary)]">
+                    <span className="font-bold uppercase text-[var(--color-accent)]">Branch</span>
+                    <code className="font-mono">{preflightBranch}</code>
+                  </div>
+                ) : null}
+                {preflightError ? (
+                  <div className="border border-red-500/30 bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-100">
+                    {preflightError}
+                  </div>
+                ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
                     <VoiceStatusHint voice={voice} />
                   </span>
-                  <button
-                    className="inline-flex min-w-32 flex-col items-center justify-center gap-0.5 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim()}
-                    onClick={() => void handleSpawn()}
-                    type="button"
-                  >
-                    <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                    {!spawning ? (
-                      <span
-                        aria-hidden="true"
-                        className="text-center font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
-                      >
-                        Command + Enter
-                      </span>
-                    ) : null}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={preflightLoading || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                      onClick={() => void handlePreflight()}
+                      type="button"
+                    >
+                      {preflightLoading ? "Checking..." : "Preview"}
+                    </button>
+                    <button
+                      className="inline-flex min-w-32 flex-col items-center justify-center gap-0.5 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={spawning || !spawnProjectId.trim()}
+                      onClick={() => void handleSpawn()}
+                      type="button"
+                    >
+                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
+                      {!spawning ? (
+                        <span
+                          aria-hidden="true"
+                          className="text-center font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                        >
+                          Command + Enter
+                        </span>
+                      ) : null}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
