@@ -729,7 +729,7 @@ export function Dashboard() {
                     <VoiceStatusHint voice={voice} />
                   </span>
                   <button
-                    className="inline-flex min-w-32 flex-col items-center justify-center gap-0.5 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={spawning || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
@@ -738,9 +738,9 @@ export function Dashboard() {
                     {!spawning ? (
                       <span
                         aria-hidden="true"
-                        className="text-center font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                        className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
                       >
-                        Command + Enter
+                        CMD + ⏎
                       </span>
                     ) : null}
                   </button>

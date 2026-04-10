@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PORT_START=4320
-PORT_END=4399
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=./spur-sidecar-common.sh
+source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
-# Find free port
-AGENT_PORT=""
-for port in $(seq "$PORT_START" "$PORT_END"); do
-  if ! ss -tlnH "sport = :$port" | grep -q .; then
-    AGENT_PORT="$port"
-    break
-  fi
-done
+PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
+PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
+AGENT_PORT=$(find_free_port "$PORT_START" "$PORT_END")
+PROJECT_CONFIG_PATH="${SPUR_PROJECT_CONFIG_PATH:-$(realpath "$SCRIPT_DIR/../spur.yaml")}"
 
-if [[ -z "$AGENT_PORT" ]]; then
-  echo "No free port in $PORT_START-$PORT_END" >&2
-  exit 1
-fi
+CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
+TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
+RUNTIME_FILE="$TOOL_DIR/isolated-env.sh"
 
-CONFIG_DIR=$(mktemp -d)
-trap 'rm -rf "$CONFIG_DIR"' EXIT
+cleanup() {
+  rm -f "$RUNTIME_FILE"
+  rm -rf "$CONFIG_DIR"
+}
+trap cleanup EXIT
 
 cat > "$CONFIG_DIR/config.yaml" <<YAML
 server:
@@ -32,9 +31,15 @@ tmux:
 YAML
 
 mkdir -p "$CONFIG_DIR/data"
+cat > "$CONFIG_DIR/data/config-registry.json" <<JSON
+{
+  "configPaths": [
+    "$PROJECT_CONFIG_PATH"
+  ]
+}
+JSON
 
 # Overwrite spur wrapper to point at isolated config
-TOOL_DIR="${SPUR_SESSION_TOOL_DIR:?SPUR_SESSION_TOOL_DIR not set}"
 CLI_PATH="$(dirname "$(realpath "$0")")/../v2/dist/cli.js"
 NODE_BIN="$(command -v node)"
 
@@ -44,6 +49,15 @@ set -euo pipefail
 exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" "\$@"
 WRAPPER
 chmod +x "$TOOL_DIR/spur"
+
+cat > "$RUNTIME_FILE" <<ENVFILE
+SPUR_ISOLATED_CONFIG="$CONFIG_DIR/config.yaml"
+SPUR_ISOLATED_DATA_DIR="$CONFIG_DIR/data"
+SPUR_ISOLATED_DAEMON_URL="http://127.0.0.1:$AGENT_PORT"
+SPUR_ISOLATED_TMUX_SOCKET_NAME="spur-$AGENT_PORT"
+SPUR_ISOLATED_PROJECT_CONFIG="$PROJECT_CONFIG_PATH"
+ENVFILE
+chmod 600 "$RUNTIME_FILE"
 
 echo "Isolated daemon starting on port $AGENT_PORT"
 exec "$NODE_BIN" "$CLI_PATH" --config "$CONFIG_DIR/config.yaml" daemon start

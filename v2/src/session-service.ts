@@ -11,6 +11,7 @@ import {
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
@@ -224,7 +225,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -712,6 +713,35 @@ export class SessionService {
     return project;
   }
 
+  private resolveProjectForSession(
+    session: Pick<SessionRecord, "id" | "project" | "worktreePath">,
+  ): ProjectConfig | undefined {
+    const daemonProject = this.config.projects[session.project];
+    const projectConfigPath = session.worktreePath
+      ? findProjectConfigPath(session.worktreePath)
+      : undefined;
+    if (!projectConfigPath) {
+      return daemonProject;
+    }
+
+    try {
+      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
+      if (localProject) {
+        return localProject;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.project_config.local.failed", {
+        level: "warn",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Failed to load local project config for ${session.id}: ${message}`,
+      });
+    }
+
+    return daemonProject;
+  }
+
   private findProjectByRepoPath(repoPath: string): ProjectConfig | undefined {
     const resolvedRepoPath = tryRealpath(repoPath);
     return Object.values(this.config.projects).find(
@@ -1197,7 +1227,11 @@ export class SessionService {
             sidecarName: name,
             cwd: workspacePath,
             command: sidecar.command,
-            env: { ...sessionEnv, ...(sidecar.env ?? {}) },
+            env: {
+              ...sessionEnv,
+              SPUR_SIDECAR_NAME: name,
+              ...(sidecar.env ?? {}),
+            },
           });
           this.logEvent("session.sidecar.started", {
             level: "info",
@@ -1493,7 +1527,10 @@ export class SessionService {
     if (!session.worktreePath || !workspaceExists(session.worktreePath)) {
       throw new Error(`Session workspace is not available: ${sessionId}`);
     }
-    const project = this.getProject(session.project);
+    const project = this.resolveProjectForSession(session);
+    if (!project) {
+      throw new Error(`Unknown project: ${session.project}`);
+    }
     const sidecar = project.sidecars[sidecarName];
     if (!sidecar) {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
@@ -1518,7 +1555,11 @@ export class SessionService {
       sidecarName,
       cwd: session.worktreePath,
       command: sidecar.command,
-      env: { ...sessionEnv, ...(sidecar.env ?? {}) },
+      env: {
+        ...sessionEnv,
+        SPUR_SIDECAR_NAME: sidecarName,
+        ...(sidecar.env ?? {}),
+      },
     });
 
     const updated: SessionRecord = { ...session, updatedAt: nowIso() };
@@ -2615,8 +2656,7 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
-    const project = this.config.projects[session.project];
-    const projectSidecars = project?.sidecars ?? {};
+    const projectSidecars = this.resolveProjectForSession(session)?.sidecars ?? {};
     const sidecars: { name: string; alive: boolean }[] = [];
     for (const name of Object.keys(projectSidecars)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });

@@ -107,7 +107,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
 - On mobile full-screen modal, prompt textarea expands to use the remaining modal height
 - On larger screens, prompt textarea default height is taller than the previous compact size
-- Spawn button shows inline muted hotkey hint "Command + Enter"
+- Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled only when project is empty
@@ -229,6 +229,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sidecars section visible in session detail sidebar when session has sidecars
 - Each sidecar shows name and alive/offline status
 - Terminal button visible only when sidecar is alive and session is attachable
+- `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - No sidecars section shown when sidecars array is empty
 

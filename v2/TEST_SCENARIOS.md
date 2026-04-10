@@ -188,6 +188,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 **Tier: runtime integration**
 - Sidecar auto-starts on spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
+- `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
+- `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
 - Sidecar cleanup on kill/complete
 - Manual sidecar start via `spur sidecar start --session <id> --name <name>`
 - Sidecar status reported in session view

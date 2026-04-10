@@ -309,7 +309,7 @@ describe("Dashboard", () => {
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
     expect(spawnButton).toBeEnabled();
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
-    expect(screen.getByText("Command + Enter")).toBeInTheDocument();
+    expect(screen.getByText("CMD + ⏎")).toBeInTheDocument();
     expect(screen.queryByText("⌘/Ctrl+Enter")).not.toBeInTheDocument();
 
     fireEvent.click(spawnButton);

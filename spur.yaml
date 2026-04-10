@@ -9,6 +9,16 @@ projects:
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
         autoStart: true
+      isolated-ui:
+        command: ./scripts/spur-isolated-ui.sh
+        autoStart: true
+        env:
+          SPUR_SIDECAR_PUBLIC_HOST: openclaw-dev.tail90e846.ts.net
+          SPUR_SIDECAR_PUBLIC_SCHEME: http
+          SPUR_SIDECAR_UI_PORT_START: "5600"
+          SPUR_SIDECAR_UI_PORT_END: "5699"
+          SPUR_SIDECAR_TERMINAL_PORT_START: "15600"
+          SPUR_SIDECAR_TERMINAL_PORT_END: "15699"
     spawn:
       steps:
         - "run $manager"
