@@ -1593,6 +1593,11 @@ export function createProgram(cliEntrypoint: string): Command {
     .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
+      if (process.env["SPUR_SIDECAR_NAME"]) {
+        throw new Error(
+          `Cannot start sidecar "${options.name as string}" from inside sidecar "${process.env["SPUR_SIDECAR_NAME"]}". Start sidecars only from the main session shell.`,
+        );
+      }
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
