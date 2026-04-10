@@ -115,6 +115,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Successful Spawn persists the selected project so it is restored on the next open
 - All new fields reset on successful spawn
 
+### D7b: Branch preflight suggest
+
+- "Suggest" button in spawn modal branch row, between branch input and workspace select
+- Button disabled when project or prompt is empty, or when preflight is in progress
+- Button shows "..." while preflight is running
+- On success: branch input is populated with the suggested branch name
+- On failure or no suggestion: a tertiary-colored error line appears below the branch row
+- Error clears when a new preflight starts or spawn succeeds
+
 ## Session Detail
 
 ### S1: Header with white underline

@@ -124,6 +124,19 @@ function readLocationSearch(): string {
   return window.location.search;
 }
 
+function buildSpawnOverrides(
+  workspaceMode: "default" | "worktree" | "shared",
+  defaultBranch: string,
+): { worktree?: boolean; defaultBranch?: string } | undefined {
+  if (workspaceMode === "worktree") {
+    const overrides: { worktree: true; defaultBranch?: string } = { worktree: true };
+    if (defaultBranch.trim()) overrides.defaultBranch = defaultBranch.trim();
+    return overrides;
+  }
+  if (workspaceMode === "shared") return { worktree: false };
+  return undefined;
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -148,6 +161,8 @@ export function Dashboard() {
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const [preflighting, setPreflighting] = useState(false);
+  const [preflightError, setPreflightError] = useState<string | null>(null);
   const voice = useVoiceInput({
     onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
@@ -372,6 +387,43 @@ export function Dashboard() {
   const updateStep = (id: number, value: string) =>
     setSpawnSteps((prev) => prev.map((s) => (s.id === id ? { ...s, value } : s)));
 
+  const handlePreflight = async () => {
+    const nextProjectId = spawnProjectId.trim();
+    const nextPrompt = spawnPrompt.trim();
+    if (!nextProjectId || !nextPrompt || preflighting) return;
+
+    setPreflighting(true);
+    setPreflightError(null);
+    try {
+      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
+      const payload: Record<string, unknown> = {
+        projectId: nextProjectId,
+        prompt: nextPrompt,
+        agent: spawnAgent,
+      };
+      if (overrides) payload.overrides = overrides;
+
+      const response = await fetch("/api/preflight", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = (await response.json()) as { branch: string | null };
+      if (result.branch) {
+        setSpawnBranch(result.branch);
+      } else {
+        setPreflightError("no branch suggestion");
+      }
+    } catch (preflightErr) {
+      setPreflightError(
+        preflightErr instanceof Error ? preflightErr.message : "preflight failed",
+      );
+    } finally {
+      setPreflighting(false);
+    }
+  };
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
@@ -380,13 +432,7 @@ export function Dashboard() {
     setSpawning(true);
     try {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
-      let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
-      if (spawnWorkspaceMode === "worktree") {
-        overrides = { worktree: true };
-        if (spawnDefaultBranch.trim()) overrides.defaultBranch = spawnDefaultBranch.trim();
-      } else if (spawnWorkspaceMode === "shared") {
-        overrides = { worktree: false };
-      }
+      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
 
       const payload: Record<string, unknown> = {
         projectId: nextProjectId,
@@ -410,6 +456,7 @@ export function Dashboard() {
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
+      setPreflightError(null);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
@@ -584,6 +631,14 @@ export function Dashboard() {
                     placeholder="branch name"
                     value={spawnBranch}
                   />
+                  <button
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-xs font-bold uppercase text-[var(--color-text-secondary)] transition hover:text-[var(--color-text-primary)] disabled:cursor-not-allowed disabled:opacity-60"
+                    disabled={!spawnProjectId.trim() || !spawnPrompt.trim() || preflighting}
+                    onClick={() => void handlePreflight()}
+                    type="button"
+                  >
+                    {preflighting ? "..." : "Suggest"}
+                  </button>
                   <select
                     aria-label="workspace mode"
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
@@ -608,6 +663,9 @@ export function Dashboard() {
                     </span>
                   </label>
                 </div>
+                {preflightError ? (
+                  <p className="text-xs text-[var(--color-text-tertiary)]">{preflightError}</p>
+                ) : null}
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
