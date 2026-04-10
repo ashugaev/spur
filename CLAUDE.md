@@ -56,9 +56,8 @@
 - The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.
 - Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
 - Do not override `--config` to point at `~/.spur/config.yaml` (root config).
-- Do not kill processes or ports you did not start. Your allocated port is in `$SPUR_AGENT_PORT`.
-- Do not modify files under `~/.spur/agent-instances/`.
-- For `packages/web` work, use `spur-dev-server` (or the project `devServer` config) so the frontend rebuilds automatically in your worktree.
+- Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
+- For `packages/web` work, use `spur-sidecar --name dev` (or the project `sidecars` config) so the frontend rebuilds automatically in your worktree.
 
 ## Spur Validation
 

@@ -267,16 +267,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
-  const terminalOpen = Boolean(canAttach && requestedTerminalSessionId === session.id);
+  const isSessionTerminal = Boolean(
+    session &&
+      (requestedTerminalSessionId === session.id ||
+        (requestedTerminalSessionId !== null &&
+          requestedTerminalSessionId.startsWith(`${session.id}--`))),
+  );
+  const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
-    if (requestedTerminalSessionId === session.id && canAttach) return;
+    if (isSessionTerminal && canAttach) return;
 
     const query = withTerminalQuery(window.location.search, null);
     window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
     setLocationSearch(window.location.search);
-  }, [canAttach, requestedTerminalSessionId, session]);
+  }, [canAttach, isSessionTerminal, requestedTerminalSessionId, session]);
 
   const syncTerminalFilter = (terminalSessionId: string | null) => {
     if (typeof window === "undefined") return;
@@ -586,6 +592,43 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
               ) : null}
             </section>
+
+            {/* Sidecars */}
+            {session.sidecars.length > 0 ? (
+              <section>
+                <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  Sidecars
+                  <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                </h2>
+                <div className="space-y-2">
+                  {session.sidecars.map((sc) => (
+                    <div
+                      key={sc.name}
+                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-green-400" : "bg-[var(--color-text-tertiary)]"}`}
+                        />
+                        <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                        <span className="text-[var(--color-text-tertiary)]">
+                          {sc.alive ? "alive" : "offline"}
+                        </span>
+                      </div>
+                      {sc.alive && canAttach ? (
+                        <button
+                          type="button"
+                          className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+                          onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                        >
+                          Terminal
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
 
 
@@ -633,7 +676,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (
-            <TerminalModal onClose={() => syncTerminalFilter(null)} session={session} />
+            <TerminalModal
+              onClose={() => syncTerminalFilter(null)}
+              session={session}
+              tmuxSessionOverride={
+                requestedTerminalSessionId !== session.id
+                  ? (requestedTerminalSessionId ?? undefined)
+                  : undefined
+              }
+              titleSuffix={
+                requestedTerminalSessionId !== session.id
+                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  : undefined
+              }
+            />
           ) : null}
         </>
       ) : (

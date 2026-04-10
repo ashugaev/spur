@@ -80,14 +80,29 @@ describe("session slots", () => {
       dataDir,
       sessionId: "api-1",
       configPath: "/tmp/spur.yaml",
-      agentConfigPath: "/tmp/agent-spur.yaml",
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
-    expect(wrapper).toContain("--config '/tmp/agent-spur.yaml'");
+    expect(wrapper).toContain("--config '/tmp/spur.yaml'");
     expect(wrapper).toContain('"$@"');
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
       "slots --session 'api-1'",
     );
+  });
+
+  it("writes spur-sidecar wrapper pointing at prod config", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-2",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
+    expect(sidecar).toContain("sidecar start");
+    expect(sidecar).toContain("--session 'api-2'");
+    expect(sidecar).toContain("--config '/tmp/spur.yaml'");
   });
 });

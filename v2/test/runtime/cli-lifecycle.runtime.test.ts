@@ -2215,7 +2215,7 @@ projects:
       ).stdout,
     ) as SessionView;
 
-    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/dev-server/start`, {
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/dev/start`, {
       method: "POST",
     });
 
@@ -2279,10 +2279,10 @@ projects:
       timeoutMs: 15_000,
       accept: (v) => v === true,
     });
-    const devServerEvents = readEventLog(context.dataDir)
+    const sidecarEvents = readEventLog(context.dataDir)
       .map((e) => e.event)
-      .filter((ev) => typeof ev === "string" && ev.startsWith("session.devserver"));
-    expect(devServerEvents).toContain("session.devserver.started");
+      .filter((ev) => typeof ev === "string" && ev.startsWith("session.sidecar"));
+    expect(sidecarEvents).toContain("session.sidecar.started");
     expect(devSessionAlive).toBe(true);
   });
 

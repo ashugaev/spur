@@ -381,7 +381,7 @@ projects:
     );
   });
 
-  it("parses devServer command and autoStart", async () => {
+  it("parses devServer as sidecar backward compat", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -393,13 +393,50 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.devServer).toEqual({
-      command: "pnpm dev",
-      autoStart: true,
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: { command: "pnpm dev", autoStart: true },
     });
   });
 
-  it("returns undefined for devServer when the key is absent", async () => {
+  it("parses sidecars block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        autoStart: true
+      worker:
+        command: "pnpm worker"
+        env:
+          NODE_ENV: production
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: { command: "pnpm dev", autoStart: true },
+      worker: { command: "pnpm worker", autoStart: false, env: { NODE_ENV: "production" } },
+    });
+  });
+
+  it("rejects both devServer and sidecars", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    devServer:
+      command: "pnpm dev"
+    sidecars:
+      dev:
+        command: "pnpm dev"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow('defines both "devServer" and "sidecars"');
+  });
+
+  it("returns empty sidecars when no sidecar or devServer key present", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -408,7 +445,7 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.devServer).toBeUndefined();
+    expect(config.projects["backend"]?.sidecars).toEqual({});
   });
 
   it("rejects non-boolean project worktree values", async () => {

@@ -74,9 +74,10 @@ export interface ProjectPreflightConfig {
   prompt: string;
 }
 
-export interface DevServerConfig {
+export interface SidecarConfig {
   command: string;
   autoStart: boolean;
+  env?: Record<string, string>;
 }
 
 export interface ProjectSpawnConfig {
@@ -139,7 +140,7 @@ export interface ProjectConfig {
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
-  devServer?: DevServerConfig;
+  sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
 }
@@ -223,7 +224,7 @@ export interface SessionView extends SessionRecord {
   stateHistory?: SessionStateTransition[];
   lastActivityAt: string;
   services: ServiceInstanceView[];
-  devServerAlive: boolean;
+  sidecars: { name: string; alive: boolean }[];
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {

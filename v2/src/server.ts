@@ -315,9 +315,15 @@ export async function startServer(
         return;
       }
 
-      const devServerStartId = path.match(/^\/sessions\/([^/]+)\/dev-server\/start$/)?.[1];
-      if (method === "POST" && devServerStartId) {
-        sendJson(response, 200, await service.startDevServer(devServerStartId));
+      const sidecarMatch = path.match(
+        /^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/,
+      );
+      if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.startSidecar(sidecarMatch[1], sidecarMatch[2]),
+        );
         return;
       }
 

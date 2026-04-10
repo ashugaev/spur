@@ -168,7 +168,6 @@ export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
   configPath: string;
-  agentConfigPath: string;
   agent?: AgentName;
 }): string {
   const toolDir = slotToolDir(args.dataDir, args.sessionId);
@@ -178,7 +177,7 @@ export function ensureSessionSlotTool(args: {
     join(toolDir, SPUR_WRAPPER_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.agentConfigPath)} "$@"
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -285,10 +284,10 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     );
   }
   writeFileSync(
-    join(toolDir, "spur-dev-server"),
+    join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} dev-server --session ${shellEscape(args.sessionId)} "$@"
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar start --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
