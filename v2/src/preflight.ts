@@ -103,6 +103,7 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
         cwd,
         env: {
           ...process.env,
+          CODEX_HOME: undefined,
           SPUR_CODEX_BIN: codexCommand(),
           SPUR_PREFLIGHT_OUTPUT: outputPath,
           SPUR_PREFLIGHT_PROMPT: prompt,

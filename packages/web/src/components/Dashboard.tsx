@@ -326,7 +326,7 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || !nextPrompt) return;
+    if (!nextProjectId) return;
 
     setSpawning(true);
     try {
@@ -597,7 +597,7 @@ export function Dashboard() {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Prompt for the new session..."
+                    placeholder="Optional prompt for the new session..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -609,11 +609,11 @@ export function Dashboard() {
                 ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter to submit" : null}
+                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "Leave empty to open the agent session. ⌘/Ctrl + Enter to submit" : null}
                   </span>
                   <button
                     className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                    disabled={spawning || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
                   >
