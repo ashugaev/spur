@@ -74,6 +74,21 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 - PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
+- `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
+- `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
+- GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
+- Service send batch `merge` accumulates rule ids; `format` includes service id, sorted rule ids, and a custom prompt override.
+- `shortText` collapses whitespace and truncates with ellipsis at a configurable limit.
+- `parseRepoFromUrl` extracts `owner/repo` from GitHub PR URLs and returns empty for non-PR or invalid URLs.
+- `normalizeReviewDecision` maps GitHub review decision strings to the internal enum and defaults to `none` for null, undefined, empty, or unknown values.
+- `summarizeFailingCi` lists names of checks in any failing state and returns null when all pass.
+- `hasMergeConflict` detects `CONFLICTING` mergeable or `DIRTY` merge state status.
+- `normalizeLines` splits on newlines, trims trailing whitespace, and removes blank lines.
+- `appendedLines` detects the overlap between previous and next line arrays and returns only the newly appended lines.
+- `formatSessionLinkDisplay` extracts compact PR ids from GitHub URLs, Jira keys from tracker URLs, and falls back to the last path segment or label for unknown URL shapes.
+- `appendEventLog` creates the data directory, writes JSONL entries, and auto-fills timestamps; `readEventLog` skips malformed lines; `readSessionEventLog` filters by session and respects a limit parameter.
+- `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
+- `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 
 - Config parses `devServer` with `command` and `autoStart`; absent key returns `undefined`.
 - `startDevServer` rejects sessions without `devServer` config, inactive sessions, and missing workspace.

@@ -51,6 +51,12 @@ describe("isGitHubEventData", () => {
   it("returns false for missing fields", () => {
     expect(isGitHubEventData({ sessionId: "x" })).toBe(false);
   });
+
+  it("returns false when signals is not an array", () => {
+    expect(
+      isGitHubEventData({ sessionId: "x", prNumber: 1, prTitle: "t", signals: "not-array" }),
+    ).toBe(false);
+  });
 });
 
 describe("isServiceProblemEventData", () => {

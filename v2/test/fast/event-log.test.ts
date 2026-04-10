@@ -41,8 +41,9 @@ describe("appendEventLog", () => {
     const dataDir = makeTempDir();
     appendEventLog(dataDir, { event: "test", level: "info" });
     const entries = readEventLog(dataDir);
-    expect(entries[0]?.timestamp).toBeTruthy();
-    expect(new Date(entries[0]!.timestamp).getTime()).not.toBeNaN();
+    const ts = entries[0]?.timestamp;
+    expect(ts).toBeTruthy();
+    expect(new Date(ts!).getTime()).not.toBeNaN();
   });
 
   it("preserves an explicit timestamp", () => {

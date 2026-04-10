@@ -83,6 +83,10 @@ describe("normalizeReviewDecision", () => {
     expect(normalizeReviewDecision(null)).toBe("none");
   });
 
+  it("maps undefined to none", () => {
+    expect(normalizeReviewDecision(undefined)).toBe("none");
+  });
+
   it("maps empty string to none", () => {
     expect(normalizeReviewDecision("")).toBe("none");
   });
