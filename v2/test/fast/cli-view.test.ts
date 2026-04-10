@@ -26,7 +26,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
     services: [],
-    devServerAlive: false,
+    sidecars: [],
     ...overrides,
   };
 }

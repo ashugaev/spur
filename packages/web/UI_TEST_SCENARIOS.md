@@ -207,6 +207,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Full layout: all columns visible
 - Header stats inline with title
 
+## Sidecar Terminal
+
+### SC1: Sidecar terminal buttons
+
+- Sidecars section visible in session detail sidebar when session has sidecars
+- Each sidecar shows name and alive/offline status
+- Terminal button visible only when sidecar is alive and session is attachable
+- Clicking terminal button opens terminal modal for sidecar tmux session
+- No sidecars section shown when sidecars array is empty
+
 ## PWA
 
 ### P1: App is installable from browser chrome
