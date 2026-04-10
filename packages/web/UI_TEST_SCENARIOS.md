@@ -46,6 +46,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, terminal button
 - All rows aligned — terminal button column is uniform width
+- Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
 ### D4: Terminal button state
 
@@ -117,6 +118,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S1: Header with white underline
 
 - Back link to dashboard
+- If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
+- If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below

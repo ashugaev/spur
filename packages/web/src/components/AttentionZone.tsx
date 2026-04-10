@@ -5,6 +5,7 @@ import type { AttentionLevel, DashboardSession } from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
+  projectFilterId?: string;
   sessions: DashboardSession[];
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
@@ -20,6 +21,7 @@ const zoneConfig: Record<AttentionLevel, { label: string; color: string }> = {
 
 export function AttentionZone({
   level,
+  projectFilterId,
   sessions,
   collapsed,
   onToggle,
@@ -43,7 +45,12 @@ export function AttentionZone({
   );
 
   const rows = sessions.map((session) => (
-    <SessionRow key={session.id} session={session} onOpenTerminal={onOpenTerminal} />
+    <SessionRow
+      key={session.id}
+      projectFilterId={projectFilterId}
+      session={session}
+      onOpenTerminal={onOpenTerminal}
+    />
   ));
 
   if (isAccordion) {
