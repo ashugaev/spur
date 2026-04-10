@@ -5,6 +5,10 @@ projects:
     sessionPrefix: spur
     symlinks: [node_modules, .env]
     preflight: {}
+    sidecars:
+      isolated-daemon:
+        command: ./scripts/spur-isolated-daemon.sh
+        autoStart: true
     spawn:
       steps:
         - "run $manager"

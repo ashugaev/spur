@@ -90,14 +90,6 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
 
-- `sidecars` config parsing: named sidecar entries with command, autoStart, env.
-- `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart.
-- Both `devServer` and `sidecars` defined: throws error.
-- Sidecar tmux session naming: `{sessionId}--{sidecarName}`.
-- `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`.
-- Sidecar env merges session env with sidecar config env.
-- `ensureSessionSlotTool` creates `spur-sidecar` wrapper script.
-
 ## Runtime Integration
 
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.

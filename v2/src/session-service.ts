@@ -298,7 +298,6 @@ function buildSessionEnv(args: {
   projectId: string;
   sessionId: string;
   sessionToolDir: string;
-  configPath: string;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -1134,7 +1133,6 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         sessionToolDir,
-        configPath: this.config.configPath,
         repoPath: project.path,
         symlinks: project.symlinks,
       });
@@ -1508,7 +1506,6 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
-      configPath: this.config.configPath,
       repoPath: project.path,
       symlinks: project.symlinks,
     });
@@ -1805,7 +1802,6 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
-      configPath: this.config.configPath,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -1968,7 +1964,6 @@ export class SessionService {
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
-          configPath: this.config.configPath,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),

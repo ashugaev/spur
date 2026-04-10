@@ -165,7 +165,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     };
   }, []);
 
-
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -252,7 +251,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (encoded.length > 0) body.attachments = encoded;
     await handleAction("send", body);
   };
-
 
   const title = useMemo(
     () => (session ? getSessionTitle(session) : sessionId),
@@ -630,7 +628,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </section>
             ) : null}
           </div>
-
 
           {/* Logs modal */}
           {logsOpen ? (
