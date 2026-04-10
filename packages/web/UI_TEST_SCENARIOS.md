@@ -155,6 +155,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
+- If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input

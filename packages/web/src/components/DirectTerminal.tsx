@@ -90,7 +90,11 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
     websocketRef.current.send(data);
     return true;
   }, []);
-  const submitVoiceDraft = useCallback((text: string) => sendTerminalInput(`${text}\r`), [sendTerminalInput]);
+  const submitVoiceDraft = useCallback((text: string) => {
+    if (!sendTerminalInput(`${text}\r`)) {
+      throw new Error("Failed to insert transcription");
+    }
+  }, [sendTerminalInput]);
 
   const voice = useVoiceInput();
 
