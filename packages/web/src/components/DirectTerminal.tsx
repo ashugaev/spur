@@ -48,6 +48,12 @@ const terminalTheme: ITheme = {
 
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
+const RECONNECT_DELAY_MS = 1_000;
+const VISIBILITY_REFRESH_AFTER_MS = 1_000;
+
+function isRetryableClose(code: number): boolean {
+  return code !== 1000 && code !== 1008 && code !== 4004;
+}
 
 export function buildDirectTerminalWsUrl(
   location: TerminalLocation,
@@ -71,7 +77,7 @@ function sgrScroll(up: boolean): string {
 export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
-  const [status, setStatus] = useState<"connecting" | "connected" | "error">("connecting");
+  const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
 
   const sendTerminalInput = useCallback((data: string) => {
@@ -91,6 +97,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     let binaryDisposable: { dispose(): void } | null = null;
     let resizeHandler: (() => void) | null = null;
     let touchCleanup: (() => void) | null = null;
+    let reconnectTimer: number | null = null;
+    let hiddenAt: number | null = null;
+    let websocket: WebSocket | null = null;
+    let closingForUnmount = false;
 
     Promise.all([
       import("xterm").then((module) => module.Terminal),
@@ -180,54 +190,8 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         };
 
         const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
-        const websocket = new WebSocket(wsUrl);
-        websocketRef.current = websocket;
-        websocket.binaryType = "arraybuffer";
-
-        websocket.onopen = () => {
-          if (!terminal) return;
-          setStatus("connected");
-          setError(null);
-          websocket.send(
-            JSON.stringify({
-              type: "resize",
-              cols: terminal.cols,
-              rows: terminal.rows,
-            }),
-          );
-        };
-
-        websocket.onmessage = (event) => {
-          const data =
-            typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
-          terminal?.write(data);
-        };
-
-        websocket.onerror = () => {
-          setStatus("error");
-          setError("Terminal connection failed");
-        };
-
-        websocket.onclose = (event) => {
-          if (!mounted) return;
-          setStatus("error");
-          setError(event.reason || "Terminal disconnected");
-        };
-
-        inputDisposable = terminal.onData((data) => {
-          if (websocket.readyState === WebSocket.OPEN) {
-            websocket.send(data);
-          }
-        });
-
-        binaryDisposable = terminal.onBinary((data) => {
-          if (websocket.readyState === WebSocket.OPEN) {
-            websocket.send(data);
-          }
-        });
-
-        resizeHandler = () => {
-          if (!terminal || !fit || websocket.readyState !== WebSocket.OPEN) return;
+        const sendResize = () => {
+          if (!terminal || !fit || websocket?.readyState !== WebSocket.OPEN) return;
           fit.fit();
           websocket.send(
             JSON.stringify({
@@ -238,7 +202,139 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           );
         };
 
+        const clearReconnectTimer = () => {
+          if (reconnectTimer === null) return;
+          window.clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        };
+
+        const scheduleReconnect = (message: string) => {
+          if (!mounted || reconnectTimer !== null || closingForUnmount) return;
+          setStatus("reconnecting");
+          setError(message);
+          reconnectTimer = window.setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, RECONNECT_DELAY_MS);
+        };
+
+        const connect = (force = false) => {
+          if (!mounted || !terminal) return;
+          const readyState = websocket?.readyState;
+          if (
+            !force &&
+            (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)
+          ) {
+            return;
+          }
+          clearReconnectTimer();
+          if (force && websocket && websocket.readyState < WebSocket.CLOSING) {
+            websocket.onopen = null;
+            websocket.onmessage = null;
+            websocket.onerror = null;
+            websocket.onclose = null;
+            websocket.close();
+          }
+
+          setStatus((current) => (current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting"));
+          const nextSocket = new WebSocket(wsUrl);
+          websocket = nextSocket;
+          websocketRef.current = nextSocket;
+          nextSocket.binaryType = "arraybuffer";
+
+          nextSocket.onopen = () => {
+            if (websocket !== nextSocket || !terminal) return;
+            setStatus("connected");
+            setError(null);
+            terminal.focus();
+            sendResize();
+          };
+
+          nextSocket.onmessage = (event) => {
+            if (websocket !== nextSocket) return;
+            const data =
+              typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+            terminal?.write(data);
+          };
+
+          nextSocket.onerror = () => {
+            if (websocket !== nextSocket || !mounted) return;
+            setStatus("reconnecting");
+            setError("Terminal connection failed. Retrying…");
+          };
+
+          nextSocket.onclose = (event) => {
+            if (websocket === nextSocket) {
+              websocket = null;
+              websocketRef.current = null;
+            }
+            if (!mounted || closingForUnmount) return;
+
+            const message = event.reason || "Terminal disconnected";
+            if (isRetryableClose(event.code)) {
+              scheduleReconnect(`${message}. Retrying…`);
+              return;
+            }
+
+            setStatus("error");
+            setError(message);
+          };
+        };
+
+        connect();
+
+        resizeHandler = () => {
+          sendResize();
+        };
+
+        const maybeRefreshConnection = () => {
+          if (document.visibilityState === "hidden") return;
+          const wasHiddenLongEnough =
+            hiddenAt !== null && Date.now() - hiddenAt >= VISIBILITY_REFRESH_AFTER_MS;
+          hiddenAt = null;
+
+          if (wasHiddenLongEnough) {
+            connect(true);
+            return;
+          }
+
+          if (!websocket || websocket.readyState === WebSocket.CLOSED) {
+            connect();
+          }
+        };
+
+        inputDisposable = terminal.onData((data) => {
+          if (websocket?.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
+        binaryDisposable = terminal.onBinary((data) => {
+          if (websocket?.readyState === WebSocket.OPEN) {
+            websocket.send(data);
+          }
+        });
+
+        const handleVisibilityChange = () => {
+          if (document.visibilityState === "hidden") {
+            hiddenAt = Date.now();
+            return;
+          }
+          maybeRefreshConnection();
+        };
+
         window.addEventListener("resize", resizeHandler);
+        window.addEventListener("focus", maybeRefreshConnection);
+        window.addEventListener("online", maybeRefreshConnection);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+
+        touchCleanup = () => {
+          touchTarget.removeEventListener("touchstart", onTouchStart);
+          touchTarget.removeEventListener("touchmove", onTouchMove);
+          window.removeEventListener("focus", maybeRefreshConnection);
+          window.removeEventListener("online", maybeRefreshConnection);
+          document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
       })
       .catch(() => {
         setStatus("error");
@@ -247,6 +343,10 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
 
     return () => {
       mounted = false;
+      closingForUnmount = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
       if (resizeHandler) {
         window.removeEventListener("resize", resizeHandler);
       }
@@ -254,6 +354,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       inputDisposable?.dispose();
       binaryDisposable?.dispose();
       websocketRef.current?.close();
+      websocketRef.current = null;
       terminal?.dispose();
     };
   }, [sessionId]);
@@ -266,7 +367,13 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         : "bg-[var(--color-status-attention)] animate-[pulse_1.5s_ease-in-out_infinite]";
 
   const statusText =
-    status === "connected" ? "Connected" : status === "error" ? (error ?? "Error") : "Connecting…";
+    status === "connected"
+      ? "Connected"
+      : status === "reconnecting"
+        ? (error ?? "Reconnecting…")
+        : status === "error"
+          ? (error ?? "Error")
+          : "Connecting…";
   const terminalControlButtonClass =
     "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
   const terminalControlIconButtonClass =
