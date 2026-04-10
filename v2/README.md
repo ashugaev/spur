@@ -98,6 +98,22 @@ sources/triggers.
 Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`, and
 their `project` ids plus `sessionPrefix` values must stay globally unique within that daemon.
 
+### Daemon restarts and session survival
+
+Tmux sessions (agent workspaces) survive daemon restarts. The systemd unit
+uses `KillMode=process` so that `systemctl restart` only stops the daemon's
+node process — tmux and agents keep running. On startup the daemon calls
+`applyConfig()` which re-discovers living sessions, resumes delivery loops
+for queued messages and running pipelines, and restarts attention monitoring.
+
+In-memory state that does not survive a restart:
+- Trigger pending batches and retry counters (re-populated on next source poll)
+- State classification cache (rebuilt within seconds)
+- State history ring buffer (starts empty)
+
+Unit templates live in `deploy/`. After editing, copy to
+`/etc/systemd/system/` and run `systemctl daemon-reload`.
+
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml

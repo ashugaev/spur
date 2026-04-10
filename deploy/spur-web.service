@@ -1,0 +1,27 @@
+# Spur web UI — systemd unit template
+#
+# Copy to /etc/systemd/system/spur-web.service, replace {{…}} placeholders,
+# then run: systemctl daemon-reload && systemctl enable --now spur-web
+
+[Unit]
+Description=Spur web UI
+After=network.target spur-daemon.service
+Requires=spur-daemon.service
+
+[Service]
+Type=simple
+User=alek
+WorkingDirectory={{SPUR_ROOT}}
+Environment=HOME=/home/alek
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=WEB_HOST=127.0.0.1
+Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
+Environment=DIRECT_TERMINAL_BIND_PORT=14801
+Environment=DIRECT_TERMINAL_PUBLIC_PORT=5555
+Environment=PORT=3012
+ExecStart=/usr/bin/pnpm ui:start
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

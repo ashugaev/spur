@@ -609,7 +609,7 @@ export function Dashboard() {
               if (event.target === event.currentTarget) closeSpawnModal();
             }}
           >
-            <div className="h-full w-full overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:h-auto sm:max-w-lg sm:p-5">
+            <div className="flex h-full w-full flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -622,7 +622,7 @@ export function Dashboard() {
                   ✕
                 </button>
               </div>
-              <div className="space-y-3">
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                 <div className="flex gap-2">
                   <select
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
@@ -726,9 +726,9 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <div className="relative">
+                <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
-                    className="min-h-[6rem] w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] sm:min-h-[10rem]"
                     onChange={(event) => {
                       clearBranchConfirmation();
                       setSpawnPrompt(event.target.value);
@@ -752,7 +752,7 @@ export function Dashboard() {
                     <VoiceStatusHint voice={voice} />
                   </span>
                   <button
-                    className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex min-w-32 flex-col items-center justify-center gap-0.5 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={spawning || preflightBusy || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
@@ -769,9 +769,9 @@ export function Dashboard() {
                     {!spawning && !preflightBusy ? (
                       <span
                         aria-hidden="true"
-                        className="border border-black/30 px-1 py-0.5 font-mono text-[9px] font-semibold normal-case tracking-normal text-black/80"
+                        className="text-center font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
                       >
-                        ⌘/Ctrl+Enter
+                        Command + Enter
                       </span>
                     ) : null}
                   </button>
@@ -815,6 +815,7 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
+                projectFilterId={projectId || undefined}
                 onToggle={
                   isMobile
                     ? (nextLevel) =>

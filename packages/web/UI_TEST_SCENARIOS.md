@@ -46,6 +46,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, terminal button
 - All rows aligned — terminal button column is uniform width
+- Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
 ### D4: Terminal button state
 
@@ -104,7 +105,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
-- Spawn button shows inline hotkey badge "⌘/Ctrl+Enter"
+- On mobile full-screen modal, prompt textarea expands to use the remaining modal height
+- On larger screens, prompt textarea default height is taller than the previous compact size
+- Spawn button shows inline muted hotkey hint "Command + Enter"
 - With prompt + empty branch, first submit calls preflight and does not spawn yet when preflight returns a branch
 - Preflight branch suggestion is previewed in the branch input and an inline confirmation hint is shown
 - After a suggested branch is shown, button label changes to "Confirm & Spawn"
@@ -125,6 +128,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S1: Header with white underline
 
 - Back link to dashboard
+- If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
+- If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below

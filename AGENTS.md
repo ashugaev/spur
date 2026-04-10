@@ -57,7 +57,8 @@
 - Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
 - Do not override `--config` to point at `~/.spur/config.yaml` (root config).
 - Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
-- For `packages/web` work, use `spur-sidecar --name dev` (or the project `sidecars` config) so the frontend rebuilds automatically in your worktree.
+- For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`).
+- Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
 
 ## Spur Validation
 
