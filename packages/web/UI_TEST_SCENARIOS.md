@@ -82,6 +82,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal
+- If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
+- If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
+- If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
 - Branch input: placeholder "branch name", optional
@@ -96,6 +99,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled when project or prompt empty
+- Changing Spawn project updates the last selected Spawn project in local storage
+- Successful Spawn persists the selected project so it is restored on the next open
 - All new fields reset on successful spawn
 
 ## Session Detail
