@@ -10,10 +10,19 @@ import YAML from "yaml";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
+const DEFAULT_SPUR_ENV_PATH = join(homedir(), ".spur", ".env");
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
+const DEFAULT_WHISPER_CPP_MODEL_DIR = join(homedir(), ".cache", "whisper.cpp");
 const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-base.bin");
 const DEFAULT_VOICE_MODEL = "base";
 const DEFAULT_VOICE_LANGUAGE = "auto";
+const DEFAULT_AZURE_OPENAI_API_VERSION = "2024-10-21";
+const LOCAL_WHISPER_CPP_ROOT = join(homedir(), "whisper.cpp");
+const LOCAL_WHISPER_CPP_CLI = join(LOCAL_WHISPER_CPP_ROOT, "build", "bin", "whisper-cli");
+const LOCAL_WHISPER_CPP_LIBRARY_DIRS = [
+  join(LOCAL_WHISPER_CPP_ROOT, "build", "src"),
+  join(LOCAL_WHISPER_CPP_ROOT, "build", "ggml", "src"),
+];
 const DEFAULT_FASTER_WHISPER_PYTHON = join(
   homedir(),
   ".spur",
@@ -28,7 +37,7 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const FASTER_WHISPER_WORKER_PATH = resolve(MODULE_DIR, "../../server/voice/faster-whisper-worker.py");
 const VOICE_BENCHMARK_ENV = "SPUR_VOICE_BENCHMARK";
 
-type VoiceProvider = "whisper_cpp" | "faster_whisper";
+type VoiceProvider = "whisper_cpp" | "faster_whisper" | "azure_openai";
 type VoiceFailureReason =
   | "missing_model"
   | "missing_whisper_cli"
@@ -80,6 +89,17 @@ interface VoiceBenchRecord {
   error?: string;
 }
 
+interface WhisperCliRuntime {
+  command: string;
+  env: NodeJS.ProcessEnv;
+}
+
+interface AzureOpenAICredentials {
+  endpoint: string;
+  apiKey: string;
+  apiVersion: string;
+}
+
 interface FasterWorkerResponse {
   id?: string;
   type?: string;
@@ -98,7 +118,7 @@ export interface VoiceStatus {
 }
 
 function invalidProviderError(value: string): Error {
-  return new Error(`voice.provider must be "whisper_cpp" or "faster_whisper" (received "${value}")`);
+  return new Error(`voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai" (received "${value}")`);
 }
 
 function resolveConfigPath(): string {
@@ -119,6 +139,10 @@ function resolvePathFromConfig(configDir: string, value: string): string {
   return value.startsWith("/") ? value : resolve(configDir, value);
 }
 
+function resolveWhisperCppModelPath(config: ResolvedVoiceConfig): string {
+  return config.modelPath ?? join(DEFAULT_WHISPER_CPP_MODEL_DIR, `ggml-${config.model}.bin`);
+}
+
 function resolveVoiceConfig(): ResolvedVoiceConfig {
   const configPath = resolveConfigPath();
   if (!existsSync(configPath)) {
@@ -133,17 +157,22 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
   const configDir = dirname(configPath);
   const parsed = YAML.parse(readFileSync(configPath, "utf8")) as VoiceConfigShape | null;
   const rawProvider = parsed?.voice?.provider?.trim();
-  if (rawProvider && rawProvider !== "whisper_cpp" && rawProvider !== "faster_whisper") {
+  if (
+    rawProvider &&
+    rawProvider !== "whisper_cpp" &&
+    rawProvider !== "faster_whisper" &&
+    rawProvider !== "azure_openai"
+  ) {
     throw invalidProviderError(rawProvider);
   }
   const provider: VoiceProvider =
-    rawProvider === "faster_whisper" ? "faster_whisper" : DEFAULT_VOICE_PROVIDER;
+    rawProvider === "faster_whisper" || rawProvider === "azure_openai"
+      ? rawProvider
+      : DEFAULT_VOICE_PROVIDER;
   const configuredModelPath = parsed?.voice?.modelPath?.trim();
   const modelPath = configuredModelPath
     ? resolvePathFromConfig(configDir, configuredModelPath)
-    : provider === "whisper_cpp"
-      ? DEFAULT_VOICE_MODEL_PATH
-      : undefined;
+    : undefined;
   const model = parsed?.voice?.model?.trim() || DEFAULT_VOICE_MODEL;
   const language = parsed?.voice?.language?.trim() || DEFAULT_VOICE_LANGUAGE;
   return { provider, modelPath, model, language };
@@ -155,6 +184,66 @@ function commandExists(command: string): boolean {
   } catch {
     return false;
   }
+}
+
+function parseEnvFile(content: string): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const separator = line.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "");
+    if (key) {
+      entries[key] = value;
+    }
+  }
+  return entries;
+}
+
+function readVoiceSecrets(): Record<string, string> {
+  if (!existsSync(DEFAULT_SPUR_ENV_PATH)) {
+    return {};
+  }
+  try {
+    return parseEnvFile(readFileSync(DEFAULT_SPUR_ENV_PATH, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function resolveVoiceSecret(...keys: string[]): string | undefined {
+  const fileSecrets = readVoiceSecrets();
+  for (const key of keys) {
+    const fileValue = fileSecrets[key]?.trim();
+    if (fileValue) {
+      return fileValue;
+    }
+    const envValue = process.env[key]?.trim();
+    if (envValue) {
+      return envValue;
+    }
+  }
+  return undefined;
+}
+
+function resolveAzureOpenAICredentials(): AzureOpenAICredentials | null {
+  const endpoint = resolveVoiceSecret("AZURE_OPENAI_ENDPOINT");
+  const apiKey = resolveVoiceSecret("AZURE_OPENAI_API_KEY");
+  if (!endpoint || !apiKey) {
+    return null;
+  }
+  const apiVersion = resolveVoiceSecret("AZURE_OPENAI_API_VERSION") ?? DEFAULT_AZURE_OPENAI_API_VERSION;
+  return {
+    endpoint: endpoint.replace(/\/+$/, ""),
+    apiKey,
+    apiVersion,
+  };
 }
 
 function benchmarkLoggingEnabled(): boolean {
@@ -221,6 +310,35 @@ function resolvePythonCommand(): string | null {
   if (commandExists("python")) {
     return "python";
   }
+  return null;
+}
+
+function canRunCommand(command: string, args: string[], env: NodeJS.ProcessEnv): boolean {
+  try {
+    return spawnSync(command, args, { stdio: "ignore", env }).status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function withLibraryPath(env: NodeJS.ProcessEnv, libraryDirs: string[]): NodeJS.ProcessEnv {
+  const ldLibraryPath = [...libraryDirs, env["LD_LIBRARY_PATH"]].filter(Boolean).join(":");
+  return ldLibraryPath ? { ...env, LD_LIBRARY_PATH: ldLibraryPath } : env;
+}
+
+function resolveWhisperCliRuntime(): WhisperCliRuntime | null {
+  const baseEnv = { ...process.env };
+  if (existsSync(LOCAL_WHISPER_CPP_CLI)) {
+    const env = withLibraryPath(baseEnv, LOCAL_WHISPER_CPP_LIBRARY_DIRS);
+    if (canRunCommand(LOCAL_WHISPER_CPP_CLI, ["--help"], env)) {
+      return { command: LOCAL_WHISPER_CPP_CLI, env };
+    }
+  }
+
+  if (commandExists("whisper-cli") && canRunCommand("whisper-cli", ["--help"], baseEnv)) {
+    return { command: "whisper-cli", env: baseEnv };
+  }
+
   return null;
 }
 
@@ -325,6 +443,9 @@ class FasterWhisperWorker {
     });
 
     child.on("exit", () => {
+      if (this.child !== child) {
+        return;
+      }
       this.failPending(new Error("faster_whisper worker exited"));
       if (this.startupReject) {
         this.startupReject(new Error("faster_whisper worker failed to start"));
@@ -333,6 +454,9 @@ class FasterWhisperWorker {
     });
 
     child.on("error", (error: Error) => {
+      if (this.child !== child) {
+        return;
+      }
       this.failPending(error);
       if (this.startupReject) {
         this.startupReject(error);
@@ -456,7 +580,7 @@ function getFasterWhisperWorker(): FasterWhisperWorker {
 }
 
 async function readWhisperCppStatus(config: ResolvedVoiceConfig): Promise<VoiceStatus> {
-  const modelPath = config.modelPath ?? DEFAULT_VOICE_MODEL_PATH;
+  const modelPath = resolveWhisperCppModelPath(config);
   if (!existsSync(modelPath)) {
     return {
       available: false,
@@ -467,7 +591,7 @@ async function readWhisperCppStatus(config: ResolvedVoiceConfig): Promise<VoiceS
       reason: "missing_model",
     };
   }
-  if (!commandExists("whisper-cli")) {
+  if (!resolveWhisperCliRuntime()) {
     return {
       available: false,
       provider: "whisper_cpp",
@@ -554,11 +678,35 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
   };
 }
 
+async function readAzureOpenAIStatus(config: ResolvedVoiceConfig): Promise<VoiceStatus> {
+  const credentials = resolveAzureOpenAICredentials();
+  if (!credentials) {
+    return {
+      available: false,
+      provider: "azure_openai",
+      model: config.model,
+      language: config.language,
+      reason: "missing_runtime",
+      detail: `Azure OpenAI credentials are missing; set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in ${DEFAULT_SPUR_ENV_PATH}`,
+    };
+  }
+
+  return {
+    available: true,
+    provider: "azure_openai",
+    model: config.model,
+    language: config.language,
+  };
+}
+
 export async function readVoiceStatus(): Promise<VoiceStatus> {
   try {
     const config = resolveVoiceConfig();
     if (config.provider === "faster_whisper") {
       return readFasterWhisperStatus(config);
+    }
+    if (config.provider === "azure_openai") {
+      return readAzureOpenAIStatus(config);
     }
     return readWhisperCppStatus(config);
   } catch (error) {
@@ -574,6 +722,21 @@ export async function readVoiceStatus(): Promise<VoiceStatus> {
   }
 }
 
+function extractAzureOpenAIError(body: unknown, fallback: string): string {
+  if (
+    body &&
+    typeof body === "object" &&
+    "error" in body &&
+    body["error"] &&
+    typeof body["error"] === "object" &&
+    "message" in body["error"] &&
+    typeof body["error"]["message"] === "string"
+  ) {
+    return body["error"]["message"];
+  }
+  return fallback;
+}
+
 async function transcribeWithWhisperCpp(
   config: ResolvedVoiceConfig,
   audio: Buffer,
@@ -587,7 +750,11 @@ async function transcribeWithWhisperCpp(
   if (!status.available) {
     throw new Error(status.reason ?? "voice input is unavailable");
   }
-  const modelPath = status.modelPath ?? config.modelPath ?? DEFAULT_VOICE_MODEL_PATH;
+  const runtime = resolveWhisperCliRuntime();
+  if (!runtime) {
+    throw new Error("missing_whisper_cli");
+  }
+  const modelPath = status.modelPath ?? resolveWhisperCppModelPath(config);
 
   const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
   const inputExt = extname(originalFilename) || ".webm";
@@ -614,9 +781,9 @@ async function transcribeWithWhisperCpp(
 
     const whisperStartedAt = process.hrtime.bigint();
     await execFileAsync(
-      "whisper-cli",
+      runtime.command,
       ["-m", modelPath, "-l", status.language, "-f", wavPath, "-otxt", "-of", outputBasePath],
-      { timeout: 120_000 },
+      { timeout: 120_000, env: runtime.env },
     );
     pushStep(steps, "transcribeMs", elapsedMs(whisperStartedAt));
 
@@ -710,6 +877,89 @@ async function transcribeWithFasterWhisper(
   }
 }
 
+async function transcribeWithAzureOpenAI(
+  config: ResolvedVoiceConfig,
+  audio: Buffer,
+  originalFilename: string,
+): Promise<VoiceTranscription> {
+  const startedAt = process.hrtime.bigint();
+  const steps: Record<string, number> = {};
+  let audioSeconds: number | undefined;
+  let failure: Error | undefined;
+  const credentials = resolveAzureOpenAICredentials();
+  if (!credentials) {
+    throw new Error("missing_runtime");
+  }
+
+  const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
+  const inputExt = extname(originalFilename) || ".webm";
+  const inputPath = join(tempDir, `input${inputExt}`);
+  try {
+    const writeStartedAt = process.hrtime.bigint();
+    await writeFile(inputPath, audio);
+    pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
+
+    const probeStartedAt = process.hrtime.bigint();
+    audioSeconds = await readAudioDurationSeconds(inputPath);
+    pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
+
+    const requestStartedAt = process.hrtime.bigint();
+    const formData = new FormData();
+    formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
+    if (config.language !== "auto") {
+      formData.append("language", config.language);
+    }
+    const response = await fetch(
+      `${credentials.endpoint}/openai/deployments/${encodeURIComponent(config.model)}/audio/transcriptions?api-version=${encodeURIComponent(credentials.apiVersion)}`,
+      {
+        method: "POST",
+        headers: {
+          "api-key": credentials.apiKey,
+        },
+        body: formData,
+      },
+    );
+    pushStep(steps, "requestMs", elapsedMs(requestStartedAt));
+
+    const payload = (await response.json()) as { text?: string; error?: { message?: string } };
+    if (!response.ok) {
+      throw new Error(extractAzureOpenAIError(payload, "Azure OpenAI transcription failed"));
+    }
+    if (!payload.text?.trim()) {
+      throw new Error("transcription returned empty text");
+    }
+
+    return {
+      text: payload.text.trim(),
+      provider: "azure_openai",
+      model: config.model,
+      language: config.language,
+    };
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error("startup_failed");
+    throw failure;
+  } finally {
+    const cleanupStartedAt = process.hrtime.bigint();
+    await rm(tempDir, { recursive: true, force: true });
+    pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
+    const totalMs = roundMetric(elapsedMs(startedAt));
+    emitVoiceBenchmark({
+      provider: "azure_openai",
+      model: config.model,
+      language: config.language,
+      audioBytes: audio.byteLength,
+      ...(audioSeconds !== undefined ? { audioSeconds } : {}),
+      ...(audioSeconds && audioSeconds > 0
+        ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
+        : {}),
+      totalMs,
+      steps,
+      status: failure ? "error" : "ok",
+      ...(failure ? { error: failure.message } : {}),
+    });
+  }
+}
+
 export async function transcribeAudio(
   audio: Buffer,
   originalFilename: string,
@@ -717,6 +967,9 @@ export async function transcribeAudio(
   const config = resolveVoiceConfig();
   if (config.provider === "faster_whisper") {
     return transcribeWithFasterWhisper(config, audio, originalFilename);
+  }
+  if (config.provider === "azure_openai") {
+    return transcribeWithAzureOpenAI(config, audio, originalFilename);
   }
   return transcribeWithWhisperCpp(config, audio, originalFilename);
 }

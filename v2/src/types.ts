@@ -160,7 +160,7 @@ export interface AppConfig {
     port: number;
   };
   voice: {
-    provider: "whisper_cpp" | "faster_whisper";
+    provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
     language: string;
     model: string;
     modelPath?: string;

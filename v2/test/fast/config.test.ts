@@ -57,7 +57,7 @@ projects:
     expect(config.worktreeDir).toContain(".spur/worktrees");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
-    expect(config.voice.modelPath).toContain(".cache/whisper.cpp/ggml-base.bin");
+    expect(config.voice.modelPath).toBeUndefined();
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
@@ -290,6 +290,26 @@ projects:
     });
   });
 
+  it("parses azure_openai voice provider with deployment name only", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: whisper
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "whisper",
+    });
+  });
+
   it("keeps legacy voice configs backwards compatible", async () => {
     const configPath = await writeConfig(`
 voice:
@@ -320,7 +340,7 @@ projects:
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      'voice.provider must be "whisper_cpp" or "faster_whisper"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
     );
   });
 
