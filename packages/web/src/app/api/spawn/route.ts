@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView } from "@/lib/types";
+import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
@@ -9,7 +9,7 @@ interface SpawnBody {
   branch?: string;
   planMode?: boolean;
   steps?: string[];
-  overrides?: { worktree?: boolean; defaultBranch?: string };
+  overrides?: SpawnOverrides;
 }
 
 export async function POST(request: NextRequest) {
@@ -28,10 +28,8 @@ export async function POST(request: NextRequest) {
           .map((s) => s.trim())
       : undefined;
 
-    const rawOverrides =
-      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
     const overrides =
-      rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
+      body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
 
     const payload: Record<string, unknown> = { project, prompt };
     if (body.agent) payload.agent = body.agent;

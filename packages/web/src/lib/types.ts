@@ -91,6 +91,11 @@ export interface DashboardSession {
   error?: string;
 }
 
+export interface SpawnOverrides {
+  worktree?: boolean;
+  defaultBranch?: string;
+}
+
 export function toDashboardSession(
   session: SpurSessionView,
   projectName = session.project,
