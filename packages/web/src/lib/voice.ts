@@ -26,6 +26,7 @@ const FASTER_WHISPER_STARTUP_TIMEOUT_MS = 10 * 60_000;
 const FASTER_WHISPER_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const FASTER_WHISPER_WORKER_PATH = resolve(MODULE_DIR, "../../server/voice/faster-whisper-worker.py");
+const VOICE_BENCHMARK_ENV = "SPUR_VOICE_BENCHMARK";
 
 type VoiceProvider = "whisper_cpp" | "faster_whisper";
 type VoiceFailureReason =
@@ -57,6 +58,26 @@ interface VoiceTranscription {
   provider: VoiceProvider;
   model: string;
   language: string;
+}
+
+interface FasterWorkerMetrics {
+  coldStart: boolean;
+  startupMs: number;
+  requestMs: number;
+}
+
+interface VoiceBenchRecord {
+  provider: VoiceProvider;
+  model: string;
+  language: string;
+  audioBytes: number;
+  audioSeconds?: number;
+  secondsPerAudioSecond?: number;
+  coldStart?: boolean;
+  totalMs: number;
+  steps: Record<string, number>;
+  status: "ok" | "error";
+  error?: string;
 }
 
 interface FasterWorkerResponse {
@@ -136,6 +157,56 @@ function commandExists(command: string): boolean {
   }
 }
 
+function benchmarkLoggingEnabled(): boolean {
+  const value = process.env[VOICE_BENCHMARK_ENV]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function elapsedMs(startedAt: bigint): number {
+  return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+}
+
+function roundMetric(value: number): number {
+  return Number(value.toFixed(3));
+}
+
+function pushStep(steps: Record<string, number>, key: string, value: number): void {
+  steps[key] = roundMetric(value);
+}
+
+function emitVoiceBenchmark(record: VoiceBenchRecord): void {
+  if (!benchmarkLoggingEnabled()) {
+    return;
+  }
+  process.stderr.write(`[voice-bench] ${JSON.stringify(record)}\n`);
+}
+
+async function readAudioDurationSeconds(audioPath: string): Promise<number | undefined> {
+  if (!commandExists("ffprobe")) {
+    return undefined;
+  }
+
+  try {
+    const { stdout } = await execFileAsync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        audioPath,
+      ],
+      { timeout: 15_000 },
+    );
+    const duration = Number.parseFloat(stdout.trim());
+    return Number.isFinite(duration) && duration > 0 ? roundMetric(duration) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function resolvePythonCommand(): string | null {
   const override = process.env["SPUR_VOICE_PYTHON"]?.trim();
   if (override) {
@@ -176,10 +247,11 @@ class FasterWhisperWorker {
   async transcribe(
     config: ResolvedVoiceConfig,
     audioPath: string,
-  ): Promise<VoiceTranscription> {
-    const run = async (): Promise<VoiceTranscription> => {
-      await this.ensureStarted(config);
+  ): Promise<{ transcription: VoiceTranscription; metrics: FasterWorkerMetrics }> {
+    const run = async (): Promise<{ transcription: VoiceTranscription; metrics: FasterWorkerMetrics }> => {
+      const startup = await this.ensureStarted(config);
       const requestId = String(this.nextRequestId++);
+      const requestStartedAt = process.hrtime.bigint();
       const response = await this.send({
         id: requestId,
         action: "transcribe",
@@ -190,11 +262,17 @@ class FasterWhisperWorker {
         throw new Error(response.error || "transcription returned empty text");
       }
       return {
-        text: response.text.trim(),
-        ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
-        provider: "faster_whisper",
-        model: config.model,
-        language: config.language,
+        transcription: {
+          text: response.text.trim(),
+          ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
+          provider: "faster_whisper",
+          model: config.model,
+          language: config.language,
+        },
+        metrics: {
+          ...startup,
+          requestMs: roundMetric(elapsedMs(requestStartedAt)),
+        },
       };
     };
 
@@ -207,19 +285,25 @@ class FasterWhisperWorker {
     return `${config.modelPath ?? ""}|${config.model}`;
   }
 
-  private async ensureStarted(config: ResolvedVoiceConfig): Promise<void> {
+  private async ensureStarted(config: ResolvedVoiceConfig): Promise<{
+    coldStart: boolean;
+    startupMs: number;
+  }> {
     const key = this.createWorkerKey(config);
     if (this.workerKey !== key) {
       this.stop();
     }
     if (this.child && this.startupPromise === null) {
-      return;
+      return { coldStart: false, startupMs: 0 };
     }
     if (this.startupPromise) {
-      return this.startupPromise;
+      const waitingStartedAt = process.hrtime.bigint();
+      await this.startupPromise;
+      return { coldStart: true, startupMs: roundMetric(elapsedMs(waitingStartedAt)) };
     }
 
     this.workerKey = key;
+    const startupStartedAt = process.hrtime.bigint();
     this.startupPromise = new Promise<void>((resolveStart, rejectStart) => {
       this.startupResolve = resolveStart;
       this.startupReject = rejectStart;
@@ -276,6 +360,8 @@ class FasterWhisperWorker {
       this.startupResolve = null;
       this.startupReject = null;
     }
+
+    return { coldStart: true, startupMs: roundMetric(elapsedMs(startupStartedAt)) };
   }
 
   private cleanupWorkerHandles(): void {
@@ -493,6 +579,10 @@ async function transcribeWithWhisperCpp(
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
+  const startedAt = process.hrtime.bigint();
+  const steps: Record<string, number> = {};
+  let audioSeconds: number | undefined;
+  let failure: Error | undefined;
   const status = await readWhisperCppStatus(config);
   if (!status.available) {
     throw new Error(status.reason ?? "voice input is unavailable");
@@ -506,19 +596,33 @@ async function transcribeWithWhisperCpp(
   const outputBasePath = join(tempDir, "transcript");
 
   try {
+    const writeStartedAt = process.hrtime.bigint();
     await writeFile(inputPath, audio);
+    pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
+
+    const probeStartedAt = process.hrtime.bigint();
+    audioSeconds = await readAudioDurationSeconds(inputPath);
+    pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
+
+    const ffmpegStartedAt = process.hrtime.bigint();
     await execFileAsync(
       "ffmpeg",
       ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wavPath],
       { timeout: 120_000 },
     );
+    pushStep(steps, "ffmpegMs", elapsedMs(ffmpegStartedAt));
+
+    const whisperStartedAt = process.hrtime.bigint();
     await execFileAsync(
       "whisper-cli",
       ["-m", modelPath, "-l", status.language, "-f", wavPath, "-otxt", "-of", outputBasePath],
       { timeout: 120_000 },
     );
+    pushStep(steps, "transcribeMs", elapsedMs(whisperStartedAt));
 
+    const readStartedAt = process.hrtime.bigint();
     const text = (await readFile(`${outputBasePath}.txt`, "utf8")).trim();
+    pushStep(steps, "readOutputMs", elapsedMs(readStartedAt));
     if (!text) {
       throw new Error("transcription returned empty text");
     }
@@ -529,8 +633,28 @@ async function transcribeWithWhisperCpp(
       model: status.model,
       language: status.language,
     };
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error("startup_failed");
+    throw failure;
   } finally {
+    const cleanupStartedAt = process.hrtime.bigint();
     await rm(tempDir, { recursive: true, force: true });
+    pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
+    const totalMs = roundMetric(elapsedMs(startedAt));
+    emitVoiceBenchmark({
+      provider: status.provider,
+      model: status.model,
+      language: status.language,
+      audioBytes: audio.byteLength,
+      ...(audioSeconds !== undefined ? { audioSeconds } : {}),
+      ...(audioSeconds && audioSeconds > 0
+        ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
+        : {}),
+      totalMs,
+      steps,
+      status: failure ? "error" : "ok",
+      ...(failure ? { error: failure.message } : {}),
+    });
   }
 }
 
@@ -539,17 +663,50 @@ async function transcribeWithFasterWhisper(
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
+  const startedAt = process.hrtime.bigint();
+  const steps: Record<string, number> = {};
+  let audioSeconds: number | undefined;
+  let failure: Error | undefined;
   const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
   const inputExt = extname(originalFilename) || ".webm";
   const inputPath = join(tempDir, `input${inputExt}`);
   try {
+    const writeStartedAt = process.hrtime.bigint();
     await writeFile(inputPath, audio);
+    pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
+
+    const probeStartedAt = process.hrtime.bigint();
+    audioSeconds = await readAudioDurationSeconds(inputPath);
+    pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
+
     const worker = getFasterWhisperWorker();
-    return await worker.transcribe(config, inputPath);
+    const { transcription, metrics } = await worker.transcribe(config, inputPath);
+    pushStep(steps, "workerStartupMs", metrics.startupMs);
+    pushStep(steps, "workerRequestMs", metrics.requestMs);
+    return transcription;
   } catch (error) {
-    throw error instanceof Error ? error : new Error("startup_failed");
+    failure = error instanceof Error ? error : new Error("startup_failed");
+    throw failure;
   } finally {
+    const cleanupStartedAt = process.hrtime.bigint();
     await rm(tempDir, { recursive: true, force: true });
+    pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
+    const totalMs = roundMetric(elapsedMs(startedAt));
+    emitVoiceBenchmark({
+      provider: "faster_whisper",
+      model: config.model,
+      language: config.language,
+      audioBytes: audio.byteLength,
+      ...(audioSeconds !== undefined ? { audioSeconds } : {}),
+      ...(audioSeconds && audioSeconds > 0
+        ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
+        : {}),
+      ...(steps["workerStartupMs"] !== undefined ? { coldStart: steps["workerStartupMs"] > 0 } : {}),
+      totalMs,
+      steps,
+      status: failure ? "error" : "ok",
+      ...(failure ? { error: failure.message } : {}),
+    });
   }
 }
 

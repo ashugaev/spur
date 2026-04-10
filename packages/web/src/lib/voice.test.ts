@@ -92,6 +92,7 @@ describe("voice runtime", () => {
     vi.clearAllMocks();
     delete process.env["SPUR_CONFIG"];
     delete process.env["SPUR_VOICE_PYTHON"];
+    delete process.env["SPUR_VOICE_BENCHMARK"];
     mockMkdtemp.mockResolvedValue("/tmp/spur-voice-test");
     mockWriteFile.mockResolvedValue(undefined);
     mockReadFile.mockResolvedValue("transcribed text");
@@ -193,5 +194,66 @@ voice:
       language: "uk",
     });
     expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits benchmark logs when voice benchmarking is enabled", async () => {
+    const reader = new MockLineReader();
+    const stderrWrite = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      mockCreateInterface.mockReturnValue(reader);
+      mockExistsSync.mockImplementation((path: string) => {
+        if (path === "/tmp/config.yaml") return true;
+        if (path === workerPath) return true;
+        return false;
+      });
+      mockReadFileSync.mockReturnValue(`
+voice:
+  provider: faster_whisper
+  model: small
+  language: uk
+`);
+      mockSpawnSync.mockImplementation((command: string, args: string[]) => {
+        if (command === "which" && args[0] === "python3") {
+          return { status: 0 };
+        }
+        return { status: 1 };
+      });
+      mockExecFileSuccess();
+      mockSpawn.mockImplementation(() => {
+        const stdout = new EventEmitter();
+        const stderr = new EventEmitter();
+        const child = new EventEmitter() as EventEmitter & {
+          stdin: MockStdin;
+          stdout: EventEmitter;
+          stderr: EventEmitter;
+          kill: () => void;
+        };
+        child.stdout = stdout;
+        child.stderr = stderr;
+        child.kill = () => undefined;
+        child.stdin = new MockStdin((chunk) => {
+          const payload = JSON.parse(chunk.trim()) as { id: string; audioPath: string; language: string };
+          reader.emit(JSON.stringify({ id: payload.id, text: `ok:${payload.language}:${payload.audioPath}` }));
+        });
+        queueMicrotask(() => {
+          reader.emit(JSON.stringify({ type: "ready" }));
+        });
+        return child;
+      });
+      process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+      process.env["SPUR_VOICE_BENCHMARK"] = "1";
+
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+
+      const message = stderrWrite.mock.calls
+        .map(([chunk]) => String(chunk))
+        .find((chunk) => chunk.startsWith("[voice-bench] "));
+      expect(message).toBeDefined();
+      expect(message).toContain('"provider":"faster_whisper"');
+      expect(message).toContain('"workerRequestMs"');
+    } finally {
+      stderrWrite.mockRestore();
+    }
   });
 });
