@@ -13,22 +13,24 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
-`spawn` always takes one task prompt. Optional `steps` are a pipeline skeleton around that task:
+`spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
-- The positional `<prompt...>` is the task.
+- The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
+- Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
 spur spawn backend-api "Fix the flaky auth test" --step research --step test
+spur spawn backend-api
 ```
 
 ```yaml
@@ -40,7 +42,7 @@ spawn:
     - "test"
 ```
 
-When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is.
+When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
@@ -111,18 +113,30 @@ Voice input lets you dictate prompts and messages in the web UI via a microphone
 ### Server dependencies
 
 ```bash
-# 1. Build and install whisper.cpp CLI
+# whisper_cpp provider dependencies
 git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
 cd /tmp/whisper.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cli
 
-# 2. Install ffmpeg (if not present)
+# ffmpeg is required for whisper_cpp audio conversion
 sudo apt install -y ffmpeg   # or brew install ffmpeg
 
-# 3. Download a multilingual whisper model
+# whisper_cpp default model
 mkdir -p ~/.cache/whisper.cpp
 curl -L -o ~/.cache/whisper.cpp/ggml-base.bin \
   https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+# faster_whisper provider dependencies
+python3 -m venv ~/.spur/venvs/faster-whisper
+~/.spur/venvs/faster-whisper/bin/python -m pip install --upgrade pip faster-whisper
+
+# azure_openai provider credentials
+cat >> ~/.spur/.env <<'EOF'
+AZURE_OPENAI_ENDPOINT=https://<resource>.services.ai.azure.com
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_API_VERSION=2024-10-21
+EOF
+chmod 600 ~/.spur/.env
 ```
 
 ### Config
@@ -131,11 +145,17 @@ In `~/.spur/config.yaml`:
 
 ```yaml
 voice:
-  modelPath: ~/.cache/whisper.cpp/ggml-base.bin  # default
-  language: ru  # whisper language code, default "ru"
+  provider: whisper_cpp   # default: whisper_cpp
+  language: auto          # default: auto
+  model: base             # default: base
+  # modelPath: ~/.cache/whisper.cpp/ggml-base.bin  # optional override
 ```
 
-`voice.language` is passed as `-l <code>` to `whisper-cli`. Use `en` for English, `auto` for auto-detect, etc.
+`voice.modelPath` has priority when set. If omitted, Spur uses `voice.model`.
+For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
+For `faster_whisper`, `voice.language` is used as the transcription language hint.
+For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
+Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
 
 ### HTTPS requirement
 
@@ -187,7 +207,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until the host has `whisper-cli`, `ffmpeg`, and a local Whisper model at `voice.modelPath`. See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -201,8 +221,9 @@ tmux:
 ui:
   port: 5555
 voice:
-  modelPath: ~/.cache/whisper.cpp/ggml-base.bin
-  language: ru
+  provider: whisper_cpp
+  language: auto
+  model: base
 
 projects:
   backend-api:
@@ -287,8 +308,10 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex`, default `claude`.
-- `voice.modelPath`: optional, default `~/.cache/whisper.cpp/ggml-base.bin`.
-- `voice.language`: optional whisper language code, default `ru`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
+- `voice.language`: optional transcription language code, default `auto`.
+- `voice.model`: optional model name, default `base`.
+- `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.

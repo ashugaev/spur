@@ -161,8 +161,10 @@ export interface AppConfig {
     port: number;
   };
   voice: {
-    modelPath: string;
+    provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
     language: string;
+    model: string;
+    modelPath?: string;
   };
   projects: Record<string, ProjectConfig>;
 }
@@ -247,7 +249,7 @@ export interface PreflightResponse {
 
 export interface SpawnSessionRequest {
   project: string;
-  prompt: string;
+  prompt?: string;
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;

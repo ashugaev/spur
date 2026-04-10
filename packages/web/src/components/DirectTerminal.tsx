@@ -80,10 +80,14 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
   const [error, setError] = useState<string | null>(null);
 
-  const sendTerminalInput = useCallback((data: string) => {
-    if (websocketRef.current?.readyState !== WebSocket.OPEN) return;
+  const sendTerminalInput = useCallback((data: string): boolean => {
+    if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
     websocketRef.current.send(data);
+    return true;
   }, []);
+  const submitVoiceDraft = useCallback((text: string) => {
+    sendTerminalInput(`${text}\r`);
+  }, [sendTerminalInput]);
 
   const voice = useVoiceInput();
 
@@ -149,7 +153,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         fit.fit();
 
         // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
-        // so tmux enters copy-mode and scrolls history on touch devices (iPad, phone).
+        // using native drag semantics, so finger movement matches terminal content movement.
         const touchTarget = terminalRef.current.querySelector(".xterm-screen") ?? terminalRef.current;
         let touchStartY = 0;
         let touchAccum = 0;
@@ -172,7 +176,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           if (lines === 0) return;
           touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
 
-          const up = lines > 0;
+          const up = lines < 0;
           const seq = sgrScroll(up);
           const count = Math.abs(lines);
           for (let i = 0; i < count; i++) {
@@ -418,6 +422,11 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
+      {voice.voiceError ? (
+        <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
+          {voice.voiceError}
+        </div>
+      ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
         <div className="flex items-center gap-1">
@@ -504,7 +513,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
-      <VoiceConfirmModal voice={voice} onInsert={(text) => sendTerminalInput(text)} />
+      <VoiceConfirmModal voice={voice} onInsert={submitVoiceDraft} />
     </div>
   );
 }

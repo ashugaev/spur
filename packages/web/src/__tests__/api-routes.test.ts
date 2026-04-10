@@ -118,20 +118,23 @@ describe("Spur web API routes", () => {
     expect(payload.projects).toEqual([{ id: "sp", name: "Spur Core" }]);
   });
 
-  it("POST /api/spawn validates body and proxies to Spur", async () => {
+  it("POST /api/spawn accepts a missing prompt and proxies an empty prompt to Spur", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
       new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
-        body: JSON.stringify({ projectId: "api", prompt: "Fix auth", agent: "claude" }),
+        body: JSON.stringify({ projectId: "api", agent: "claude" }),
       }),
     );
 
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ project: "api", prompt: "", agent: "claude" }),
+      }),
     );
   });
 
@@ -206,24 +209,39 @@ describe("Spur web API routes", () => {
   });
 
   it("GET /api/runtime/voice returns availability from server-side voice checks", async () => {
-    mockedReadVoiceStatus.mockReturnValue({
+    mockedReadVoiceStatus.mockResolvedValue({
       available: true,
+      provider: "whisper_cpp",
+      model: "base",
       modelPath: "/models/ggml-base.en.bin",
+      language: "auto",
     });
 
     const response = await runtimeVoiceStatus();
-    const payload = (await response.json()) as { available: boolean; modelPath: string };
+    const payload = (await response.json()) as {
+      available: boolean;
+      provider: string;
+      model: string;
+      modelPath?: string;
+      language: string;
+    };
 
     expect(response.status).toBe(200);
     expect(payload).toEqual({
       available: true,
+      provider: "whisper_cpp",
+      model: "base",
       modelPath: "/models/ggml-base.en.bin",
+      language: "auto",
     });
   });
 
   it("POST /api/runtime/voice/transcribe validates audio and returns transcription", async () => {
     mockedTranscribeAudio.mockResolvedValue({
       text: "Fix the flaky test",
+      provider: "whisper_cpp",
+      model: "base",
+      language: "auto",
       modelPath: "/models/ggml-base.en.bin",
     });
 
@@ -236,11 +254,20 @@ describe("Spur web API routes", () => {
         body: formData,
       }),
     );
-    const payload = (await response.json()) as { text: string; modelPath: string };
+    const payload = (await response.json()) as {
+      text: string;
+      provider: string;
+      model: string;
+      language: string;
+      modelPath?: string;
+    };
 
     expect(response.status).toBe(200);
     expect(payload).toEqual({
       text: "Fix the flaky test",
+      provider: "whisper_cpp",
+      model: "base",
+      language: "auto",
       modelPath: "/models/ggml-base.en.bin",
     });
     expect(mockedTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), "voice.webm");

@@ -150,24 +150,28 @@ function tryRealpath(path: string): string {
   }
 }
 
-function normalizeSpawnRequest(request: SpawnSessionRequest): {
+function normalizeSpawnRequest(
+  request: SpawnSessionRequest,
+  defaultSteps?: string[],
+): {
   prompt: string;
   steps?: string[];
   planMode: boolean;
 } {
-  if (typeof request.prompt !== "string" || !request.prompt.trim()) {
-    throw new Error("prompt must be a non-empty string");
-  }
-  const steps = request.steps?.map((step, index) => {
+  const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
+  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
     return step.trim();
   });
   const normalized = {
-    prompt: request.prompt.trim(),
+    prompt,
     planMode: request.planMode === true,
   };
+  if (!prompt) {
+    return normalized;
+  }
   if (!steps || steps.length === 0) {
     return normalized;
   }
@@ -262,14 +266,9 @@ function withQueuedMessages(
 }
 
 export function isRestorableSession(
-  session: Pick<SessionView, "status" | "state" | "workspaceExists" | "worktree">,
+  session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
-  return (
-    session.worktree &&
-    isRestorableStatus(session.status) &&
-    session.state === "stopped" &&
-    session.workspaceExists
-  );
+  return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
 }
 
 function buildRestorePrompt(prompt: string): string {
@@ -960,12 +959,7 @@ export class SessionService {
     let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest({
-        ...request,
-        ...(request.steps === undefined && project.spawn?.steps !== undefined
-          ? { steps: project.spawn.steps }
-          : {}),
-      }));
+      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
@@ -980,7 +974,7 @@ export class SessionService {
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
-      if (!effectiveBranch && worktree && project.preflight) {
+      if (!effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
         const preflight = await runSpawnPreflight({
           agent,
@@ -1171,22 +1165,24 @@ export class SessionService {
         message: `Agent prompt is ready for ${sessionId}`,
       });
 
-      stage = "prompt.send";
-      const sidecarNames = Object.keys(project.sidecars);
-      const spawnInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
-        sidecarNames,
-      );
-      await sendMessageToTmux(tmuxSession, spawnInitialMessage);
-      this.logEvent("session.spawn.initial_prompt_sent", {
-        level: "info",
-        sessionId,
-        projectId: request.project,
-        message: `Sent initial prompt to ${sessionId}`,
-        details: {
-          messageLength: launchPlan.initialMessage.length,
-        },
-      });
+      if (launchPlan.initialMessage.trim()) {
+        stage = "prompt.send";
+        const sidecarNames = Object.keys(project.sidecars);
+        const spawnInitialMessage = buildInitialMessage(
+          launchPlan.initialMessage,
+          sidecarNames,
+        );
+        await sendMessageToTmux(tmuxSession, spawnInitialMessage);
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            messageLength: launchPlan.initialMessage.length,
+          },
+        });
+      }
 
       stage = "record.write";
       const persistedRecord = await this.captureAgentSessionId(
@@ -1896,9 +1892,6 @@ export class SessionService {
     }
 
     const current = await this.enrich(session);
-    if (!current.worktree) {
-      throw new Error(`Session is not restorable without a worktree: ${sessionId}`);
-    }
     if (!isRestorableSession(current)) {
       throw new Error(`Session is not restorable: ${sessionId}`);
     }

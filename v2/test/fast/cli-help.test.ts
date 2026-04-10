@@ -12,7 +12,7 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
-    expect(help).toContain("spawn [options] <project> <prompt...>");
+    expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");

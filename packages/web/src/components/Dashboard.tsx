@@ -22,6 +22,7 @@ import {
 
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 
 function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
   return Array.from(new Set(sessions.map((session) => session.project)))
@@ -46,12 +47,12 @@ function StatItem({
 }) {
   return (
     <button
-      className={`flex w-full min-w-0 flex-col items-center justify-center gap-0.5 border px-1.5 py-1 text-center transition sm:w-auto sm:shrink-0 sm:flex-row sm:justify-start sm:gap-1.5 sm:px-1.5 sm:py-0.5 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
       onClick={onClick}
       type="button"
     >
       <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="min-w-0 truncate text-[var(--color-text-secondary)]">{label}:</span>
+      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">{label}:</span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
         style={color ? { color } : undefined}
@@ -269,20 +270,49 @@ export function Dashboard() {
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
 
+  const isValidSpawnProject = (candidateProjectId: string) =>
+    filterProjectOptions.some((project) => project.id === candidateProjectId);
+
+  const resolvePreferredSpawnProjectId = () => {
+    const selectedFilterProjectId =
+      filterProjectOptions.find((project) => project.id === projectId)?.id ?? "";
+
+    if (selectedFilterProjectId) {
+      return selectedFilterProjectId;
+    }
+
+    if (typeof window !== "undefined") {
+      const storedProjectId =
+        window.localStorage.getItem(LAST_SPAWN_PROJECT_STORAGE_KEY)?.trim() ?? "";
+      if (storedProjectId && isValidSpawnProject(storedProjectId)) {
+        return storedProjectId;
+      }
+    }
+
+    return filterProjectOptions[0]?.id ?? "";
+  };
+
   useEffect(() => {
-    if (spawnProjectId && filterProjectOptions.some((project) => project.id === spawnProjectId)) {
+    if (spawnProjectId && isValidSpawnProject(spawnProjectId)) {
       return;
     }
 
-    const nextProjectId =
-      filterProjectOptions.find((project) => project.id === projectId)?.id ??
-      filterProjectOptions[0]?.id ??
-      "";
-
+    const nextProjectId = resolvePreferredSpawnProjectId();
     if (nextProjectId !== spawnProjectId) {
       setSpawnProjectId(nextProjectId);
     }
   }, [projectId, spawnProjectId, filterProjectOptions]);
+
+  const syncSpawnProject = (nextProjectId: string) => {
+    const normalizedProjectId = nextProjectId.trim();
+    setSpawnProjectId(normalizedProjectId);
+    if (typeof window === "undefined") return;
+    if (normalizedProjectId) {
+      window.localStorage.setItem(LAST_SPAWN_PROJECT_STORAGE_KEY, normalizedProjectId);
+      return;
+    }
+    window.localStorage.removeItem(LAST_SPAWN_PROJECT_STORAGE_KEY);
+  };
 
   useEffect(() => {
     if (!isMobile) return;
@@ -294,6 +324,9 @@ export function Dashboard() {
 
   const syncProjectFilter = (nextProjectId: string) => {
     setProjectId(nextProjectId);
+    if (!spawnOpen && nextProjectId) {
+      setSpawnProjectId(nextProjectId);
+    }
     if (typeof window === "undefined") return;
 
     const params = new URLSearchParams(window.location.search);
@@ -326,7 +359,7 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId || !nextPrompt) return;
+    if (!nextProjectId) return;
 
     setSpawning(true);
     try {
@@ -362,8 +395,8 @@ export function Dashboard() {
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
       setSpawnOpen(false);
+      syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
-      setSpawnProjectId(nextProjectId);
       await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
@@ -376,6 +409,11 @@ export function Dashboard() {
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
     setError(null);
+  };
+
+  const openSpawnModal = () => {
+    setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnOpen(true);
   };
 
   const terminalSession = useMemo(() => {
@@ -401,15 +439,15 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex min-w-0 items-center gap-3">
+        <header className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
+            <div className="flex shrink-0 items-center gap-3">
               <span className="text-lg text-[var(--color-accent)]">𖤓</span>
               <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
                 {activeProjectName}
               </h1>
             </div>
-            <div className="grid grid-cols-3 gap-2 uppercase tracking-[0.06em] sm:flex sm:items-center sm:gap-4">
+            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
               <StatItem
                 icon={<IconChat />}
                 label="Needs Input"
@@ -436,8 +474,8 @@ export function Dashboard() {
               />
             </div>
           </div>
-          <div className="grid w-full min-w-0 grid-cols-2 gap-2 sm:flex sm:w-auto sm:items-center">
-            <div className="col-span-2 flex min-w-0 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:col-span-1">
+          <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
+            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
               <svg
                 className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
                 viewBox="0 0 24 24"
@@ -449,31 +487,33 @@ export function Dashboard() {
                 <path d="m21 21-4.35-4.35" />
               </svg>
               <input
-                className="w-full min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
+                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Filter sessions..."
                 value={searchQuery}
               />
             </div>
-            <select
-              className="min-w-0 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-              onChange={(event) => syncProjectFilter(event.target.value)}
-              value={projectId}
-            >
-              <option value="">All projects</option>
-              {filterProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={() => setSpawnOpen(true)}
-              type="button"
-            >
-              Spawn Session
-            </button>
+            <div className="flex min-w-[280px] flex-1 items-center gap-2">
+              <select
+                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                onChange={(event) => syncProjectFilter(event.target.value)}
+                value={projectId}
+              >
+                <option value="">All projects</option>
+                {filterProjectOptions.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={openSpawnModal}
+                type="button"
+              >
+                Spawn Session
+              </button>
+            </div>
           </div>
         </header>
 
@@ -501,7 +541,7 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <select
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnProjectId(event.target.value)}
+                    onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
                   >
                     <option value="">Select project</option>
@@ -597,7 +637,7 @@ export function Dashboard() {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Prompt for the new session..."
+                    placeholder="Optional prompt for the new session..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -609,11 +649,11 @@ export function Dashboard() {
                 ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter to submit" : null}
+                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "Leave empty to open the agent session. ⌘/Ctrl + Enter to submit" : null}
                   </span>
                   <button
                     className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim() || !spawnPrompt.trim()}
+                    disabled={spawning || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
                   >

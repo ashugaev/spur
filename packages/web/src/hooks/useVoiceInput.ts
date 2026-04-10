@@ -4,9 +4,30 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 interface VoiceStatus {
   available: boolean;
-  modelPath: string;
+  modelPath?: string;
   language: string;
   reason?: string;
+}
+
+const EMPTY_AUDIO_ERROR =
+  "Voice recording captured no audio. Check your microphone input and try again.";
+const TRANSCRIBE_ERROR = "Failed to transcribe audio";
+const INSERT_ERROR = "Failed to insert transcription";
+
+async function readVoiceError(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  if (!text) return fallback;
+
+  try {
+    const payload = JSON.parse(text) as { error?: unknown };
+    if (typeof payload.error === "string" && payload.error.trim()) {
+      return payload.error;
+    }
+  } catch {
+    // Fall back to the raw response body when it is not JSON.
+  }
+
+  return text;
 }
 
 export interface UseVoiceInput {
@@ -17,7 +38,7 @@ export interface UseVoiceInput {
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
   toggleRecording: () => void;
-  confirmDraft: (onInsert: (text: string) => void) => void;
+  confirmDraft: (onInsert: (text: string) => unknown) => void;
   dismissModal: () => void;
   voiceError: string | null;
   clearVoiceError: () => void;
@@ -45,7 +66,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         const payload = (await response.json()) as VoiceStatus;
         if (!cancelled) setVoiceStatus(payload);
       } catch {
-        if (!cancelled) setVoiceStatus({ available: false, modelPath: "", language: "", reason: "unavailable" });
+        if (!cancelled) setVoiceStatus({ available: false, language: "", reason: "unavailable" });
       }
     })();
     return () => {
@@ -99,7 +120,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         recorder.addEventListener("stop", () => {
           const chunks = [...mediaChunksRef.current];
           stopStream();
-          if (chunks.length === 0) return;
+          if (chunks.length === 0) {
+            setVoiceError(EMPTY_AUDIO_ERROR);
+            return;
+          }
           void (async () => {
             setVoiceBusy("transcribing");
             try {
@@ -110,18 +134,22 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                 method: "POST",
                 body: formData,
               });
-              if (!response.ok) throw new Error(await response.text());
+              if (!response.ok) throw new Error(await readVoiceError(response, TRANSCRIBE_ERROR));
               const payload = (await response.json()) as { text?: string };
               const text = payload.text?.trim() ?? "";
               if (!text) throw new Error("Transcription returned empty text");
               if (onTranscribedRef.current) {
-                onTranscribedRef.current(text);
+                try {
+                  onTranscribedRef.current(text);
+                } catch (error) {
+                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
+                }
               } else {
                 setVoiceDraft(text);
                 setVoiceModalOpen(true);
               }
             } catch (err) {
-              setVoiceError(err instanceof Error ? err.message : "Failed to transcribe audio");
+              setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
             } finally {
               setVoiceBusy(null);
             }
@@ -140,12 +168,20 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   }, [recording, stopStream, voiceStatus]);
 
   const confirmDraft = useCallback(
-    (onInsert: (text: string) => void) => {
+    (onInsert: (text: string) => unknown) => {
       const trimmed = voiceDraft.trim();
       if (!trimmed) return;
-      onInsert(trimmed);
-      setVoiceModalOpen(false);
-      setVoiceDraft("");
+      try {
+        const inserted = onInsert(trimmed);
+        if (inserted === false) {
+          throw new Error(INSERT_ERROR);
+        }
+        setVoiceError(null);
+        setVoiceModalOpen(false);
+        setVoiceDraft("");
+      } catch (error) {
+        setVoiceError(error instanceof Error ? error.message : INSERT_ERROR);
+      }
     },
     [voiceDraft],
   );

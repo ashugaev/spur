@@ -20,8 +20,12 @@ sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 tailscale serve --https=443 off
 ```
 
-Server-side dependencies: `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default `~/.cache/whisper.cpp/ggml-base.bin`).
-Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `ru`).
+Server-side dependencies are provider-specific:
+- `voice.provider=whisper_cpp`: requires `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default path `~/.cache/whisper.cpp/ggml-base.bin`).
+- `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
+- `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
+
+Language is configured in `~/.spur/config.yaml` under `voice.language` (default: `auto`).
 
 ## Dashboard
 
@@ -85,6 +89,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
+- If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
+- If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
+- If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
 - Branch input: placeholder "branch name", optional
@@ -96,9 +103,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
+- Prompt textarea placeholder is "Optional prompt for the new session..."
+- Helper text says leaving prompt empty opens the agent session directly
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
-- Spawn button disabled when project or prompt empty
+- Spawn button disabled only when project is empty
+- Changing Spawn project updates the last selected Spawn project in local storage
+- Successful Spawn persists the selected project so it is restored on the next open
 - All new fields reset on successful spawn
 
 ## Session Detail
@@ -129,6 +140,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
+- If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
@@ -161,10 +173,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
+- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
+- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
+- On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
 - After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 

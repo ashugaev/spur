@@ -1675,6 +1675,59 @@ projects:
     expect(log).toContain("ship the task");
   });
 
+  it("spawns a session through the built CLI without sending an initial prompt", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-empty-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "empty-prompt.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - research
+        - test
+    preflight:
+      prompt: Suggest a branch name from the task context.
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "--json"])).stdout,
+    ) as SessionView;
+
+    expect(spawned.prompt).toBe("");
+    expect(spawned.pipeline).toBeUndefined();
+
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Claude Code") && value.includes("❯"),
+    });
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("startup:launch::"),
+    });
+    const listed = await context.fetchJson<SessionView[]>("/sessions");
+
+    expect(log).toContain("startup:launch::");
+    expect(log).not.toContain("research");
+    expect(log).not.toContain("[Spur step");
+    expect(pane).not.toContain("[Spur step");
+    expect(listed[0]?.id).toBe(spawned.id);
+    expect(listed[0]?.prompt).toBe("");
+    expect(listed[0]?.pipeline).toBeUndefined();
+  });
+
   it.each([
     { agent: "claude", expectPlanFlag: true },
     { agent: "codex", expectPlanFlag: false },

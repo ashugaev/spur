@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -103,7 +103,7 @@ function applySymlink(repoPath: string, worktreePath: string, relativePath: stri
   const targetPath = join(worktreePath, relativePath);
 
   if (!existsSync(sourcePath)) {
-    console.warn(`Symlink source not found (skipping): ${sourcePath}`);
+    process.stderr.write(`Symlink source not found (skipping): ${sourcePath}\n`);
     return;
   }
 
@@ -157,7 +157,12 @@ export async function removeWorktree(repoPath: string, worktreePath: string): Pr
     // Fall back to direct removal below.
   }
 
-  rmSync(worktreePath, { recursive: true, force: true });
+  try {
+    rmSync(worktreePath, { recursive: true, force: true });
+  } catch {
+    // Root-owned files (e.g. from Docker) block rmSync; escalate via sudo.
+    execFileSync("sudo", ["rm", "-rf", worktreePath]);
+  }
 }
 
 export async function resolveRepoPathFromWorktree(
