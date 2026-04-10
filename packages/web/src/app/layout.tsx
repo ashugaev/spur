@@ -39,7 +39,7 @@ export async function generateMetadata(): Promise<Metadata> {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`dark ${jetbrainsMono.variable}`}>
+    <html lang="en" suppressHydrationWarning className={`dark ${jetbrainsMono.variable}`}>
       <body suppressHydrationWarning className="antialiased">
         {children}
       </body>

@@ -47,12 +47,12 @@ function StatItem({
 }) {
   return (
     <button
-      className={`flex w-full min-w-0 flex-col items-center justify-center gap-0.5 border px-1.5 py-1 text-center transition sm:w-auto sm:shrink-0 sm:flex-row sm:justify-start sm:gap-1.5 sm:px-1.5 sm:py-0.5 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
       onClick={onClick}
       type="button"
     >
       <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="min-w-0 truncate text-[var(--color-text-secondary)]">{label}:</span>
+      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">{label}:</span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
         style={color ? { color } : undefined}
@@ -439,15 +439,15 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-            <div className="flex min-w-0 items-center gap-3">
+        <header className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="flex shrink-0 flex-wrap items-center gap-3">
+            <div className="flex shrink-0 items-center gap-3">
               <span className="text-lg text-[var(--color-accent)]">𖤓</span>
               <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
                 {activeProjectName}
               </h1>
             </div>
-            <div className="grid grid-cols-3 gap-2 uppercase tracking-[0.06em] sm:flex sm:items-center sm:gap-4">
+            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
               <StatItem
                 icon={<IconChat />}
                 label="Needs Input"
@@ -474,8 +474,8 @@ export function Dashboard() {
               />
             </div>
           </div>
-          <div className="grid w-full min-w-0 grid-cols-2 gap-2 sm:flex sm:w-auto sm:items-center">
-            <div className="col-span-2 flex min-w-0 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:col-span-1">
+          <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
+            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
               <svg
                 className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
                 viewBox="0 0 24 24"
@@ -487,31 +487,33 @@ export function Dashboard() {
                 <path d="m21 21-4.35-4.35" />
               </svg>
               <input
-                className="w-full min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] sm:w-48"
+                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Filter sessions..."
                 value={searchQuery}
               />
             </div>
-            <select
-              className="min-w-0 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-              onChange={(event) => syncProjectFilter(event.target.value)}
-              value={projectId}
-            >
-              <option value="">All projects</option>
-              {filterProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openSpawnModal}
-              type="button"
-            >
-              Spawn Session
-            </button>
+            <div className="flex min-w-[280px] flex-1 items-center gap-2">
+              <select
+                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                onChange={(event) => syncProjectFilter(event.target.value)}
+                value={projectId}
+              >
+                <option value="">All projects</option>
+                {filterProjectOptions.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+                onClick={openSpawnModal}
+                type="button"
+              >
+                Spawn Session
+              </button>
+            </div>
           </div>
         </header>
 
