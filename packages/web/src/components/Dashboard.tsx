@@ -637,7 +637,7 @@ export function Dashboard() {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Optional prompt for the new session..."
+                    placeholder="Optional prompt (leave empty to open the agent session)..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -649,15 +649,23 @@ export function Dashboard() {
                 ) : null}
                 <div className="flex items-center justify-between">
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "Leave empty to open the agent session. ⌘/Ctrl + Enter to submit" : null}
+                    <VoiceStatusHint voice={voice} />
                   </span>
                   <button
-                    className="bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={spawning || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
                   >
-                    {spawning ? "Spawning..." : "Spawn"}
+                    <span>{spawning ? "Spawning..." : "Spawn"}</span>
+                    {!spawning ? (
+                      <span
+                        aria-hidden="true"
+                        className="border border-black/30 px-1 py-0.5 font-mono text-[9px] font-semibold normal-case tracking-normal text-black/80"
+                      >
+                        ⌘/Ctrl+Enter
+                      </span>
+                    ) : null}
                   </button>
                 </div>
               </div>
