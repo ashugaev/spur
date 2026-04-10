@@ -266,14 +266,9 @@ function withQueuedMessages(
 }
 
 export function isRestorableSession(
-  session: Pick<SessionView, "status" | "state" | "workspaceExists" | "worktree">,
+  session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
-  return (
-    session.worktree &&
-    isRestorableStatus(session.status) &&
-    session.state === "stopped" &&
-    session.workspaceExists
-  );
+  return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
 }
 
 function buildRestorePrompt(prompt: string): string {
@@ -1869,9 +1864,6 @@ export class SessionService {
     }
 
     const current = await this.enrich(session);
-    if (!current.worktree) {
-      throw new Error(`Session is not restorable without a worktree: ${sessionId}`);
-    }
     if (!isRestorableSession(current)) {
       throw new Error(`Session is not restorable: ${sessionId}`);
     }
