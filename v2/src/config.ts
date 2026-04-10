@@ -29,7 +29,7 @@ const DEFAULT_DATA_DIR = "~/.spur";
 const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
 const DEFAULT_UI_PORT = 5555;
 const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
-const DEFAULT_VOICE_LANGUAGE = "ru";
+const DEFAULT_VOICE_LANGUAGE = "auto";
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 
 type ConfigMode = "instance" | "project";
