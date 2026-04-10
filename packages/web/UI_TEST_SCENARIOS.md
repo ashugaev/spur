@@ -84,7 +84,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal
+- SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
 - Branch input: placeholder "branch name", optional
