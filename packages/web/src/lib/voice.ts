@@ -53,7 +53,7 @@ interface ResolvedVoiceConfig {
 
 interface VoiceTranscription {
   text: string;
-  modelPath: string;
+  modelPath?: string;
   provider: VoiceProvider;
   model: string;
   language: string;
@@ -68,7 +68,7 @@ interface FasterWorkerResponse {
 
 export interface VoiceStatus {
   available: boolean;
-  modelPath: string;
+  modelPath?: string;
   language: string;
   provider: VoiceProvider;
   model: string;
@@ -191,7 +191,7 @@ class FasterWhisperWorker {
       }
       return {
         text: response.text.trim(),
-        modelPath: config.modelPath ?? "",
+        ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
         provider: "faster_whisper",
         model: config.model,
         language: config.language,
@@ -426,10 +426,10 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
       available: false,
       provider: "faster_whisper",
       model: config.model,
-      modelPath: config.modelPath ?? "",
       language: config.language,
       reason: "startup_failed",
       detail: "The bundled faster-whisper worker script is missing",
+      ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
     };
   }
   const pythonCommand = resolvePythonCommand();
@@ -438,10 +438,10 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
       available: false,
       provider: "faster_whisper",
       model: config.model,
-      modelPath: config.modelPath ?? "",
       language: config.language,
       reason: "missing_runtime",
       detail: "python3 (or python) is not available",
+      ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
     };
   }
 
@@ -452,10 +452,10 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
       available: false,
       provider: "faster_whisper",
       model: config.model,
-      modelPath: config.modelPath ?? "",
       language: config.language,
       reason: "missing_runtime",
       detail: "faster-whisper is not installed in the Python environment",
+      ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
     };
   }
 
@@ -463,8 +463,8 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
     available: true,
     provider: "faster_whisper",
     model: config.model,
-    modelPath: config.modelPath ?? "",
     language: config.language,
+    ...(config.modelPath !== undefined ? { modelPath: config.modelPath } : {}),
   };
 }
 
@@ -497,6 +497,7 @@ async function transcribeWithWhisperCpp(
   if (!status.available) {
     throw new Error(status.reason ?? "voice input is unavailable");
   }
+  const modelPath = status.modelPath ?? config.modelPath ?? DEFAULT_VOICE_MODEL_PATH;
 
   const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
   const inputExt = extname(originalFilename) || ".webm";
@@ -513,7 +514,7 @@ async function transcribeWithWhisperCpp(
     );
     await execFileAsync(
       "whisper-cli",
-      ["-m", status.modelPath, "-l", status.language, "-f", wavPath, "-otxt", "-of", outputBasePath],
+      ["-m", modelPath, "-l", status.language, "-f", wavPath, "-otxt", "-of", outputBasePath],
       { timeout: 120_000 },
     );
 
@@ -523,7 +524,7 @@ async function transcribeWithWhisperCpp(
     }
     return {
       text,
-      modelPath: status.modelPath,
+      modelPath,
       provider: status.provider,
       model: status.model,
       language: status.language,
@@ -538,11 +539,6 @@ async function transcribeWithFasterWhisper(
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
-  const status = await readFasterWhisperStatus(config);
-  if (!status.available) {
-    throw new Error(status.reason ?? "voice input is unavailable");
-  }
-
   const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
   const inputExt = extname(originalFilename) || ".webm";
   const inputPath = join(tempDir, `input${inputExt}`);

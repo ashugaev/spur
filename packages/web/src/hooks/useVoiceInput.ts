@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 interface VoiceStatus {
   available: boolean;
-  modelPath: string;
+  modelPath?: string;
   language: string;
   reason?: string;
 }
@@ -45,7 +45,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         const payload = (await response.json()) as VoiceStatus;
         if (!cancelled) setVoiceStatus(payload);
       } catch {
-        if (!cancelled) setVoiceStatus({ available: false, modelPath: "", language: "", reason: "unavailable" });
+        if (!cancelled) setVoiceStatus({ available: false, language: "", reason: "unavailable" });
       }
     })();
     return () => {

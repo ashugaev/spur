@@ -219,7 +219,7 @@ describe("Spur web API routes", () => {
       available: boolean;
       provider: string;
       model: string;
-      modelPath: string;
+      modelPath?: string;
       language: string;
     };
 
@@ -256,7 +256,7 @@ describe("Spur web API routes", () => {
       provider: string;
       model: string;
       language: string;
-      modelPath: string;
+      modelPath?: string;
     };
 
     expect(response.status).toBe(200);

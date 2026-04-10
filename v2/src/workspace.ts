@@ -103,7 +103,7 @@ function applySymlink(repoPath: string, worktreePath: string, relativePath: stri
   const targetPath = join(worktreePath, relativePath);
 
   if (!existsSync(sourcePath)) {
-    console.warn(`Symlink source not found (skipping): ${sourcePath}`);
+    process.stderr.write(`Symlink source not found (skipping): ${sourcePath}\n`);
     return;
   }
 
