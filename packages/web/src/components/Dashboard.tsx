@@ -17,6 +17,7 @@ import {
   type DashboardSession,
   type ProjectInfo,
   type SpurSessionView,
+  type SpawnOverrides,
   type SpurSessionsResponse,
 } from "@/lib/types";
 
@@ -127,11 +128,10 @@ function readLocationSearch(): string {
 function buildSpawnOverrides(
   workspaceMode: "default" | "worktree" | "shared",
   defaultBranch: string,
-): { worktree?: boolean; defaultBranch?: string } | undefined {
+): SpawnOverrides | undefined {
   if (workspaceMode === "worktree") {
-    const overrides: { worktree: true; defaultBranch?: string } = { worktree: true };
-    if (defaultBranch.trim()) overrides.defaultBranch = defaultBranch.trim();
-    return overrides;
+    const trimmed = defaultBranch.trim();
+    return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
@@ -408,7 +408,10 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? "preflight failed");
+      }
       const result = (await response.json()) as { branch: string | null };
       if (result.branch) {
         setSpawnBranch(result.branch);

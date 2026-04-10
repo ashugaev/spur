@@ -1,11 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import type { SpawnOverrides } from "@/lib/types";
 
 interface PreflightBody {
   projectId?: string;
   prompt?: string;
   agent?: "claude" | "codex";
-  overrides?: { worktree?: boolean; defaultBranch?: string };
+  overrides?: SpawnOverrides;
 }
 
 export async function POST(request: NextRequest) {
@@ -23,9 +24,7 @@ export async function POST(request: NextRequest) {
 
     const payload: Record<string, unknown> = { project, prompt };
     if (body.agent) payload.agent = body.agent;
-    const rawOverrides =
-      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
-    if (rawOverrides && Object.keys(rawOverrides).length > 0) payload.overrides = rawOverrides;
+    if (body.overrides && Object.keys(body.overrides).length > 0) payload.overrides = body.overrides;
 
     const result = await spurRequestJson<{ branch: string | null }>(
       `/projects/${encodeURIComponent(project)}/preflight`,
