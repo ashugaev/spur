@@ -62,7 +62,7 @@ export async function buildAgentRestorePlan(
   return buildCodexRestorePlan(worktreePath, prompt, codexPlanOptions(options));
 }
 
-function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
+export function extractCommandBinary(launchCommand: string, fallbackBinary: string): string {
   const trimmed = launchCommand.trim();
   if (!trimmed) {
     return fallbackBinary;
