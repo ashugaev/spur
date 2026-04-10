@@ -6,7 +6,12 @@ let onDataCallback: ((data: string) => void) | null = null;
 
 const mockTerminal = {
   loadAddon: vi.fn(),
-  open: vi.fn(),
+  open: vi.fn((element: HTMLElement) => {
+    element.replaceChildren();
+    const screen = document.createElement("div");
+    screen.className = "xterm-screen";
+    element.appendChild(screen);
+  }),
   focus: vi.fn(),
   write: vi.fn(),
   dispose: vi.fn(),
@@ -151,6 +156,29 @@ describe("DirectTerminal scroll integration", () => {
     });
     terminalDiv!.dispatchEvent(wheelEvent);
     expect(wheelEvent.defaultPrevented).toBe(false);
+  });
+
+  it("maps touch swipe direction to native terminal scroll direction", async () => {
+    const { container } = await mountTerminal("test-touch");
+
+    const touchTarget = container.querySelector(".xterm-screen");
+    expect(touchTarget).not.toBeNull();
+
+    const touchStart = new Event("touchstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(touchStart, "touches", {
+      configurable: true,
+      value: [{ clientY: 200 }],
+    });
+    touchTarget!.dispatchEvent(touchStart);
+
+    const touchMove = new Event("touchmove", { bubbles: true, cancelable: true });
+    Object.defineProperty(touchMove, "touches", {
+      configurable: true,
+      value: [{ clientY: 160 }],
+    });
+    touchTarget!.dispatchEvent(touchMove);
+
+    expect(wsSend).toHaveBeenCalledWith("\x1b[<65;1;1M");
   });
 
   it("reconnects after an unexpected websocket close", async () => {

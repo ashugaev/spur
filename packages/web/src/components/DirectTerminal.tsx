@@ -149,7 +149,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
         fit.fit();
 
         // Touch scroll: convert vertical swipes into SGR mouse scroll sequences
-        // so tmux enters copy-mode and scrolls history on touch devices (iPad, phone).
+        // using native drag semantics, so finger movement matches terminal content movement.
         const touchTarget = terminalRef.current.querySelector(".xterm-screen") ?? terminalRef.current;
         let touchStartY = 0;
         let touchAccum = 0;
@@ -172,7 +172,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
           if (lines === 0) return;
           touchAccum -= lines * TOUCH_SCROLL_THRESHOLD;
 
-          const up = lines > 0;
+          const up = lines < 0;
           const seq = sgrScroll(up);
           const count = Math.abs(lines);
           for (let i = 0; i < count; i++) {
