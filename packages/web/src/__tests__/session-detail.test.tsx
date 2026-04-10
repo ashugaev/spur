@@ -1,9 +1,28 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionDetail } from "@/components/SessionDetail";
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
+}));
+
+vi.mock("@/components/DirectTerminal", () => ({
+  DirectTerminal: ({
+    label,
+    onClose,
+    sessionId,
+  }: {
+    label?: string;
+    onClose?: () => void;
+    sessionId: string;
+  }) => (
+    <div>
+      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <button onClick={onClose} type="button">
+        Close terminal
+      </button>
+    </div>
+  ),
 }));
 
 class MockMediaRecorder {
@@ -64,6 +83,7 @@ function sessionFixture() {
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    window.history.replaceState(null, "", "/sessions/api-a1");
     vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -132,5 +152,99 @@ describe("SessionDetail voice input", () => {
       "/api/sessions/api-a1/send",
       expect.anything(),
     );
+  });
+
+  it("syncs terminal modal with query params", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Terminal" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Terminal" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+    expect(window.location.search).toContain("terminal=api-a1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Close terminal" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    });
+    expect(window.location.search).not.toContain("terminal=");
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1", { cache: "no-store" });
+
+    act(() => {
+      window.history.back();
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+
+    act(() => {
+      window.history.forward();
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("restores terminal from query params only when attachable", async () => {
+    window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+  });
+
+  it("ignores terminal query params when session is not attachable", async () => {
+    window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({ ...sessionFixture(), runtimeAlive: false, tmuxSession: null }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Terminal" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole("dialog", { name: "Terminal api-a1" })).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(window.location.search).not.toContain("terminal=");
+    });
   });
 });
