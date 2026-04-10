@@ -566,16 +566,39 @@ describe("SessionService", () => {
     );
   });
 
-  it("requires a prompt for spawn", async () => {
+  it("allows spawn without a prompt and skips preflight, default steps, and the initial send", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          spawn: {
+            steps: ["research", "test"],
+          },
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
     const { SessionService } = await loadSessionServiceModule();
+    createSessionStore();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await expect(
-      service.spawn({
-        project: "api",
-        steps: ["research"],
-      } as never),
-    ).rejects.toThrow("prompt must be a non-empty string");
+    const result = await service.spawn({
+      project: "api",
+    });
+
+    expect(result.prompt).toBe("");
+    expect(result.pipeline).toBeUndefined();
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {});
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(runSpawnPreflightMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls
+        .map(([, entry]) => entry.event)
+        .filter((e) => e !== "session.state.classified"),
+    ).not.toContain("session.spawn.initial_prompt_sent");
   });
 
   it("resumes an unfinished pipeline into a cooldown before the next auto-step", async () => {

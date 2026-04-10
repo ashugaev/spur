@@ -1199,7 +1199,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
-    .argument("<prompt...>", "Task prompt")
+    .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option(
       "--plan",
@@ -1213,7 +1213,7 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
     .option("--json", "Print raw JSON")
-    .action(async (project: string, promptParts: string[], options, command) => {
+    .action(async (project: string, promptParts: string[] | undefined, options, command) => {
       const parentProgram = command.parent as Command;
       const explicitConfigPath = getConfigPath(parentProgram);
       const instance = prepareInstanceConfig(parentProgram);
@@ -1230,10 +1230,7 @@ export function createProgram(cliEntrypoint: string): Command {
         writeStdout(brandLine(autoConnect.warning));
       }
       const overrides = resolveCliSpawnOverrides(options);
-      const prompt = promptParts.join(" ").trim();
-      if (!prompt) {
-        throw new Error("spawn requires a non-empty prompt");
-      }
+      const prompt = (promptParts ?? []).join(" ").trim();
       const configPath = instance.configPath;
       const availableProjects = await listProjects(cliEntrypoint, configPath);
       if (!availableProjects.some((entry) => entry.id === project)) {
@@ -1246,7 +1243,7 @@ export function createProgram(cliEntrypoint: string): Command {
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
       const interactive = !options.json && !branch && process.stdin.isTTY && process.stdout.isTTY;
-      if (interactive) {
+      if (interactive && prompt) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
             cliEntrypoint,

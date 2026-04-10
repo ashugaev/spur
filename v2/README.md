@@ -13,22 +13,24 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
-`spawn` always takes one task prompt. Optional `steps` are a pipeline skeleton around that task:
+`spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
-- The positional `<prompt...>` is the task.
+- The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
+- Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
 spur spawn backend-api "Fix the flaky auth test" --step research --step test
+spur spawn backend-api
 ```
 
 ```yaml
@@ -40,7 +42,7 @@ spawn:
     - "test"
 ```
 
-When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is.
+When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 

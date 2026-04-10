@@ -52,6 +52,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
+- Opening terminal appends `terminal=<session-id>` query param
+- Closing terminal removes `terminal` query param
+- Reload with `terminal=<session-id>` restores modal only when that session is attachable
 
 ### D4b: Merged-PR done button
 
@@ -84,7 +87,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal
+- SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
+- If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
+- If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
+- If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
 - Branch input: placeholder "branch name", optional
@@ -96,9 +102,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
+- Prompt textarea placeholder is "Optional prompt for the new session..."
+- Helper text says leaving prompt empty opens the agent session directly
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
-- Spawn button disabled when project or prompt empty
+- Spawn button disabled only when project is empty
+- Changing Spawn project updates the last selected Spawn project in local storage
+- Successful Spawn persists the selected project so it is restored on the next open
 - All new fields reset on successful spawn
 
 ## Session Detail
@@ -154,6 +164,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Terminal button opens the shared full-screen terminal overlay from both dashboard and detail page
 - ✕ closes overlay
+- Open/close always syncs `terminal=<session-id>` in query params
+- Reload restores terminal overlay from query on both pages when attachable
+- Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
@@ -162,6 +175,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
+- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ## Responsive
 

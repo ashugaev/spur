@@ -248,7 +248,7 @@ export interface PreflightResponse {
 
 export interface SpawnSessionRequest {
   project: string;
-  prompt: string;
+  prompt?: string;
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
