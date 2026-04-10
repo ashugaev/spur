@@ -54,6 +54,15 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+const findAvailableAgentPortMock = vi.fn();
+const ensureAgentIsolatedConfigMock = vi.fn();
+const removeAgentIsolatedConfigMock = vi.fn();
+
+vi.mock("../../src/agent-isolation.js", () => ({
+  findAvailableAgentPort: findAvailableAgentPortMock,
+  ensureAgentIsolatedConfig: ensureAgentIsolatedConfigMock,
+  removeAgentIsolatedConfig: removeAgentIsolatedConfigMock,
+}));
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -323,6 +332,9 @@ describe("SessionService", () => {
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
+    findAvailableAgentPortMock.mockReset().mockResolvedValue(4320);
+    ensureAgentIsolatedConfigMock.mockReset().mockReturnValue("/tmp/agent-instances/api-1/config.yaml");
+    removeAgentIsolatedConfigMock.mockReset();
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
@@ -385,7 +397,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_CONFIG: "/tmp/spur.yaml",
+        SPUR_AGENT_PORT: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
@@ -648,7 +660,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_CONFIG: "/tmp/spur.yaml",
+        SPUR_AGENT_PORT: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
@@ -1699,7 +1711,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_CONFIG: "/tmp/spur.yaml",
+        SPUR_AGENT_PORT: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
@@ -2424,7 +2436,7 @@ describe("SessionService", () => {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
-        SPUR_CONFIG: "/tmp/spur.yaml",
+        SPUR_AGENT_PORT: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
