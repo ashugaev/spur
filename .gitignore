@@ -4,6 +4,7 @@ dist/
 dist-server/
 .pnpm-store/
 .next/
+.next-sidecars/
 *.tsbuildinfo
 coverage/
 *.patch

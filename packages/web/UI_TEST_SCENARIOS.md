@@ -106,7 +106,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
 - On mobile full-screen modal, prompt textarea expands to use the remaining modal height
 - On larger screens, prompt textarea default height is taller than the previous compact size
-- Spawn button shows inline muted hotkey hint "Command + Enter"
+- Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled only when project is empty
