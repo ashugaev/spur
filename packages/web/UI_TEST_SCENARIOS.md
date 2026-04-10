@@ -173,6 +173,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
+- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
