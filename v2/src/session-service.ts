@@ -150,13 +150,16 @@ function tryRealpath(path: string): string {
   }
 }
 
-function normalizeSpawnRequest(request: SpawnSessionRequest): {
+function normalizeSpawnRequest(
+  request: SpawnSessionRequest,
+  defaultSteps?: string[],
+): {
   prompt: string;
   steps?: string[];
   planMode: boolean;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
-  const steps = request.steps?.map((step, index) => {
+  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -961,14 +964,7 @@ export class SessionService {
     let preflightBranch: string | undefined;
     try {
       project = this.getProject(request.project);
-      ({ prompt, steps, planMode } = normalizeSpawnRequest({
-        ...request,
-        ...(request.prompt?.trim() &&
-        request.steps === undefined &&
-        project.spawn?.steps !== undefined
-          ? { steps: project.spawn.steps }
-          : {}),
-      }));
+      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
