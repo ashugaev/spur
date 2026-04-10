@@ -258,6 +258,54 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("allows spawning from the dashboard without a prompt", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(
+          JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
+        );
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], {
+      target: { value: "api" },
+    });
+
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    expect(spawnButton).toBeEnabled();
+    expect(screen.getByPlaceholderText("Optional prompt for the new session...")).toBeInTheDocument();
+
+    fireEvent.click(spawnButton);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
+        }),
+      );
+    });
+  });
+
   it("defaults spawn project to the selected dashboard filter project", async () => {
     const sessionsData = {
       projects: [
@@ -369,7 +417,8 @@ describe("Dashboard", () => {
       if (url === "/api/spawn") return new Response("ok", { status: 200 });
       if (url === "/api/sessions?project=sp")
         return new Response(JSON.stringify({ ...sessionsData, sessions: [] }), { status: 200 });
-      if (url === "/api/sessions") return new Response(JSON.stringify(sessionsData), { status: 200 });
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsData), { status: 200 });
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
     });
 
@@ -384,14 +433,16 @@ describe("Dashboard", () => {
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
 
-    fireEvent.change(screen.getByPlaceholderText("Prompt for the new session..."), {
+    fireEvent.change(screen.getByPlaceholderText("Optional prompt for the new session..."), {
       target: { value: "Ship it" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
-      expect(screen.queryByPlaceholderText("Prompt for the new session...")).not.toBeInTheDocument();
+      expect(
+        screen.queryByPlaceholderText("Optional prompt for the new session..."),
+      ).not.toBeInTheDocument();
     });
   });
 
