@@ -19,19 +19,20 @@ function configYaml(args: {
   projectId: string;
   projectPath: string;
   sessionPrefix: string;
-  defaultAgent?: "claude" | "codex";
+  instanceDefaultAgent?: "claude" | "codex";
+  projectDefaultAgent?: "claude" | "codex";
 }): string {
   return `server:
   host: 127.0.0.1
   port: ${args.port}
 dataDir: ${args.dataDir}
 worktreeDir: ${args.worktreeDir}
-${args.defaultAgent ? `defaultAgent: ${args.defaultAgent}\n` : ""}projects:
+${args.instanceDefaultAgent ? `defaultAgent: ${args.instanceDefaultAgent}\n` : ""}projects:
   ${args.projectId}:
     path: ${args.projectPath}
     defaultBranch: main
     sessionPrefix: ${args.sessionPrefix}
-`;
+${args.projectDefaultAgent ? `    defaultAgent: ${args.projectDefaultAgent}\n` : ""}`;
 }
 
 afterEach(async () => {
@@ -67,7 +68,7 @@ describe("registry.buildMergedConfig", () => {
         projectId: "web",
         projectPath: join(rootDir, "repo-b"),
         sessionPrefix: "web",
-        defaultAgent: "codex",
+        projectDefaultAgent: "codex",
       }),
     );
 

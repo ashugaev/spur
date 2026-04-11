@@ -1,8 +1,8 @@
-import { spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { homedir, userInfo } from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
-import { findTmux, tmuxSessionExists, validateSessionId } from "./tmux-utils.js";
+import { findTmux, tmuxSessionExists, tmuxSocketArgs, validateSessionId } from "./tmux-utils.js";
 
 interface Pty {
   onData(listener: (data: string) => void): void;
@@ -37,11 +37,29 @@ interface TerminalSession {
   sessionId: string;
   pty: Pty;
   ws: WebSocket;
+  seenInputIds: Set<string>;
+}
+
+interface ResizeMessage {
+  type: "resize";
+  cols?: number;
+  rows?: number;
+}
+
+interface InputMessage {
+  type: "input";
+  id?: string;
+  data?: string;
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10);
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : fallback;
+}
+
+function readHost(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
 }
 
 function readSessionId(urlValue: string | undefined): string | null {
@@ -94,17 +112,24 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       return;
     }
 
-    const mouseProcess = spawn(tmuxPath, ["set-option", "-t", `=${sessionId}`, "mouse", "on"]);
-    mouseProcess.on("error", () => {
+    // Ensure mouse mode is enabled for the session before attaching.
+    // This allows xterm.js to correctly handle wheel scrolling as mouse sequences.
+    try {
+      const socketArgs = tmuxSocketArgs();
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "mouse", "on"]);
+      execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "status", "off"]);
+      // Bind scroll-up to enter copy mode so wheel scrolls through history.
+      execFileSync(tmuxPath, [
+        ...socketArgs, "bind-key", "-n", "WheelUpPane",
+        "if-shell", "-F", "-t", "=", "#{mouse_any_flag}",
+        "send-keys -M",
+        "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e; send-keys -M'",
+      ]);
+    } catch {
       // Best effort only.
-    });
+    }
 
-    const statusProcess = spawn(tmuxPath, ["set-option", "-t", `=${sessionId}`, "status", "off"]);
-    statusProcess.on("error", () => {
-      // Best effort only.
-    });
-
-    const pty = ptySpawn(tmuxPath, ["attach-session", "-t", `=${sessionId}`], {
+    const pty = ptySpawn(tmuxPath, [...tmuxSocketArgs(), "attach-session", "-t", `=${sessionId}`], {
       name: "xterm-256color",
       cols: 80,
       rows: 24,
@@ -112,7 +137,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       env: createTerminalEnvironment(),
     });
 
-    sessions.set(sessionId, { sessionId, pty, ws });
+    sessions.set(sessionId, { sessionId, pty, ws, seenInputIds: new Set() });
 
     pty.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -133,9 +158,23 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       const message = data.toString("utf8");
       if (message.startsWith("{")) {
         try {
-          const parsed = JSON.parse(message) as { type?: string; cols?: number; rows?: number };
+          const parsed = JSON.parse(message) as ResizeMessage | InputMessage;
           if (parsed.type === "resize" && parsed.cols && parsed.rows) {
             pty.resize(parsed.cols, parsed.rows);
+            return;
+          }
+          if (parsed.type === "input" && typeof parsed.id === "string" && typeof parsed.data === "string") {
+            const session = sessions.get(sessionId);
+            if (!session) {
+              return;
+            }
+            if (!session.seenInputIds.has(parsed.id)) {
+              session.seenInputIds.add(parsed.id);
+              pty.write(parsed.data);
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ack", id: parsed.id }));
+            }
             return;
           }
         } catch {
@@ -175,12 +214,16 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
   };
 }
 
-const port = parsePort(process.env["DIRECT_TERMINAL_PORT"], 14801);
+const port = parsePort(
+  process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
+  14801,
+);
+const host = readHost(process.env["DIRECT_TERMINAL_BIND_HOST"], "127.0.0.1");
 const shouldListen = import.meta.url === new URL(`file://${process.argv[1]}`).href;
 
 if (shouldListen) {
   const { server } = createDirectTerminalServer();
-  server.listen(port, "127.0.0.1", () => {
-    process.stdout.write(`[direct-terminal] listening on 127.0.0.1:${port}\n`);
+  server.listen(port, host, () => {
+    process.stdout.write(`[direct-terminal] listening on ${host}:${port}\n`);
   });
 }

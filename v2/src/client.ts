@@ -2,11 +2,14 @@ import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { loadConfig } from "./config.js";
 import {
+  type ConnectProjectConfigRequest,
+  type DisconnectProjectConfigRequest,
+  type ProjectConfigMutationResponse,
+  type ProjectListEntry,
   SPUR_DAEMON_API_VERSION,
   type PreflightRequest,
   type PreflightResponse,
   type RuntimeInfo,
-  type SyncProjectsRequest,
 } from "./types.js";
 
 const DAEMON_STOP_ATTEMPTS = 20;
@@ -248,8 +251,13 @@ export async function restartDaemonIfRunning(
     return { baseUrl, restarted: false };
   }
 
-  spawnDaemon(cliEntrypoint, resolvedConfigPath);
-  const runtime = await waitForReadyDaemon(baseUrl);
+  // Wait for an external service manager (e.g. systemd) to restart the daemon.
+  // Only spawn a new process as fallback if nothing comes up.
+  let runtime = await waitForReadyDaemon(baseUrl).catch(() => null);
+  if (!runtime) {
+    spawnDaemon(cliEntrypoint, resolvedConfigPath);
+    runtime = await waitForReadyDaemon(baseUrl);
+  }
   if (!runtime) {
     throw new Error(`Timed out waiting for daemon restart at ${baseUrl}`);
   }
@@ -299,15 +307,7 @@ export async function getJson<T>(
   path: string,
   configPath?: string,
 ): Promise<T> {
-  const { configPath: resolvedConfigPath } = createBaseUrl(configPath);
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
-  if (path !== "/info") {
-    await requestJson(baseUrl, "/projects/sync", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ configPath: resolvedConfigPath } satisfies SyncProjectsRequest),
-    });
-  }
   return requestJson<T>(baseUrl, path);
 }
 
@@ -317,15 +317,7 @@ export async function postJson<T>(
   body: unknown,
   configPath?: string,
 ): Promise<T> {
-  const { configPath: resolvedConfigPath } = createBaseUrl(configPath);
   const baseUrl = await ensureServer(cliEntrypoint, configPath);
-  if (path !== "/projects/sync") {
-    await requestJson(baseUrl, "/projects/sync", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ configPath: resolvedConfigPath } satisfies SyncProjectsRequest),
-    });
-  }
   return requestJson<T>(baseUrl, path, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -343,6 +335,39 @@ export async function postPreflight(
     cliEntrypoint,
     `/projects/${encodeURIComponent(projectId)}/preflight`,
     body,
+    configPath,
+  );
+}
+
+export function listProjects(
+  cliEntrypoint: string,
+  configPath?: string,
+): Promise<ProjectListEntry[]> {
+  return getJson<ProjectListEntry[]>(cliEntrypoint, "/projects", configPath);
+}
+
+export function connectProjectConfig(
+  cliEntrypoint: string,
+  projectConfigPath: string,
+  configPath?: string,
+): Promise<ProjectConfigMutationResponse> {
+  return postJson<ProjectConfigMutationResponse>(
+    cliEntrypoint,
+    "/projects/connect",
+    { configPath: projectConfigPath } satisfies ConnectProjectConfigRequest,
+    configPath,
+  );
+}
+
+export function disconnectProjectConfig(
+  cliEntrypoint: string,
+  projectConfigPath: string,
+  configPath?: string,
+): Promise<ProjectConfigMutationResponse> {
+  return postJson<ProjectConfigMutationResponse>(
+    cliEntrypoint,
+    "/projects/disconnect",
+    { configPath: projectConfigPath } satisfies DisconnectProjectConfigRequest,
     configPath,
   );
 }

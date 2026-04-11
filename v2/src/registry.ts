@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { loadConfig } from "./config.js";
+import { loadConfig, loadProjectConfig } from "./config.js";
 import type { AppConfig, ProjectConfig } from "./types.js";
 
 const REGISTRY_FILE = "config-registry.json";
@@ -51,24 +51,6 @@ function materializeProjectDefaults(config: AppConfig): AppConfig {
     ...config,
     projects,
   };
-}
-
-function assertCompatibleConfig(base: AppConfig, candidate: AppConfig): void {
-  if (base.server.host !== candidate.server.host || base.server.port !== candidate.server.port) {
-    throw new Error(
-      `Config ${candidate.configPath} uses ${candidate.server.host}:${candidate.server.port}, expected ${base.server.host}:${base.server.port}`,
-    );
-  }
-  if (base.dataDir !== candidate.dataDir) {
-    throw new Error(
-      `Config ${candidate.configPath} uses dataDir ${candidate.dataDir}, expected ${base.dataDir}`,
-    );
-  }
-  if (base.worktreeDir !== candidate.worktreeDir) {
-    throw new Error(
-      `Config ${candidate.configPath} uses worktreeDir ${candidate.worktreeDir}, expected ${base.worktreeDir}`,
-    );
-  }
 }
 
 function mergeProjects(base: AppConfig, configs: AppConfig[]): AppConfig {
@@ -128,8 +110,16 @@ export function upsertConfigRegistryPath(dataDir: string, configPath: string): s
   return next;
 }
 
+export function removeConfigRegistryPath(dataDir: string, configPath: string): string[] {
+  const next = normalizeConfigPaths(
+    readConfigRegistry(dataDir).filter((registeredPath) => registeredPath !== configPath),
+  );
+  writeConfigRegistry(dataDir, next);
+  return next;
+}
+
 export function buildMergedConfig(
-  bootstrapConfigPath: string,
+  bootstrapConfigPath: string | undefined,
   configPaths: string[],
   options: MergeOptions = {},
 ): { config: AppConfig; configPaths: string[] } {
@@ -142,8 +132,7 @@ export function buildMergedConfig(
       continue;
     }
     try {
-      const candidate = materializeProjectDefaults(loadConfig(path));
-      assertCompatibleConfig(base, candidate);
+      const candidate = materializeProjectDefaults(loadProjectConfig(path, base));
       mergeProjects(base, [...mergedConfigs, candidate]);
       mergedConfigs.push(candidate);
     } catch (error) {

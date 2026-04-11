@@ -21,7 +21,7 @@ concurrency:
 jobs:
   gitleaks:
     name: Scan for Secrets
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,7 +36,7 @@ jobs:
 
   npm-audit:
     name: NPM Audit
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

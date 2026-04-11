@@ -10,6 +10,7 @@ const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const getTmuxSessionActivityMock = vi.fn();
+const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
@@ -29,6 +30,8 @@ vi.mock("../../src/agents/index.js", () => ({
 }));
 vi.mock("../../src/config.js", () => ({
   loadConfig: vi.fn(),
+  loadProjectConfig: vi.fn(),
+  findProjectConfigPath: vi.fn(),
 }));
 vi.mock("../../src/preflight.js", () => ({
   runSpawnPreflight: vi.fn(),
@@ -62,13 +65,14 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/runtime-tmux.js", () => ({
   createTmuxSession: vi.fn(),
   createTmuxCommandSession: vi.fn(),
-  createTmuxDevServerSession: vi.fn(),
-  devServerTmuxAlive: vi.fn(),
-  devServerTmuxSession: vi.fn((id: string) => `${id}--dev`),
-  killDevServerTmux: vi.fn(),
+  createTmuxSidecarSession: vi.fn(),
+  sidecarTmuxAlive: vi.fn(),
+  sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
+  killSidecarTmux: vi.fn(),
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
+  setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
   syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
@@ -125,6 +129,8 @@ function baseConfig() {
     dataDir: "/tmp/spur-data",
     worktreeDir: "/tmp/spur-worktrees",
     defaultAgent: "claude",
+    tmux: { socketName: "spur-4310" },
+    ui: { port: 5555 },
     projects: {
       api: {
         path: "/repo/api",

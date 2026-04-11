@@ -12,12 +12,13 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
-    expect(help).toContain("spawn [options] <project> <prompt...>");
+    expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
     expect(help).toContain("pause [options] <sessionId>");
     expect(help).toContain("complete [options] <sessionId>");
     expect(help).toContain("kill [options] <sessionId>");
+    expect(help).toContain("respawn [options] <sessionId>");
     expect(help).toContain("service");
     expect(help).toContain("Use `spur <command> --help` for per-command details.");
     expect(help).not.toContain("help [command]");
@@ -49,7 +50,7 @@ describe("spur help", () => {
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
     );
     expect(help).toContain(
-      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
     );
     expect(help).toContain(
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
