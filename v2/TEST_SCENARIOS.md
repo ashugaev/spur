@@ -119,7 +119,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
-- TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
+- TTY `list` falls back to a fresh launch when the agent's native resume state is missing and returns the session to `waiting`.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.
@@ -181,6 +181,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 ### Sidecars
 
 **Tier: fast**
+
 - `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
@@ -191,6 +192,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 
 **Tier: runtime integration**
+
 - Sidecar auto-starts on spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
 - Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
