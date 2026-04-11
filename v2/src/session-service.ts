@@ -85,6 +85,7 @@ import {
 } from "./types.js";
 import {
   createWorktree,
+  findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
   readCurrentBranch,
@@ -420,6 +421,20 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: session.prompt,
+    agent: session.agent,
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+    overrides: { worktree: session.worktree },
+    ...(session.worktree && session.branchSource === "explicit"
+      ? { branch: session.branch }
+      : {}),
+  };
 }
 
 async function resolveSpawnBranch(args: {
@@ -1114,6 +1129,30 @@ export class SessionService {
         worktree,
         fallbackBranch: sessionId,
       });
+      if (worktree && resolvedBranch.branch !== sessionId) {
+        const branchConflictPath = await findWorktreePathForBranch(project.path, resolvedBranch.branch);
+        if (branchConflictPath) {
+          if (resolvedBranch.branchSource === "explicit") {
+            throw new Error(
+              `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+            );
+          }
+          this.logEvent("session.spawn.branch_conflict", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message:
+              `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+            details: {
+              occupiedBranch: resolvedBranch.branch,
+              conflictingWorktreePath: branchConflictPath,
+              fallbackBranch: sessionId,
+              branchSource: resolvedBranch.branchSource ?? null,
+            },
+          });
+          resolvedBranch = { branch: sessionId };
+        }
+      }
       const tmuxSession = sessionId;
       createdAt = nowIso();
 
@@ -2166,14 +2205,7 @@ export class SessionService {
       details: { agent: session.agent },
     });
 
-    const request: SpawnSessionRequest = {
-      project: session.project,
-      prompt: session.prompt,
-      agent: session.agent,
-      ...(session.planMode !== undefined && { planMode: session.planMode }),
-      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
-    };
-    return this.spawn(request);
+    return this.spawn(resolveRespawnRequest(session));
   }
 
   private resumeSessionDelivery(): void {

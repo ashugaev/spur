@@ -15,6 +15,11 @@ interface CreateWorktreeInput {
   symlinks: string[];
 }
 
+interface GitWorktreeEntry {
+  path: string;
+  branch?: string;
+}
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout.trimEnd();
@@ -32,8 +37,47 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function parseWorktreeList(output: string): GitWorktreeEntry[] {
+  const entries: GitWorktreeEntry[] = [];
+  let current: GitWorktreeEntry | null = null;
+  for (const line of output.split("\n")) {
+    if (!line.trim()) {
+      if (current) {
+        entries.push(current);
+        current = null;
+      }
+      continue;
+    }
+    if (line.startsWith("worktree ")) {
+      if (current) {
+        entries.push(current);
+      }
+      current = { path: line.slice("worktree ".length) };
+      continue;
+    }
+    if (line.startsWith("branch ") && current) {
+      const ref = line.slice("branch ".length);
+      current.branch = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : ref;
+    }
+  }
+  if (current) {
+    entries.push(current);
+  }
+  return entries;
+}
+
 export async function readCurrentBranch(repoPath: string): Promise<string> {
   return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
+}
+
+export async function findWorktreePathForBranch(
+  repoPath: string,
+  branch: string,
+): Promise<string | null> {
+  await pruneWorktrees(repoPath);
+  const output = await git(repoPath, "worktree", "list", "--porcelain");
+  const match = parseWorktreeList(output).find((entry) => entry.branch === branch);
+  return match?.path ?? null;
 }
 
 async function pruneWorktrees(repoPath: string): Promise<void> {
