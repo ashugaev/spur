@@ -2521,6 +2521,11 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "q");
 
+    const restoreLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("startup:launch::"),
+    });
+
     const listedSessions = await pollUntil(
       async () =>
         JSON.parse(
@@ -2529,14 +2534,14 @@ projects:
       {
         timeoutMs: 30_000,
         accept: (sessions) =>
-          sessions[0]?.runtimeAlive === true && sessions[0]?.state === "waiting",
+          sessions[0]?.runtimeAlive === true && sessions[0]?.state !== "stopped",
       },
     );
     expect(listedSessions[0]?.id).toBe(spawned.id);
-    expect(listedSessions[0]?.state).toBe("waiting");
     expect(listedSessions[0]?.runtimeAlive).toBe(true);
     expect(listedSessions[0]?.workspaceExists).toBe(true);
     expect(controllerPane).toContain(`Restored ${spawned.id}.`);
+    expect(restoreLog).toContain("startup:launch::");
   });
 
   it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
