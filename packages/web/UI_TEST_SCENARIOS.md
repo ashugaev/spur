@@ -81,11 +81,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
-### D6b: Footer clock hydrates cleanly
+### D6b: Footer build version
 
-- Footer clock area renders without Next.js recoverable hydration error overlay
-- Initial footer clock value may briefly show a deterministic placeholder before client time appears
-- Footer clock updates to local time after hydration
+- Footer right side shows a build version string in `YYYYMMDD.HHmmss` format (UTC)
+- Version is static (no ticking), set at build time
+- Falls back to `dev` in development when no build version is injected
 
 ### D7: Spawn modal
 
