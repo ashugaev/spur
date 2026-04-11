@@ -21,6 +21,20 @@ find_free_port() {
   printf '%s\n' "$port"
 }
 
+resolve_sidecar_port() {
+  local env_name="$1"
+  local start="$2"
+  local end="$3"
+  local reserved="${!env_name:-}"
+
+  if [[ -n "$reserved" ]]; then
+    printf '%s\n' "$reserved"
+    return 0
+  fi
+
+  find_free_port "$start" "$end"
+}
+
 wait_for_http() {
   local url="$1"
   local attempts="${2:-120}"

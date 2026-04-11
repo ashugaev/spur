@@ -89,6 +89,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const [recording, setRecording] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const voiceModalOpenRef = useRef(false);
+  const dismissedRef = useRef(false);
+
+  useEffect(() => { voiceModalOpenRef.current = voiceModalOpen; }, [voiceModalOpen]);
   const [voiceDraft, setVoiceDraft] = useState("");
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -157,7 +161,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
 
         recorder.addEventListener("stop", () => {
           const chunks = [...mediaChunksRef.current];
+          const wasDismissed = dismissedRef.current;
+          dismissedRef.current = false;
           stopStream();
+          if (wasDismissed) return;
           if (chunks.length === 0) {
             setVoiceError(EMPTY_AUDIO_ERROR);
             return;
@@ -182,6 +189,11 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                 } catch (error) {
                   throw error instanceof Error ? error : new Error(INSERT_ERROR);
                 }
+              } else if (voiceModalOpenRef.current) {
+                setVoiceDraft(prev => {
+                  const base = prev.trimEnd();
+                  return base ? base + ' ' + text : text;
+                });
               } else {
                 setVoiceDraft(text);
                 setVoiceModalOpen(true);
@@ -225,9 +237,15 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   );
 
   const dismissModal = useCallback(() => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      dismissedRef.current = true;
+      mediaRecorderRef.current.stop();
+    }
+    stopStream();
+    setVoiceBusy(null);
     setVoiceModalOpen(false);
     setVoiceDraft("");
-  }, []);
+  }, [stopStream]);
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),

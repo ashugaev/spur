@@ -108,6 +108,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.
+- `respawn --json` rejects running sessions, respawns a terminal session into a new running session, and keeps lifecycle cleanup available through normal `kill --json`.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
@@ -117,6 +118,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` can pause, complete, and kill the selected live session in place; `completed` or `killed` sessions disappear from the live list without silently retargeting another row, and a killed session is not restorable on `Enter` or `r`, with terminal metadata showing `runtimeAlive: false` and `workspaceExists: false`.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
+- Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
 - TTY `list` surfaces a restore error in place and keeps the session stopped when the agent's native resume state is missing.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
@@ -166,8 +168,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Missing session for `pause`.
 - Missing session for `complete`.
 - Missing session for `kill`.
+- Missing session for `respawn`.
 - Empty message for `send`.
 - `send` to a `completed` or `killed` session.
+- `respawn` for a non-terminal session.
 - `cron` source without `schedule`.
 - Trigger spawn without `prompt`.
 - Trigger referencing an unknown source.
@@ -177,9 +181,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 ### Sidecars
 
 **Tier: fast**
-- `sidecars` config parsing: named sidecar entries with command, autoStart, env
+- `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
+- Invalid sidecar reserved port ranges fail config validation
 - Sidecar tmux session naming: `{sessionId}--{sidecarName}`
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
 - Sidecar env merges session env with sidecar config env
@@ -188,6 +193,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 **Tier: runtime integration**
 - Sidecar auto-starts on spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
+- Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
 - Sidecar cleanup on kill/complete

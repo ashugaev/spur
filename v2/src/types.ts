@@ -78,6 +78,13 @@ export interface SidecarConfig {
   command: string;
   autoStart: boolean;
   env?: Record<string, string>;
+  ports?: Record<string, SidecarPortConfig>;
+}
+
+export interface SidecarPortConfig {
+  env: string;
+  start: number;
+  end: number;
 }
 
 export interface ProjectSpawnConfig {
@@ -200,6 +207,7 @@ export interface SessionRecord {
   createdAt: string;
   updatedAt: string;
   slots?: SessionSlots;
+  sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   error?: string;
@@ -276,6 +284,10 @@ export interface RunServiceRequest {
 
 export interface KillSessionRequest {
   force?: boolean;
+}
+
+export interface RespawnSessionRequest {
+  terminateSessionId?: string;
 }
 
 export interface UpdateSessionSlotsRequest {

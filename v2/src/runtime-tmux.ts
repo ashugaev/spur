@@ -166,6 +166,7 @@ export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
+  agent?: AgentName;
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
@@ -186,7 +187,9 @@ export async function createTmuxSession(input: {
   await sleep(300);
 
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand);
+    await sendMessageToTmux(input.sessionName, input.launchCommand, {
+      ...(input.agent ? { agent: input.agent } : {}),
+    });
   } catch (error) {
     try {
       await tmux("kill-session", "-t", sessionTarget);

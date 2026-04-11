@@ -21,6 +21,7 @@ import {
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
   listActiveServiceProblems,
+  listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
   readServiceInstance,
@@ -319,6 +320,68 @@ function buildSessionEnv(args: {
     env["npm_config_virtual_store_dir"] = join(args.repoPath, "node_modules/.pnpm");
   }
   return env;
+}
+
+function collectReservedSidecarPorts(
+  session: Pick<SessionRecord, "status" | "sidecarPorts">,
+): number[] {
+  if (isTerminalSessionStatus(session.status)) {
+    return [];
+  }
+  return Object.values(session.sidecarPorts ?? {}).flatMap((sidecarPorts) =>
+    Object.values(sidecarPorts),
+  );
+}
+
+function reserveSidecarPorts(
+  dataDir: string,
+  sidecars: ProjectConfig["sidecars"],
+): SessionRecord["sidecarPorts"] | undefined {
+  const unavailable = new Set<number>();
+  for (const service of listServiceInstances(dataDir)) {
+    if (service.port !== undefined) {
+      unavailable.add(service.port);
+    }
+  }
+  for (const session of listSessions(dataDir)) {
+    for (const port of collectReservedSidecarPorts(session)) {
+      unavailable.add(port);
+    }
+  }
+
+  const reserved: NonNullable<SessionRecord["sidecarPorts"]> = {};
+  for (const [sidecarName, sidecar] of Object.entries(sidecars)) {
+    if (!sidecar.ports) continue;
+    const reservedEnvPorts: Record<string, number> = {};
+    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
+      let selectedPort: number | undefined;
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        if (unavailable.has(candidate)) continue;
+        selectedPort = candidate;
+        unavailable.add(candidate);
+        break;
+      }
+      if (selectedPort === undefined) {
+        throw new Error(
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+        );
+      }
+      reservedEnvPorts[portConfig.env] = selectedPort;
+    }
+    if (Object.keys(reservedEnvPorts).length > 0) {
+      reserved[sidecarName] = reservedEnvPorts;
+    }
+  }
+
+  return Object.keys(reserved).length > 0 ? reserved : undefined;
+}
+
+function sidecarPortEnv(
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+): Record<string, string> {
+  const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
+  return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
 async function waitForRestorePlan(
@@ -1027,6 +1090,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
       if (preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -1082,6 +1146,7 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -1170,6 +1235,7 @@ export class SessionService {
         sessionName: tmuxSession,
         cwd: workspacePath,
         launchCommand: launchPlan.launchCommand,
+        agent,
         env: sessionEnv,
       });
       this.logEvent("session.spawn.tmux_created", {
@@ -1200,7 +1266,7 @@ export class SessionService {
           launchPlan.initialMessage,
           sidecarNames,
         );
-        await sendMessageToTmux(tmuxSession, spawnInitialMessage, { agent: runningRecord.agent });
+        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -1231,6 +1297,7 @@ export class SessionService {
               ...sessionEnv,
               SPUR_SIDECAR_NAME: name,
               ...(sidecar.env ?? {}),
+              ...sidecarPortEnv(runningRecord, name),
             },
           });
           this.logEvent("session.sidecar.started", {
@@ -1441,10 +1508,7 @@ export class SessionService {
         const sendState = await this.classifySessionState(readySession);
         interrupt = sendState !== "waiting";
       }
-      await sendMessageToTmux(readySession.tmuxSession, message, {
-        interrupt,
-        agent: readySession.agent,
-      });
+      await this.sendAgentMessage(readySession, message, { interrupt });
       this.stateCache.delete(sessionId);
       const updated: SessionRecord = {
         ...readySession,
@@ -1482,6 +1546,17 @@ export class SessionService {
 
   async pause(sessionId: string): Promise<SessionView> {
     return this.applyManualStatus(sessionId, "paused");
+  }
+
+  private async sendAgentMessage(
+    session: Pick<SessionRecord, "tmuxSession" | "agent">,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<void> {
+    await sendMessageToTmux(session.tmuxSession, message, {
+      agent: session.agent,
+      ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
+    });
   }
 
   async complete(sessionId: string): Promise<SessionView> {
@@ -1559,6 +1634,7 @@ export class SessionService {
         ...sessionEnv,
         SPUR_SIDECAR_NAME: sidecarName,
         ...(sidecar.env ?? {}),
+        ...sidecarPortEnv(session, sidecarName),
       },
     });
 
@@ -1855,6 +1931,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: recoveryPlan?.launchCommand ?? baseLaunchCommand,
+        agent: session.agent,
         env,
       });
       await syncTmuxStatus(session.tmuxSession, session.slots);
@@ -1889,6 +1966,7 @@ export class SessionService {
         sessionName: session.tmuxSession,
         cwd: session.worktreePath,
         launchCommand: baseLaunchCommand,
+        agent: session.agent,
         env,
       });
       await syncTmuxStatus(session.tmuxSession, session.slots);
@@ -2003,6 +2081,7 @@ export class SessionService {
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
+        agent: current.agent,
         env: buildSessionEnv({
           agent: current.agent,
           projectId: current.project,
@@ -2023,9 +2102,7 @@ export class SessionService {
         effectivePlan.initialMessage,
         restoreSidecarNames,
       );
-      await sendMessageToTmux(current.tmuxSession, restoreInitialMessage, {
-        agent: current.agent,
-      });
+      await this.sendAgentMessage(current, restoreInitialMessage);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -2154,10 +2231,7 @@ export class SessionService {
       return false;
     }
 
-    await sendMessageToTmux(latest.tmuxSession, nextMessage, {
-      interrupt: false,
-      agent: latest.agent,
-    });
+    await this.sendAgentMessage(latest, nextMessage, { interrupt: false });
     this.stateCache.delete(sessionId);
     const updated = withQueuedMessages(
       {
@@ -2353,10 +2427,9 @@ export class SessionService {
             `Pipeline state is invalid for ${sessionId}: missing step ${stepIndex + 1}`,
           );
         }
-        await sendMessageToTmux(
-          session.tmuxSession,
+        await this.sendAgentMessage(
+          session,
           formatPipelineStepMessage(session.prompt, step, stepIndex, session.pipeline.steps.length),
-          { agent: session.agent },
         );
 
         const latest = readSession(this.config.dataDir, sessionId);

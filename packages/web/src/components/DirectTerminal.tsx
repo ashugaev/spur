@@ -142,7 +142,7 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
 
         terminal = new Terminal({
           cursorBlink: true,
-          fontSize: 13,
+          fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
           theme: terminalTheme,
@@ -415,11 +415,11 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
       <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
         <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
         <div className="min-w-0">
-          <div className="truncate font-mono text-[11px] text-[var(--color-accent)]">
+          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
             {label ?? sessionId}
           </div>
           {title ? (
-            <div className="truncate text-[11px] text-[var(--color-text-secondary)]">{title}</div>
+            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
           ) : null}
         </div>
         <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
@@ -457,13 +457,6 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
         <div className="flex items-center gap-1">
-          <button
-            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
-            onClick={() => sendTerminalInput("\x1b")}
-            type="button"
-          >
-            Esc
-          </button>
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
@@ -499,7 +492,7 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
                       <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
                         {hotkey.label}
                       </span>
-                      <span className="block text-[11px] text-[var(--color-text-secondary)]">
+                      <span className="block text-[10px] text-[var(--color-text-secondary)]">
                         {hotkey.detail}
                       </span>
                     </span>

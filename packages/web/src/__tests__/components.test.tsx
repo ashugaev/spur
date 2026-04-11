@@ -586,8 +586,8 @@ describe("Dashboard", () => {
 });
 
 describe("StatusBar", () => {
-  it("uses a deterministic initial clock value for SSR to avoid hydration drift", () => {
+  it("renders build version without hydration mismatch", () => {
     const html = renderToString(<StatusBar sessions={[]} />);
-    expect(html).toContain("--:--:--");
+    expect(html).toContain("dev");
   });
 });

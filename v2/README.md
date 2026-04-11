@@ -84,6 +84,8 @@ If the agent already knows the devserver port, pass it with `--port` so `list` c
 
 For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
 
+If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env, so sibling sessions cannot race onto the same sidecar port range before anything starts listening.
+
 ## Start
 
 ```bash

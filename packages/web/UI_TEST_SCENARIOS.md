@@ -81,15 +81,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
-### D6b: Footer clock hydrates cleanly
+### D6b: Footer build version
 
-- Footer clock area renders without Next.js recoverable hydration error overlay
-- Initial footer clock value may briefly show a deterministic placeholder before client time appears
-- Footer clock updates to local time after hydration
+- Footer right side shows a build version string in `YYYYMMDD.HHmmss` format (UTC)
+- Version is static (no ticking), set at build time
+- Falls back to `dev` in development when no build version is injected
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
+- SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
@@ -105,7 +105,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
-- On mobile full-screen modal, prompt textarea expands to use the remaining modal height
+- On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
+- On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
 - Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
 - Click outside modal (backdrop) closes it
@@ -184,10 +185,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `ESC`, `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`); clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
+- Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts

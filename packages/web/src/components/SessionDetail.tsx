@@ -54,7 +54,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       target="_blank"
     >
       {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[11px]" style={color ? { color } : undefined}>
+      <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
       {link.label === "pr" ? (
@@ -470,7 +470,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               onClick={() =>
                                 setAttachments((prev) => prev.filter((_, j) => j !== i))
                               }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[8px] text-white opacity-0 transition group-hover:opacity-100"
+                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-white opacity-0 transition group-hover:opacity-100"
                             >
                               x
                             </button>
@@ -663,7 +663,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
                 {logEntries.length === 0 ? (
                   <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
                 ) : (
