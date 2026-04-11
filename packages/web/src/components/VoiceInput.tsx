@@ -23,16 +23,13 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
 }
 
 const ACTIVE_STYLE = "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
+const IDLE_STYLE = "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]";
 
 export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
   if (!voice.canUseVoice) return null;
   const active = voice.recording || voice.voiceBusy === "transcribing";
   const baseClass = className
-    ?? `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${
-      active
-        ? ""
-        : "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]"
-    }`;
+    ?? `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
@@ -85,11 +82,24 @@ export function VoiceConfirmModal({
           <p className="text-[var(--color-text-secondary)]">
             Review the transcription before inserting it into the message box.
           </p>
-          <textarea
-            className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-            onChange={(event) => voice.setVoiceDraft(event.target.value)}
-            value={voice.voiceDraft}
-          />
+          <div className="relative">
+            <textarea
+              className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+              onChange={(event) => voice.setVoiceDraft(event.target.value)}
+              value={voice.voiceDraft}
+            />
+            <VoiceButton
+              voice={voice}
+              className={`absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center border ${
+                voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
+              }`}
+            />
+          </div>
+          {(voice.recording || voice.voiceBusy) && (
+            <p className="text-xs text-[var(--color-text-tertiary)]">
+              <VoiceStatusHint voice={voice} />
+            </p>
+          )}
           <div className="flex items-center justify-end gap-2">
             <button
               type="button"
@@ -101,7 +111,7 @@ export function VoiceConfirmModal({
             <button
               type="button"
               className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-              disabled={!voice.voiceDraft.trim()}
+              disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
               onClick={() => voice.confirmDraft(onInsert)}
             >
               Insert

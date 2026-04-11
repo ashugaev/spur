@@ -188,6 +188,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`); clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
