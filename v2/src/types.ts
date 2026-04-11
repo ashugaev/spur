@@ -74,9 +74,17 @@ export interface ProjectPreflightConfig {
   prompt: string;
 }
 
-export interface DevServerConfig {
+export interface SidecarConfig {
   command: string;
   autoStart: boolean;
+  env?: Record<string, string>;
+  ports?: Record<string, SidecarPortConfig>;
+}
+
+export interface SidecarPortConfig {
+  env: string;
+  start: number;
+  end: number;
 }
 
 export interface ProjectSpawnConfig {
@@ -130,6 +138,7 @@ export interface ServiceProblemEventData {
 }
 
 export interface ProjectConfig {
+  name?: string;
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
@@ -138,7 +147,7 @@ export interface ProjectConfig {
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
-  devServer?: DevServerConfig;
+  sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
 }
@@ -152,6 +161,18 @@ export interface AppConfig {
   dataDir: string;
   worktreeDir: string;
   defaultAgent: AgentName;
+  tmux: {
+    socketName: string;
+  };
+  ui: {
+    port: number;
+  };
+  voice: {
+    provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+    language: string;
+    model: string;
+    modelPath?: string;
+  };
   projects: Record<string, ProjectConfig>;
 }
 
@@ -186,6 +207,7 @@ export interface SessionRecord {
   createdAt: string;
   updatedAt: string;
   slots?: SessionSlots;
+  sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
   error?: string;
@@ -212,7 +234,7 @@ export interface SessionView extends SessionRecord {
   stateHistory?: SessionStateTransition[];
   lastActivityAt: string;
   services: ServiceInstanceView[];
-  devServerAlive: boolean;
+  sidecars: { name: string; alive: boolean }[];
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {
@@ -235,7 +257,7 @@ export interface PreflightResponse {
 
 export interface SpawnSessionRequest {
   project: string;
-  prompt: string;
+  prompt?: string;
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
@@ -264,6 +286,10 @@ export interface KillSessionRequest {
   force?: boolean;
 }
 
+export interface RespawnSessionRequest {
+  terminateSessionId?: string;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
@@ -271,8 +297,24 @@ export interface UpdateSessionSlotsRequest {
   unlinkLabels?: string[];
 }
 
-export interface SyncProjectsRequest {
+export interface ProjectListEntry {
+  id: string;
+  name: string;
+}
+
+export interface ConnectProjectConfigRequest {
   configPath: string;
+}
+
+export interface DisconnectProjectConfigRequest {
+  configPath: string;
+}
+
+export interface ProjectConfigMutationResponse {
+  ok: true;
+  changed: boolean;
+  configPath: string;
+  projects: ProjectListEntry[];
 }
 
 export interface RuntimeInfo {
@@ -284,6 +326,8 @@ export interface RuntimeInfo {
   dataDir: string;
   worktreeDir: string;
   configPath: string;
+  tmuxSocketName: string;
+  uiPort: number;
   startedAt: string;
 }
 

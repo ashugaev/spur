@@ -13,6 +13,19 @@ export const CLI_PATH = join(V2_DIR, "dist/cli.js");
 const TMUX_BOOTSTRAP_SESSION = `spur-runtime-bootstrap-${process.pid}`;
 let tmuxBootstrapReady = false;
 let tmuxBootstrapCleanupRegistered = false;
+let activeTmuxSocketName: string | null = null;
+
+function setActiveTmuxSocketName(socketName: string | undefined): void {
+  const next = socketName?.trim() || null;
+  if (activeTmuxSocketName !== next) {
+    tmuxBootstrapReady = false;
+  }
+  activeTmuxSocketName = next;
+}
+
+function withTmuxSocket(args: string[]): string[] {
+  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+}
 
 export interface FakeGhState {
   prsByBranch?: Record<
@@ -114,7 +127,11 @@ jsonl_append() {
       break
     fi
   done
-  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  preflight_input="$*"
+  if [[ "\${args[\${#args[@]}-1]:-}" == "-" ]]; then
+    preflight_input="$(cat)"
+  fi
+  branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
     payload="$branch_hint"
@@ -274,7 +291,7 @@ async function startTmuxServer(): Promise<void> {
   }
 
   try {
-    await execFileAsync("tmux", ["has-session", "-t", TMUX_BOOTSTRAP_SESSION]);
+    await execFileAsync("tmux", withTmuxSocket(["has-session", "-t", TMUX_BOOTSTRAP_SESSION]));
     tmuxBootstrapReady = true;
     return;
   } catch {
@@ -282,17 +299,20 @@ async function startTmuxServer(): Promise<void> {
   }
 
   try {
-    await execFileAsync("tmux", [
-      "new-session",
-      "-d",
-      "-s",
-      TMUX_BOOTSTRAP_SESSION,
-      "-x",
-      "1",
-      "-y",
-      "1",
-      "sleep 3600",
-    ]);
+    await execFileAsync(
+      "tmux",
+      withTmuxSocket([
+        "new-session",
+        "-d",
+        "-s",
+        TMUX_BOOTSTRAP_SESSION,
+        "-x",
+        "1",
+        "-y",
+        "1",
+        "sleep 3600",
+      ]),
+    );
     tmuxBootstrapReady = true;
   } catch {
     // Best effort only.
@@ -301,7 +321,7 @@ async function startTmuxServer(): Promise<void> {
 
 export async function isTmuxAvailable(): Promise<boolean> {
   try {
-    await execFileAsync("tmux", ["-V"]);
+    await execFileAsync("tmux", withTmuxSocket(["-V"]));
     return true;
   } catch {
     return false;
@@ -309,10 +329,11 @@ export async function isTmuxAvailable(): Promise<boolean> {
 }
 
 export async function syncTmuxEnvironment(env: Record<string, string | undefined>): Promise<void> {
+  setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
   await startTmuxServer();
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
-    await execFileAsync("tmux", ["set-environment", "-g", key, value]);
+    await execFileAsync("tmux", withTmuxSocket(["set-environment", "-g", key, value]));
   }
 }
 
@@ -328,19 +349,15 @@ export async function createTmuxSession(args: {
     tmuxArgs.push("-e", `${key}=${value}`);
   }
   tmuxArgs.push(args.command);
-  await execFileAsync("tmux", tmuxArgs, { cwd: args.cwd });
+  await execFileAsync("tmux", withTmuxSocket(tmuxArgs), { cwd: args.cwd });
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 80): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("tmux", [
-      "capture-pane",
-      "-t",
-      sessionName,
-      "-p",
-      "-S",
-      `-${lines}`,
-    ]);
+    const { stdout } = await execFileAsync(
+      "tmux",
+      withTmuxSocket(["capture-pane", "-t", sessionName, "-p", "-S", `-${lines}`]),
+    );
     return stdout;
   } catch {
     return "";
@@ -348,17 +365,34 @@ export async function captureTmuxPane(sessionName: string, lines = 80): Promise<
 }
 
 export async function readTmuxOption(sessionName: string, option: string): Promise<string> {
-  const { stdout } = await execFileAsync("tmux", ["show-options", "-t", sessionName, option]);
+  const { stdout } = await execFileAsync(
+    "tmux",
+    withTmuxSocket(["show-options", "-t", sessionName, option]),
+  );
   return stdout.trim();
 }
 
+export async function execTmux(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  const { stdout, stderr } = await execFileAsync("tmux", withTmuxSocket(args));
+  return { stdout, stderr };
+}
+
+export async function tmuxSessionExists(sessionName: string): Promise<boolean> {
+  try {
+    await execTmux(["has-session", "-t", sessionName]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function sendKeysToTmux(sessionName: string, ...keys: string[]): Promise<void> {
-  await execFileAsync("tmux", ["send-keys", "-t", sessionName, ...keys]);
+  await execFileAsync("tmux", withTmuxSocket(["send-keys", "-t", sessionName, ...keys]));
 }
 
 export async function killTmuxSession(sessionName: string): Promise<void> {
   try {
-    await execFileAsync("tmux", ["kill-session", "-t", sessionName]);
+    await execFileAsync("tmux", withTmuxSocket(["kill-session", "-t", sessionName]));
   } catch {
     // Already gone.
   }
@@ -366,7 +400,10 @@ export async function killTmuxSession(sessionName: string): Promise<void> {
 
 export async function killTmuxSessionsByPrefix(prefix: string): Promise<void> {
   try {
-    const { stdout } = await execFileAsync("tmux", ["list-sessions", "-F", "#{session_name}"]);
+    const { stdout } = await execFileAsync(
+      "tmux",
+      withTmuxSocket(["list-sessions", "-F", "#{session_name}"]),
+    );
     const sessions = stdout
       .trim()
       .split("\n")
@@ -431,6 +468,7 @@ export async function createRuntimeTestContext(
       ? {
           HOME: rootDir,
           PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+          SPUR_TMUX_SOCKET_NAME: `spur-${port}`,
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
@@ -470,6 +508,7 @@ export async function createRuntimeTestContext(
   };
 
   const startDaemon = async (configPath: string) => {
+    setActiveTmuxSocketName(env["SPUR_TMUX_SOCKET_NAME"]);
     const child = spawn(
       process.execPath,
       [CLI_PATH, "--config", configPath, "daemon", "start", "--json"],

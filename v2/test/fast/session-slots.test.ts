@@ -89,4 +89,20 @@ describe("session slots", () => {
       "slots --session 'api-1'",
     );
   });
+
+  it("writes spur-sidecar wrapper pointing at prod config", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-2",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
+    expect(sidecar).toContain("sidecar start");
+    expect(sidecar).toContain("--session 'api-2'");
+    expect(sidecar).toContain("--config '/tmp/spur.yaml'");
+  });
 });

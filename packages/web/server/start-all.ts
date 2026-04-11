@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSpurInstanceRuntimeConfig } from "./spur-instance.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,11 +16,19 @@ function log(label: string, message: string): void {
   process.stdout.write(`[${label}] ${message}\n`);
 }
 
-function spawnProcess(label: string, command: string, args: string[]): ChildProcess {
+function spawnProcess(
+  label: string,
+  command: string,
+  args: string[],
+  envOverrides: Record<string, string> = {},
+): ChildProcess {
   const child = spawn(command, args, {
     cwd: pkgRoot,
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
+    env: {
+      ...process.env,
+      ...envOverrides,
+    },
   });
 
   child.stdout?.on("data", (data: Buffer) => {
@@ -36,6 +45,18 @@ function spawnProcess(label: string, command: string, args: string[]): ChildProc
 
   children.push(child);
   return child;
+}
+
+function readHost(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : fallback;
+}
+
+function readPort(value: string | undefined, fallback: number): string {
+  const parsed = Number.parseInt(value ?? "", 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535
+    ? String(parsed)
+    : String(fallback);
 }
 
 function resolveNextBin(): string {
@@ -76,9 +97,23 @@ function cleanup(exitCode: number): void {
   }
 }
 
-const port = process.env["PORT"] || "3000";
-spawnProcess("next", resolveNextBin(), ["start", "-p", port]);
-spawnProcess("direct-terminal", "node", [resolve(__dirname, "direct-terminal-ws.js")]);
+const instanceConfig = readSpurInstanceRuntimeConfig();
+const port = process.env["PORT"] || String(instanceConfig.uiPort);
+const directTerminalPort = readPort(
+  process.env["DIRECT_TERMINAL_BIND_PORT"] ?? process.env["DIRECT_TERMINAL_PORT"],
+  instanceConfig.uiPort + 1,
+);
+const host = readHost(process.env["WEB_HOST"], "0.0.0.0");
+const sharedEnv = {
+  PORT: port,
+  DIRECT_TERMINAL_BIND_PORT: directTerminalPort,
+  DIRECT_TERMINAL_PORT: directTerminalPort,
+  SPUR_DAEMON_URL: process.env["SPUR_DAEMON_URL"] || instanceConfig.daemonUrl,
+  SPUR_TMUX_SOCKET_NAME: process.env["SPUR_TMUX_SOCKET_NAME"] || instanceConfig.tmuxSocketName,
+  SPUR_CONFIG: process.env["SPUR_CONFIG"] || instanceConfig.configPath,
+};
+spawnProcess("next", resolveNextBin(), ["start", "-H", host, "-p", port], sharedEnv);
+spawnProcess("direct-terminal", "node", [resolve(__dirname, "direct-terminal-ws.js")], sharedEnv);
 
 process.on("SIGINT", () => cleanup(0));
 process.on("SIGTERM", () => cleanup(0));

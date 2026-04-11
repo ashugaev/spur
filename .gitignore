@@ -4,6 +4,7 @@ dist/
 dist-server/
 .pnpm-store/
 .next/
+.next-sidecars/
 *.tsbuildinfo
 coverage/
 *.patch
@@ -63,3 +64,5 @@ spur.local.yaml
 spur.*.local.yaml
 
 .idea/
+.playwright-mcp/
+spur.vm.yaml

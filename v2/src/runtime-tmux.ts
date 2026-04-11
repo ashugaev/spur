@@ -10,12 +10,36 @@ import { shellEscape } from "./agents/shell-escape.js";
 import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
 
+// ── Session survival across daemon restarts ──
+// The daemon spawns tmux sessions via execFileAsync. By default, systemd
+// places child processes in the service's cgroup. If the unit uses the
+// default KillMode=control-group, `systemctl restart` sends SIGTERM to
+// every process in the cgroup — including tmux and the agents running
+// inside it. To prevent this, the systemd unit MUST use KillMode=process
+// so only the daemon's node process receives the stop signal.
+// After restart, the daemon re-discovers living sessions through
+// applyConfig() → resumeSessionDelivery().
+// See deploy/spur-daemon.service for the unit template.
+
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
+let activeTmuxSocketName: string | null = null;
+
+export function setTmuxSocketName(socketName: string | undefined): void {
+  activeTmuxSocketName = socketName?.trim() || null;
+}
+
+export function getTmuxSocketName(): string | null {
+  return activeTmuxSocketName;
+}
+
+export function withTmuxSocketArgs(args: string[]): string[] {
+  return activeTmuxSocketName ? ["-L", activeTmuxSocketName, ...args] : args;
+}
 
 async function tmux(...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("tmux", args);
+  const { stdout } = await execFileAsync("tmux", withTmuxSocketArgs(args));
   return stdout.trimEnd();
 }
 
@@ -142,12 +166,14 @@ export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
+  agent?: AgentName;
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const envArgs = buildEnvArgs(input.env);
 
   await execFileAsync("tmux", [
+    ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,
     "new-session",
@@ -161,7 +187,9 @@ export async function createTmuxSession(input: {
   await sleep(300);
 
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand);
+    await sendMessageToTmux(input.sessionName, input.launchCommand, {
+      ...(input.agent ? { agent: input.agent } : {}),
+    });
   } catch (error) {
     try {
       await tmux("kill-session", "-t", sessionTarget);
@@ -181,6 +209,7 @@ export async function createTmuxCommandSession(input: {
   const sessionTarget = exactSessionTarget(input.sessionName);
   const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
   await execFileAsync("tmux", [
+    ...withTmuxSocketArgs([]),
     "-f",
     TMUX_CONFIG_PATH,
     "new-session",
@@ -222,37 +251,46 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   }
 }
 
+async function pasteLiteral(sessionName: string, payload: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const bufferName = `spur-${randomUUID()}`;
+  const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
+  writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
+  try {
+    await tmux("load-buffer", "-b", bufferName, tempPath);
+    await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Ignore cleanup failures.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+}
+
 async function sendLiteral(sessionName: string, message: string): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (message.includes("\n") || message.length > 200) {
-    const bufferName = `spur-${randomUUID()}`;
-    const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
-    writeFileSync(tempPath, message, { encoding: "utf-8", mode: 0o600 });
-    try {
-      await tmux("load-buffer", "-b", bufferName, tempPath);
-      await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
-    } finally {
-      try {
-        unlinkSync(tempPath);
-      } catch {
-        // Ignore cleanup failures.
-      }
-      try {
-        await tmux("delete-buffer", "-b", bufferName);
-      } catch {
-        // Ignore cleanup failures.
-      }
-    }
+    await pasteLiteral(sessionName, message);
     return;
   }
 
   await tmux("send-keys", "-t", target, "-l", message);
 }
 
+function submitDelayMs(agent: AgentName | undefined): number {
+  return agent === "codex" ? 1_000 : 300;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean },
+  options?: { interrupt?: boolean; agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (options?.interrupt) {
@@ -260,8 +298,12 @@ export async function sendMessageToTmux(
     await sleep(500);
   }
   await tmux("send-keys", "-t", target, "C-u");
+  if (options?.agent === "codex") {
+    await pasteLiteral(sessionName, `${message}\n`);
+    return;
+  }
   await sendLiteral(sessionName, message);
-  await sleep(300);
+  await sleep(submitDelayMs(options?.agent));
   await tmux("send-keys", "-t", target, "Enter");
 }
 
@@ -323,28 +365,29 @@ export async function tmuxPaneDead(sessionName: string): Promise<boolean> {
   }
 }
 
-export function devServerTmuxSession(sessionId: string): string {
-  return `${sessionId}--dev`;
+export function sidecarTmuxSession(sessionId: string, sidecarName: string): string {
+  return `${sessionId}--${sidecarName}`;
 }
 
-export async function createTmuxDevServerSession(input: {
+export async function createTmuxSidecarSession(input: {
   sessionId: string;
+  sidecarName: string;
   cwd: string;
   command: string;
   env?: Record<string, string>;
 }): Promise<void> {
   await createTmuxCommandSession({
-    sessionName: devServerTmuxSession(input.sessionId),
+    sessionName: sidecarTmuxSession(input.sessionId, input.sidecarName),
     cwd: input.cwd,
     launchCommand: input.command,
     ...(input.env ? { env: input.env } : {}),
   });
 }
 
-export async function devServerTmuxAlive(sessionId: string): Promise<boolean> {
-  return tmuxSessionExists(devServerTmuxSession(sessionId));
+export async function sidecarTmuxAlive(sessionId: string, sidecarName: string): Promise<boolean> {
+  return tmuxSessionExists(sidecarTmuxSession(sessionId, sidecarName));
 }
 
-export async function killDevServerTmux(sessionId: string): Promise<void> {
-  await killTmuxSession(devServerTmuxSession(sessionId));
+export async function killSidecarTmux(sessionId: string, sidecarName: string): Promise<void> {
+  await killTmuxSession(sidecarTmuxSession(sessionId, sidecarName));
 }

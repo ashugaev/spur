@@ -61,6 +61,33 @@ a:hover {
   text-decoration: underline;
 }
 
+button {
+  white-space: nowrap;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-tertiary);
+  opacity: 1;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  textarea:not(.xterm-helper-textarea),
+  select {
+    font-size: 16px;
+  }
+}
+
+@supports (zoom: 1) {
+  @media (hover: none) and (pointer: coarse) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+    textarea:not(.xterm-helper-textarea),
+    select {
+      zoom: 0.75;
+    }
+  }
+}
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {
@@ -83,8 +110,13 @@ a:hover {
 
 /* ── xterm.js ────────────────────────────────────────────────────────── */
 
-.xterm-viewport {
+.xterm .xterm-viewport {
   overscroll-behavior: contain;
+}
+
+.xterm .xterm-helper-textarea {
+  caret-color: transparent;
+  outline: none;
 }
 
 /* ── Animations ──────────────────────────────────────────────────────── */
@@ -101,6 +133,17 @@ a:hover {
 
 .dot-pulse {
   animation: activity-pulse 2s ease-in-out infinite;
+}
+
+/* ── Voice spinner ──────────────────────────────────────────────────── */
+
+.voice-spinner {
+  animation: voice-spin 0.8s linear infinite;
+}
+
+@keyframes voice-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* ── Data rows ───────────────────────────────────────────────────────── */

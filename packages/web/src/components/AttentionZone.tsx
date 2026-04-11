@@ -5,6 +5,7 @@ import type { AttentionLevel, DashboardSession } from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
+  projectFilterId?: string;
   sessions: DashboardSession[];
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
@@ -20,6 +21,7 @@ const zoneConfig: Record<AttentionLevel, { label: string; color: string }> = {
 
 export function AttentionZone({
   level,
+  projectFilterId,
   sessions,
   collapsed,
   onToggle,
@@ -31,7 +33,7 @@ export function AttentionZone({
   const header = (
     <div className="flex items-center gap-2 py-2">
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: config.color }} />
-      <span className="text-[9px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
+      <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-secondary)]">
         {config.label}
       </span>
       <div
@@ -43,7 +45,12 @@ export function AttentionZone({
   );
 
   const rows = sessions.map((session) => (
-    <SessionRow key={session.id} session={session} onOpenTerminal={onOpenTerminal} />
+    <SessionRow
+      key={session.id}
+      projectFilterId={projectFilterId}
+      session={session}
+      onOpenTerminal={onOpenTerminal}
+    />
   ));
 
   if (isAccordion) {
@@ -55,7 +62,7 @@ export function AttentionZone({
           onClick={() => onToggle(level)}
         >
           <div className="flex-1">{header}</div>
-          <span className="ml-2 text-[11px] text-[var(--color-text-tertiary)]">
+          <span className="ml-2 text-[10px] text-[var(--color-text-tertiary)]">
             {collapsed ? "\u25B8" : "\u25BE"}
           </span>
         </button>

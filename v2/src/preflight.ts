@@ -11,6 +11,8 @@ import type { AgentName, ProjectConfig } from "./types.js";
 const execFileAsync = promisify(execFile);
 const PREFLIGHT_TIMEOUT_MS = 60_000;
 const PREFLIGHT_MAX_BUFFER_BYTES = 1024 * 1024;
+const PREFLIGHT_RM_RETRIES = 5;
+const PREFLIGHT_RM_RETRY_DELAY_MS = 100;
 
 export interface SpawnPreflightResult {
   branch?: string;
@@ -92,19 +94,20 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
 
   try {
     const { stdout } = await execFileAsync(
-      codexCommand(),
+      "/bin/sh",
       [
-        "exec",
-        "--ephemeral",
-        "--disable",
-        "codex_hooks",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--output-last-message",
-        outputPath,
-        prompt,
+        "-lc",
+        'printf "%s" "$SPUR_PREFLIGHT_PROMPT" | "$SPUR_CODEX_BIN" exec --ephemeral --disable codex_hooks --disable apps --disable plugins --dangerously-bypass-approvals-and-sandbox --output-last-message "$SPUR_PREFLIGHT_OUTPUT" -',
       ],
       {
         cwd,
+        env: {
+          ...process.env,
+          CODEX_HOME: undefined,
+          SPUR_CODEX_BIN: codexCommand(),
+          SPUR_PREFLIGHT_OUTPUT: outputPath,
+          SPUR_PREFLIGHT_PROMPT: prompt,
+        },
         timeout: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
       },
@@ -116,7 +119,12 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
       return stdout;
     }
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: PREFLIGHT_RM_RETRIES,
+      retryDelay: PREFLIGHT_RM_RETRY_DELAY_MS,
+    }).catch(() => {});
   }
 }
 

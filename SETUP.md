@@ -36,35 +36,49 @@ cp v2/spur.yaml.example spur.yaml
 $EDITOR spur.yaml
 ```
 
-This repository also keeps a tracked root `spur.yaml` for dogfooding the repo itself. Use it only if its project settings match the checkout you are running.
+The first Spur command auto-creates the global instance config at `~/.spur/config.yaml`.
+Keep repo-local `spur.yaml` focused on `projects:` only. This repository also keeps a tracked root `spur.yaml` for dogfooding the repo itself. Use it only if its project settings match the checkout you are running.
 
 ## Run Spur
 
 ```bash
-SPUR_CONFIG=./spur.yaml spur daemon start
-SPUR_CONFIG=./spur.yaml spur list
+spur list
+spur spawn <project> "your task"
 ```
+
+`spur list` and `spur spawn` auto-connect the nearest local `spur.yaml` / `spur.yml` when present.
 
 ## Run the Web UI
 
 ```bash
-SPUR_CONFIG=./spur.yaml \
-SPUR_DAEMON_URL=http://127.0.0.1:4310 \
 pnpm dev
 ```
+
+The web UI reads the global instance config by default and uses its `ui.port` value. The default UI port is `5555`.
 
 For a production-like UI server:
 
 ```bash
 pnpm ui:build
-SPUR_CONFIG=./spur.yaml \
-SPUR_DAEMON_URL=http://127.0.0.1:4310 \
-DIRECT_TERMINAL_PORT=14801 \
+WEB_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_HOST=127.0.0.1 \
+DIRECT_TERMINAL_BIND_PORT=14801 \
+DIRECT_TERMINAL_PUBLIC_PORT=3011 \
 PORT=3011 \
 pnpm ui:start
 ```
 
 The UI is optional. It does not own runtime logic or persistence; it proxies to the daemon.
+For reverse-proxy deployments, leave Next.js and the terminal server on loopback and advertise the proxy port with
+`DIRECT_TERMINAL_PUBLIC_PORT`.
+
+For a generic Ubuntu VM deployment and release flow, use [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md).
+
+For an explicit production update on a host that runs `spur-daemon.service` and `spur-web.service`:
+
+```bash
+pnpm main:deploy
+```
 
 ## Local Validation
 
