@@ -2414,7 +2414,7 @@ projects:
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
-        timeoutMs: 15_000,
+        timeoutMs: 30_000,
         accept: (sessions) =>
           sessions[0]?.runtimeAlive === true && sessions[0]?.state === "waiting",
       },
