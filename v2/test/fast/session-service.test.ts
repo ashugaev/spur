@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
@@ -248,6 +249,11 @@ function mockClaudeJsonlState(state: string) {
 }
 
 describe("SessionService", () => {
+  beforeAll(() => {
+    // Remove stale /tmp/spur-data from previous CI runs to avoid EACCES failures.
+    rmSync("/tmp/spur-data", { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
