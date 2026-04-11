@@ -432,7 +432,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <div className="relative">
                       <textarea
-                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {

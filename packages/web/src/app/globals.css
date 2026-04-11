@@ -65,6 +65,12 @@ button {
   white-space: nowrap;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-tertiary);
+  opacity: 1;
+}
+
 @media (hover: none) and (pointer: coarse) {
   input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
   textarea:not(.xterm-helper-textarea),
@@ -73,6 +79,15 @@ button {
   }
 }
 
+@supports (zoom: 1) {
+  @media (hover: none) and (pointer: coarse) {
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+    textarea:not(.xterm-helper-textarea),
+    select {
+      zoom: 0.75;
+    }
+  }
+}
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

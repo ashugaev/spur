@@ -55,7 +55,7 @@ function sessionsPayload() {
   };
 }
 
-const SPAWN_PROMPT_PLACEHOLDER = "Optional prompt (leave empty to open the agent session)...";
+const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
 
 describe("Dashboard", () => {
   beforeEach(() => {
