@@ -2415,7 +2415,8 @@ projects:
         ) as SessionView[],
       {
         timeoutMs: 15_000,
-        accept: (sessions) => sessions[0]?.runtimeAlive === true && sessions[0]?.state === "waiting",
+        accept: (sessions) =>
+          sessions[0]?.runtimeAlive === true && sessions[0]?.state === "waiting",
       },
     );
     expect(listedSessions[0]?.id).toBe(spawned.id);
