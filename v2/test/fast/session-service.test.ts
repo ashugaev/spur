@@ -60,7 +60,8 @@ const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/registry.js")>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = await importOriginal<any>();
   return {
     ...actual,
     upsertConfigRegistryPath: upsertConfigRegistryPathMock,
