@@ -361,12 +361,12 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toBeVisible();
   });
 
-  test("footer clock hydrates to a time string", async ({ page }) => {
+  test("footer shows build version or dev fallback", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
     await expect(page.locator("footer")).toBeVisible();
-    // After hydration the clock shows HH:MM:SS
-    await expect(page.locator("footer")).toContainText(/\d\d:\d\d:\d\d/);
+    // NEXT_PUBLIC_BUILD_VERSION env var or "dev" fallback in development
+    await expect(page.locator("footer")).toContainText(/dev|v20\d\d\.\d\d\.\d\d/);
   });
 
   test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
@@ -551,6 +551,57 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
       timeout: 5000,
     });
+  });
+});
+
+// D7 extra: workspace select and steps
+test.describe("D7: Spawn modal – workspace and steps", () => {
+  test("Worktree workspace option shows base branch input", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "ws-wt-1", project: "p1" })], [{ id: "p1", name: "p1" }]);
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.locator('[aria-label="workspace mode"]').selectOption("worktree");
+    await expect(page.getByPlaceholder("Base branch")).toBeVisible();
+  });
+
+  test("Default workspace hides base branch input", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "ws-def-1", project: "p1" })], [{ id: "p1", name: "p1" }]);
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByPlaceholder("Base branch")).not.toBeVisible();
+  });
+
+  test("+ Step button adds a step input", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "step-add-1", project: "p1" })], [{ id: "p1", name: "p1" }]);
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("button", { name: /\+ step/i }).click();
+    await expect(page.getByLabel("step 1")).toBeVisible();
+  });
+
+  test("✕ removes step input", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "step-rm-1", project: "p1" })], [{ id: "p1", name: "p1" }]);
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("button", { name: /\+ step/i }).click();
+    await expect(page.getByLabel("step 1")).toBeVisible();
+    await page.getByLabel("step 1").locator("..").getByRole("button", { name: "✕" }).click();
+    await expect(page.getByLabel("step 1")).not.toBeVisible();
+  });
+
+  test("spawn modal restores last project from localStorage", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("spur:last-spawn-project", "proj-b");
+    });
+    await mockSessions(page, [], [
+      { id: "proj-a", name: "Project A" },
+      { id: "proj-b", name: "Project B" },
+    ]);
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    // The spawn modal project select is the one with "Select project" placeholder option
+    const spawnSelect = page.locator("select").filter({ has: page.getByRole("option", { name: /select project/i }) });
+    await expect(spawnSelect).toHaveValue("proj-b");
   });
 });
 
