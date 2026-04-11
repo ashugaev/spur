@@ -1,9 +1,9 @@
 const sidecarDistDir = process.env["NEXT_DIST_DIR"]?.trim();
 
-// Build-time version: YYYYMMDD.HHmmss (UTC)
+// Build-time version: vYYYY.MM.DD HH:MM (UTC)
 const buildVersion = new Date()
   .toISOString()
-  .replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2}).*/, "$1$2$3.$4$5$6");
+  .replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}).*/, "v$1.$2.$3 $4:$5");
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
