@@ -86,7 +86,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
           target="_blank"
         >
           <JiraIcon />
-          <span className="text-[11px]">{extractLinkId(trackerLink)}</span>
+          <span className="text-[10px]">{extractLinkId(trackerLink)}</span>
         </a>
       ) : null}
 
@@ -99,7 +99,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
           target="_blank"
         >
           <GithubIcon />
-          <span className="text-[11px]">{extractLinkId(prLink)}</span>
+          <span className="text-[10px]">{extractLinkId(prLink)}</span>
           <CiStatusDot status={prInfo.ciStatus} />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </a>
