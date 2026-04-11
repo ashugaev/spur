@@ -25,6 +25,7 @@
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
 - Default close-out for repo work: if the current branch already has an open PR, commit and push every update to that branch. If no PR exists, create one unless the user explicitly says not to. New PRs default to auto-merge when allowed by repository settings.
+- Never merge a PR while any required CI check is failing. If checks were already failing on `main` before your branch (pre-existing failures), fix them in your PR before merging. A failing check is always your responsibility to fix regardless of who introduced it.
 - Branch names for this repo must use `feature/<short-description>`, where `<short-description>` is 1-4 lowercase hyphen-separated words derived from the task.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
 - `v2/` is the source of truth for Spur behavior.
