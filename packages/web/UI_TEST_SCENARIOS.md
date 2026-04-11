@@ -89,7 +89,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
+- SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
@@ -105,7 +105,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
-- On mobile full-screen modal, prompt textarea expands to use the remaining modal height
+- On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
+- On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
 - Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
 - Click outside modal (backdrop) closes it
