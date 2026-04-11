@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "playwright/test";
-import { makeWorkingSession, makeStoppedSession, makeCompletedSession } from "./fixtures.js";
+import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
