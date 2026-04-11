@@ -98,6 +98,13 @@ interface LogEntry {
   sessionId?: string;
 }
 
+interface DialogMessage {
+  key: string;
+  role: "user" | "assistant";
+  text: string;
+  pending?: boolean;
+}
+
 function formatLogTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -142,6 +149,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const lastDialogTailRef = useRef<string | null>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -192,15 +200,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadConversation]);
 
-  // Auto-scroll dialog when new messages arrive, if already at bottom
   useEffect(() => {
+    const lastMessage = conversation?.messages.at(-1);
+    const nextDialogTail =
+      conversation?.state === "working"
+        ? `pending:${lastMessage?.timestampMs ?? "none"}:${lastMessage?.role ?? "none"}:${lastMessage?.text ?? ""}`
+        : lastMessage?.role === "assistant"
+          ? `assistant:${lastMessage.timestampMs}:${lastMessage.text}`
+          : null;
+    if (!nextDialogTail || nextDialogTail === lastDialogTailRef.current) {
+      return;
+    }
+    lastDialogTailRef.current = nextDialogTail;
     const el = dialogRef.current;
     if (!el) return;
-    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    if (isNearBottom) {
-      el.scrollTop = el.scrollHeight;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      return;
     }
-  }, [conversation?.messages.length]);
+    el.scrollTop = el.scrollHeight;
+  }, [conversation]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -304,6 +323,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const displayState = useMemo(
+    () =>
+      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
+    [conversation?.state, session?.agent, session?.state],
+  );
+  const dialogMessages = useMemo<DialogMessage[]>(
+    () =>
+      conversation
+        ? [
+            ...conversation.messages.map((msg) => ({
+              key: `${msg.timestampMs}:${msg.role}:${msg.text}`,
+              role: msg.role,
+              text: msg.text,
+            })),
+            ...(conversation.state === "working"
+              ? [
+                  {
+                    key: "pending-assistant-response",
+                    role: "assistant" as const,
+                    text: "...",
+                    pending: true,
+                  },
+                ]
+              : []),
+          ]
+        : [],
+    [conversation],
+  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -374,7 +421,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <ActivityDot activity={session.state} />
+              {displayState ? <ActivityDot activity={displayState} /> : null}
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
@@ -485,24 +532,29 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ref={dialogRef}
                     className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
                   >
-                    {conversation.messages.map((msg, i) => (
+                    {dialogMessages.map((msg) => (
                       <div
-                        key={i}
+                        key={msg.key}
+                        aria-label={msg.pending ? "Assistant is responding" : undefined}
                         className={`max-w-[85%] px-3 py-2 text-sm ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
-                            : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
+                            : msg.pending
+                              ? "mr-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)]"
+                              : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        <div className="whitespace-pre-wrap break-words">
-                          {msg.text.length > 500 ? msg.text.slice(0, 500) + "..." : msg.text}
+                        <div
+                          className={`whitespace-pre-wrap break-words ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
+                        >
+                          {msg.pending
+                            ? msg.text
+                            : msg.text.length > 500
+                              ? msg.text.slice(0, 500) + "..."
+                              : msg.text}
                         </div>
                       </div>
                     ))}
-                  </div>
-                  <div className="mt-1 flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
-                    <ActivityDot activity={conversation.state} />
-                    <span className="uppercase">{conversation.state.replaceAll("_", " ")}</span>
                   </div>
                 </section>
               ) : null}
