@@ -2408,13 +2408,20 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "q");
 
-    const listed = JSON.parse(
-      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
-    ) as SessionView[];
-    expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.state).toBe("waiting");
-    expect(listed[0]?.runtimeAlive).toBe(true);
-    expect(listed[0]?.workspaceExists).toBe(true);
+    const listedSessions = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (sessions) => sessions[0]?.runtimeAlive === true && sessions[0]?.state === "waiting",
+      },
+    );
+    expect(listedSessions[0]?.id).toBe(spawned.id);
+    expect(listedSessions[0]?.state).toBe("waiting");
+    expect(listedSessions[0]?.runtimeAlive).toBe(true);
+    expect(listedSessions[0]?.workspaceExists).toBe(true);
     expect(controllerPane).toContain(`Restored ${spawned.id}.`);
   });
 

@@ -404,6 +404,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -839,6 +840,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -1929,6 +1931,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -2658,6 +2661,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });

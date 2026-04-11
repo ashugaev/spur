@@ -307,6 +307,7 @@ function buildSessionEnv(args: {
   projectId: string;
   sessionId: string;
   sessionToolDir: string;
+  dataDir: string;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -317,6 +318,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
+    SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -1247,6 +1249,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         sessionToolDir,
+        dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
       });
@@ -1637,6 +1640,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: project.path,
       symlinks: project.symlinks,
     });
@@ -1944,6 +1948,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -2105,6 +2110,7 @@ export class SessionService {
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
+          dataDir: this.config.dataDir,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),
