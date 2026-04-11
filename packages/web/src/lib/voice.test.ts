@@ -409,14 +409,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
           status: 200,
         }),
       );
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
-      handler: TimerHandler,
-    ) => {
-      if (typeof handler === "function") {
-        handler();
-      }
-      return { unref() {} } as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout);
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          handler();
+        }
+        return { unref() {} } as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    );
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
@@ -470,14 +470,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
           status: 200,
         }),
       );
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
-      handler: TimerHandler,
-    ) => {
-      if (typeof handler === "function") {
-        handler();
-      }
-      return { unref() {} } as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout);
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          handler();
+        }
+        return { unref() {} } as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    );
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
