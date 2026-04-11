@@ -1,6 +1,16 @@
 const sidecarDistDir = process.env["NEXT_DIST_DIR"]?.trim();
 
+// Build-time version: YYYYMMDD.HHmmss (UTC)
+const buildVersion = new Date()
+  .toISOString()
+  .replace(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2}).*/, "$1$2$3.$4$5$6");
+
 /** @type {import('next').NextConfig} */
-const nextConfig = sidecarDistDir ? { distDir: sidecarDistDir } : {};
+const nextConfig = {
+  ...(sidecarDistDir ? { distDir: sidecarDistDir } : {}),
+  env: {
+    NEXT_PUBLIC_BUILD_VERSION: buildVersion,
+  },
+};
 
 export default nextConfig;
