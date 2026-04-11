@@ -46,7 +46,7 @@ export interface SpurSessionView {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   worktreePath: string;
-  services: SpurServiceView[];
+  services?: SpurServiceView[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -91,6 +91,11 @@ export interface DashboardSession {
   error?: string;
 }
 
+export interface SpawnOverrides {
+  worktree?: boolean;
+  defaultBranch?: string;
+}
+
 export function toDashboardSession(
   session: SpurSessionView,
   projectName = session.project,
@@ -114,7 +119,7 @@ export function toDashboardSession(
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
-    services: session.services,
+    services: session.services ?? [],
     sidecars: session.sidecars ?? [],
     links,
     error: session.error,

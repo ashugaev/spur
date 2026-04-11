@@ -14,7 +14,7 @@ concurrency:
 jobs:
   quality:
     name: Quality
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -31,7 +31,7 @@ jobs:
 
   runtime-integration:
     name: Runtime Integration
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -39,8 +39,6 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-      - name: Install tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
       - name: Start tmux server
         run: tmux start-server
       - run: pnpm install --frozen-lockfile

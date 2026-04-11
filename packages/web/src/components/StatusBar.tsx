@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   CiStatusDot,
   fetchPrInfo,
@@ -78,19 +78,6 @@ function useAggregatePr(sessions: SpurSessionView[]) {
   return entries;
 }
 
-function useClock() {
-  const [clock, setClock] = useState("--:--:--");
-
-  useEffect(() => {
-    const formatClock = () => new Date().toLocaleTimeString("en-GB", { hour12: false });
-    setClock(formatClock());
-    const timer = setInterval(() => setClock(formatClock()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  return clock;
-}
-
 function PrStateLabel({ state }: { state: PrInfo["state"] }) {
   if (!state) return null;
   return (
@@ -104,10 +91,8 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const gitError = useGitError();
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
-  const clock = useClock();
-
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
+    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[10px] uppercase tracking-[0.08em]">
       <div className="flex items-center gap-6">
         {/* Daemon status */}
         <div className="flex items-center gap-1.5">
@@ -148,8 +133,10 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         ) : null}
       </div>
 
-      {/* Clock */}
-      <div className="text-[var(--color-text-tertiary)]">{clock}</div>
+      {/* Build version */}
+      <div className="text-[var(--color-text-tertiary)]">
+        {process.env.NEXT_PUBLIC_BUILD_VERSION ?? "dev"}
+      </div>
     </footer>
   );
 }

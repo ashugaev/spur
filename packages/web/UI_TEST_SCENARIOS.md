@@ -81,33 +81,34 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
-### D6b: Footer clock hydrates cleanly
+### D6b: Footer build version
 
-- Footer clock area renders without Next.js recoverable hydration error overlay
-- Initial footer clock value may briefly show a deterministic placeholder before client time appears
-- Footer clock updates to local time after hydration
+- Footer right side shows a build version string in `YYYYMMDD.HHmmss` format (UTC)
+- Version is static (no ticking), set at build time
+- Falls back to `dev` in development when no build version is injected
 
 ### D7: Spawn modal
 
-- SPAWN_NEW_SESSION button opens centered modal on desktop, full-screen modal on mobile
+- SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
-- Branch input: placeholder "branch name", optional
+- Branch input: placeholder "Branch name", optional
 - Workspace select: Default / Worktree / Shared options
-- When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"
+- When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
-- Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
-- On mobile full-screen modal, prompt textarea expands to use the remaining modal height
+- Prompt textarea placeholder is "Prompt for the new session..."
+- On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
+- On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
-- Spawn button shows inline muted hotkey hint "Command + Enter"
+- Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
 - With prompt + empty branch, first submit calls preflight and does not spawn yet when preflight returns a branch
 - Preflight branch suggestion is previewed in the branch input and an inline confirmation hint is shown
 - After a suggested branch is shown, button label changes to "Confirm & Spawn"
@@ -122,6 +123,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - Successful spawn resets prompt/branch/plan/steps/workspace/base-branch and clears preflight confirmation state
+
+### D7b: Branch preflight
+
+- When project and prompt are set, preflight may suggest a branch before spawn
+- If preflight suggests a branch, the branch input is populated and spawn requires explicit confirmation
+- User can edit the suggested branch before confirming spawn
+- If preflight returns no branch, spawn continues without a confirmation step
+- If preflight fails during submit, the modal shows the error and spawn is blocked
 
 ## Session Detail
 
@@ -154,6 +163,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
+- If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
 - Send button disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
@@ -184,9 +194,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `ESC`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
@@ -204,6 +219,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Row 1: logo + project title
 - Row 2: Needs Input / Working / Waiting stats
 - Row 3: search input + project filter + Spawn Session button
+- Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
 - Attention zones use accordion (tap to expand/collapse)
@@ -227,6 +243,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sidecars section visible in session detail sidebar when session has sidecars
 - Each sidecar shows name and alive/offline status
 - Terminal button visible only when sidecar is alive and session is attachable
+- `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - No sidecars section shown when sidecars array is empty
 

@@ -54,7 +54,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       target="_blank"
     >
       {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[11px]" style={color ? { color } : undefined}>
+      <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
       {link.label === "pr" ? (
@@ -261,6 +261,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
+  const sidecarUiLink = useMemo(
+    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+    [session],
+  );
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -428,7 +432,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <div className="relative">
                       <textarea
-                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -466,7 +470,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               onClick={() =>
                                 setAttachments((prev) => prev.filter((_, j) => j !== i))
                               }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[8px] text-white opacity-0 transition group-hover:opacity-100"
+                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-white opacity-0 transition group-hover:opacity-100"
                             >
                               x
                             </button>
@@ -612,15 +616,27 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           {sc.alive ? "alive" : "offline"}
                         </span>
                       </div>
-                      {sc.alive && canAttach ? (
-                        <button
-                          type="button"
-                          className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
-                          onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
-                        >
-                          Terminal
-                        </button>
-                      ) : null}
+                      <div className="flex items-center gap-2">
+                        {sc.alive && canAttach ? (
+                          <button
+                            type="button"
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                          >
+                            Terminal
+                          </button>
+                        ) : null}
+                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
+                          <a
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 hover:no-underline"
+                            href={sidecarUiLink}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            Open
+                          </a>
+                        ) : null}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -647,7 +663,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
                 {logEntries.length === 0 ? (
                   <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
                 ) : (

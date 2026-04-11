@@ -90,6 +90,33 @@ function mockExecFileSuccess() {
   );
 }
 
+function configureAzureOpenAIConfig(language = "auto") {
+  mockExistsSync.mockImplementation((path: string) => {
+    if (path === "/tmp/config.yaml") return true;
+    if (path === localSpurEnvPath) return true;
+    return false;
+  });
+  mockReadFileSync.mockImplementation((path: string) => {
+    if (path === "/tmp/config.yaml") {
+      return `
+voice:
+  provider: azure_openai
+  model: whisper
+  language: ${language}
+`;
+    }
+    if (path === localSpurEnvPath) {
+      return `
+AZURE_OPENAI_ENDPOINT=https://example.services.ai.azure.com
+AZURE_OPENAI_API_KEY=test-key
+AZURE_OPENAI_API_VERSION=2024-10-21
+`;
+    }
+    return "";
+  });
+  process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+}
+
 describe("voice runtime", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -322,6 +349,153 @@ AZURE_OPENAI_API_VERSION=2024-10-21
           headers: { "api-key": "test-key" },
         }),
       );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries retryable azure errors and succeeds before exhaustion", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: { "retry-after": "0" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: "azure ok after retry" }), {
+          status: 200,
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureAzureOpenAIConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      const result = await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(result).toMatchObject({
+        text: "azure ok after retry",
+        provider: "azure_openai",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("honors azure Retry-After http-date before retrying", async () => {
+    const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const retryAt = new Date(now + 15_000).toUTCString();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: { "retry-after": retryAt },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: "azure ok after date retry" }), {
+          status: 200,
+        }),
+      );
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler();
+      }
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
+    vi.stubGlobal("fetch", fetchMock);
+    configureAzureOpenAIConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      const result = await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(result).toMatchObject({
+        text: "azure ok after date retry",
+        provider: "azure_openai",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 15_000);
+    } finally {
+      dateNowSpy.mockRestore();
+      setTimeoutSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("fails with explicit message after exhausting retryable azure errors and still cleans up temp files", async () => {
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: { message: "service unavailable" } }), {
+          status: 503,
+          headers: { "retry-after": "0" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    configureAzureOpenAIConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+        "Azure OpenAI transcription failed after 5 attempts: service unavailable",
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+      expect(mockRm).toHaveBeenCalledWith("/tmp/spur-voice-test", { recursive: true, force: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("retries transient azure network failures", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: "azure ok after network retry" }), {
+          status: 200,
+        }),
+      );
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
+      if (typeof handler === "function") {
+        handler();
+      }
+      return { unref() {} } as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+    vi.stubGlobal("fetch", fetchMock);
+    configureAzureOpenAIConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      const result = await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      expect(result).toMatchObject({
+        text: "azure ok after network retry",
+        provider: "azure_openai",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(setTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not retry non-retryable azure 400 errors", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "bad request" } }), {
+        status: 400,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    configureAzureOpenAIConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow("bad request");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
     }

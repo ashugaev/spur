@@ -166,6 +166,7 @@ export async function createTmuxSession(input: {
   sessionName: string;
   cwd: string;
   launchCommand: string;
+  agent?: AgentName;
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
@@ -186,7 +187,9 @@ export async function createTmuxSession(input: {
   await sleep(300);
 
   try {
-    await sendMessageToTmux(input.sessionName, input.launchCommand);
+    await sendMessageToTmux(input.sessionName, input.launchCommand, {
+      ...(input.agent ? { agent: input.agent } : {}),
+    });
   } catch (error) {
     try {
       await tmux("kill-session", "-t", sessionTarget);
@@ -248,37 +251,46 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   }
 }
 
+async function pasteLiteral(sessionName: string, payload: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const bufferName = `spur-${randomUUID()}`;
+  const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
+  writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
+  try {
+    await tmux("load-buffer", "-b", bufferName, tempPath);
+    await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Ignore cleanup failures.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+}
+
 async function sendLiteral(sessionName: string, message: string): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (message.includes("\n") || message.length > 200) {
-    const bufferName = `spur-${randomUUID()}`;
-    const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
-    writeFileSync(tempPath, message, { encoding: "utf-8", mode: 0o600 });
-    try {
-      await tmux("load-buffer", "-b", bufferName, tempPath);
-      await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
-    } finally {
-      try {
-        unlinkSync(tempPath);
-      } catch {
-        // Ignore cleanup failures.
-      }
-      try {
-        await tmux("delete-buffer", "-b", bufferName);
-      } catch {
-        // Ignore cleanup failures.
-      }
-    }
+    await pasteLiteral(sessionName, message);
     return;
   }
 
   await tmux("send-keys", "-t", target, "-l", message);
 }
 
+function submitDelayMs(agent: AgentName | undefined): number {
+  return agent === "codex" ? 1_000 : 300;
+}
+
 export async function sendMessageToTmux(
   sessionName: string,
   message: string,
-  options?: { interrupt?: boolean },
+  options?: { interrupt?: boolean; agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (options?.interrupt) {
@@ -286,8 +298,12 @@ export async function sendMessageToTmux(
     await sleep(500);
   }
   await tmux("send-keys", "-t", target, "C-u");
+  if (options?.agent === "codex") {
+    await pasteLiteral(sessionName, `${message}\n`);
+    return;
+  }
   await sendLiteral(sessionName, message);
-  await sleep(300);
+  await sleep(submitDelayMs(options?.agent));
   await tmux("send-keys", "-t", target, "Enter");
 }
 

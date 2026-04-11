@@ -556,6 +556,12 @@ projects:
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
+    await expect(
+      context.execCli(["--config", configPath, "respawn", "api-999"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
     const listed = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
@@ -563,6 +569,65 @@ projects:
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
       expect.arrayContaining(["daemon.started", "http.request.failed"]),
     );
+  });
+
+  it("respawns a completed session and rejects respawn for a running session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("respawn.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "respawn runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.execCli(["--config", configPath, "respawn", spawned.id]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(`Session ${spawned.id} is not in a terminal state`),
+    });
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(completed.status).toBe("completed");
+    expect(completed.runtimeAlive).toBe(false);
+    expect(completed.workspaceExists).toBe(false);
+
+    const respawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "respawn", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(respawned.status).toBe("running");
+    expect(respawned.project).toBe(spawned.project);
+
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    expect(listed.map((session) => session.id)).toContain(respawned.id);
+
+    const killed = JSON.parse(
+      (await context.execCli(["--config", configPath, "kill", respawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(killed.status).toBe("killed");
+    expect(killed.runtimeAlive).toBe(false);
+    expect(killed.workspaceExists).toBe(false);
   });
 
   it("keeps kill and complete working for existing sessions after the project id is renamed", async () => {
@@ -2138,6 +2203,139 @@ projects:
     expect(result.spawned.agent).toBe("codex");
   });
 
+  it("completes the calling live session after a session-bound respawn succeeds", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-parent-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("respawn-parent.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const caller = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "caller runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const target = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "respawn target prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
+
+    const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
+    const respawned = JSON.parse(
+      (
+        await execFileAsync(helperPath, ["respawn", target.id, "--json"], {
+          cwd: caller.worktreePath,
+          env: {
+            ...context.env,
+            SPUR_SESSION: caller.id,
+            SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", caller.id),
+          },
+        })
+      ).stdout,
+    ) as SessionView;
+
+    expect(respawned.id).not.toBe(target.id);
+    expect(respawned.status).toBe("running");
+
+    const sessions = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value.some(
+            (session) =>
+              session.id === caller.id &&
+              session.status === "completed" &&
+              session.runtimeAlive === false &&
+              session.workspaceExists === false,
+          ),
+      },
+    );
+    const completedCaller = sessions.find((session) => session.id === caller.id);
+    expect(completedCaller?.status).toBe("completed");
+    expect(completedCaller?.runtimeAlive).toBe(false);
+    expect(completedCaller?.workspaceExists).toBe(false);
+  });
+
+  it("keeps the calling live session running when a session-bound respawn fails", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-parent-fail-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "respawn-parent-fail.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const caller = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "caller runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
+
+    await expect(
+      execFileAsync(helperPath, ["respawn", "api-999", "--json"], {
+        cwd: caller.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: caller.id,
+          SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", caller.id),
+        },
+      }),
+    ).rejects.toThrow("Session not found: api-999");
+
+    const sessions = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    const liveCaller = sessions.find((session) => session.id === caller.id);
+    expect(liveCaller?.status).toBe("running");
+    expect(liveCaller?.runtimeAlive).toBe(true);
+    expect(liveCaller?.workspaceExists).toBe(true);
+  });
+
   it("shows a restore error in the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -2337,6 +2535,150 @@ projects:
       .filter((ev) => typeof ev === "string" && ev.startsWith("session.sidecar"));
     expect(sidecarEvents).toContain("session.sidecar.started");
     expect(devSessionAlive).toBe(true);
+  });
+
+  it("reserves sidecar ports per live session and releases them after cleanup", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-reserved-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = join(context.repoDir, "record-sidecar-port.sh");
+    await writeFile(
+      recorderPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
+tail -f /dev/null
+`,
+      "utf8",
+    );
+    await chmod(recorderPath, 0o755);
+    const configPath = await context.writeConfig(
+      "sidecar-reserved-ports.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "./record-sidecar-port.sh"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 4600
+            end: 4601
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const first = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
+    ) as SessionView;
+    const second = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"])).stdout,
+    ) as SessionView;
+
+    const firstPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    const secondPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+
+    expect(new Set([firstPort.trim(), secondPort.trim()])).toEqual(new Set(["4600", "4601"]));
+
+    await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
+
+    const third = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "third", "--json"])).stdout,
+    ) as SessionView;
+    const thirdPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${third.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    expect(thirdPort.trim()).toBe("4600");
+  });
+
+  it("fails spawn when no reserved sidecar ports remain", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-ports-full-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = join(context.repoDir, "record-sidecar-port.sh");
+    await writeFile(
+      recorderPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
+tail -f /dev/null
+`,
+      "utf8",
+    );
+    await chmod(recorderPath, 0o755);
+    const configPath = await context.writeConfig(
+      "sidecar-reserved-ports-full.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "./record-sidecar-port.sh"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 4700
+            end: 4700
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"]);
+
+    await expect(
+      context.execCli(["--config", configPath, "spawn", "api", "second", "--json"]),
+    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
   });
 
   it("kill cleans up the --dev tmux session", async () => {

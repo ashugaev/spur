@@ -1,15 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import type { SpawnOverrides } from "@/lib/types";
 
 interface PreflightBody {
   projectId?: string;
   prompt?: string;
   agent?: "claude" | "codex";
-  overrides?: { worktree?: boolean; defaultBranch?: string };
-}
-
-interface PreflightResponse {
-  branch: string | null;
+  overrides?: SpawnOverrides;
 }
 
 export async function POST(request: NextRequest) {
@@ -24,22 +21,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
-    const rawOverrides =
-      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
     const overrides =
-      rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
+      body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
     const payload: Record<string, unknown> = { prompt };
     if (body.agent) payload.agent = body.agent;
     if (overrides) payload.overrides = overrides;
 
-    const preflight = await spurRequestJson<PreflightResponse>(
+    const preflight = await spurRequestJson<{ branch: string | null }>(
       `/projects/${encodeURIComponent(projectId)}/preflight`,
       spurJsonInit("POST", payload),
     );
 
     return NextResponse.json(preflight);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to run Spur preflight";
+    const message = error instanceof Error ? error.message : "Failed to run preflight";
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

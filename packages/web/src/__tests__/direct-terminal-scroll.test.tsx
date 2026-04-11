@@ -145,11 +145,11 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(sessionId = "test-session") {
+async function mountTerminal(sessionId = "test-session", agent: "claude" | "codex" = "claude") {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<DirectTerminal sessionId={sessionId} label="test" />);
+    result = render(<DirectTerminal agent={agent} sessionId={sessionId} label="test" />);
   });
   await act(async () => {
     await new Promise((r) => setTimeout(r, 50));
@@ -219,6 +219,38 @@ describe("DirectTerminal scroll integration", () => {
     touchTarget!.dispatchEvent(touchMove);
 
     expect(wsSend).toHaveBeenCalledWith("\x1b[<65;1;1M");
+  });
+
+  it("opens agent hotkeys menu and sends a selected shortcut", async () => {
+    await mountTerminal("test-hotkeys", "claude");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
+    expect(screen.getByRole("menu", { name: "claude shortcuts" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /Switch mode/i }));
+    expect(wsSend).toHaveBeenCalledWith("\x1b[Z");
+    expect(screen.queryByRole("menu", { name: "claude shortcuts" })).not.toBeInTheDocument();
+  });
+
+  it("renders codex-specific hotkeys menu label", async () => {
+    await mountTerminal("test-codex-hotkeys", "codex");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    expect(screen.getByRole("menu", { name: "codex shortcuts" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /Start file picker/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+  });
+
+  it("does not render a standalone esc button in the control bar", async () => {
+    await mountTerminal("test-no-esc", "claude");
+
+    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
   it("reconnects after an unexpected websocket close", async () => {

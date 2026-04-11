@@ -55,7 +55,7 @@ function sessionsPayload() {
   };
 }
 
-const SPAWN_PROMPT_PLACEHOLDER = "Optional prompt (leave empty to open the agent session)...";
+const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
 
 describe("Dashboard", () => {
   beforeEach(() => {
@@ -79,6 +79,28 @@ describe("Dashboard", () => {
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("defaults missing services to an empty list", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      return new Response(
+        JSON.stringify({
+          projects: [{ id: "api", name: "API" }],
+          sessions: [{ ...sessionsPayload().sessions[0], services: undefined }],
+        }),
+      );
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
   });
 
@@ -309,7 +331,7 @@ describe("Dashboard", () => {
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
     expect(spawnButton).toBeEnabled();
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
-    expect(screen.getByText("Command + Enter")).toBeInTheDocument();
+    expect(screen.getByText("CMD + ⏎")).toBeInTheDocument();
     expect(screen.queryByText("⌘/Ctrl+Enter")).not.toBeInTheDocument();
 
     fireEvent.click(spawnButton);
@@ -500,7 +522,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getByPlaceholderText("branch name"), {
+    fireEvent.change(screen.getByPlaceholderText("Branch name"), {
       target: { value: "feature/manual-branch" },
     });
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
@@ -655,7 +677,7 @@ describe("Dashboard", () => {
       expect(screen.getByDisplayValue("feature/api-fix-auth")).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByPlaceholderText("branch name"), {
+    fireEvent.change(screen.getByPlaceholderText("Branch name"), {
       target: { value: "" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Confirm & Spawn" }));
@@ -924,8 +946,8 @@ describe("Dashboard", () => {
 });
 
 describe("StatusBar", () => {
-  it("uses a deterministic initial clock value for SSR to avoid hydration drift", () => {
+  it("renders build version without hydration mismatch", () => {
     const html = renderToString(<StatusBar sessions={[]} />);
-    expect(html).toContain("--:--:--");
+    expect(html).toContain("dev");
   });
 });

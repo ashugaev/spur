@@ -10,13 +10,14 @@ const execFileMock: ((...args: unknown[]) => void) & {
 } = Object.assign(vi.fn(), {
   [promisify.custom]: execFileAsyncMock,
 });
+const sleepMock = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("node:child_process", () => ({
   execFile: execFileMock,
 }));
 
 vi.mock("node:timers/promises", () => ({
-  setTimeout: vi.fn().mockResolvedValue(undefined),
+  setTimeout: sleepMock,
 }));
 
 const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.url));
@@ -24,6 +25,7 @@ const expectedConfigPath = fileURLToPath(new URL("../../tmux.conf", import.meta.
 describe("runtime-tmux", () => {
   afterEach(() => {
     execFileAsyncMock.mockReset();
+    sleepMock.mockReset().mockResolvedValue(undefined);
     vi.resetModules();
   });
 
@@ -39,6 +41,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      agent: "codex",
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -57,6 +60,7 @@ describe("runtime-tmux", () => {
       "-c",
       "/tmp/worktree",
     ]);
+    expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
   it("registers status-right link click handling when syncing tmux status", async () => {
@@ -108,5 +112,48 @@ describe("runtime-tmux", () => {
     const rendered = args.at(-1);
     expect(rendered).toContain("]pr ##42#[");
     expect(rendered).toContain("tracker API-7");
+  });
+
+  it("keeps the default submit delay for non-codex sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
+  it("uses atomic newline paste for codex sends without a separate Enter", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
+
+    const commandCalls = execFileAsyncMock.mock.calls.map(([, args]) => args[0]);
+    expect(commandCalls).toContain("load-buffer");
+    expect(commandCalls).toContain("paste-buffer");
+    expect(commandCalls).toContain("delete-buffer");
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps interrupt behavior before codex atomic send", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "codex" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    expect(sleepMock).toHaveBeenCalledWith(500);
   });
 });

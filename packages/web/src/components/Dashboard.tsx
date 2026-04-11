@@ -17,11 +17,13 @@ import {
   type DashboardSession,
   type ProjectInfo,
   type SpurSessionView,
+  type SpawnOverrides,
   type SpurSessionsResponse,
 } from "@/lib/types";
 
 const POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 
@@ -32,11 +34,7 @@ function readCollapsedCategories(): Set<AttentionLevel> {
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
-    const valid = parsed.filter(
-      (item): item is AttentionLevel =>
-        typeof item === "string" && LANE_ORDER.includes(item as AttentionLevel),
-    );
-    return new Set(valid);
+    return new Set(parsed.filter((v): v is AttentionLevel => LANE_ORDER_SET.has(v as string)));
   } catch {
     return new Set();
   }
@@ -127,6 +125,18 @@ function readLocationSearch(): string {
   return window.location.search;
 }
 
+function buildSpawnOverrides(
+  workspaceMode: "default" | "worktree" | "shared",
+  defaultBranch: string,
+): SpawnOverrides | undefined {
+  if (workspaceMode === "worktree") {
+    const trimmed = defaultBranch.trim();
+    return trimmed ? { worktree: true, defaultBranch: trimmed } : { worktree: true };
+  }
+  if (workspaceMode === "shared") return { worktree: false };
+  return undefined;
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -164,6 +174,15 @@ export function Dashboard() {
     },
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
+  const toggleCollapsed = useCallback((level: AttentionLevel) => {
+    setCollapsedLevels((current) => {
+      const next = new Set(current);
+      if (next.has(level)) next.delete(level);
+      else next.add(level);
+      window.localStorage.setItem(COLLAPSED_CATEGORIES_STORAGE_KEY, JSON.stringify([...next]));
+      return next;
+    });
+  }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
@@ -403,19 +422,54 @@ export function Dashboard() {
     clearBranchConfirmation();
   };
 
+  useEffect(() => {
+    const project = spawnProjectId.trim();
+    const prompt = spawnPrompt.trim();
+    if (!project || !prompt || spawnBranch.trim() || awaitingBranchConfirm) return;
+
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
+      const payload: Record<string, unknown> = { projectId: project, prompt, agent: spawnAgent };
+      if (overrides) payload.overrides = overrides;
+
+      fetch("/api/preflight", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((result: { branch: string | null } | null) => {
+          if (!cancelled && result?.branch) {
+            setPreflightSuggestedBranch(result.branch);
+            setSpawnBranch(result.branch);
+            setAwaitingBranchConfirm(true);
+          }
+        })
+        .catch(() => {});
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    awaitingBranchConfirm,
+    spawnAgent,
+    spawnBranch,
+    spawnDefaultBranch,
+    spawnProjectId,
+    spawnPrompt,
+    spawnWorkspaceMode,
+  ]);
+
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
     if (!nextProjectId || spawning || preflightBusy) return;
 
     const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
-    let overrides: { worktree?: boolean; defaultBranch?: string } | undefined;
-    if (spawnWorkspaceMode === "worktree") {
-      overrides = { worktree: true };
-      if (spawnDefaultBranch.trim()) overrides.defaultBranch = spawnDefaultBranch.trim();
-    } else if (spawnWorkspaceMode === "shared") {
-      overrides = { worktree: false };
-    }
+    const overrides = buildSpawnOverrides(spawnWorkspaceMode, spawnDefaultBranch);
 
     const explicitBranch = spawnBranch.trim();
     const needsPreflight = !explicitBranch && Boolean(nextPrompt) && !awaitingBranchConfirm;
@@ -527,7 +581,7 @@ export function Dashboard() {
         <header className="mb-4 flex flex-wrap items-center gap-3">
           <div className="flex shrink-0 flex-wrap items-center gap-3">
             <div className="flex shrink-0 items-center gap-3">
-              <span className="text-lg text-[var(--color-accent)]">𖤓</span>
+              <span className="text-xl text-[var(--color-accent)]">𖤓</span>
               <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
                 {activeProjectName}
               </h1>
@@ -572,7 +626,7 @@ export function Dashboard() {
                 <path d="m21 21-4.35-4.35" />
               </svg>
               <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Filter sessions..."
                 value={searchQuery}
@@ -609,7 +663,7 @@ export function Dashboard() {
               if (event.target === event.currentTarget) closeSpawnModal();
             }}
           >
-            <div className="flex h-full w-full flex-col border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:h-auto sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -653,7 +707,7 @@ export function Dashboard() {
                     aria-label="branch name"
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => setSpawnBranch(event.target.value)}
-                    placeholder="branch name"
+                    placeholder="Branch name"
                     value={spawnBranch}
                   />
                   <select
@@ -688,7 +742,7 @@ export function Dashboard() {
                       clearBranchConfirmation();
                       setSpawnDefaultBranch(event.target.value);
                     }}
-                    placeholder="base branch (defaults to project default)"
+                    placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
                 ) : null}
@@ -737,7 +791,7 @@ export function Dashboard() {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Optional prompt (leave empty to open the agent session)..."
+                    placeholder="Prompt for the new session..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -752,7 +806,7 @@ export function Dashboard() {
                     <VoiceStatusHint voice={voice} />
                   </span>
                   <button
-                    className="inline-flex min-w-32 flex-col items-center justify-center gap-0.5 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
                     disabled={spawning || preflightBusy || !spawnProjectId.trim()}
                     onClick={() => void handleSpawn()}
                     type="button"
@@ -769,9 +823,9 @@ export function Dashboard() {
                     {!spawning && !preflightBusy ? (
                       <span
                         aria-hidden="true"
-                        className="text-center font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                        className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
                       >
-                        Command + Enter
+                        CMD + ⏎
                       </span>
                     ) : null}
                   </button>
@@ -816,21 +870,7 @@ export function Dashboard() {
                 level={level}
                 onOpenTerminal={openTerminal}
                 projectFilterId={projectId || undefined}
-                onToggle={
-                  isMobile
-                    ? (nextLevel) =>
-                        setCollapsedLevels((current) => {
-                          const next = new Set(current);
-                          if (next.has(nextLevel)) next.delete(nextLevel);
-                          else next.add(nextLevel);
-                          window.localStorage.setItem(
-                            COLLAPSED_CATEGORIES_STORAGE_KEY,
-                            JSON.stringify([...next]),
-                          );
-                          return next;
-                        })
-                    : undefined
-                }
+                onToggle={isMobile ? toggleCollapsed : undefined}
                 sessions={grouped[level]}
               />
             ))}

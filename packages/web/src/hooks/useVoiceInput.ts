@@ -13,6 +13,12 @@ const EMPTY_AUDIO_ERROR =
   "Voice recording captured no audio. Check your microphone input and try again.";
 const TRANSCRIBE_ERROR = "Failed to transcribe audio";
 const INSERT_ERROR = "Failed to insert transcription";
+const MICROPHONE_HTTPS_ERROR =
+  "Microphone access requires HTTPS. Connect via Tailscale HTTPS or localhost.";
+const MICROPHONE_PERMISSION_ERROR =
+  "Microphone access is blocked. Allow microphone permission in your browser and try again.";
+const MICROPHONE_NOT_FOUND_ERROR =
+  "No microphone was found. Connect a microphone and try again.";
 
 async function readVoiceError(response: Response, fallback: string): Promise<string> {
   const text = await response.text();
@@ -30,6 +36,38 @@ async function readVoiceError(response: Response, fallback: string): Promise<str
   return text;
 }
 
+function readRecordingStartError(error: unknown): string {
+  if (!(error instanceof Error)) return "Failed to start recording";
+  const message = error.message.trim();
+  const secureContext = typeof window === "undefined" ? true : window.isSecureContext;
+  if (!secureContext) return MICROPHONE_HTTPS_ERROR;
+
+  const normalizedName = error.name.toLowerCase();
+  const normalizedMessage = message.toLowerCase();
+
+  if (
+    normalizedName === "notallowederror"
+    || normalizedName === "securityerror"
+    || normalizedMessage.includes("request is not allowed by the user agent")
+    || normalizedMessage.includes("permission denied")
+    || normalizedMessage.includes("user denied permission")
+    || normalizedMessage.includes("permission dismissed")
+  ) {
+    return MICROPHONE_PERMISSION_ERROR;
+  }
+
+  if (
+    normalizedName === "notfounderror"
+    || normalizedName === "devicesnotfounderror"
+    || normalizedMessage.includes("requested device not found")
+    || normalizedMessage.includes("no microphone")
+  ) {
+    return MICROPHONE_NOT_FOUND_ERROR;
+  }
+
+  return message || "Failed to start recording";
+}
+
 export interface UseVoiceInput {
   canUseVoice: boolean;
   recording: boolean;
@@ -38,7 +76,7 @@ export interface UseVoiceInput {
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
   toggleRecording: () => void;
-  confirmDraft: (onInsert: (text: string) => unknown) => void;
+  confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
   dismissModal: () => void;
   voiceError: string | null;
   clearVoiceError: () => void;
@@ -51,6 +89,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const [recording, setRecording] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
+  const voiceModalOpenRef = useRef(false);
+  const dismissedRef = useRef(false);
+
+  useEffect(() => { voiceModalOpenRef.current = voiceModalOpen; }, [voiceModalOpen]);
   const [voiceDraft, setVoiceDraft] = useState("");
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -105,7 +147,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
           throw new Error("Voice recording is not supported in this browser");
         }
         if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error("Microphone access requires HTTPS. Connect via Tailscale HTTPS or localhost.");
+          throw new Error(MICROPHONE_HTTPS_ERROR);
         }
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         const recorder = new MediaRecorder(stream);
@@ -119,7 +161,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
 
         recorder.addEventListener("stop", () => {
           const chunks = [...mediaChunksRef.current];
+          const wasDismissed = dismissedRef.current;
+          dismissedRef.current = false;
           stopStream();
+          if (wasDismissed) return;
           if (chunks.length === 0) {
             setVoiceError(EMPTY_AUDIO_ERROR);
             return;
@@ -144,6 +189,11 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                 } catch (error) {
                   throw error instanceof Error ? error : new Error(INSERT_ERROR);
                 }
+              } else if (voiceModalOpenRef.current) {
+                setVoiceDraft(prev => {
+                  const base = prev.trimEnd();
+                  return base ? base + ' ' + text : text;
+                });
               } else {
                 setVoiceDraft(text);
                 setVoiceModalOpen(true);
@@ -160,7 +210,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         setRecording(true);
       } catch (err) {
         stopStream();
-        setVoiceError(err instanceof Error ? err.message : "Failed to start recording");
+        setVoiceError(readRecordingStartError(err));
       } finally {
         setVoiceBusy((current) => (current === "starting" ? null : current));
       }
@@ -168,11 +218,11 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   }, [recording, stopStream, voiceStatus]);
 
   const confirmDraft = useCallback(
-    (onInsert: (text: string) => unknown) => {
+    async (onInsert: (text: string) => unknown) => {
       const trimmed = voiceDraft.trim();
       if (!trimmed) return;
       try {
-        const inserted = onInsert(trimmed);
+        const inserted = await onInsert(trimmed);
         if (inserted === false) {
           throw new Error(INSERT_ERROR);
         }
@@ -187,9 +237,15 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   );
 
   const dismissModal = useCallback(() => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      dismissedRef.current = true;
+      mediaRecorderRef.current.stop();
+    }
+    stopStream();
+    setVoiceBusy(null);
     setVoiceModalOpen(false);
     setVoiceDraft("");
-  }, []);
+  }, [stopStream]);
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),

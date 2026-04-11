@@ -27,7 +27,8 @@ WORKDIR /workspace
 COPY . /workspace/spur
 
 # Create a test user (simulates developer's home directory)
-RUN useradd -m -s /bin/bash testuser
+RUN useradd -m -s /bin/bash testuser && \
+    chown -R testuser:testuser /workspace/spur
 
 # Configure npm to use user-local prefix (no sudo needed for npm link)
 RUN mkdir -p /home/testuser/.npm-global && \

@@ -11,6 +11,8 @@ const setupAgentHooksMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
 const readAgentHookStateMock = vi.fn();
 const loadConfigMock = vi.fn();
+const loadProjectConfigMock = vi.fn();
+const findProjectConfigPathMock = vi.fn();
 const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
@@ -20,6 +22,7 @@ const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
+const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
@@ -70,6 +73,8 @@ vi.mock("../../src/agents/index.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   loadConfig: loadConfigMock,
+  loadProjectConfig: loadProjectConfigMock,
+  findProjectConfigPath: findProjectConfigPathMock,
 }));
 
 vi.mock("../../src/preflight.js", () => ({
@@ -94,6 +99,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
+  listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
   listSessions: listSessionsMock,
   readServiceInstance: readServiceInstanceMock,
@@ -196,6 +202,9 @@ function serviceKey(sessionId: string, serviceId: string): string {
 
 function resetServiceStore() {
   serviceRecords.clear();
+  listServiceInstancesMock.mockImplementation(() =>
+    [...serviceRecords.values()].map((service) => clone(service)),
+  );
   listServiceInstancesForSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
     [...serviceRecords.values()]
       .filter((service) => service.sessionId === sessionId)
@@ -287,6 +296,8 @@ describe("SessionService", () => {
     readAgentHookStateMock.mockReset().mockReturnValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
+    loadProjectConfigMock.mockReset();
+    findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
     runSpawnPreflightMock.mockReset().mockResolvedValue({});
     reserveNextSessionIdMock.mockReset().mockResolvedValue("api-1");
     listSessionsMock.mockReset().mockReturnValue([]);
@@ -297,6 +308,7 @@ describe("SessionService", () => {
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
     listActiveServiceProblemsMock.mockReset().mockReturnValue([]);
+    listServiceInstancesMock.mockReset().mockReturnValue([]);
     listServiceInstancesForSessionMock.mockReset().mockReturnValue([]);
     readServiceInstanceMock.mockReset().mockReturnValue(undefined);
     writeServiceInstanceMock.mockReset();
@@ -382,6 +394,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -394,7 +407,9 @@ describe("SessionService", () => {
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {});
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello");
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello", {
+      agent: "claude",
+    });
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -445,15 +460,122 @@ describe("SessionService", () => {
       expect.stringContaining(
         'Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one.',
       ),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("Do not start app, dev server, or test helper processes directly"),
+      { agent: "claude" },
+    );
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("See `v2/README.md` for sidecar usage."),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("Available: `dev`."),
+      { agent: "claude" },
     );
+  });
+
+  it("reserves sidecar ports during spawn and passes them into sidecar env", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: true,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+              },
+            },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sidecarPorts: {
+          dev: {
+            SPUR_RESERVED_PORT_DEV: 3000,
+          },
+        },
+      }),
+    );
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sidecarName: "dev",
+        env: expect.objectContaining({
+          SPUR_SIDECAR_NAME: "dev",
+          SPUR_RESERVED_PORT_DEV: "3000",
+        }),
+      }),
+    );
+  });
+
+  it("fails spawn when another live session already holds the only reserved sidecar port", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+              },
+            },
+          },
+        },
+      },
+    });
+    listSessionsMock.mockReturnValue([
+      {
+        id: "api-existing",
+        project: "api",
+        agent: "claude",
+        prompt: "existing",
+        branch: "api-existing",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-existing",
+        tmuxSession: "api-existing",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: {
+          dev: {
+            SPUR_RESERVED_PORT_DEV: 3000,
+          },
+        },
+      },
+    ]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 3000-3000");
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("passes planMode to launch planning and persists it on the session", async () => {
@@ -472,6 +594,7 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
     expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
@@ -504,6 +627,7 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        agent: "codex",
       }),
     );
     expect(result.planMode).toBe(true);
@@ -564,6 +688,7 @@ describe("SessionService", () => {
       1,
       "api-1",
       expect.stringContaining("[Spur step 1/2: research]"),
+      { agent: "claude" },
     );
   });
 
@@ -599,6 +724,7 @@ describe("SessionService", () => {
       1,
       "api-1",
       expect.stringContaining("[Spur step 1/1: review]"),
+      { agent: "claude" },
     );
   });
 
@@ -703,6 +829,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/repo/api",
       launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -748,7 +875,10 @@ describe("SessionService", () => {
     const result = await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { interrupt: false });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      interrupt: false,
+      agent: "claude",
+    });
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -764,6 +894,40 @@ describe("SessionService", () => {
       }),
     );
     expect(result.id).toBe("api-1");
+  });
+
+  it("passes the codex agent to tmux delivery", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      interrupt: false,
+      agent: "codex",
+    });
   });
 
   it("queues manual send messages while the agent is busy", async () => {
@@ -833,6 +997,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
     expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(1, "api-1", "follow up", {
       interrupt: false,
+      agent: "claude",
     });
   });
 
@@ -1754,6 +1919,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -1766,6 +1932,7 @@ describe("SessionService", () => {
     });
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
       interrupt: false,
+      agent: "claude",
     });
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
@@ -1814,6 +1981,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
   });
@@ -2480,6 +2648,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -2496,6 +2665,7 @@ describe("SessionService", () => {
       expect.stringContaining(
         "slot-instructions\nThis session was restored after the agent exited.",
       ),
+      { agent: "claude" },
     );
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
     expect(restored.id).toBe("api-1");
@@ -2551,6 +2721,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
   });
@@ -2842,6 +3013,106 @@ describe("SessionService", () => {
 
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     expect(result.id).toBe("api-1");
+  });
+
+  it("startSidecar prefers sidecars from the session worktree config", async () => {
+    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    loadProjectConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          path: "/tmp/spur-worktrees/api/api-1",
+          sidecars: {
+            dev: {
+              command: "./scripts/dev.sh",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+              },
+            },
+          },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "api-1",
+        sidecarName: "dev",
+        cwd: "/tmp/spur-worktrees/api/api-1",
+        command: "./scripts/dev.sh",
+        env: expect.objectContaining({
+          SPUR_SIDECAR_NAME: "dev",
+          SPUR_RESERVED_PORT_DEV: "3000",
+        }),
+      }),
+    );
+  });
+
+  it("get lists sidecars from the session worktree config", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    loadProjectConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            daemon: { command: "./scripts/daemon.sh", autoStart: true },
+            ui: { command: "./scripts/ui.sh", autoStart: true },
+          },
+        },
+      },
+    });
+    sidecarTmuxAliveMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.sidecars).toEqual([
+      { name: "daemon", alive: false },
+      { name: "ui", alive: false },
+    ]);
   });
 
   it("kill calls killSidecarTmux to clean up sidecar sessions", async () => {

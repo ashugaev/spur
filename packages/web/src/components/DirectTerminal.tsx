@@ -7,9 +7,11 @@ import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
 import { cn } from "@/lib/cn";
+import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
 
 interface DirectTerminalProps {
   sessionId: string;
+  agent?: AgentName;
   label?: string;
   title?: string;
   onClose?: () => void;
@@ -50,6 +52,9 @@ const terminalTheme: ITheme = {
 const TOUCH_SCROLL_THRESHOLD = 20;
 const RECONNECT_DELAY_MS = 1_000;
 const VISIBILITY_REFRESH_AFTER_MS = 1_000;
+const INPUT_ACK_TIMEOUT_MS = 600;
+const INPUT_RETRY_DELAY_MS = 200;
+const INPUT_MAX_ATTEMPTS = 4;
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -74,10 +79,30 @@ function sgrScroll(up: boolean): string {
   return `\x1b[<${button};1;1M`;
 }
 
-export function DirectTerminal({ sessionId, label, title, onClose }: DirectTerminalProps) {
+interface InputAckMessage {
+  type: "ack";
+  id?: string;
+}
+
+interface PendingInputAck {
+  attempts: number;
+  data: string;
+  id: string;
+  ackTimer: number | null;
+  retryTimer: number | null;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+export function DirectTerminal({ sessionId, agent = "claude", label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
+  const hotkeyMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
+  const inputSeqRef = useRef(0);
+  const pendingAckRef = useRef<PendingInputAck | null>(null);
+  const hotkeys = getAgentHotkeys(agent);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
+  const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const sendTerminalInput = useCallback((data: string): boolean => {
@@ -85,11 +110,102 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     websocketRef.current.send(data);
     return true;
   }, []);
+  const clearPendingAckTimers = useCallback((pending: PendingInputAck) => {
+    if (pending.ackTimer !== null) {
+      window.clearTimeout(pending.ackTimer);
+      pending.ackTimer = null;
+    }
+    if (pending.retryTimer !== null) {
+      window.clearTimeout(pending.retryTimer);
+      pending.retryTimer = null;
+    }
+  }, []);
+
+  const rejectPendingAck = useCallback((pending: PendingInputAck, message: string) => {
+    clearPendingAckTimers(pending);
+    if (pendingAckRef.current?.id === pending.id) {
+      pendingAckRef.current = null;
+    }
+    pending.reject(new Error(message));
+  }, [clearPendingAckTimers]);
+
+  const sendWithAck = useCallback((data: string): Promise<void> => {
+    const id = `${Date.now()}-${inputSeqRef.current++}`;
+
+    return new Promise<void>((resolve, reject) => {
+      const existing = pendingAckRef.current;
+      if (existing) {
+        reject(new Error("Failed to insert transcription"));
+        return;
+      }
+      const pending: PendingInputAck = {
+        attempts: 0,
+        data,
+        id,
+        ackTimer: null,
+        retryTimer: null,
+        resolve,
+        reject,
+      };
+
+      const trySend = () => {
+        pending.attempts += 1;
+        if (pending.attempts > INPUT_MAX_ATTEMPTS) {
+          rejectPendingAck(pending, "Failed to insert transcription");
+          return;
+        }
+        const socket = websocketRef.current;
+        if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+          rejectPendingAck(pending, "Failed to insert transcription");
+          return;
+        }
+
+        if (socket.readyState !== WebSocket.OPEN) {
+          pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+          return;
+        }
+
+        socket.send(JSON.stringify({ type: "input", id: pending.id, data: pending.data }));
+        pending.ackTimer = window.setTimeout(() => {
+          pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+        }, INPUT_ACK_TIMEOUT_MS);
+      };
+
+      pendingAckRef.current = pending;
+      trySend();
+    });
+  }, [rejectPendingAck]);
+
   const submitVoiceDraft = useCallback((text: string) => {
-    return sendTerminalInput(`${text}\r`);
-  }, [sendTerminalInput]);
+    const socket = websocketRef.current;
+    if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
+      throw new Error("Failed to insert transcription");
+    }
+    setError(null);
+    return sendWithAck(`${text}\r`);
+  }, [sendWithAck]);
 
   const voice = useVoiceInput();
+
+  useEffect(() => {
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!hotkeysOpen) return;
+      if (hotkeyMenuRef.current?.contains(event.target as Node)) return;
+      setHotkeysOpen(false);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (!hotkeysOpen || event.key !== "Escape") return;
+      setHotkeysOpen(false);
+    };
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [hotkeysOpen]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -115,7 +231,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
 
         terminal = new Terminal({
           cursorBlink: true,
-          fontSize: 13,
+          fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
           theme: terminalTheme,
@@ -258,6 +374,22 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
             if (websocket !== nextSocket) return;
             const data =
               typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+            if (typeof data === "string" && data.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(data) as InputAckMessage;
+                if (parsed.type === "ack" && typeof parsed.id === "string") {
+                  const pending = pendingAckRef.current;
+                  if (pending?.id === parsed.id) {
+                    clearPendingAckTimers(pending);
+                    pendingAckRef.current = null;
+                    pending.resolve();
+                  }
+                  return;
+                }
+              } catch {
+                // Fall through to terminal output.
+              }
+            }
             terminal?.write(data);
           };
 
@@ -348,6 +480,11 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
     return () => {
       mounted = false;
       closingForUnmount = true;
+      const pending = pendingAckRef.current;
+      if (pending) {
+        rejectPendingAck(pending, "Failed to insert transcription");
+      }
+      pendingAckRef.current = null;
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
       }
@@ -361,7 +498,7 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       websocketRef.current = null;
       terminal?.dispose();
     };
-  }, [sessionId]);
+  }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
 
   const statusDotClass =
     status === "connected"
@@ -388,11 +525,11 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
       <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
         <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
         <div className="min-w-0">
-          <div className="truncate font-mono text-[11px] text-[var(--color-accent)]">
+          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
             {label ?? sessionId}
           </div>
           {title ? (
-            <div className="truncate text-[11px] text-[var(--color-text-secondary)]">{title}</div>
+            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
           ) : null}
         </div>
         <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
@@ -430,13 +567,55 @@ export function DirectTerminal({ sessionId, label, title, onClose }: DirectTermi
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
         <div className="flex items-center gap-1">
-          <button
-            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
-            onClick={() => sendTerminalInput("\x1b")}
-            type="button"
-          >
-            Esc
-          </button>
+          <div className="relative" ref={hotkeyMenuRef}>
+            <button
+              aria-expanded={hotkeysOpen}
+              aria-haspopup="menu"
+              aria-label={`Open ${agent} shortcuts`}
+              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              onClick={() => setHotkeysOpen((current) => !current)}
+              type="button"
+            >
+              ...
+            </button>
+            {hotkeysOpen ? (
+              <div
+                aria-label={`${agent} shortcuts`}
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+                role="menu"
+              >
+                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                </div>
+                {hotkeys.map((hotkey) => (
+                  <button
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-white/5"
+                    key={hotkey.id}
+                    onClick={() => {
+                      sendTerminalInput(hotkey.sequence);
+                      setHotkeysOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
+                        {hotkey.label}
+                      </span>
+                      <span className="block text-[10px] text-[var(--color-text-secondary)]">
+                        {hotkey.detail}
+                      </span>
+                    </span>
+                    {hotkey.shortcut ? (
+                      <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
+                        {hotkey.shortcut}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}
