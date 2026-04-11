@@ -68,7 +68,9 @@ function StatItem({
       type="button"
     >
       <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">{label}:</span>
+      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">
+        {label}:
+      </span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
         style={color ? { color } : undefined}
@@ -135,6 +137,26 @@ function buildSpawnOverrides(
   }
   if (workspaceMode === "shared") return { worktree: false };
   return undefined;
+}
+
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  try {
+    const text = (await response.text()).trim();
+    if (!text) {
+      return fallback;
+    }
+    try {
+      const payload = JSON.parse(text) as { error?: string };
+      if (typeof payload.error === "string" && payload.error.trim()) {
+        return payload.error;
+      }
+    } catch {
+      return text;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export function Dashboard() {
@@ -271,7 +293,9 @@ export function Dashboard() {
 
   const allSessions = useMemo(
     () =>
-      rawSessions.map((session) => toDashboardSession(session, projectNameMap.get(session.project))),
+      rawSessions.map((session) =>
+        toDashboardSession(session, projectNameMap.get(session.project)),
+      ),
     [projectNameMap, rawSessions],
   );
 
@@ -391,7 +415,11 @@ export function Dashboard() {
   const syncTerminalFilter = (terminalSessionId: string | null) => {
     if (typeof window === "undefined") return;
     const query = withTerminalQuery(window.location.search, terminalSessionId);
-    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   };
 
@@ -413,13 +441,24 @@ export function Dashboard() {
     [awaitingBranchConfirm],
   );
 
+  const resetSpawnDraft = (nextProjectId = spawnProjectId) => {
+    setSpawnProjectId(nextProjectId);
+    setSpawnPrompt("");
+    setSpawnBranch("");
+    setSpawnPlanMode(false);
+    setSpawnSteps([]);
+    setSpawnWorkspaceMode("default");
+    setSpawnDefaultBranch("");
+    setPreflightBusy(false);
+    clearBranchConfirmation(false);
+  };
+
   const closeSpawnModal = (force = false) => {
     if (!force && (spawning || preflightBusy)) {
       return;
     }
     setSpawnOpen(false);
-    setPreflightBusy(false);
-    clearBranchConfirmation();
+    resetSpawnDraft(resolvePreferredSpawnProjectId());
   };
 
   useEffect(() => {
@@ -487,7 +526,9 @@ export function Dashboard() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(preflightPayload),
         });
-        if (!preflightResponse.ok) throw new Error(await preflightResponse.text());
+        if (!preflightResponse.ok) {
+          throw new Error(await readApiError(preflightResponse, "Failed to run spawn preflight"));
+        }
         const preflight = (await preflightResponse.json()) as { branch: string | null };
         if (preflight.branch) {
           setPreflightSuggestedBranch(preflight.branch);
@@ -498,7 +539,9 @@ export function Dashboard() {
         }
       } catch (preflightError) {
         setError(
-          preflightError instanceof Error ? preflightError.message : "Failed to run spawn preflight",
+          preflightError instanceof Error
+            ? preflightError.message
+            : "Failed to run spawn preflight",
         );
         return;
       } finally {
@@ -525,7 +568,8 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok)
+        throw new Error(await readApiError(response, "Failed to spawn Spur session"));
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -550,8 +594,7 @@ export function Dashboard() {
   };
 
   const openSpawnModal = () => {
-    setSpawnProjectId(resolvePreferredSpawnProjectId());
-    clearBranchConfirmation();
+    resetSpawnDraft(resolvePreferredSpawnProjectId());
     setSpawnOpen(true);
   };
 
@@ -566,12 +609,21 @@ export function Dashboard() {
   }, [allSessions, requestedTerminalSessionId]);
 
   useEffect(() => {
-    if (loading || !requestedTerminalSessionId || terminalSession || typeof window === "undefined") {
+    if (
+      loading ||
+      !requestedTerminalSessionId ||
+      terminalSession ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
     const query = withTerminalQuery(window.location.search, null);
-    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
 
@@ -715,7 +767,9 @@ export function Dashboard() {
                     className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => {
                       clearBranchConfirmation();
-                      setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared");
+                      setSpawnWorkspaceMode(
+                        event.target.value as "default" | "worktree" | "shared",
+                      );
                     }}
                     value={spawnWorkspaceMode}
                   >

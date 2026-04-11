@@ -16,13 +16,21 @@ vi.mock("@/lib/voice", () => ({
   transcribeAudio: vi.fn(),
 }));
 
+vi.mock("node:fs/promises", () => ({
+  readFile: vi.fn(),
+  statfs: vi.fn(),
+}));
+
 import { spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
+import { readFile, statfs } from "node:fs/promises";
+import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
+import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
@@ -33,6 +41,9 @@ import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
 const mockedReadVoiceStatus = vi.mocked(readVoiceStatus);
 const mockedTranscribeAudio = vi.mocked(transcribeAudio);
+const mockedReadFile = vi.mocked(readFile);
+const mockedStatfs = vi.mocked(statfs);
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
 function sessionFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -61,6 +72,10 @@ describe("Spur web API routes", () => {
     mockedSpurRequestJson.mockReset();
     mockedReadVoiceStatus.mockReset();
     mockedTranscribeAudio.mockReset();
+    mockedReadFile.mockReset();
+    mockedStatfs.mockReset();
+    resetResourceMonitoringForTests();
+    if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
     delete process.env["DIRECT_TERMINAL_BIND_PORT"];
     delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
@@ -308,5 +323,60 @@ describe("Spur web API routes", () => {
       modelPath: "/models/ggml-base.en.bin",
     });
     expect(mockedTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), "voice.webm");
+  });
+
+  it("GET /api/runtime/resources returns metrics on linux after the first CPU baseline request", async () => {
+    Object.defineProperty(process, "platform", { value: "linux" });
+    let cpuReads = 0;
+    mockedReadFile.mockImplementation(async (path: string) => {
+      if (path === "/proc/stat") {
+        cpuReads += 1;
+        return cpuReads === 1
+          ? "cpu  100 0 100 800 0 0 0 0 0 0\n"
+          : "cpu  200 0 200 1200 0 0 0 0 0 0\n";
+      }
+      if (path === "/proc/meminfo") {
+        return "MemTotal:       1000 kB\nMemAvailable:    250 kB\n";
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    mockedStatfs.mockResolvedValue({
+      blocks: 1000,
+      bavail: 250,
+    } as Awaited<ReturnType<typeof statfs>>);
+
+    const firstResponse = await runtimeResources();
+    expect(firstResponse.status).toBe(200);
+    expect(await firstResponse.json()).toEqual({ available: false });
+
+    const secondResponse = await runtimeResources();
+    const secondPayload = (await secondResponse.json()) as {
+      available: boolean;
+      cpuPercent?: number;
+      memoryPercent?: number;
+      diskPercent?: number;
+    };
+
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload).toEqual({
+      available: true,
+      cpuPercent: 33,
+      memoryPercent: 75,
+      diskPercent: 75,
+    });
+    expect(cpuReads).toBe(2);
+  });
+
+  it("GET /api/runtime/resources returns available:false on unsupported platforms and read errors", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const unsupported = await runtimeResources();
+    expect(unsupported.status).toBe(200);
+    expect(await unsupported.json()).toEqual({ available: false });
+
+    Object.defineProperty(process, "platform", { value: "linux" });
+    mockedReadFile.mockRejectedValue(new Error("read failed"));
+    const errored = await runtimeResources();
+    expect(errored.status).toBe(200);
+    expect(await errored.json()).toEqual({ available: false });
   });
 });

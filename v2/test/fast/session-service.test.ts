@@ -317,7 +317,9 @@ describe("SessionService", () => {
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
-    sidecarTmuxSessionMock.mockReset().mockImplementation((id: string, name: string) => `${id}--${name}`);
+    sidecarTmuxSessionMock
+      .mockReset()
+      .mockImplementation((id: string, name: string) => `${id}--${name}`);
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
@@ -1085,7 +1087,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("defaults codex to working when no hook state exists", async () => {
+  it("defaults codex to waiting when no hook state exists (SPUR1614 regression)", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1107,7 +1109,7 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("working");
+    expect(result.state).toBe("waiting");
   });
 
   it("Claude: defaults to working when no JSONL exists yet", async () => {

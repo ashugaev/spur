@@ -581,7 +581,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("respawn.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "respawn.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -2214,7 +2217,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("respawn-parent.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "respawn-parent.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -2261,27 +2267,19 @@ projects:
     expect(respawned.id).not.toBe(target.id);
     expect(respawned.status).toBe("running");
 
-    const sessions = await pollUntil(
-      async () =>
-        JSON.parse(
-          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
-        ) as SessionView[],
+    const completedCaller = await pollUntil(
+      () => context.fetchJson<SessionView>(`/sessions/${caller.id}`),
       {
         timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (session) =>
-              session.id === caller.id &&
-              session.status === "completed" &&
-              session.runtimeAlive === false &&
-              session.workspaceExists === false,
-          ),
+        accept: (session) =>
+          session.status === "completed" &&
+          session.runtimeAlive === false &&
+          session.workspaceExists === false,
       },
     );
-    const completedCaller = sessions.find((session) => session.id === caller.id);
-    expect(completedCaller?.status).toBe("completed");
-    expect(completedCaller?.runtimeAlive).toBe(false);
-    expect(completedCaller?.workspaceExists).toBe(false);
+    expect(completedCaller.status).toBe("completed");
+    expect(completedCaller.runtimeAlive).toBe(false);
+    expect(completedCaller.workspaceExists).toBe(false);
   });
 
   it("keeps the calling live session running when a session-bound respawn fails", async () => {
@@ -2336,7 +2334,7 @@ projects:
     expect(liveCaller?.workspaceExists).toBe(true);
   });
 
-  it("shows a restore error in the TTY list when native resume state is missing", async () => {
+  it("falls back to a fresh launch from the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-restore-missing-${port}`;
@@ -2405,7 +2403,7 @@ projects:
 
     const controllerPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("No native resume state found for claude session"),
+      accept: (value) => value.includes(`Restored ${spawned.id}.`),
     });
 
     await sendKeysToTmux(controllerSessionName, "q");
@@ -2414,10 +2412,10 @@ projects:
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
     expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.state).toBe("stopped");
-    expect(controllerPane).toContain(
-      `No native resume state found for claude session ${spawned.id}`,
-    );
+    expect(listed[0]?.state).toBe("waiting");
+    expect(listed[0]?.runtimeAlive).toBe(true);
+    expect(listed[0]?.workspaceExists).toBe(true);
+    expect(controllerPane).toContain(`Restored ${spawned.id}.`);
   });
 
   it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
