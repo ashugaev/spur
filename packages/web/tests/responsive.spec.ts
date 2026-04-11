@@ -1,5 +1,5 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions } from "./fixtures.js";
+import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
@@ -52,28 +52,20 @@ test.describe("R3: Desktop viewport (1280px)", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
   test("full layout renders at desktop", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "desktop-1" }),
-    ]);
-    await page.goto("/");
+    await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
-    // Header with all elements
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
   test("session row renders with project column at sm", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({
-        id: "desktop-row-1",
-        project: "desktop-project",
-      }),
-    ], [{ id: "desktop-project", name: "desktop-project" }]);
-    await page.goto("/");
+    await gotoMocked(
+      page, "/",
+      [makeWorkingSession({ id: "desktop-row-1", project: "desktop-project" })],
+      [{ id: "desktop-project", name: "desktop-project" }],
+    );
 
-    // project column (sm:inline) shows project name in the row
-    // The project name appears in both the filter select and the row span
     await expect(page.locator(".data-row span").filter({ hasText: "desktop-project" })).toBeVisible();
   });
 });
