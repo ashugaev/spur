@@ -1,0 +1,30 @@
+# Spur daemon — systemd unit template
+#
+# Copy to /etc/systemd/system/spur-daemon.service, replace {{…}} placeholders,
+# then run: systemctl daemon-reload && systemctl enable --now spur-daemon
+
+[Unit]
+Description=Spur daemon
+After=network.target
+
+[Service]
+Type=simple
+User=alek
+WorkingDirectory={{SPUR_ROOT}}
+Environment=HOME=/home/alek
+Environment=PATH=/home/alek/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AZURE_OPENAI_API_KEY={{AZURE_OPENAI_API_KEY}}
+ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
+Restart=always
+RestartSec=3
+
+# The daemon spawns tmux sessions (agent workspaces) that must outlive
+# daemon restarts. The default KillMode=control-group sends SIGTERM to
+# every process in the service cgroup — including tmux and the agents
+# inside it. KillMode=process ensures only the daemon node process
+# receives the stop signal. After restart the daemon re-discovers
+# living sessions via applyConfig() → resumeSessionDelivery().
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
@@ -10,15 +11,26 @@ vi.mock("@/lib/spur-daemon", () => ({
   })),
 }));
 
-vi.mock("@/lib/spur-projects", () => ({
-  readSpurProjectOptions: vi.fn(() => [{ id: "sp", name: "Spur Core" }]),
+vi.mock("@/lib/voice", () => ({
+  readVoiceStatus: vi.fn(),
+  transcribeAudio: vi.fn(),
+}));
+
+vi.mock("node:fs/promises", () => ({
+  readFile: vi.fn(),
+  statfs: vi.fn(),
 }));
 
 import { spurRequestJson } from "@/lib/spur-daemon";
-import { readSpurProjectOptions } from "@/lib/spur-projects";
+import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
+import { readFile, statfs } from "node:fs/promises";
+import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
+import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
+import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
+import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
@@ -26,7 +38,11 @@ import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
-const mockedReadSpurProjectOptions = vi.mocked(readSpurProjectOptions);
+const mockedReadVoiceStatus = vi.mocked(readVoiceStatus);
+const mockedTranscribeAudio = vi.mocked(transcribeAudio);
+const mockedReadFile = vi.mocked(readFile);
+const mockedStatfs = vi.mocked(statfs);
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
 function sessionFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -53,28 +69,37 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
 describe("Spur web API routes", () => {
   beforeEach(() => {
     mockedSpurRequestJson.mockReset();
-    mockedReadSpurProjectOptions.mockReset();
-    mockedReadSpurProjectOptions.mockReturnValue([{ id: "sp", name: "Spur Core" }]);
+    mockedReadVoiceStatus.mockReset();
+    mockedTranscribeAudio.mockReset();
+    mockedReadFile.mockReset();
+    mockedStatfs.mockReset();
+    resetResourceMonitoringForTests();
+    if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
     delete process.env["DIRECT_TERMINAL_BIND_PORT"];
     delete process.env["DIRECT_TERMINAL_PUBLIC_PORT"];
   });
 
   it("GET /api/sessions filters by project", async () => {
-    mockedSpurRequestJson.mockResolvedValue([
-      sessionFixture(),
-      sessionFixture({
-        id: "web-b2",
-        project: "web",
-        agent: "codex",
-        prompt: "Polish UI",
-        branch: "feat/ui",
-        tmuxSession: "web-b2",
-        status: "paused",
-        state: "waiting",
-        worktreePath: "/tmp/web-b2",
-      }),
-    ]);
+    mockedSpurRequestJson
+      .mockResolvedValueOnce([
+        sessionFixture(),
+        sessionFixture({
+          id: "web-b2",
+          project: "web",
+          agent: "codex",
+          prompt: "Polish UI",
+          branch: "feat/ui",
+          tmuxSession: "web-b2",
+          status: "paused",
+          state: "waiting",
+          worktreePath: "/tmp/web-b2",
+        }),
+      ])
+      .mockResolvedValueOnce([
+        { id: "api", name: "API" },
+        { id: "web", name: "Web" },
+      ]);
 
     const response = await listSessions(
       new NextRequest("http://localhost:3000/api/sessions?project=api"),
@@ -87,15 +112,17 @@ describe("Spur web API routes", () => {
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
-    mockedSpurRequestJson.mockResolvedValue([
-      sessionFixture(),
-      sessionFixture({
-        id: "ops-a1",
-        project: "ops",
-        tmuxSession: "ops-a1",
-        worktreePath: "/tmp/ops-a1",
-      }),
-    ]);
+    mockedSpurRequestJson
+      .mockResolvedValueOnce([
+        sessionFixture(),
+        sessionFixture({
+          id: "ops-a1",
+          project: "ops",
+          tmuxSession: "ops-a1",
+          worktreePath: "/tmp/ops-a1",
+        }),
+      ])
+      .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as {
@@ -106,20 +133,23 @@ describe("Spur web API routes", () => {
     expect(payload.projects).toEqual([{ id: "sp", name: "Spur Core" }]);
   });
 
-  it("POST /api/spawn validates body and proxies to Spur", async () => {
+  it("POST /api/spawn accepts a missing prompt and proxies an empty prompt to Spur", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
     const response = await spawnSession(
       new NextRequest("http://localhost:3000/api/spawn", {
         method: "POST",
-        body: JSON.stringify({ projectId: "api", prompt: "Fix auth", agent: "claude" }),
+        body: JSON.stringify({ projectId: "api", agent: "claude" }),
       }),
     );
 
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ project: "api", prompt: "", agent: "claude" }),
+      }),
     );
   });
 
@@ -191,5 +221,125 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toEqual({ directTerminalPort: "443" });
+  });
+
+  it("GET /api/runtime/voice returns availability from server-side voice checks", async () => {
+    mockedReadVoiceStatus.mockResolvedValue({
+      available: true,
+      provider: "whisper_cpp",
+      model: "base",
+      modelPath: "/models/ggml-base.en.bin",
+      language: "auto",
+    });
+
+    const response = await runtimeVoiceStatus();
+    const payload = (await response.json()) as {
+      available: boolean;
+      provider: string;
+      model: string;
+      modelPath?: string;
+      language: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      available: true,
+      provider: "whisper_cpp",
+      model: "base",
+      modelPath: "/models/ggml-base.en.bin",
+      language: "auto",
+    });
+  });
+
+  it("POST /api/runtime/voice/transcribe validates audio and returns transcription", async () => {
+    mockedTranscribeAudio.mockResolvedValue({
+      text: "Fix the flaky test",
+      provider: "whisper_cpp",
+      model: "base",
+      language: "auto",
+      modelPath: "/models/ggml-base.en.bin",
+    });
+
+    const formData = new FormData();
+    formData.append("audio", new File(["audio-bytes"], "voice.webm", { type: "audio/webm" }));
+
+    const response = await transcribeVoice(
+      new Request("http://localhost:3000/api/runtime/voice/transcribe", {
+        method: "POST",
+        body: formData,
+      }),
+    );
+    const payload = (await response.json()) as {
+      text: string;
+      provider: string;
+      model: string;
+      language: string;
+      modelPath?: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      text: "Fix the flaky test",
+      provider: "whisper_cpp",
+      model: "base",
+      language: "auto",
+      modelPath: "/models/ggml-base.en.bin",
+    });
+    expect(mockedTranscribeAudio).toHaveBeenCalledWith(expect.any(Buffer), "voice.webm");
+  });
+
+  it("GET /api/runtime/resources returns metrics on linux after the first CPU baseline request", async () => {
+    Object.defineProperty(process, "platform", { value: "linux" });
+    let cpuReads = 0;
+    mockedReadFile.mockImplementation(async (path: string) => {
+      if (path === "/proc/stat") {
+        cpuReads += 1;
+        return cpuReads === 1
+          ? "cpu  100 0 100 800 0 0 0 0 0 0\n"
+          : "cpu  200 0 200 1200 0 0 0 0 0 0\n";
+      }
+      if (path === "/proc/meminfo") {
+        return "MemTotal:       1000 kB\nMemAvailable:    250 kB\n";
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+    mockedStatfs.mockResolvedValue({
+      blocks: 1000,
+      bavail: 250,
+    } as Awaited<ReturnType<typeof statfs>>);
+
+    const firstResponse = await runtimeResources();
+    expect(firstResponse.status).toBe(200);
+    expect(await firstResponse.json()).toEqual({ available: false });
+
+    const secondResponse = await runtimeResources();
+    const secondPayload = (await secondResponse.json()) as {
+      available: boolean;
+      cpuPercent?: number;
+      memoryPercent?: number;
+      diskPercent?: number;
+    };
+
+    expect(secondResponse.status).toBe(200);
+    expect(secondPayload).toEqual({
+      available: true,
+      cpuPercent: 33,
+      memoryPercent: 75,
+      diskPercent: 75,
+    });
+    expect(cpuReads).toBe(2);
+  });
+
+  it("GET /api/runtime/resources returns available:false on unsupported platforms and read errors", async () => {
+    Object.defineProperty(process, "platform", { value: "darwin" });
+    const unsupported = await runtimeResources();
+    expect(unsupported.status).toBe(200);
+    expect(await unsupported.json()).toEqual({ available: false });
+
+    Object.defineProperty(process, "platform", { value: "linux" });
+    mockedReadFile.mockRejectedValue(new Error("read failed"));
+    const errored = await runtimeResources();
+    expect(errored.status).toBe(200);
+    expect(await errored.json()).toEqual({ available: false });
   });
 });

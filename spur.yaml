@@ -1,23 +1,37 @@
-server:
-  host: 127.0.0.1
-  port: 4311
-
-defaultAgent: codex
-
 projects:
   sp:
-    path: .
+    path: /home/alek/projects/ao
     defaultBranch: main
     sessionPrefix: spur
     symlinks: [node_modules, .env]
-    preflight:
-      prompt: "Choose a branch name based on the project's branch naming conventions."
+    preflight: {}
+    sidecars:
+      isolated-daemon:
+        command: ./scripts/spur-isolated-daemon.sh
+        autoStart: true
+        ports:
+          daemon:
+            env: SPUR_RESERVED_PORT_DAEMON
+            start: 4320
+            end: 4399
+      isolated-ui:
+        command: ./scripts/spur-isolated-ui.sh
+        autoStart: true
+        ports:
+          ui:
+            env: SPUR_RESERVED_PORT_UI
+            start: 5600
+            end: 5699
+          terminal:
+            env: SPUR_RESERVED_PORT_TERMINAL
+            start: 15600
+            end: 15699
+        env:
+          SPUR_SIDECAR_PUBLIC_HOST: openclaw-dev.tail90e846.ts.net
+          SPUR_SIDECAR_PUBLIC_SCHEME: http
     spawn:
       steps:
         - "run $manager"
-        - "run $reviewer"
-        - "run $code-simplifier"
-        - "run $self-verify"
     sources:
       gh:
         type: github

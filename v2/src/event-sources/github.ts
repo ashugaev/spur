@@ -17,7 +17,7 @@ import type {
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 
-interface GitHubPrSummary {
+export interface GitHubPrSummary {
   number: number;
   title: string;
   url: string;
@@ -27,7 +27,7 @@ interface GitHubPrSummary {
   mergeStateStatus: string;
 }
 
-interface GitHubCheck {
+export interface GitHubCheck {
   name: string;
   state: string;
 }
@@ -46,13 +46,13 @@ type PullRequestReviewComment = {
   user?: { login?: string | null } | null;
 };
 
-function shortText(value: string, limit = 140): string {
+export function shortText(value: string, limit = 140): string {
   const clean = value.replace(/\s+/g, " ").trim();
   if (clean.length <= limit) return clean;
   return `${clean.slice(0, limit - 1).trimEnd()}…`;
 }
 
-function parseRepoFromUrl(url: string): string {
+export function parseRepoFromUrl(url: string): string {
   try {
     const parsed = new URL(url);
     const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/\d+/);
@@ -63,7 +63,7 @@ function parseRepoFromUrl(url: string): string {
   }
 }
 
-function normalizeReviewDecision(value: string | null | undefined): GitHubReviewDecision {
+export function normalizeReviewDecision(value: string | null | undefined): GitHubReviewDecision {
   const normalized = (value ?? "").trim().toUpperCase();
   if (normalized === "APPROVED") return "approved";
   if (normalized === "CHANGES_REQUESTED") return "changes_requested";
@@ -71,7 +71,7 @@ function normalizeReviewDecision(value: string | null | undefined): GitHubReview
   return "none";
 }
 
-function summarizeFailingCi(checks: GitHubCheck[]): string | null {
+export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
   const failing = checks.filter((check) =>
     ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(
       check.state.toUpperCase(),
@@ -86,7 +86,7 @@ function normalizeGitHubState(value: string | null | undefined): string {
   return (value ?? "").trim().toUpperCase();
 }
 
-function hasMergeConflict(pr: GitHubPrSummary): boolean {
+export function hasMergeConflict(pr: GitHubPrSummary): boolean {
   return (
     normalizeGitHubState(pr.mergeable) === "CONFLICTING" ||
     normalizeGitHubState(pr.mergeStateStatus) === "DIRTY"

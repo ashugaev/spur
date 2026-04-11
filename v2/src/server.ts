@@ -7,12 +7,14 @@ import { writeStderr } from "./io.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
+  ConnectProjectConfigRequest,
+  DisconnectProjectConfigRequest,
   KillSessionRequest,
   PreflightRequest,
+  RespawnSessionRequest,
   RunServiceRequest,
   SendMessageRequest,
   SpawnSessionRequest,
-  SyncProjectsRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
 
@@ -105,8 +107,11 @@ export async function startServer(
       throw error;
     }
   };
-  const reloadAutomation = async (requestConfigPath: string): Promise<void> => {
-    const preview = service.previewConfigSync(requestConfigPath);
+  const reloadAutomation = async (
+    preview: ReturnType<SessionService["previewConfigConnect"]>,
+    requestConfigPath: string,
+    action: "connect" | "disconnect",
+  ): Promise<void> => {
     for (const message of preview.warnings) {
       logEvent("daemon.registry.warning", {
         level: "warn",
@@ -140,7 +145,10 @@ export async function startServer(
 
     logEvent("daemon.registry.reloaded", {
       level: "info",
-      message: `Reloaded daemon project registry from ${requestConfigPath}`,
+      message:
+        action === "connect"
+          ? `Connected daemon project registry from ${requestConfigPath}`
+          : `Disconnected daemon project registry from ${requestConfigPath}`,
       details: {
         configPaths: preview.registryPaths,
         projectCount: Object.keys(preview.config.projects).length,
@@ -198,13 +206,40 @@ export async function startServer(
         return;
       }
 
-      if (method === "POST" && path === "/projects/sync") {
-        const body = await readJsonBody<SyncProjectsRequest>(request);
+      if (method === "GET" && path === "/projects") {
+        sendJson(response, 200, service.listProjects());
+        return;
+      }
+
+      if (method === "POST" && path === "/projects/connect") {
+        const body = await readJsonBody<ConnectProjectConfigRequest>(request);
         if (typeof body.configPath !== "string" || !body.configPath.trim()) {
           throw new Error("configPath must be a non-empty string");
         }
-        await reloadAutomation(body.configPath);
-        sendJson(response, 200, { ok: true });
+        const preview = service.previewConfigConnect(body.configPath);
+        await reloadAutomation(preview, body.configPath, "connect");
+        sendJson(response, 200, {
+          ok: true,
+          changed: preview.changed,
+          configPath: body.configPath,
+          projects: service.listProjects(),
+        });
+        return;
+      }
+
+      if (method === "POST" && path === "/projects/disconnect") {
+        const body = await readJsonBody<DisconnectProjectConfigRequest>(request);
+        if (typeof body.configPath !== "string" || !body.configPath.trim()) {
+          throw new Error("configPath must be a non-empty string");
+        }
+        const preview = service.previewConfigDisconnect(body.configPath);
+        await reloadAutomation(preview, body.configPath, "disconnect");
+        sendJson(response, 200, {
+          ok: true,
+          changed: preview.changed,
+          configPath: body.configPath,
+          projects: service.listProjects(),
+        });
         return;
       }
 
@@ -227,6 +262,12 @@ export async function startServer(
         const info = service.info();
         const entries = readSessionEventLog(info.dataDir, logsSessionId, 200);
         sendJson(response, 200, entries);
+        return;
+      }
+
+      const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
+      if (method === "GET" && conversationSessionId) {
+        sendJson(response, 200, await service.getConversation(conversationSessionId));
         return;
       }
 
@@ -268,6 +309,29 @@ export async function startServer(
         return;
       }
 
+      const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
+      if (method === "POST" && respawnSessionId) {
+        const body = await readJsonBody<RespawnSessionRequest>(request);
+        const respawned = await service.respawn(respawnSessionId);
+        sendJson(response, 200, respawned);
+        const terminateSessionId = body.terminateSessionId?.trim();
+        if (
+          terminateSessionId &&
+          terminateSessionId !== respawned.id &&
+          terminateSessionId !== respawnSessionId
+        ) {
+          queueMicrotask(() => {
+            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.warn?.(
+                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+              );
+            });
+          });
+        }
+        return;
+      }
+
       const slotsSessionId = path.match(/^\/sessions\/([^/]+)\/slots$/)?.[1];
       if (method === "POST" && slotsSessionId) {
         const body = await readJsonBody<UpdateSessionSlotsRequest>(request);
@@ -275,9 +339,9 @@ export async function startServer(
         return;
       }
 
-      const devServerStartId = path.match(/^\/sessions\/([^/]+)\/dev-server\/start$/)?.[1];
-      if (method === "POST" && devServerStartId) {
-        sendJson(response, 200, await service.startDevServer(devServerStartId));
+      const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
+      if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
         return;
       }
 

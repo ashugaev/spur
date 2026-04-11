@@ -73,7 +73,7 @@ export function ActivityDot({ activity, dotOnly = false, size = 6 }: ActivityDot
         className={cn("h-1.5 w-1.5 shrink-0 rounded-full", config.pulse && "dot-pulse")}
         style={{ background: config.dot }}
       />
-      <span className="text-[11px] font-medium" style={{ color: config.text }}>
+      <span className="text-[10px] font-medium" style={{ color: config.text }}>
         {config.label}
       </span>
     </span>

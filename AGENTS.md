@@ -25,6 +25,7 @@
 - In core logic, fail fast instead of adding fallback behavior. Limit fallback handling to cleanup around external tools and teardown paths.
 - Start every task with `$manager`. No direct-execution bypass; collapse phases inside the skill when the task is small.
 - Default close-out for repo work: if the current branch already has an open PR, commit and push every update to that branch. If no PR exists, create one unless the user explicitly says not to. New PRs default to auto-merge when allowed by repository settings.
+- Branch names for this repo must use `feature/<short-description>`, where `<short-description>` is 1-4 lowercase hyphen-separated words derived from the task.
 - `v2/` is `Spur`. Use `Spur` as the name of the new orchestrator in code, config, docs, and CLI surfaces.
 - `v2/` is the source of truth for Spur behavior.
 - Outside `v2/`, the only supported product surface is `packages/web`, and it must remain a thin UI over Spur's daemon HTTP API.
@@ -42,12 +43,21 @@
 - `Spur` brand mark is `𖤓`. Use it for CLI help headers, runtime summary lines, and spinner frames.
 - `Spur list` is the only session UI: on a TTY it opens the live selector with runtime summary and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores, `k` kills, and `Esc` quits. Non-TTY `list` prints a one-shot runtime summary plus session cards.
 - `Spur list` hides `completed` and `killed` sessions by default.
-- `spawn` is positional: `spur spawn <project> <prompt...>` with optional `--agent` and `--branch`.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent` and `--branch`. Empty prompt opens a blank session and skips default pipeline steps / initial message injection.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
 - Supported agents in `Spur` are only `claude` and `codex`.
 - Both `Spur` agents must launch with full access by default:
   `claude --dangerously-skip-permissions` and
   `codex --dangerously-bypass-approvals-and-sandbox`.
+
+## Agent Isolation
+
+- The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.
+- Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
+- Do not override `--config` to point at `~/.spur/config.yaml` (root config).
+- Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
+- For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`). Do not rely on `spur-sidecar` being in `PATH`; use the helper from `$SPUR_SESSION_TOOL_DIR`.
+- Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
 
 ## Spur Validation
 

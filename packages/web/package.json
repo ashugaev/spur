@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm:dev:next\" \"npm:dev:terminal\"",
-    "dev:next": "next dev -p ${PORT:-3000}",
+    "dev:next": "next dev -p ${PORT:-5555}",
     "dev:terminal": "tsx watch server/direct-terminal-ws.ts",
     "build": "rm -rf .next && next build && tsc -p tsconfig.server.json",
     "start": "node dist-server/start-all.js",
@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
-    "next": "^15.5.14",
+    "next": "^15.5.15",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "ws": "^8.19.0",

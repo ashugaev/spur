@@ -7,38 +7,39 @@ import type { DashboardSession } from "@/lib/types";
 interface TerminalModalProps {
   session: DashboardSession;
   onClose: () => void;
+  /** Override the tmux session name (e.g. for sidecar terminals). */
+  tmuxSessionOverride?: string;
+  /** Override the modal title suffix (e.g. sidecar name). */
+  titleSuffix?: string;
 }
 
-export function TerminalModal({ session, onClose }: TerminalModalProps) {
+export function TerminalModal({
+  session,
+  onClose,
+  tmuxSessionOverride,
+  titleSuffix,
+}: TerminalModalProps) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-
     document.body.style.overflow = "hidden";
-    window.addEventListener("keydown", handleKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div
       aria-label={`Terminal ${session.id}`}
       aria-modal="true"
       className="fixed inset-0 z-[90] overflow-hidden bg-black/70 p-2 backdrop-blur-sm sm:p-3"
-      onWheel={(e) => e.stopPropagation()}
       role="dialog"
     >
       <DirectTerminal
-        label={session.id}
+        agent={session.agent}
+        label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
-        sessionId={session.tmuxSession ?? session.id}
-        title={`${session.projectName} • ${session.agent}`}
+        sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
+        title={`${session.projectName} • ${titleSuffix ?? session.agent}`}
       />
     </div>
   );

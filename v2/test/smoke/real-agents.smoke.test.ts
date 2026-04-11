@@ -221,12 +221,17 @@ async function runSmoke(
   const dataDir = join(rootDir, "data");
   const worktreeDir = join(rootDir, "worktrees");
   const sessionPrefix = `smoke-${agent}-${port}`;
+  const tmuxSocketName = `spur-${port}`;
+  const expectedPreflightBranch = options?.expectedPreflightBranch
+    ? `${options.expectedPreflightBranch}-${port}`
+    : undefined;
   const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
   cleanupItems.push(cleanupItem);
 
   await syncTmuxEnvironment({
     HOME: process.env.HOME,
     PATH: process.env.PATH,
+    SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
     SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
     SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
   });
@@ -242,10 +247,10 @@ async function runSmoke(
       baseRef: SMOKE_BASE_REF,
       sessionPrefix,
       agent,
-      ...(options?.expectedPreflightBranch
+      ...(expectedPreflightBranch
         ? {
             extraProjectYaml: `    preflight:
-      prompt: "Set branch exactly to ${options.expectedPreflightBranch}."
+      prompt: "Set branch exactly to ${expectedPreflightBranch}."
 `,
           }
         : {}),
@@ -275,8 +280,8 @@ After the file and the session metadata are set, wait for more instructions.`,
     });
     cleanupItem.branch = session.branch;
     cleanupItem.worktreePath = session.worktreePath;
-    if (options?.expectedPreflightBranch) {
-      expect(session.branch).toBe(options.expectedPreflightBranch);
+    if (expectedPreflightBranch) {
+      expect(session.branch).toBe(expectedPreflightBranch);
       expect(session.branchSource).toBe("preflight");
     }
 

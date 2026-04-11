@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
-import type { SpurSessionView } from "@/lib/types";
+import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
@@ -9,20 +9,17 @@ interface SpawnBody {
   branch?: string;
   planMode?: boolean;
   steps?: string[];
-  overrides?: { worktree?: boolean; defaultBranch?: string };
+  overrides?: SpawnOverrides;
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as SpawnBody;
     const project = body.projectId?.trim();
-    const prompt = body.prompt?.trim();
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
 
     if (!project) {
       return NextResponse.json({ error: "projectId is required" }, { status: 400 });
-    }
-    if (!prompt) {
-      return NextResponse.json({ error: "prompt is required" }, { status: 400 });
     }
 
     const filteredSteps = Array.isArray(body.steps)
@@ -31,10 +28,8 @@ export async function POST(request: NextRequest) {
           .map((s) => s.trim())
       : undefined;
 
-    const rawOverrides =
-      typeof body.overrides === "object" && body.overrides !== null ? body.overrides : undefined;
     const overrides =
-      rawOverrides && Object.keys(rawOverrides).length > 0 ? rawOverrides : undefined;
+      body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
 
     const payload: Record<string, unknown> = { project, prompt };
     if (body.agent) payload.agent = body.agent;

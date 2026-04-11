@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -7,22 +7,48 @@ import {
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
-  type DevServerConfig,
   type GitHubSourceConfig,
+  type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
-  type ProjectConfig,
   type SendTriggerConfig,
   type ServiceRuleConfig,
   type ServiceSourceConfig,
+  type SidecarConfig,
   type SourceConfig,
   type TriggerConfig,
 } from "./types.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 
-const DEFAULT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
+const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
+const DEFAULT_SERVER_HOST = "127.0.0.1";
+const DEFAULT_SERVER_PORT = 4310;
+const DEFAULT_DATA_DIR = "~/.spur";
+const DEFAULT_WORKTREE_DIR = "~/.spur/worktrees";
+const DEFAULT_UI_PORT = 5555;
+const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
+const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
+const DEFAULT_VOICE_LANGUAGE = "auto";
+const DEFAULT_VOICE_MODEL = "base";
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
+
+type ConfigMode = "instance" | "project";
+
+interface ConfigDefaults {
+  serverHost: string;
+  serverPort: number;
+  dataDir: string;
+  worktreeDir: string;
+  defaultAgent: AgentName;
+  tmuxSocketName: string;
+  uiPort: number;
+  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+  voiceModelPath?: string;
+  voiceLanguage: string;
+  voiceModel: string;
+}
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -71,6 +97,13 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asPortNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
+    throw new Error(`${label} must be an integer between 1 and 65535`);
+  }
+  return value;
+}
+
 function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "boolean") {
@@ -85,6 +118,61 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
     return value;
   }
   throw new Error(`${label} must be "claude" or "codex"`);
+}
+
+function defaultTmuxSocketName(port: number): string {
+  return `spur-${port}`;
+}
+
+function defaultConfigDefaults(configDir: string): ConfigDefaults {
+  return {
+    serverHost: DEFAULT_SERVER_HOST,
+    serverPort: DEFAULT_SERVER_PORT,
+    dataDir: resolveFrom(configDir, DEFAULT_DATA_DIR),
+    worktreeDir: resolveFrom(configDir, DEFAULT_WORKTREE_DIR),
+    defaultAgent: "claude",
+    tmuxSocketName: defaultTmuxSocketName(DEFAULT_SERVER_PORT),
+    uiPort: DEFAULT_UI_PORT,
+    voiceProvider: DEFAULT_VOICE_PROVIDER,
+    voiceModelPath: resolveFrom(configDir, DEFAULT_VOICE_MODEL_PATH),
+    voiceLanguage: DEFAULT_VOICE_LANGUAGE,
+    voiceModel: DEFAULT_VOICE_MODEL,
+  };
+}
+
+function defaultInstanceConfigYaml(): string {
+  return [
+    "server:",
+    `  host: ${DEFAULT_SERVER_HOST}`,
+    `  port: ${DEFAULT_SERVER_PORT}`,
+    "",
+    `dataDir: ${DEFAULT_DATA_DIR}`,
+    `worktreeDir: ${DEFAULT_WORKTREE_DIR}`,
+    "defaultAgent: claude",
+    "",
+    "tmux:",
+    `  socketName: ${defaultTmuxSocketName(DEFAULT_SERVER_PORT)}`,
+    "",
+    "ui:",
+    `  port: ${DEFAULT_UI_PORT}`,
+    "",
+    "voice:",
+    `  provider: ${DEFAULT_VOICE_PROVIDER}`,
+    `  language: ${DEFAULT_VOICE_LANGUAGE}`,
+    `  model: ${DEFAULT_VOICE_MODEL}`,
+    "",
+  ].join("\n");
+}
+
+function asOptionalVoiceProvider(
+  value: unknown,
+  label: string,
+): "whisper_cpp" | "faster_whisper" | "azure_openai" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "whisper_cpp" || value === "faster_whisper" || value === "azure_openai") {
+    return value;
+  }
+  throw new Error(`${label} must be "whisper_cpp", "faster_whisper", or "azure_openai"`);
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
@@ -228,6 +316,12 @@ function parseProjectPreflight(
   };
 }
 
+/** Backward-compat shape for the legacy `devServer` YAML key. */
+interface DevServerConfig {
+  command: string;
+  autoStart: boolean;
+}
+
 function parseDevServer(projectId: string, value: unknown): DevServerConfig | undefined {
   if (value === undefined) {
     return undefined;
@@ -238,6 +332,69 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   return {
     command: asString(raw["command"], `${label}.command`),
     autoStart: asOptionalBoolean(raw["autoStart"], `${label}.autoStart`) ?? false,
+  };
+}
+
+function parseSidecars(projectId: string, value: unknown): Record<string, SidecarConfig> {
+  if (value === undefined) return {};
+  const label = `projects.${projectId}.sidecars`;
+  const raw = asObject(value, label);
+  const result: Record<string, SidecarConfig> = {};
+  for (const [name, entry] of Object.entries(raw)) {
+    if (!VALID_ID_RE.test(name)) {
+      throw new Error(
+        `${label}.${name} is invalid: sidecar names must match ${VALID_ID_RE.source}`,
+      );
+    }
+    const entryLabel = `${label}.${name}`;
+    const entryRaw = asObject(entry, entryLabel);
+    const command = asString(entryRaw["command"], `${entryLabel}.command`);
+    const autoStart = asOptionalBoolean(entryRaw["autoStart"], `${entryLabel}.autoStart`) ?? false;
+    const envRaw = entryRaw["env"];
+    let env: Record<string, string> | undefined;
+    if (envRaw !== undefined) {
+      const envObj = asObject(envRaw, `${entryLabel}.env`);
+      env = {};
+      for (const [k, v] of Object.entries(envObj)) {
+        env[k] = asString(v, `${entryLabel}.env.${k}`);
+      }
+    }
+    const portsRaw = entryRaw["ports"];
+    let ports: SidecarConfig["ports"];
+    if (portsRaw !== undefined) {
+      const portsObj = asObject(portsRaw, `${entryLabel}.ports`);
+      ports = {};
+      for (const [portId, portValue] of Object.entries(portsObj)) {
+        if (!VALID_ID_RE.test(portId)) {
+          throw new Error(
+            `${entryLabel}.ports.${portId} is invalid: port ids must match ${VALID_ID_RE.source}`,
+          );
+        }
+        const portLabel = `${entryLabel}.ports.${portId}`;
+        const portObj = asObject(portValue, portLabel);
+        const start = asPortNumber(portObj["start"], `${portLabel}.start`);
+        const end = asPortNumber(portObj["end"], `${portLabel}.end`);
+        if (end < start) {
+          throw new Error(`${portLabel}.end must be greater than or equal to ${portLabel}.start`);
+        }
+        ports[portId] = {
+          env: asString(portObj["env"], `${portLabel}.env`),
+          start,
+          end,
+        };
+      }
+    }
+    result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
+  }
+  return result;
+}
+
+function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {
+  return {
+    dev: {
+      command: devServer.command,
+      autoStart: devServer.autoStart,
+    },
   };
 }
 
@@ -317,30 +474,35 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     );
   }
 
-  const raw = asObject(value, `projects.${projectId}`);
-  const path = resolveFrom(configDir, asString(raw["path"], `projects.${projectId}.path`));
-  const defaultBranch =
-    asOptionalString(raw["defaultBranch"], `projects.${projectId}.defaultBranch`) ?? "main";
+  const label = `projects.${projectId}`;
+  const raw = asObject(value, label);
+  const path = resolveFrom(configDir, asString(raw["path"], `${label}.path`));
+  const name = asOptionalString(raw["name"], `${label}.name`);
+  const defaultBranch = asOptionalString(raw["defaultBranch"], `${label}.defaultBranch`) ?? "main";
   const sessionPrefix =
-    asOptionalString(raw["sessionPrefix"], `projects.${projectId}.sessionPrefix`) ??
-    derivePrefix(projectId);
-  const worktree = asOptionalBoolean(raw["worktree"], `projects.${projectId}.worktree`) ?? true;
-  const symlinks = asOptionalStringArray(raw["symlinks"], `projects.${projectId}.symlinks`) ?? [];
+    asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
+  const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
+  const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const devServer = parseDevServer(projectId, raw["devServer"]);
-  const defaultAgent = asOptionalAgent(raw["defaultAgent"], `projects.${projectId}.defaultAgent`);
-  const sourcesRaw = raw["sources"]
-    ? asObject(raw["sources"], `projects.${projectId}.sources`)
-    : {};
+  const hasDevServerKey = raw["devServer"] !== undefined;
+  const hasSidecarsKey = raw["sidecars"] !== undefined;
+  if (hasDevServerKey && hasSidecarsKey) {
+    throw new Error(`projects.${projectId} defines both "devServer" and "sidecars"; pick one`);
+  }
+  const sidecars = hasSidecarsKey
+    ? parseSidecars(projectId, raw["sidecars"])
+    : devServer
+      ? parseDevServerAsSidecar(devServer)
+      : {};
+  const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
+  const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
   for (const [sourceId, sourceValue] of Object.entries(sourcesRaw)) {
-    const parsedSource = parseSource(projectId, sourceId, sourceValue);
-    sources[sourceId] = parsedSource;
+    sources[sourceId] = parseSource(projectId, sourceId, sourceValue);
   }
-  const triggersRaw = raw["triggers"]
-    ? asObject(raw["triggers"], `projects.${projectId}.triggers`)
-    : {};
+  const triggersRaw = raw["triggers"] ? asObject(raw["triggers"], `${label}.triggers`) : {};
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
@@ -351,6 +513,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   }
 
   return {
+    ...(name !== undefined ? { name } : {}),
     path,
     defaultBranch,
     sessionPrefix,
@@ -358,50 +521,36 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     symlinks,
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
-    ...(devServer !== undefined ? { devServer } : {}),
+    sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,
     triggers,
   };
 }
 
-export function resolveConfigPath(input?: string): string {
-  const candidate = input ?? process.env["SPUR_CONFIG"];
-  if (candidate) {
-    const resolved = resolveFrom(process.cwd(), candidate);
-    if (!existsSync(resolved)) {
-      throw new Error(`Config file not found: ${resolved}`);
-    }
-    return resolved;
-  }
-
-  for (const filename of DEFAULT_CONFIG_FILES) {
-    const resolved = resolveFrom(process.cwd(), filename);
-    if (existsSync(resolved)) {
-      return resolved;
-    }
-  }
-
-  throw new Error(`Config file not found: ${resolveFrom(process.cwd(), DEFAULT_CONFIG_FILES[0])}`);
-}
-
-export function loadConfig(input?: string): AppConfig {
-  const configPath = resolveConfigPath(input);
+function parseConfigFile(
+  configPath: string,
+  mode: ConfigMode,
+  defaults?: ConfigDefaults,
+): AppConfig {
   const configDir = dirname(configPath);
   const raw = parseYaml(readFileSync(configPath, "utf-8")) as unknown;
   const root = asObject(raw, "config");
+
+  const resolvedDefaults = defaults ?? defaultConfigDefaults(configDir);
   const server = root["server"] ? asObject(root["server"], "server") : {};
-  const projects = asObject(root["projects"], "projects");
-  const defaultAgent = asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? "claude";
-  const dataDir = resolveFrom(configDir, asOptionalString(root["dataDir"], "dataDir") ?? "~/.spur");
-  const worktreeDir = resolveFrom(
-    configDir,
-    asOptionalString(root["worktreeDir"], "worktreeDir") ?? "~/.spur/worktrees",
-  );
+  const tmux = root["tmux"] ? asObject(root["tmux"], "tmux") : {};
+  const ui = root["ui"] ? asObject(root["ui"], "ui") : {};
+  const voice = root["voice"] ? asObject(root["voice"], "voice") : {};
+  const projectsRaw =
+    root["projects"] === undefined ? undefined : asObject(root["projects"], "projects");
+  if (mode === "project" && projectsRaw === undefined) {
+    throw new Error("projects must be an object");
+  }
 
   const normalizedProjects: Record<string, ProjectConfig> = {};
   const prefixOwners = new Map<string, string>();
-  for (const [projectId, projectValue] of Object.entries(projects)) {
+  for (const [projectId, projectValue] of Object.entries(projectsRaw ?? {})) {
     const parsedProject = parseProject(configDir, projectId, projectValue);
     const existingOwner = prefixOwners.get(parsedProject.sessionPrefix);
     if (existingOwner) {
@@ -413,15 +562,180 @@ export function loadConfig(input?: string): AppConfig {
     normalizedProjects[projectId] = parsedProject;
   }
 
+  const serverPort =
+    mode === "instance"
+      ? (asOptionalNumber(server["port"], "server.port") ?? resolvedDefaults.serverPort)
+      : resolvedDefaults.serverPort;
+
   return {
     configPath,
     server: {
-      host: asOptionalString(server["host"], "server.host") ?? "127.0.0.1",
-      port: asOptionalNumber(server["port"], "server.port") ?? 4310,
+      host:
+        mode === "instance"
+          ? (asOptionalString(server["host"], "server.host") ?? resolvedDefaults.serverHost)
+          : resolvedDefaults.serverHost,
+      port: serverPort,
     },
-    dataDir,
-    worktreeDir,
-    defaultAgent,
+    dataDir:
+      mode === "instance"
+        ? resolveFrom(
+            configDir,
+            asOptionalString(root["dataDir"], "dataDir") ?? resolvedDefaults.dataDir,
+          )
+        : resolvedDefaults.dataDir,
+    worktreeDir:
+      mode === "instance"
+        ? resolveFrom(
+            configDir,
+            asOptionalString(root["worktreeDir"], "worktreeDir") ?? resolvedDefaults.worktreeDir,
+          )
+        : resolvedDefaults.worktreeDir,
+    defaultAgent:
+      mode === "instance"
+        ? (asOptionalAgent(root["defaultAgent"], "defaultAgent") ?? resolvedDefaults.defaultAgent)
+        : resolvedDefaults.defaultAgent,
+    tmux: {
+      socketName:
+        mode === "instance"
+          ? (asOptionalString(tmux["socketName"], "tmux.socketName") ??
+            defaultTmuxSocketName(serverPort))
+          : resolvedDefaults.tmuxSocketName,
+    },
+    ui: {
+      port:
+        mode === "instance"
+          ? (asOptionalNumber(ui["port"], "ui.port") ?? resolvedDefaults.uiPort)
+          : resolvedDefaults.uiPort,
+    },
+    voice: (() => {
+      const provider =
+        mode === "instance"
+          ? (asOptionalVoiceProvider(voice["provider"], "voice.provider") ??
+            resolvedDefaults.voiceProvider)
+          : resolvedDefaults.voiceProvider;
+      const model =
+        mode === "instance"
+          ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
+          : resolvedDefaults.voiceModel;
+      const configuredModelPath =
+        mode === "instance"
+          ? asOptionalString(voice["modelPath"], "voice.modelPath")
+          : asOptionalString(voice["modelPath"], "voice.modelPath");
+      const modelPath = configuredModelPath
+        ? resolveFrom(configDir, configuredModelPath)
+        : undefined;
+
+      return {
+        provider,
+        language:
+          mode === "instance"
+            ? (asOptionalString(voice["language"], "voice.language") ??
+              resolvedDefaults.voiceLanguage)
+            : resolvedDefaults.voiceLanguage,
+        model,
+        ...(modelPath !== undefined ? { modelPath } : {}),
+      };
+    })(),
     projects: normalizedProjects,
   };
+}
+
+function findConfigUpwards(startDir: string, filenames: readonly string[]): string | undefined {
+  let current = resolve(startDir);
+  for (;;) {
+    for (const filename of filenames) {
+      const candidate = join(current, filename);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+export function defaultInstanceConfigPath(): string {
+  return DEFAULT_INSTANCE_CONFIG_PATH;
+}
+
+export function defaultVoiceModelPath(): string {
+  return DEFAULT_VOICE_MODEL_PATH;
+}
+
+export function resolveInstanceConfigPath(input?: string): string {
+  const candidate = input?.trim() || process.env["SPUR_CONFIG"]?.trim();
+  return candidate
+    ? resolveFrom(process.cwd(), candidate)
+    : resolveFrom(process.cwd(), DEFAULT_INSTANCE_CONFIG_PATH);
+}
+
+export function instanceConfigExists(input?: string): boolean {
+  return existsSync(resolveInstanceConfigPath(input));
+}
+
+export function ensureInstanceConfig(input?: string): { configPath: string; initialized: boolean } {
+  const configPath = resolveInstanceConfigPath(input);
+  if (existsSync(configPath)) {
+    return { configPath, initialized: false };
+  }
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, defaultInstanceConfigYaml(), "utf-8");
+  return { configPath, initialized: true };
+}
+
+export function findProjectConfigPath(startDir = process.cwd()): string | undefined {
+  return findConfigUpwards(startDir, DEFAULT_PROJECT_CONFIG_FILES);
+}
+
+export function resolveConfigPath(input?: string): string {
+  const candidate = input?.trim();
+  if (candidate) {
+    const resolved = resolveFrom(process.cwd(), candidate);
+    if (!existsSync(resolved)) {
+      throw new Error(`Config file not found: ${resolved}`);
+    }
+    return resolved;
+  }
+
+  const found = findProjectConfigPath(process.cwd());
+  if (found) {
+    return found;
+  }
+
+  throw new Error(
+    `Config file not found: ${resolveFrom(process.cwd(), DEFAULT_PROJECT_CONFIG_FILES[0])}`,
+  );
+}
+
+export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConfig {
+  const configPath = resolveConfigPath(input);
+  return parseConfigFile(
+    configPath,
+    "project",
+    defaults
+      ? {
+          serverHost: defaults.server.host,
+          serverPort: defaults.server.port,
+          dataDir: defaults.dataDir,
+          worktreeDir: defaults.worktreeDir,
+          defaultAgent: defaults.defaultAgent,
+          tmuxSocketName: defaults.tmux.socketName,
+          uiPort: defaults.ui.port,
+          voiceProvider: defaults.voice.provider,
+          voiceLanguage: defaults.voice.language,
+          voiceModel: defaults.voice.model,
+          ...(defaults.voice.modelPath !== undefined
+            ? { voiceModelPath: defaults.voice.modelPath }
+            : {}),
+        }
+      : undefined,
+  );
+}
+
+export function loadConfig(input?: string): AppConfig {
+  const { configPath } = ensureInstanceConfig(input);
+  return parseConfigFile(configPath, "instance");
 }

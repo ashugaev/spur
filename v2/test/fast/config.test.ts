@@ -1,7 +1,7 @@
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, resolveConfigPath } from "../../src/config.js";
+import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -55,6 +55,10 @@ projects:
     expect(config.defaultAgent).toBe("claude");
     expect(config.dataDir).toContain(".spur");
     expect(config.worktreeDir).toContain(".spur/worktrees");
+    expect(config.voice.provider).toBe("whisper_cpp");
+    expect(config.voice.model).toBe("base");
+    expect(config.voice.modelPath).toBeUndefined();
+    expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
     expect(config.projects["backend"]?.worktree).toBe(true);
@@ -250,6 +254,96 @@ projects:
     });
   });
 
+  it("parses a custom voice model path from the instance config", async () => {
+    const configPath = await writeConfig(`
+voice:
+  modelPath: ~/models/ggml-small.bin
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
+  });
+
+  it("parses voice provider and model with minimal config", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: faster_whisper
+  language: auto
+  model: small
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "faster_whisper",
+      language: "auto",
+      model: "small",
+    });
+  });
+
+  it("parses azure_openai voice provider with deployment name only", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: azure_openai
+  model: whisper
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "azure_openai",
+      language: "auto",
+      model: "whisper",
+    });
+  });
+
+  it("keeps legacy voice configs backwards compatible", async () => {
+    const configPath = await writeConfig(`
+voice:
+  modelPath: ~/models/ggml-base.bin
+  language: ru
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice.provider).toBe("whisper_cpp");
+    expect(config.voice.model).toBe("base");
+    expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
+    expect(config.voice.language).toBe("ru");
+  });
+
+  it("rejects unsupported voice providers", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: whisperx
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+    );
+  });
+
   it("parses an optional project spawn preflight prompt", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -364,7 +458,7 @@ projects:
     );
   });
 
-  it("parses devServer command and autoStart", async () => {
+  it("parses devServer as sidecar backward compat", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -376,13 +470,81 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.devServer).toEqual({
-      command: "pnpm dev",
-      autoStart: true,
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: { command: "pnpm dev", autoStart: true },
     });
   });
 
-  it("returns undefined for devServer when the key is absent", async () => {
+  it("parses sidecars block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+      worker:
+        command: "pnpm worker"
+        env:
+          NODE_ENV: production
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: {
+        command: "pnpm dev",
+        autoStart: true,
+        ports: {
+          http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3099 },
+        },
+      },
+      worker: { command: "pnpm worker", autoStart: false, env: { NODE_ENV: "production" } },
+    });
+  });
+
+  it("rejects invalid sidecar port ranges", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3100
+            end: 3000
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.end must be greater than or equal to projects.backend.sidecars.dev.ports.http.start",
+    );
+  });
+
+  it("rejects both devServer and sidecars", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    devServer:
+      command: "pnpm dev"
+    sidecars:
+      dev:
+        command: "pnpm dev"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow('defines both "devServer" and "sidecars"');
+  });
+
+  it("returns empty sidecars when no sidecar or devServer key present", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
@@ -391,7 +553,7 @@ projects:
 
     const config = loadConfig(configPath);
 
-    expect(config.projects["backend"]?.devServer).toBeUndefined();
+    expect(config.projects["backend"]?.sidecars).toEqual({});
   });
 
   it("rejects non-boolean project worktree values", async () => {
@@ -434,7 +596,7 @@ projects:
     const canonicalConfigPath = await realpath(configPath);
 
     expect(resolveConfigPath()).toBe(canonicalConfigPath);
-    expect(loadConfig().configPath).toBe(canonicalConfigPath);
+    expect(loadProjectConfig().configPath).toBe(canonicalConfigPath);
   });
 
   it("reports the default spur.yaml path when no default config file exists", async () => {

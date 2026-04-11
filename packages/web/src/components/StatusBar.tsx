@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import {
   CiStatusDot,
   fetchPrInfo,
@@ -13,6 +13,16 @@ import {
 import type { SpurSessionView } from "@/lib/types";
 
 const AGGREGATE_POLL_MS = 120_000;
+const RESOURCE_POLL_MS = 15_000;
+
+type ResourceMetrics =
+  | { available: false }
+  | {
+      available: true;
+      cpuPercent: number;
+      memoryPercent: number;
+      diskPercent: number;
+    };
 
 interface PrEntry {
   url: string;
@@ -78,13 +88,44 @@ function useAggregatePr(sessions: SpurSessionView[]) {
   return entries;
 }
 
-function useClock() {
-  const [now, setNow] = useState(new Date());
+function useResourceMetrics() {
+  const [metrics, setMetrics] = useState<ResourceMetrics>({ available: false });
+
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(timer);
+    let cancelled = false;
+
+    const run = async () => {
+      try {
+        const response = await fetch("/api/runtime/resources", { cache: "no-store" });
+        if (!response.ok) {
+          if (!cancelled) setMetrics({ available: false });
+          return;
+        }
+        const payload = (await response.json()) as ResourceMetrics;
+        if (!cancelled) {
+          setMetrics(
+            payload.available &&
+              Number.isFinite(payload.cpuPercent) &&
+              Number.isFinite(payload.memoryPercent) &&
+              Number.isFinite(payload.diskPercent)
+              ? payload
+              : { available: false },
+          );
+        }
+      } catch {
+        if (!cancelled) setMetrics({ available: false });
+      }
+    };
+
+    void run();
+    const timer = setInterval(() => void run(), RESOURCE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, []);
-  return now.toLocaleTimeString("en-GB", { hour12: false });
+
+  return metrics;
 }
 
 function PrStateLabel({ state }: { state: PrInfo["state"] }) {
@@ -100,10 +141,9 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const gitError = useGitError();
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
-  const clock = useClock();
-
+  const resourceMetrics = useResourceMetrics();
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
+    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[10px] uppercase tracking-[0.08em]">
       <div className="flex items-center gap-6">
         {/* Daemon status */}
         <div className="flex items-center gap-1.5">
@@ -142,10 +182,35 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
             </div>
           </div>
         ) : null}
+
+        {resourceMetrics.available ? (
+          <div className="flex items-center gap-3 text-[var(--color-text-secondary)]">
+            <span className="flex items-center gap-1">
+              <span>CPU</span>
+              <span className="font-bold text-[var(--color-text-primary)]">
+                {resourceMetrics.cpuPercent}%
+              </span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span>RAM</span>
+              <span className="font-bold text-[var(--color-text-primary)]">
+                {resourceMetrics.memoryPercent}%
+              </span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span>DISK</span>
+              <span className="font-bold text-[var(--color-text-primary)]">
+                {resourceMetrics.diskPercent}%
+              </span>
+            </span>
+          </div>
+        ) : null}
       </div>
 
-      {/* Clock */}
-      <div className="text-[var(--color-text-tertiary)]">{clock}</div>
+      {/* Build version */}
+      <div className="text-[var(--color-text-tertiary)]">
+        {process.env.NEXT_PUBLIC_BUILD_VERSION ?? "dev"}
+      </div>
     </footer>
   );
 }

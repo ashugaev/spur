@@ -85,6 +85,13 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - Button text is always uppercase via `uppercase` class.
 - Placeholder text uses normal casing: "Filter sessions...", "Prompt for the new session..."
 
+### Voice input
+
+- Voice transcription inserts text directly into the target textarea (spawn prompt, session message) — no confirmation popup.
+- Terminal is the exception: voice opens a confirmation popup before typing into tmux, because terminal input is irreversible.
+- During transcription, the mic button shows a red spinning loader replacing the mic icon.
+- Recording state: red border + red tint on the button.
+
 ### Do not
 
 - Use `UNDER_SCORE` style in visible UI text — always use spaces
@@ -93,3 +100,10 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - Use `text-sm`, `text-xs` etc. — body is 12px, components inherit
 - Add gradient overlays or shadows heavier than `shadow-[0_8px_30px_rgba(0,0,0,0.3)]`
 - Show empty attention zones — filter them out
+
+### Visual verification
+
+- Every UI change must include a manual browser test via Playwright before completion.
+- Create a dedicated task/step for visual verification in every UI update checklist.
+- Take screenshots of each touched state (idle, active, error, loading) and review them.
+- Test on the Tailscale HTTPS URL, not just localhost, to catch secure-context issues.

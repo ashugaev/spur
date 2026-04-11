@@ -13,22 +13,24 @@ No UI. No tracker flow. No plugin layer.
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> <prompt...> [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
-`spawn` always takes one task prompt. Optional `steps` are a pipeline skeleton around that task:
+`spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
-- The positional `<prompt...>` is the task.
+- The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
 - `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
+- Empty prompt spawn skips both the initial message and any default `spawn.steps`, so the session opens blank.
 - Trigger configs use `spawn.prompt` plus optional `spawn.steps`.
 
 ```bash
 spur spawn backend-api "Fix the flaky auth test"
 spur spawn backend-api "Fix the flaky auth test" --step research --step test
+spur spawn backend-api
 ```
 
 ```yaml
@@ -40,7 +42,7 @@ spawn:
     - "test"
 ```
 
-When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is.
+When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
@@ -80,6 +82,10 @@ spur service status api-a1b2
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
 If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
 
+For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
+
+If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env, so sibling sessions cannot race onto the same sidecar port range before anything starts listening.
+
 ## Start
 
 ```bash
@@ -96,12 +102,91 @@ sources/triggers.
 Attached configs must agree on `server.host`, `server.port`, `dataDir`, and `worktreeDir`, and
 their `project` ids plus `sessionPrefix` values must stay globally unique within that daemon.
 
+### Daemon restarts and session survival
+
+Tmux sessions (agent workspaces) survive daemon restarts. The systemd unit
+uses `KillMode=process` so that `systemctl restart` only stops the daemon's
+node process — tmux and agents keep running. On startup the daemon calls
+`applyConfig()` which re-discovers living sessions, resumes delivery loops
+for queued messages and running pipelines, and restarts attention monitoring.
+
+In-memory state that does not survive a restart:
+
+- Trigger pending batches and retry counters (re-populated on next source poll)
+- State classification cache (rebuilt within seconds)
+- State history ring buffer (starts empty)
+
+Unit templates live in `deploy/`. After editing, copy to
+`/etc/systemd/system/` and run `systemctl daemon-reload`.
+
 ```bash
 node dist/cli.js spawn backend-api "Fix the flaky auth test" --config spur.yaml
 node dist/cli.js list --config spur.yaml
 node dist/cli.js pause api-a1b2 --config spur.yaml
 node dist/cli.js complete api-a1b2 --config spur.yaml
 node dist/cli.js send api-a1b2 "Run the focused test and report back." --config spur.yaml
+```
+
+## Voice Input
+
+Voice input lets you dictate prompts and messages in the web UI via a microphone button (spawn modal, session message box, terminal controls).
+
+### Server dependencies
+
+```bash
+# whisper_cpp provider dependencies
+git clone --depth 1 https://github.com/ggerganov/whisper.cpp /tmp/whisper.cpp
+cd /tmp/whisper.cpp && cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+sudo cp build/bin/whisper-cli /usr/local/bin/whisper-cli
+
+# ffmpeg is required for whisper_cpp audio conversion
+sudo apt install -y ffmpeg   # or brew install ffmpeg
+
+# whisper_cpp default model
+mkdir -p ~/.cache/whisper.cpp
+curl -L -o ~/.cache/whisper.cpp/ggml-base.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+
+# faster_whisper provider dependencies
+python3 -m venv ~/.spur/venvs/faster-whisper
+~/.spur/venvs/faster-whisper/bin/python -m pip install --upgrade pip faster-whisper
+
+# azure_openai provider credentials
+cat >> ~/.spur/.env <<'EOF'
+AZURE_OPENAI_ENDPOINT=https://<resource>.services.ai.azure.com
+AZURE_OPENAI_API_KEY=<key>
+AZURE_OPENAI_API_VERSION=2024-10-21
+EOF
+chmod 600 ~/.spur/.env
+```
+
+### Config
+
+In `~/.spur/config.yaml`:
+
+```yaml
+voice:
+  provider: whisper_cpp # default: whisper_cpp
+  language: auto # default: auto
+  model: base # default: base
+  # modelPath: ~/.cache/whisper.cpp/ggml-base.bin  # optional override
+```
+
+`voice.modelPath` has priority when set. If omitted, Spur uses `voice.model`.
+For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
+For `faster_whisper`, `voice.language` is used as the transcription language hint.
+For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
+Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
+
+### HTTPS requirement
+
+Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale:
+
+```bash
+sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
+# Access at: https://<hostname>.tail90e846.ts.net/
+# Only reachable within the tailnet.
+# To disable: tailscale serve --https=443 off
 ```
 
 ## Validate
@@ -137,6 +222,14 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 ## Config
 
+Spur now has two config layers:
+
+- global instance config: `~/.spur/config.yaml` by default. This owns daemon host/port, data dirs, tmux socket, default agent, and UI port.
+- local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
+
+`spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
+
 ```yaml
 server:
   port: 4310
@@ -144,6 +237,14 @@ server:
 dataDir: ~/.spur
 worktreeDir: ~/.spur/worktrees
 defaultAgent: claude
+tmux:
+  socketName: spur-4310
+ui:
+  port: 5555
+voice:
+  provider: whisper_cpp
+  language: auto
+  model: base
 
 projects:
   backend-api:
@@ -228,6 +329,10 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex`, default `claude`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
+- `voice.language`: optional transcription language code, default `auto`.
+- `voice.model`: optional model name, default `base`.
+- `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.
