@@ -1,3 +1,0 @@
-{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-003"}
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Do something dangerous"}]},"permissionMode":"dangerously-skip-permissions"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I cannot help with that request."}],"stop_reason":"refusal"}}

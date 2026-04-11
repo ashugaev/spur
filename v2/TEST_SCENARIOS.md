@@ -65,8 +65,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
 - State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
 - Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest, are read-only (mode 444), and are not writable by the test process.
-- Claude JSONL fixture classification covers all waiting reasons (end_turn, stop_sequence, refusal, max_tokens, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh tool_use), and needs_input (stale tool_use).
-- Codex hook state fixture classification covers all hook events: Stop and SessionStart→waiting, UserPromptSubmit, PreToolUse, and PostToolUse→working, including `readAgentHookState` parsing from disk.
+- Claude JSONL fixture classification covers waiting reasons from real history (end_turn, stop_sequence, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh tool_use), and needs_input (stale tool_use).
+- Codex hook state fixture classification covers real captured hook events: Stop→waiting, PreToolUse and PostToolUse→working, including `readAgentHookState` parsing from disk.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.

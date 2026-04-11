@@ -149,8 +149,6 @@ describe("Claude JSONL fixture classification", () => {
   it.each([
     ["waiting-end-turn.jsonl", "waiting"],
     ["waiting-stop-sequence.jsonl", "waiting"],
-    ["waiting-refusal.jsonl", "waiting"],
-    ["waiting-max-tokens.jsonl", "waiting"],
     ["waiting-system.jsonl", "waiting"],
     ["waiting-stop-hook-summary.jsonl", "waiting"],
     ["waiting-file-history-snapshot.jsonl", "waiting"],
@@ -199,16 +197,13 @@ describe("Claude JSONL fixture classification", () => {
 describe("Codex hook state fixture classification", () => {
   it.each([
     ["waiting-stop.json", "waiting"],
-    ["waiting-session-start.json", "waiting"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
-    // Write fixture to a temp location to use readAgentHookState
     const content = await readFile(join(CODEX_DIR, fixture), "utf8");
     const parsed = JSON.parse(content) as { state: string };
     expect(parsed.state).toBe(expectedState);
   });
 
   it.each([
-    ["working-user-prompt-submit.json", "working"],
     ["working-pre-tool-use.json", "working"],
     ["working-post-tool-use.json", "working"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
@@ -218,8 +213,7 @@ describe("Codex hook state fixture classification", () => {
   });
 
   it("readAgentHookState parses fixture files correctly", async () => {
-    // Use a temp dir to test readAgentHookState against fixture content
-    const { mkdtemp, writeFile: writeTmp, rm } = await import("node:fs/promises");
+    const { mkdtemp, rm } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");
     const tmpDir = await mkdtemp(join(tmpdir(), "codex-fixture-"));
     const stateDir = join(tmpDir, "session-agent-state");
@@ -229,8 +223,6 @@ describe("Codex hook state fixture classification", () => {
     try {
       const fixtures = [
         "waiting-stop.json",
-        "waiting-session-start.json",
-        "working-user-prompt-submit.json",
         "working-pre-tool-use.json",
         "working-post-tool-use.json",
       ];
