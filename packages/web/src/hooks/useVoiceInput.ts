@@ -17,8 +17,7 @@ const MICROPHONE_HTTPS_ERROR =
   "Microphone access requires HTTPS. Connect via Tailscale HTTPS or localhost.";
 const MICROPHONE_PERMISSION_ERROR =
   "Microphone access is blocked. Allow microphone permission in your browser and try again.";
-const MICROPHONE_NOT_FOUND_ERROR =
-  "No microphone was found. Connect a microphone and try again.";
+const MICROPHONE_NOT_FOUND_ERROR = "No microphone was found. Connect a microphone and try again.";
 
 async function readVoiceError(response: Response, fallback: string): Promise<string> {
   const text = await response.text();
@@ -46,21 +45,21 @@ function readRecordingStartError(error: unknown): string {
   const normalizedMessage = message.toLowerCase();
 
   if (
-    normalizedName === "notallowederror"
-    || normalizedName === "securityerror"
-    || normalizedMessage.includes("request is not allowed by the user agent")
-    || normalizedMessage.includes("permission denied")
-    || normalizedMessage.includes("user denied permission")
-    || normalizedMessage.includes("permission dismissed")
+    normalizedName === "notallowederror" ||
+    normalizedName === "securityerror" ||
+    normalizedMessage.includes("request is not allowed by the user agent") ||
+    normalizedMessage.includes("permission denied") ||
+    normalizedMessage.includes("user denied permission") ||
+    normalizedMessage.includes("permission dismissed")
   ) {
     return MICROPHONE_PERMISSION_ERROR;
   }
 
   if (
-    normalizedName === "notfounderror"
-    || normalizedName === "devicesnotfounderror"
-    || normalizedMessage.includes("requested device not found")
-    || normalizedMessage.includes("no microphone")
+    normalizedName === "notfounderror" ||
+    normalizedName === "devicesnotfounderror" ||
+    normalizedMessage.includes("requested device not found") ||
+    normalizedMessage.includes("no microphone")
   ) {
     return MICROPHONE_NOT_FOUND_ERROR;
   }
@@ -92,7 +91,9 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
 
-  useEffect(() => { voiceModalOpenRef.current = voiceModalOpen; }, [voiceModalOpen]);
+  useEffect(() => {
+    voiceModalOpenRef.current = voiceModalOpen;
+  }, [voiceModalOpen]);
   const [voiceDraft, setVoiceDraft] = useState("");
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -190,9 +191,9 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                   throw error instanceof Error ? error : new Error(INSERT_ERROR);
                 }
               } else if (voiceModalOpenRef.current) {
-                setVoiceDraft(prev => {
+                setVoiceDraft((prev) => {
                   const base = prev.trimEnd();
-                  return base ? base + ' ' + text : text;
+                  return base ? base + " " + text : text;
                 });
               } else {
                 setVoiceDraft(text);

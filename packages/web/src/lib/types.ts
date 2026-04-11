@@ -171,13 +171,27 @@ export function canComplete(session: DashboardSession): boolean {
 
 export function canRespawn(session: DashboardSession): boolean {
   return (
-    (session.status === "completed" || session.status === "killed" || session.status === "errored") &&
+    (session.status === "completed" ||
+      session.status === "killed" ||
+      session.status === "errored") &&
     !session.runtimeAlive
   );
 }
 
 export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
+}
+
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestampMs: number;
+}
+
+export interface ConversationResponse {
+  messages: ConversationMessage[];
+  durationMs: number;
+  state: SpurSessionState;
 }
 
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {

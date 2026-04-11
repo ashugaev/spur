@@ -120,8 +120,15 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       execFileSync(tmuxPath, [...socketArgs, "set-option", "-t", `=${sessionId}`, "status", "off"]);
       // Bind scroll-up to enter copy mode so wheel scrolls through history.
       execFileSync(tmuxPath, [
-        ...socketArgs, "bind-key", "-n", "WheelUpPane",
-        "if-shell", "-F", "-t", "=", "#{mouse_any_flag}",
+        ...socketArgs,
+        "bind-key",
+        "-n",
+        "WheelUpPane",
+        "if-shell",
+        "-F",
+        "-t",
+        "=",
+        "#{mouse_any_flag}",
         "send-keys -M",
         "if -Ft= '#{pane_in_mode}' 'send-keys -M' 'copy-mode -e; send-keys -M'",
       ]);
@@ -163,7 +170,11 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
             pty.resize(parsed.cols, parsed.rows);
             return;
           }
-          if (parsed.type === "input" && typeof parsed.id === "string" && typeof parsed.data === "string") {
+          if (
+            parsed.type === "input" &&
+            typeof parsed.id === "string" &&
+            typeof parsed.data === "string"
+          ) {
             const session = sessions.get(sessionId);
             if (!session) {
               return;

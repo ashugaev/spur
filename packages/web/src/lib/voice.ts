@@ -39,7 +39,10 @@ const DEFAULT_FASTER_WHISPER_PYTHON = join(
 const FASTER_WHISPER_STARTUP_TIMEOUT_MS = 10 * 60_000;
 const FASTER_WHISPER_REQUEST_TIMEOUT_MS = 5 * 60_000;
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
-const FASTER_WHISPER_WORKER_PATH = resolve(MODULE_DIR, "../../server/voice/faster-whisper-worker.py");
+const FASTER_WHISPER_WORKER_PATH = resolve(
+  MODULE_DIR,
+  "../../server/voice/faster-whisper-worker.py",
+);
 const VOICE_BENCHMARK_ENV = "SPUR_VOICE_BENCHMARK";
 
 type VoiceProvider = "whisper_cpp" | "faster_whisper" | "azure_openai";
@@ -123,7 +126,9 @@ export interface VoiceStatus {
 }
 
 function invalidProviderError(value: string): Error {
-  return new Error(`voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai" (received "${value}")`);
+  return new Error(
+    `voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai" (received "${value}")`,
+  );
 }
 
 function resolveConfigPath(): string {
@@ -203,7 +208,10 @@ function parseEnvFile(content: string): Record<string, string> {
       continue;
     }
     const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^['"]|['"]$/g, "");
+    const value = line
+      .slice(separator + 1)
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
     if (key) {
       entries[key] = value;
     }
@@ -222,7 +230,10 @@ function readVoiceSecrets(): Record<string, string> {
   }
 }
 
-function resolveVoiceSecret(fileSecrets: Record<string, string>, ...keys: string[]): string | undefined {
+function resolveVoiceSecret(
+  fileSecrets: Record<string, string>,
+  ...keys: string[]
+): string | undefined {
   for (const key of keys) {
     const fileValue = fileSecrets[key]?.trim();
     if (fileValue) {
@@ -358,11 +369,14 @@ class FasterWhisperWorker {
   private startupResolve: (() => void) | null = null;
   private startupReject: ((reason: Error) => void) | null = null;
   private queue: Promise<void> = Promise.resolve();
-  private pending = new Map<string, {
-    resolve: (response: FasterWorkerResponse) => void;
-    reject: (error: Error) => void;
-    timer: NodeJS.Timeout;
-  }>();
+  private pending = new Map<
+    string,
+    {
+      resolve: (response: FasterWorkerResponse) => void;
+      reject: (error: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >();
 
   constructor(pythonCommand: string) {
     this.pythonCommand = pythonCommand;
@@ -372,7 +386,10 @@ class FasterWhisperWorker {
     config: ResolvedVoiceConfig,
     audioPath: string,
   ): Promise<{ transcription: VoiceTranscription; metrics: FasterWorkerMetrics }> {
-    const run = async (): Promise<{ transcription: VoiceTranscription; metrics: FasterWorkerMetrics }> => {
+    const run = async (): Promise<{
+      transcription: VoiceTranscription;
+      metrics: FasterWorkerMetrics;
+    }> => {
       const startup = await this.ensureStarted(config);
       const requestId = String(this.nextRequestId++);
       const requestStartedAt = process.hrtime.bigint();
@@ -799,7 +816,9 @@ async function sleep(ms: number): Promise<void> {
   });
 }
 
-async function parseAzureTranscriptionPayload(response: Response): Promise<{ text?: string; error?: { message?: string } }> {
+async function parseAzureTranscriptionPayload(
+  response: Response,
+): Promise<{ text?: string; error?: { message?: string } }> {
   try {
     return (await response.json()) as { text?: string; error?: { message?: string } };
   } catch {
@@ -938,7 +957,9 @@ async function transcribeWithFasterWhisper(
       ...(audioSeconds && audioSeconds > 0
         ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
         : {}),
-      ...(steps["workerStartupMs"] !== undefined ? { coldStart: steps["workerStartupMs"] > 0 } : {}),
+      ...(steps["workerStartupMs"] !== undefined
+        ? { coldStart: steps["workerStartupMs"] > 0 }
+        : {}),
       totalMs,
       steps,
       status: failure ? "error" : "ok",
@@ -1031,7 +1052,8 @@ async function transcribeWithAzureOpenAI(
         if (!isRetryableAzureError(error)) {
           throw error;
         }
-        lastRetryableError = error instanceof Error ? error.message : "Azure OpenAI transcription request failed";
+        lastRetryableError =
+          error instanceof Error ? error.message : "Azure OpenAI transcription request failed";
         if (attempt >= AZURE_TRANSCRIBE_MAX_ATTEMPTS) {
           throw new Error(
             `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError}`,

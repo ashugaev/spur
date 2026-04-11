@@ -214,6 +214,7 @@ export interface SessionRecord {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  retainInList?: boolean;
   slots?: SessionSlots;
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
@@ -378,4 +379,16 @@ export interface ServiceSourceState {
   serviceId: string;
   lastTailLines: string[];
   rules: Record<string, ServiceSourceRuleState>;
+}
+
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestampMs: number;
+}
+
+export interface ConversationResponse {
+  messages: ConversationMessage[];
+  durationMs: number;
+  state: SessionState;
 }
