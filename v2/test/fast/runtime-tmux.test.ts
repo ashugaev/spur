@@ -41,6 +41,7 @@ describe("runtime-tmux", () => {
       sessionName: "api-1",
       cwd: "/tmp/worktree",
       launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      agent: "codex",
     });
 
     const firstCall = execFileAsyncMock.mock.calls[0];
@@ -59,6 +60,7 @@ describe("runtime-tmux", () => {
       "-c",
       "/tmp/worktree",
     ]);
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 
   it("registers status-right link click handling when syncing tmux status", async () => {

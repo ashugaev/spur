@@ -388,6 +388,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -463,6 +464,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("See `v2/README.md` for sidecar usage."),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
@@ -487,6 +489,7 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
     expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
@@ -519,6 +522,7 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        agent: "codex",
       }),
     );
     expect(result.planMode).toBe(true);
@@ -720,6 +724,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/repo/api",
       launchCommand: "claude --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -1809,6 +1814,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -1870,6 +1876,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
   });
@@ -2536,6 +2543,7 @@ describe("SessionService", () => {
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
       launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+      agent: "claude",
       env: {
         SPUR_SESSION: "api-1",
         SPUR_PROJECT: "api",
@@ -2608,6 +2616,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         launchCommand:
           "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
+        agent: "claude",
       }),
     );
   });
