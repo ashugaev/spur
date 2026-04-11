@@ -13,7 +13,12 @@ interface TerminalModalProps {
   titleSuffix?: string;
 }
 
-export function TerminalModal({ session, onClose, tmuxSessionOverride, titleSuffix }: TerminalModalProps) {
+export function TerminalModal({
+  session,
+  onClose,
+  tmuxSessionOverride,
+  titleSuffix,
+}: TerminalModalProps) {
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";

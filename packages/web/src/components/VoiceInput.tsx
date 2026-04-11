@@ -3,7 +3,14 @@
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
 const MicIcon = () => (
-  <svg aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+  <svg
+    aria-hidden="true"
+    className="h-4 w-4"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    viewBox="0 0 24 24"
+  >
     <path d="M12 4a3 3 0 0 1 3 3v4a3 3 0 0 1-6 0V7a3 3 0 0 1 3-3Z" />
     <path d="M19 11a7 7 0 0 1-14 0" />
     <path d="M12 18v3" />
@@ -12,7 +19,14 @@ const MicIcon = () => (
 );
 
 const Spinner = () => (
-  <svg aria-hidden="true" className="voice-spinner h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+  <svg
+    aria-hidden="true"
+    className="voice-spinner h-4 w-4"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    viewBox="0 0 24 24"
+  >
     <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" />
   </svg>
 );
@@ -22,14 +36,17 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
   return <MicIcon />;
 }
 
-const ACTIVE_STYLE = "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
-const IDLE_STYLE = "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]";
+const ACTIVE_STYLE =
+  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
+const IDLE_STYLE =
+  "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]";
 
 export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
   if (!voice.canUseVoice) return null;
   const active = voice.recording || voice.voiceBusy === "transcribing";
-  const baseClass = className
-    ?? `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
+  const baseClass =
+    className ??
+    `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}

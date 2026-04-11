@@ -333,15 +333,9 @@ export async function startServer(
         return;
       }
 
-      const sidecarMatch = path.match(
-        /^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/,
-      );
+      const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        sendJson(
-          response,
-          200,
-          await service.startSidecar(sidecarMatch[1], sidecarMatch[2]),
-        );
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
         return;
       }
 

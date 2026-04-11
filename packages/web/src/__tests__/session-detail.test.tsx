@@ -137,9 +137,7 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
-      expect(
-        screen.getByRole("button", { name: "Start voice recording" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
@@ -151,9 +149,7 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
 
     await waitFor(() => {
-      expect(
-        screen.getByDisplayValue("Fix the flaky tests before release"),
-      ).toBeInTheDocument();
+      expect(screen.getByDisplayValue("Fix the flaky tests before release")).toBeInTheDocument();
     });
 
     expect(screen.queryByRole("dialog", { name: "Confirm voice input" })).not.toBeInTheDocument();
@@ -162,10 +158,7 @@ describe("SessionDetail voice input", () => {
       "/api/runtime/voice/transcribe",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      "/api/sessions/api-a1/send",
-      expect.anything(),
-    );
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/sessions/api-a1/send", expect.anything());
   });
 
   it("shows an inline error when stopping recording yields no audio", async () => {
@@ -190,9 +183,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Start voice recording" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
@@ -204,14 +195,13 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("Voice recording captured no audio. Check your microphone input and try again."),
+        screen.getByText(
+          "Voice recording captured no audio. Check your microphone input and try again.",
+        ),
       ).toBeInTheDocument();
     });
 
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      "/api/runtime/voice/transcribe",
-      expect.anything(),
-    );
+    expect(fetchMock).not.toHaveBeenCalledWith("/api/runtime/voice/transcribe", expect.anything());
   });
 
   it("shows the transcribe API error message instead of a raw JSON blob", async () => {
@@ -239,9 +229,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Start voice recording" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
@@ -266,11 +254,14 @@ describe("SessionDetail voice input", () => {
       configurable: true,
       value: {
         getUserMedia: vi.fn().mockRejectedValue(
-          Object.assign(new Error(
-            "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission.",
-          ), {
-            name: "NotAllowedError",
-          }),
+          Object.assign(
+            new Error(
+              "The request is not allowed by the user agent or the platform in the current context, possibly because the user denied permission.",
+            ),
+            {
+              name: "NotAllowedError",
+            },
+          ),
         ),
       },
     });
@@ -294,9 +285,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Start voice recording" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
@@ -308,9 +297,7 @@ describe("SessionDetail voice input", () => {
         ),
       ).toBeInTheDocument();
     });
-    expect(
-      screen.getByRole("button", { name: "Start voice recording" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
   });
 
   it("keeps the back link on the default dashboard route when no project query is present", async () => {

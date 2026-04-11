@@ -51,7 +51,6 @@
   `claude --dangerously-skip-permissions` and
   `codex --dangerously-bypass-approvals-and-sandbox`.
 
-
 ## Agent Isolation
 
 - The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.

@@ -182,9 +182,7 @@ describe("client.ensureServer", () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);
     // Probe: running daemon
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify(runtimeInfo()), { status: 200 }),
-    );
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
     // waitUntilDaemonPidChanges: daemon stopped
     fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
     // First waitForReadyDaemon: all 160 attempts fail (no external restart)
