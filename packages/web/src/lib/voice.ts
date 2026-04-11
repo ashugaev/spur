@@ -17,6 +17,11 @@ const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-
 const DEFAULT_VOICE_MODEL = "base";
 const DEFAULT_VOICE_LANGUAGE = "auto";
 const DEFAULT_AZURE_OPENAI_API_VERSION = "2024-10-21";
+const AZURE_TRANSCRIBE_MAX_ATTEMPTS = 5;
+const AZURE_TRANSCRIBE_BASE_DELAY_MS = 250;
+const AZURE_TRANSCRIBE_MAX_DELAY_MS = 5_000;
+const AZURE_TRANSCRIBE_JITTER_MS = 200;
+const AZURE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const LOCAL_WHISPER_CPP_ROOT = join(homedir(), "whisper.cpp");
 const LOCAL_WHISPER_CPP_CLI = join(LOCAL_WHISPER_CPP_ROOT, "build", "bin", "whisper-cli");
 const LOCAL_WHISPER_CPP_LIBRARY_DIRS = [
@@ -738,6 +743,70 @@ function extractAzureOpenAIError(body: unknown, fallback: string): string {
   return fallback;
 }
 
+function isRetryableAzureStatus(status: number): boolean {
+  return AZURE_RETRYABLE_STATUS_CODES.has(status);
+}
+
+function parseRetryAfterMs(headers: Headers): number | null {
+  const retryAfter = headers.get("retry-after")?.trim();
+  if (!retryAfter) {
+    return null;
+  }
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000);
+  }
+  const resetAt = Date.parse(retryAfter);
+  if (!Number.isFinite(resetAt)) {
+    return null;
+  }
+  return Math.max(0, resetAt - Date.now());
+}
+
+function isRetryableAzureError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (error.name === "AbortError" || error instanceof TypeError) {
+    return true;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("network") ||
+    message.includes("fetch failed") ||
+    message.includes("socket") ||
+    message.includes("timeout") ||
+    message.includes("temporar")
+  );
+}
+
+function resolveAzureRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+  if (retryAfterMs !== null) {
+    return Math.max(0, retryAfterMs);
+  }
+  const exponential = AZURE_TRANSCRIBE_BASE_DELAY_MS * 2 ** (attempt - 1);
+  const jitter = Math.floor(Math.random() * AZURE_TRANSCRIBE_JITTER_MS);
+  return Math.min(exponential + jitter, AZURE_TRANSCRIBE_MAX_DELAY_MS);
+}
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return;
+  }
+  await new Promise<void>((resolveSleep) => {
+    const timer = setTimeout(resolveSleep, ms);
+    timer.unref?.();
+  });
+}
+
+async function parseAzureTranscriptionPayload(response: Response): Promise<{ text?: string; error?: { message?: string } }> {
+  try {
+    return (await response.json()) as { text?: string; error?: { message?: string } };
+  } catch {
+    return {};
+  }
+}
+
 async function transcribeWithWhisperCpp(
   config: ResolvedVoiceConfig,
   audio: Buffer,
@@ -904,38 +973,77 @@ async function transcribeWithAzureOpenAI(
     audioSeconds = await readAudioDurationSeconds(inputPath);
     pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
 
-    const requestStartedAt = process.hrtime.bigint();
-    const formData = new FormData();
-    formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
-    if (config.language !== "auto") {
-      formData.append("language", config.language);
+    let lastRetryableError: string | null = null;
+    for (let attempt = 1; attempt <= AZURE_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
+      const requestStartedAt = process.hrtime.bigint();
+      const attemptMetricKey = `requestAttempt${attempt}Ms`;
+      try {
+        const formData = new FormData();
+        formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
+        if (config.language !== "auto") {
+          formData.append("language", config.language);
+        }
+
+        const response = await fetch(
+          `${credentials.endpoint}/openai/deployments/${encodeURIComponent(config.model)}/audio/transcriptions?api-version=${encodeURIComponent(credentials.apiVersion)}`,
+          {
+            method: "POST",
+            headers: {
+              "api-key": credentials.apiKey,
+            },
+            body: formData,
+          },
+        );
+        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+        if (attempt === 1) {
+          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+        }
+
+        const payload = await parseAzureTranscriptionPayload(response);
+        if (response.ok) {
+          if (!payload.text?.trim()) {
+            throw new Error("transcription returned empty text");
+          }
+          return {
+            text: payload.text.trim(),
+            provider: "azure_openai",
+            model: config.model,
+            language: config.language,
+          };
+        }
+
+        const message = extractAzureOpenAIError(payload, "Azure OpenAI transcription failed");
+        if (!isRetryableAzureStatus(response.status)) {
+          throw new Error(message);
+        }
+        lastRetryableError = message;
+        if (attempt >= AZURE_TRANSCRIBE_MAX_ATTEMPTS) {
+          throw new Error(
+            `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`,
+          );
+        }
+        await sleep(resolveAzureRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
+      } catch (error) {
+        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+        if (attempt === 1) {
+          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+        }
+        if (!isRetryableAzureError(error)) {
+          throw error;
+        }
+        lastRetryableError = error instanceof Error ? error.message : "Azure OpenAI transcription request failed";
+        if (attempt >= AZURE_TRANSCRIBE_MAX_ATTEMPTS) {
+          throw new Error(
+            `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError}`,
+            error instanceof Error ? { cause: error } : undefined,
+          );
+        }
+        await sleep(resolveAzureRetryDelayMs(attempt, null));
+      }
     }
-    const response = await fetch(
-      `${credentials.endpoint}/openai/deployments/${encodeURIComponent(config.model)}/audio/transcriptions?api-version=${encodeURIComponent(credentials.apiVersion)}`,
-      {
-        method: "POST",
-        headers: {
-          "api-key": credentials.apiKey,
-        },
-        body: formData,
-      },
+    throw new Error(
+      `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError ?? "unknown error"}`,
     );
-    pushStep(steps, "requestMs", elapsedMs(requestStartedAt));
-
-    const payload = (await response.json()) as { text?: string; error?: { message?: string } };
-    if (!response.ok) {
-      throw new Error(extractAzureOpenAIError(payload, "Azure OpenAI transcription failed"));
-    }
-    if (!payload.text?.trim()) {
-      throw new Error("transcription returned empty text");
-    }
-
-    return {
-      text: payload.text.trim(),
-      provider: "azure_openai",
-      model: config.model,
-      language: config.language,
-    };
   } catch (error) {
     failure = error instanceof Error ? error : new Error("startup_failed");
     throw failure;
