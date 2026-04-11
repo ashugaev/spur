@@ -8,6 +8,7 @@ import {
   makeSessionWithPR,
   makeSessionWithTracker,
   mockSessions,
+  gotoMocked,
 } from "./fixtures.js";
 
 // D1: Header renders correctly
@@ -20,8 +21,7 @@ test.describe("D1: Header renders correctly", () => {
   });
 
   test("All Projects title visible", async ({ page }) => {
-    await mockSessions(page, []);
-    await page.goto("/");
+    await gotoMocked(page, "/", []);
     await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
   });
 
@@ -363,12 +363,10 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   });
 
   test("footer contains version text", async ({ page }) => {
-    await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
     await expect(page.locator("footer")).toBeVisible();
-    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
-    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+    // Footer shows build version: "v20YY.MM.DD HH:MM" pattern
+    await expect(page.locator("footer")).toContainText(/v20\d\d\.\d\d\.\d\d/);
   });
 
   test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
