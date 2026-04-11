@@ -463,6 +463,7 @@ describe("SessionService", () => {
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
       expect.stringContaining("See `v2/README.md` for sidecar usage."),
+      { agent: "claude" },
     );
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
