@@ -317,7 +317,9 @@ describe("SessionService", () => {
     createTmuxCommandSessionMock.mockReset().mockResolvedValue(undefined);
     createTmuxSidecarSessionMock.mockReset().mockResolvedValue(undefined);
     sidecarTmuxAliveMock.mockReset().mockResolvedValue(false);
-    sidecarTmuxSessionMock.mockReset().mockImplementation((id: string, name: string) => `${id}--${name}`);
+    sidecarTmuxSessionMock
+      .mockReset()
+      .mockImplementation((id: string, name: string) => `${id}--${name}`);
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);

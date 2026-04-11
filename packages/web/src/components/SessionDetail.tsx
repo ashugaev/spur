@@ -141,7 +141,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const voice = useVoiceInput({
-    onTranscribed: (text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) =>
+      setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
@@ -265,17 +266,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRespawn = async () => {
     setBusyAction("respawn");
     try {
-      const response = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/respawn`,
-        { method: "POST" },
-      );
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
+        method: "POST",
+      });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
-      setError(
-        respawnError instanceof Error ? respawnError.message : "Failed to respawn session",
-      );
+      setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
     } finally {
       setBusyAction(null);
     }
@@ -364,9 +362,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
   const isSessionTerminal = Boolean(
     session &&
-      (requestedTerminalSessionId === session.id ||
-        (requestedTerminalSessionId !== null &&
-          requestedTerminalSessionId.startsWith(`${session.id}--`))),
+    (requestedTerminalSessionId === session.id ||
+      (requestedTerminalSessionId !== null &&
+        requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
@@ -375,14 +373,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (isSessionTerminal && canAttach) return;
 
     const query = withTerminalQuery(window.location.search, null);
-    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   }, [canAttach, isSessionTerminal, requestedTerminalSessionId, session]);
 
   const syncTerminalFilter = (terminalSessionId: string | null) => {
     if (typeof window === "undefined") return;
     const query = withTerminalQuery(window.location.search, terminalSessionId);
-    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   };
 
@@ -617,7 +623,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     )}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                        <VoiceStatusHint voice={voice} />{" "}
+                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <button
                         type="button"

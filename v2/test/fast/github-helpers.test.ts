@@ -126,7 +126,14 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
+    const states = [
+      "FAILURE",
+      "TIMED_OUT",
+      "CANCELLED",
+      "ACTION_REQUIRED",
+      "STARTUP_FAILURE",
+      "STALE",
+    ];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
@@ -148,8 +155,6 @@ describe("hasMergeConflict", () => {
   });
 
   it("returns false for null-ish fields", () => {
-    expect(
-      hasMergeConflict(prSummary({ mergeable: "", mergeStateStatus: "" })),
-    ).toBe(false);
+    expect(hasMergeConflict(prSummary({ mergeable: "", mergeStateStatus: "" }))).toBe(false);
   });
 });

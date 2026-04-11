@@ -166,7 +166,7 @@ function normalizeSpawnRequest(
   planMode: boolean;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
-  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -275,7 +275,9 @@ function withQueuedMessages(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
-  return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
+  return (
+    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+  );
 }
 
 export function buildRestorePrompt(prompt: string): string {
@@ -793,7 +795,9 @@ export class SessionService {
     }
 
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
+      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
+        session.project
+      ];
       if (localProject) {
         return localProject;
       }
@@ -1277,10 +1281,7 @@ export class SessionService {
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
         const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(
-          launchPlan.initialMessage,
-          sidecarNames,
-        );
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
         await this.sendAgentMessage(runningRecord, spawnInitialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -1574,10 +1575,7 @@ export class SessionService {
     });
   }
 
-  async complete(
-    sessionId: string,
-    options?: { retainInList?: boolean },
-  ): Promise<SessionView> {
+  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
     return this.applyManualStatus(sessionId, "completed", options);
   }
 
@@ -2067,11 +2065,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ??
-        buildAgentLaunchPlan(
-          current.agent,
-          restorePrompt,
-          withPlanMode(hookSetup, planMode),
-        );
+        buildAgentLaunchPlan(current.agent, restorePrompt, withPlanMode(hookSetup, planMode));
       if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
@@ -2179,7 +2173,9 @@ export class SessionService {
       session.status !== "killed" &&
       session.status !== "errored"
     ) {
-      throw new Error(`Session ${sessionId} is not in a terminal state (status: ${session.status})`);
+      throw new Error(
+        `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
+      );
     }
 
     this.logEvent("session.respawn.started", {

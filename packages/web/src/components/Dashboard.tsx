@@ -68,7 +68,9 @@ function StatItem({
       type="button"
     >
       <span style={color ? { color } : undefined}>{icon}</span>
-      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">{label}:</span>
+      <span className="hidden min-w-0 truncate text-[var(--color-text-secondary)] sm:inline">
+        {label}:
+      </span>
       <span
         className="font-bold text-[var(--color-text-primary)]"
         style={color ? { color } : undefined}
@@ -162,7 +164,8 @@ export function Dashboard() {
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const voice = useVoiceInput({
-    onTranscribed: (text) => setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) =>
+      setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
@@ -262,7 +265,9 @@ export function Dashboard() {
 
   const allSessions = useMemo(
     () =>
-      rawSessions.map((session) => toDashboardSession(session, projectNameMap.get(session.project))),
+      rawSessions.map((session) =>
+        toDashboardSession(session, projectNameMap.get(session.project)),
+      ),
     [projectNameMap, rawSessions],
   );
 
@@ -374,7 +379,11 @@ export function Dashboard() {
   const syncTerminalFilter = (terminalSessionId: string | null) => {
     if (typeof window === "undefined") return;
     const query = withTerminalQuery(window.location.search, terminalSessionId);
-    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   };
 
@@ -408,7 +417,10 @@ export function Dashboard() {
         .catch(() => {});
     }, 500);
 
-    return () => { cancelled = true; clearTimeout(timer); };
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [spawnProjectId, spawnPrompt, spawnAgent, spawnWorkspaceMode, spawnDefaultBranch]);
 
   const handleSpawn = async () => {
@@ -476,12 +488,21 @@ export function Dashboard() {
   }, [allSessions, requestedTerminalSessionId]);
 
   useEffect(() => {
-    if (loading || !requestedTerminalSessionId || terminalSession || typeof window === "undefined") {
+    if (
+      loading ||
+      !requestedTerminalSessionId ||
+      terminalSession ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
     const query = withTerminalQuery(window.location.search, null);
-    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   }, [loading, requestedTerminalSessionId, terminalSession]);
 

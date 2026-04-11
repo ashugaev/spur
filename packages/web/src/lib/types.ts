@@ -156,7 +156,9 @@ export function canComplete(session: DashboardSession): boolean {
 
 export function canRespawn(session: DashboardSession): boolean {
   return (
-    (session.status === "completed" || session.status === "killed" || session.status === "errored") &&
+    (session.status === "completed" ||
+      session.status === "killed" ||
+      session.status === "errored") &&
     !session.runtimeAlive
   );
 }

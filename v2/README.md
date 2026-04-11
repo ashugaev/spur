@@ -111,6 +111,7 @@ node process — tmux and agents keep running. On startup the daemon calls
 for queued messages and running pipelines, and restarts attention monitoring.
 
 In-memory state that does not survive a restart:
+
 - Trigger pending batches and retry counters (re-populated on next source poll)
 - State classification cache (rebuilt within seconds)
 - State history ring buffer (starts empty)
@@ -165,9 +166,9 @@ In `~/.spur/config.yaml`:
 
 ```yaml
 voice:
-  provider: whisper_cpp   # default: whisper_cpp
-  language: auto          # default: auto
-  model: base             # default: base
+  provider: whisper_cpp # default: whisper_cpp
+  language: auto # default: auto
+  model: base # default: base
   # modelPath: ~/.cache/whisper.cpp/ggml-base.bin  # optional override
 ```
 

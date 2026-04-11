@@ -181,6 +181,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 ### Sidecars
 
 **Tier: fast**
+
 - `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
@@ -191,6 +192,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 
 **Tier: runtime integration**
+
 - Sidecar auto-starts on spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
 - Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
