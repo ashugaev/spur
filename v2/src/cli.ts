@@ -48,6 +48,7 @@ import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./run
 import { startServer } from "./server.js";
 import type {
   ProjectConfigMutationResponse,
+  RespawnSessionRequest,
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
@@ -521,11 +522,54 @@ function parseSlotLink(value: string): SessionLink {
 }
 
 function currentSessionId(): string {
-  const sessionId = process.env["SPUR_SESSION"]?.trim();
+  const sessionId = runningSessionId();
   if (!sessionId) {
     throw new Error("service run requires a live Spur session");
   }
   return sessionId;
+}
+
+function runningSessionId(): string | undefined {
+  const sessionId = process.env["SPUR_SESSION"]?.trim();
+  return sessionId ? sessionId : undefined;
+}
+
+function respawnParentSessionId(): string | undefined {
+  const sessionId = runningSessionId();
+  if (!sessionId) {
+    return undefined;
+  }
+  if (process.env["SPUR_SIDECAR_NAME"]?.trim()) {
+    return undefined;
+  }
+  const sessionToolDir = process.env["SPUR_SESSION_TOOL_DIR"]?.trim();
+  return sessionToolDir ? sessionId : undefined;
+}
+
+function respawnRequestBody(): RespawnSessionRequest {
+  const sessionId = respawnParentSessionId();
+  return sessionId ? { terminateSessionId: sessionId } : {};
+}
+
+export function terminateRespawnParentProcess(): boolean {
+  if (process.env["TEST"] || process.env["VITEST"]) {
+    return false;
+  }
+  if (!process.env["TMUX"]) {
+    return false;
+  }
+  if (!respawnParentSessionId()) {
+    return false;
+  }
+  try {
+    process.kill(process.ppid, "SIGTERM");
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function parsePortOption(value: string, label: string): number {
@@ -1022,13 +1066,14 @@ async function runInteractiveSessionList(
       const respawned = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/respawn`,
-        {},
+        respawnRequestBody(),
         configPath,
       );
       sessions = sortSessionsForList([...sessions, respawned]);
       selectedSessionId = respawned.id;
       pendingKillConfirmationSessionId = null;
       statusMessage = brandLine(`Respawned as ${respawned.id}.`);
+      return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -1472,12 +1517,13 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${sessionId}/respawn`,
-            {},
+            respawnRequestBody(),
             configPath,
           ),
         success: (session) => `Respawned as ${session.id}.`,
         render: renderSessionCard,
       });
+      terminateRespawnParentProcess();
     });
 
   const service = program

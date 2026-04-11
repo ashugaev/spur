@@ -11,6 +11,7 @@ import type {
   DisconnectProjectConfigRequest,
   KillSessionRequest,
   PreflightRequest,
+  RespawnSessionRequest,
   RunServiceRequest,
   SendMessageRequest,
   SpawnSessionRequest,
@@ -304,7 +305,24 @@ export async function startServer(
 
       const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
       if (method === "POST" && respawnSessionId) {
-        sendJson(response, 200, await service.respawn(respawnSessionId));
+        const body = await readJsonBody<RespawnSessionRequest>(request);
+        const respawned = await service.respawn(respawnSessionId);
+        sendJson(response, 200, respawned);
+        const terminateSessionId = body.terminateSessionId?.trim();
+        if (
+          terminateSessionId &&
+          terminateSessionId !== respawned.id &&
+          terminateSessionId !== respawnSessionId
+        ) {
+          queueMicrotask(() => {
+            void service.complete(terminateSessionId).catch((error) => {
+              const message = error instanceof Error ? error.message : String(error);
+              logger.warn?.(
+                `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
+              );
+            });
+          });
+        }
         return;
       }
 
