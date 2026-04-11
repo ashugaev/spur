@@ -491,7 +491,7 @@ export function Dashboard() {
         <header className="mb-4 flex flex-wrap items-center gap-3">
           <div className="flex shrink-0 flex-wrap items-center gap-3">
             <div className="flex shrink-0 items-center gap-3">
-              <span className="text-lg text-[var(--color-accent)]">𖤓</span>
+              <span className="text-xl text-[var(--color-accent)]">𖤓</span>
               <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
                 {activeProjectName}
               </h1>

@@ -92,7 +92,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
   return (
-    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[9px] uppercase tracking-[0.08em]">
+    <footer className="fixed bottom-0 left-0 right-0 z-40 flex h-6 items-center justify-between border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-[10px] uppercase tracking-[0.08em]">
       <div className="flex items-center gap-6">
         {/* Daemon status */}
         <div className="flex items-center gap-1.5">
