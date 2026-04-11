@@ -10,7 +10,11 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import {
+  readClaudeConversation,
+  readClaudeJsonlState,
+  type ClaudeJsonlReaderState,
+} from "./claude-jsonl-state.js";
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -63,6 +67,7 @@ import {
   type AgentName,
   type AppConfig,
   type BranchSource,
+  type ConversationResponse,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -161,7 +166,7 @@ function normalizeSpawnRequest(
   planMode: boolean;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
-  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -270,10 +275,12 @@ function withQueuedMessages(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
-  return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
+  return (
+    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+  );
 }
 
-function buildRestorePrompt(prompt: string): string {
+export function buildRestorePrompt(prompt: string): string {
   return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
 }
 
@@ -788,7 +795,9 @@ export class SessionService {
     }
 
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
+      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
+        session.project
+      ];
       if (localProject) {
         return localProject;
       }
@@ -837,7 +846,7 @@ export class SessionService {
 
   async list(): Promise<SessionView[]> {
     const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !isTerminalSessionStatus(session.status),
+      (session) => !isTerminalSessionStatus(session.status) || session.retainInList === true,
     );
     const views: SessionView[] = [];
     for (const session of sessions) {
@@ -852,6 +861,16 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  async getConversation(sessionId: string): Promise<ConversationResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const durationMs = Date.now() - new Date(session.createdAt).getTime();
+    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    if (session.agent !== "claude") return fallback;
+    const result = await readClaudeConversation(session.worktreePath);
+    return result ? { ...result, durationMs } : fallback;
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -1262,10 +1281,7 @@ export class SessionService {
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
         const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(
-          launchPlan.initialMessage,
-          sidecarNames,
-        );
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
         await this.sendAgentMessage(runningRecord, spawnInitialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -1559,8 +1575,8 @@ export class SessionService {
     });
   }
 
-  async complete(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed");
+  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", options);
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -1683,6 +1699,7 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    options?: { retainInList?: boolean },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -1722,7 +1739,11 @@ export class SessionService {
       ...session,
       status: targetStatus,
       updatedAt: nowIso(),
+      ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (!options?.retainInList) {
+      delete record.retainInList;
+    }
     writeSession(this.config.dataDir, record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -1795,6 +1816,7 @@ export class SessionService {
       status: "killed",
       updatedAt: nowIso(),
     };
+    delete record.retainInList;
     writeSession(this.config.dataDir, record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -2043,11 +2065,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ??
-        buildAgentLaunchPlan(
-          current.agent,
-          restorePrompt,
-          withPlanMode(hookSetup, planMode),
-        );
+        buildAgentLaunchPlan(current.agent, restorePrompt, withPlanMode(hookSetup, planMode));
       if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
@@ -2155,7 +2173,9 @@ export class SessionService {
       session.status !== "killed" &&
       session.status !== "errored"
     ) {
-      throw new Error(`Session ${sessionId} is not in a terminal state (status: ${session.status})`);
+      throw new Error(
+        `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
+      );
     }
 
     this.logEvent("session.respawn.started", {

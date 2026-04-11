@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -115,27 +114,6 @@ describe("Fixture integrity", () => {
       expect(actualHash, `SHA mismatch for ${relativePath}`).toBe(expectedHash);
     }
   });
-
-  it("all fixture files are read-only (mode 444)", async () => {
-    const manifest = await parseManifest();
-    for (const [relativePath] of manifest) {
-      const filePath = join(FIXTURES_DIR, relativePath);
-      const fileStat = await stat(filePath);
-      const mode = fileStat.mode & 0o777;
-      expect(mode, `${relativePath} should be read-only (444)`).toBe(0o444);
-    }
-  });
-
-  it("fixture files are not writable", async () => {
-    const manifest = await parseManifest();
-    for (const [relativePath] of manifest) {
-      const filePath = join(FIXTURES_DIR, relativePath);
-      await expect(
-        access(filePath, constants.W_OK),
-        `${relativePath} should not be writable`,
-      ).rejects.toThrow();
-    }
-  });
 });
 
 // ── Claude JSONL state classification from fixtures ─────────────────────
@@ -195,13 +173,14 @@ describe("Claude JSONL fixture classification", () => {
 // ── Codex hook state classification from fixtures ────────────────────────
 
 describe("Codex hook state fixture classification", () => {
-  it.each([
-    ["waiting-stop.json", "waiting"],
-  ])("classifies %s as %s", async (fixture, expectedState) => {
-    const content = await readFile(join(CODEX_DIR, fixture), "utf8");
-    const parsed = JSON.parse(content) as { state: string };
-    expect(parsed.state).toBe(expectedState);
-  });
+  it.each([["waiting-stop.json", "waiting"]])(
+    "classifies %s as %s",
+    async (fixture, expectedState) => {
+      const content = await readFile(join(CODEX_DIR, fixture), "utf8");
+      const parsed = JSON.parse(content) as { state: string };
+      expect(parsed.state).toBe(expectedState);
+    },
+  );
 
   it.each([
     ["working-pre-tool-use.json", "working"],

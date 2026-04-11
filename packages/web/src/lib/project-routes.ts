@@ -24,10 +24,7 @@ export function getTerminalQuerySessionId(searchParams: URLSearchParams): string
   return value ? value : null;
 }
 
-export function withTerminalQuery(
-  search: string,
-  terminalSessionId: string | null,
-): string {
+export function withTerminalQuery(search: string, terminalSessionId: string | null): string {
   const params = new URLSearchParams(search);
   if (terminalSessionId) {
     params.set(TERMINAL_QUERY_PARAM, terminalSessionId);
