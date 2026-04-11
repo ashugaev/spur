@@ -278,7 +278,7 @@ export function isRestorableSession(
   return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
 }
 
-function buildRestorePrompt(prompt: string): string {
+export function buildRestorePrompt(prompt: string): string {
   return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
 }
 
@@ -842,7 +842,7 @@ export class SessionService {
 
   async list(): Promise<SessionView[]> {
     const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !isTerminalSessionStatus(session.status),
+      (session) => !isTerminalSessionStatus(session.status) || session.retainInList === true,
     );
     const views: SessionView[] = [];
     for (const session of sessions) {
@@ -1574,8 +1574,11 @@ export class SessionService {
     });
   }
 
-  async complete(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed");
+  async complete(
+    sessionId: string,
+    options?: { retainInList?: boolean },
+  ): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", options);
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -1698,6 +1701,7 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    options?: { retainInList?: boolean },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -1737,7 +1741,11 @@ export class SessionService {
       ...session,
       status: targetStatus,
       updatedAt: nowIso(),
+      ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (!options?.retainInList) {
+      delete record.retainInList;
+    }
     writeSession(this.config.dataDir, record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -1810,6 +1818,7 @@ export class SessionService {
       status: "killed",
       updatedAt: nowIso(),
     };
+    delete record.retainInList;
     writeSession(this.config.dataDir, record);
     this.logEvent("session.kill.completed", {
       level: "info",

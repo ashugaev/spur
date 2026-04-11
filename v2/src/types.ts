@@ -206,6 +206,7 @@ export interface SessionRecord {
   status: SessionStatus;
   createdAt: string;
   updatedAt: string;
+  retainInList?: boolean;
   slots?: SessionSlots;
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;

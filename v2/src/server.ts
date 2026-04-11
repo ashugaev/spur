@@ -321,7 +321,7 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId).catch((error) => {
+            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
               const message = error instanceof Error ? error.message : String(error);
               logger.warn?.(
                 `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
