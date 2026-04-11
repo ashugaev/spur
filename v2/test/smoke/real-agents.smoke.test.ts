@@ -3,7 +3,6 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { formatSessionLinkDisplay } from "../../src/session-link-display.js";
 import { SessionService } from "../../src/session-service.js";
 import type { AgentName, SpawnResult } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
@@ -20,13 +19,7 @@ const SMOKE_BASE_REF = await git(SMOKE_REPO_DIR, "rev-parse", "HEAD");
 const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
 const CODEX_BIN = await binaryPath("codex");
-const SINGLE_SMOKE_TEST_TIMEOUT_MS = 420_000;
 const GROUP_SMOKE_TEST_TIMEOUT_MS = 480_000;
-
-function renderExpectedStatusText(value: string): string {
-  const escaped = value.replace(/\s+/g, " ").trim().replace(/#/g, "##");
-  return escaped.length > 18 ? `${escaped.slice(0, 15)}...` : escaped;
-}
 
 interface AuthStatus {
   available: boolean;
@@ -229,15 +222,17 @@ async function runSmoke(
   const dataDir = join(rootDir, "data");
   const worktreeDir = join(rootDir, "worktrees");
   const sessionPrefix = `smoke-${agent}-${port}`;
-  const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
-  cleanupItems.push(cleanupItem);
-  const preflightBranch = options?.expectedPreflightBranch
+  const tmuxSocketName = `spur-${port}`;
+  const expectedPreflightBranch = options?.expectedPreflightBranch
     ? `${options.expectedPreflightBranch}-${port}`
     : undefined;
+  const cleanupItem: CleanupItem = { rootDir, sessionPrefix };
+  cleanupItems.push(cleanupItem);
 
   await syncTmuxEnvironment({
     HOME: process.env.HOME,
     PATH: process.env.PATH,
+    SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
     SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
     SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
   });
@@ -253,10 +248,10 @@ async function runSmoke(
       baseRef: SMOKE_BASE_REF,
       sessionPrefix,
       agent,
-      ...(preflightBranch
+      ...(expectedPreflightBranch
         ? {
             extraProjectYaml: `    preflight:
-      prompt: "Set branch exactly to ${preflightBranch}."
+      prompt: "Set branch exactly to ${expectedPreflightBranch}."
 `,
           }
         : {}),
@@ -266,31 +261,28 @@ async function runSmoke(
 
   await withPinnedAgentBinaries(async () => {
     const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
-    const initialSmokeTimeoutMs = 240_000;
+    const initialSmokeTimeoutMs = agent === "codex" ? 240_000 : 180_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
       { label: "tracker", url: `https://tracker.example.com/${agent}-smoke` },
       { label: "pr", url: `https://example.com/${agent}/pull/1` },
     ] as const;
     const expectedLinkPairs = expectedLinks.map((link) => `${link.label}=${link.url}`).sort();
-    const expectedStatusLinks = expectedLinks.map((link) => {
-      const display = formatSessionLinkDisplay(link);
-      return {
-        text: renderExpectedStatusText(display.text),
-        url: display.url,
-      };
-    });
+    const expectedStatusLinks = expectedLinks.map(
+      (link) => `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
+    );
     const session = await service.spawn({
       project: "api",
       agent,
       prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
-Run \`$SPUR_SLOT_COMMAND --title "${expectedTitle}" --link tracker=${expectedLinks[0].url} --link pr=${expectedLinks[1].url}\` before waiting.
+This task title is "${expectedTitle}".
+The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
 After the file and the session metadata are set, wait for more instructions.`,
     });
     cleanupItem.branch = session.branch;
     cleanupItem.worktreePath = session.worktreePath;
-    if (preflightBranch) {
-      expect(session.branch).toBe(preflightBranch);
+    if (expectedPreflightBranch) {
+      expect(session.branch).toBe(expectedPreflightBranch);
       expect(session.branchSource).toBe("preflight");
     }
 
@@ -313,12 +305,7 @@ After the file and the session metadata are set, wait for more instructions.`,
         if (!statusLeft.includes(expectedTitle)) {
           return null;
         }
-        if (
-          expectedStatusLinks.some(
-            (value) =>
-              !statusRight.includes(`#[hyperlink=${value.url}]`) || !statusRight.includes(value.text),
-          )
-        ) {
+        if (expectedStatusLinks.some((value) => !statusRight.includes(value))) {
           return null;
         }
         return { current, statusLeft, statusRight };
@@ -337,8 +324,7 @@ After the file and the session metadata are set, wait for more instructions.`,
     expect(liveState.current.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
     expect(liveState.statusLeft).toContain(expectedTitle);
     for (const value of expectedStatusLinks) {
-      expect(liveState.statusRight).toContain(`#[hyperlink=${value.url}]`);
-      expect(liveState.statusRight).toContain(value.text);
+      expect(liveState.statusRight).toContain(value);
     }
     expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
@@ -380,21 +366,13 @@ if (claudeAuth.error) {
   });
 } else {
   describe.skipIf(!claudeAuth.available)("Spur real-agent smoke (claude)", () => {
-    it(
-      "launches claude, restores it, and accepts a follow-up send",
-      async () => {
-        await runSmoke("claude");
-      },
-      SINGLE_SMOKE_TEST_TIMEOUT_MS,
-    );
+    it("launches claude, restores it, and accepts a follow-up send", async () => {
+      await runSmoke("claude");
+    });
 
-    it(
-      "uses claude spawn preflight before the normal session launch",
-      async () => {
-        await runSmoke("claude", { expectedPreflightBranch: "smoke-claude-preflight" });
-      },
-      SINGLE_SMOKE_TEST_TIMEOUT_MS,
-    );
+    it("uses claude spawn preflight before the normal session launch", async () => {
+      await runSmoke("claude", { expectedPreflightBranch: "smoke-claude-preflight" });
+    });
   });
 }
 
@@ -406,89 +384,80 @@ if (codexAuth.error) {
   });
 } else {
   describe.skipIf(!codexAuth.available)("Spur real-agent smoke (codex)", () => {
-    it(
-      "launches codex, restores it, and accepts a follow-up send",
-      async () => {
-        await runSmoke("codex");
-      },
-      SINGLE_SMOKE_TEST_TIMEOUT_MS,
-    );
+    it("launches codex, restores it, and accepts a follow-up send", async () => {
+      await runSmoke("codex");
+    });
 
-    it(
-      "uses codex spawn preflight before the normal session launch",
-      async () => {
-        await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });
-      },
-      SINGLE_SMOKE_TEST_TIMEOUT_MS,
-    );
+    it("uses codex spawn preflight before the normal session launch", async () => {
+      await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });
+    });
   });
 }
 
-describe.skipIf(!(claudeAuth.available && codexAuth.available))(
-  "Spur real-agent smoke (grouped)",
-  () => {
-    it(
-      "launches grouped claude and codex sessions for one task",
-      async () => {
-        const rootDir = await createTempDir("spur-smoke-group-");
-        const port = await findFreePort();
-        const dataDir = join(rootDir, "data");
-        const worktreeDir = join(rootDir, "worktrees");
-        const sessionPrefix = `smoke-group-${port}`;
+describe.skipIf(!claudeAuth.available || !codexAuth.available)("Spur real-agent smoke (grouped)", () => {
+  it(
+    "launches grouped claude and codex sessions for one task",
+    async () => {
+      const rootDir = await createTempDir("spur-smoke-group-");
+      const port = await findFreePort();
+      const dataDir = join(rootDir, "data");
+      const worktreeDir = join(rootDir, "worktrees");
+      const sessionPrefix = `smoke-group-${port}`;
+      const tmuxSocketName = `spur-${port}`;
 
-        await syncTmuxEnvironment({
-          HOME: process.env.HOME,
-          PATH: process.env.PATH,
-          SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
-          SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
-        });
+      await syncTmuxEnvironment({
+        HOME: process.env.HOME,
+        PATH: process.env.PATH,
+        SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
+        SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
+        SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
+      });
 
-        const configPath = join(rootDir, "spur.yaml");
-        await writeFile(
-          configPath,
-          smokeConfig({
-            port,
-            dataDir,
-            worktreeDir,
-            repoDir: SMOKE_REPO_DIR,
-            baseRef: SMOKE_BASE_REF,
+      const configPath = join(rootDir, "spur.yaml");
+      await writeFile(
+        configPath,
+        smokeConfig({
+          port,
+          dataDir,
+          worktreeDir,
+          repoDir: SMOKE_REPO_DIR,
+          baseRef: SMOKE_BASE_REF,
+          sessionPrefix,
+          agent: "claude",
+        }),
+        "utf8",
+      );
+
+      await withPinnedAgentBinaries(async () => {
+        const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+        const spawned = (await service.spawn({
+          project: "api",
+          prompt:
+            'Create a file named smoke-group.txt containing exactly your agent name, then wait for more instructions.',
+          members: [{ agent: "claude" }, { agent: "codex" }],
+        })) as SpawnResult;
+
+        expect(spawned.groupId).toBeTruthy();
+        expect(spawned.sessions).toHaveLength(2);
+
+        for (const session of spawned.sessions) {
+          cleanupItems.push({
+            rootDir,
             sessionPrefix,
-            agent: "claude",
-          }),
-          "utf8",
-        );
-
-        await withPinnedAgentBinaries(async () => {
-          const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
-          const spawned = (await service.spawn({
-            project: "api",
-            prompt:
-              'Create a file named smoke-group.txt containing exactly your agent name, then wait for more instructions.',
-            members: [{ agent: "claude" }, { agent: "codex" }],
-          })) as SpawnResult;
-
-          expect(spawned.groupId).toBeTruthy();
-          expect(spawned.sessions).toHaveLength(2);
-
-          for (const session of spawned.sessions) {
-            cleanupItems.push({
-              rootDir,
-              sessionPrefix,
-              branch: session.branch,
-              worktreePath: session.worktreePath,
-            });
-            const groupFile = join(session.worktreePath, "smoke-group.txt");
-            await pollUntil(async () => existsSync(groupFile), {
-              timeoutMs: session.agent === "codex" ? 240_000 : 180_000,
-              accept: Boolean,
-            });
-            expect((await readFile(groupFile, "utf8")).trim()).toBe(session.agent);
-            const killed = await service.kill(session.id, { force: true });
-            expect(killed.status).toBe("killed");
-          }
-        });
-      },
-      GROUP_SMOKE_TEST_TIMEOUT_MS,
-    );
-  },
-);
+            branch: session.branch,
+            worktreePath: session.worktreePath,
+          });
+          const groupFile = join(session.worktreePath, "smoke-group.txt");
+          await pollUntil(async () => existsSync(groupFile), {
+            timeoutMs: session.agent === "codex" ? 240_000 : 180_000,
+            accept: Boolean,
+          });
+          expect((await readFile(groupFile, "utf8")).trim()).toBe(session.agent);
+          const killed = await service.kill(session.id, { force: true });
+          expect(killed.status).toBe("killed");
+        }
+      });
+    },
+    GROUP_SMOKE_TEST_TIMEOUT_MS,
+  );
+});

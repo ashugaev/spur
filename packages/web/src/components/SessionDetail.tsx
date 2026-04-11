@@ -1,8 +1,11 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useVoiceInput } from "@/hooks/useVoiceInput";
+import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { ActivityDot } from "@/components/ActivityDot";
-import { DirectTerminal } from "@/components/DirectTerminal";
+import { TerminalModal } from "@/components/TerminalModal";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -19,10 +22,16 @@ import {
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
-import { buildDashboardPath } from "@/lib/project-routes";
+import {
+  buildDashboardPath,
+  buildSessionPath,
+  getTerminalQuerySessionId,
+  withTerminalQuery,
+} from "@/lib/project-routes";
 import {
   canComplete,
   canPause,
+  canRespawn,
   canSendMessage,
   hasServiceProblems,
   isRestorable,
@@ -45,7 +54,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       target="_blank"
     >
       {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[11px]" style={color ? { color } : undefined}>
+      <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
       {link.label === "pr" ? (
@@ -109,11 +118,15 @@ interface SessionDetailProps {
 }
 
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
+  const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [terminalOpen, setTerminalOpen] = useState(false);
+  const voice = useVoiceInput({
+    onTranscribed: (text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
+  const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -142,6 +155,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     return () => clearInterval(timer);
   }, [loadSession]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const syncSearch = () => setLocationSearch(window.location.search);
+    syncSearch();
+    window.addEventListener("popstate", syncSearch);
+    return () => {
+      window.removeEventListener("popstate", syncSearch);
+    };
+  }, []);
+
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
     body?: Record<string, unknown>,
@@ -168,6 +191,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       await loadSession();
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : `Failed to ${action} session`);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleRespawn = async () => {
+    setBusyAction("respawn");
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/respawn`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const data = (await response.json()) as SpurSessionView;
+      router.push(buildSessionPath(data.id, projectId));
+    } catch (respawnError) {
+      setError(
+        respawnError instanceof Error ? respawnError.message : "Failed to respawn session",
+      );
     } finally {
       setBusyAction(null);
     }
@@ -215,23 +257,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const effectiveProjectId = projectId ?? session?.projectId ?? "";
+  const requestedTerminalSessionId = useMemo(
+    () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
+    [locationSearch],
+  );
+  const sidecarUiLink = useMemo(
+    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+    [session],
+  );
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
+  const isSessionTerminal = Boolean(
+    session &&
+      (requestedTerminalSessionId === session.id ||
+        (requestedTerminalSessionId !== null &&
+          requestedTerminalSessionId.startsWith(`${session.id}--`))),
+  );
+  const terminalOpen = Boolean(canAttach && isSessionTerminal);
+
+  useEffect(() => {
+    if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
+    if (isSessionTerminal && canAttach) return;
+
+    const query = withTerminalQuery(window.location.search, null);
+    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
+  }, [canAttach, isSessionTerminal, requestedTerminalSessionId, session]);
+
+  const syncTerminalFilter = (terminalSessionId: string | null) => {
+    if (typeof window === "undefined") return;
+    const query = withTerminalQuery(window.location.search, terminalSessionId);
+    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    setLocationSearch(window.location.search);
+  };
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
       <a
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-        href={buildDashboardPath(effectiveProjectId)}
+        href={buildDashboardPath(projectId)}
       >
         ← Back
       </a>
 
-      {error ? (
+      {error || voice.voiceError ? (
         <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
-          {error}
+          {error || voice.voiceError}
         </div>
       ) : null}
 
@@ -283,7 +355,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={() => setTerminalOpen(true)}
+                onClick={() => syncTerminalFilter(session.id)}
               >
                 Terminal
               </button>
@@ -328,6 +400,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 {busyAction === "kill" ? "Killing..." : "Kill"}
               </button>
             ) : null}
+            {canRespawn(session) ? (
+              <button
+                type="button"
+                disabled={busyAction !== null}
+                onClick={() => void handleRespawn()}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+              >
+                {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => void openLogs()}
@@ -348,29 +430,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <textarea
-                      className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
-                      onChange={(event) => setMessage(event.target.value)}
-                      onKeyDown={(event) => {
-                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                          void doSend();
-                        }
-                      }}
-                      onPaste={(e) => {
-                        const files = e.clipboardData.files;
-                        if (files.length > 0) {
+                    <div className="relative">
+                      <textarea
+                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                        onChange={(event) => setMessage(event.target.value)}
+                        onKeyDown={(event) => {
+                          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                            void doSend();
+                          }
+                        }}
+                        onPaste={(e) => {
+                          const files = e.clipboardData.files;
+                          if (files.length > 0) {
+                            e.preventDefault();
+                            addImageFiles(files);
+                          }
+                        }}
+                        onDrop={(e) => {
                           e.preventDefault();
-                          addImageFiles(files);
-                        }
-                      }}
-                      onDrop={(e) => {
-                        e.preventDefault();
-                        addImageFiles(e.dataTransfer.files);
-                      }}
-                      onDragOver={(e) => e.preventDefault()}
-                      placeholder="Message to the running agent..."
-                      value={message}
-                    />
+                          addImageFiles(e.dataTransfer.files);
+                        }}
+                        onDragOver={(e) => e.preventDefault()}
+                        placeholder="Message to the running agent..."
+                        value={message}
+                      />
+                      <VoiceButton voice={voice} />
+                    </div>
                     {attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
                         {attachments.map((att, i) => (
@@ -385,7 +470,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               onClick={() =>
                                 setAttachments((prev) => prev.filter((_, j) => j !== i))
                               }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[8px] text-white opacity-0 transition group-hover:opacity-100"
+                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-white opacity-0 transition group-hover:opacity-100"
                             >
                               x
                             </button>
@@ -395,7 +480,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     )}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        ⌘/Ctrl + Enter
+                        <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <button
                         type="button"
@@ -508,6 +593,55 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
               ) : null}
             </section>
+
+            {/* Sidecars */}
+            {session.sidecars.length > 0 ? (
+              <section>
+                <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                  Sidecars
+                  <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                </h2>
+                <div className="space-y-2">
+                  {session.sidecars.map((sc) => (
+                    <div
+                      key={sc.name}
+                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-green-400" : "bg-[var(--color-text-tertiary)]"}`}
+                        />
+                        <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                        <span className="text-[var(--color-text-tertiary)]">
+                          {sc.alive ? "alive" : "offline"}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {sc.alive && canAttach ? (
+                          <button
+                            type="button"
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                          >
+                            Terminal
+                          </button>
+                        ) : null}
+                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
+                          <a
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 hover:no-underline"
+                            href={sidecarUiLink}
+                            rel="noreferrer"
+                            target="_blank"
+                          >
+                            Open
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
 
           {/* Logs modal */}
@@ -529,7 +663,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[11px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
                 {logEntries.length === 0 ? (
                   <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
                 ) : (
@@ -554,28 +688,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
           {/* Terminal modal */}
           {terminalOpen && canAttach ? (
-            <div
-              className="fixed inset-0 z-50 flex flex-col overflow-hidden bg-[var(--color-bg-base)]"
-              onWheel={(e) => e.stopPropagation()}
-              role="dialog"
-              aria-label={`Terminal ${session.id}`}
-            >
-              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                  Terminal — {session.id}
-                </span>
-                <button
-                  type="button"
-                  className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-                  onClick={() => setTerminalOpen(false)}
-                >
-                  ✕
-                </button>
-              </div>
-              <div className="min-h-0 flex-1">
-                <DirectTerminal sessionId={session.tmuxSession ?? session.id} />
-              </div>
-            </div>
+            <TerminalModal
+              onClose={() => syncTerminalFilter(null)}
+              session={session}
+              tmuxSessionOverride={
+                requestedTerminalSessionId !== session.id
+                  ? (requestedTerminalSessionId ?? undefined)
+                  : undefined
+              }
+              titleSuffix={
+                requestedTerminalSessionId !== session.id
+                  ? requestedTerminalSessionId?.replace(`${session.id}--`, "")
+                  : undefined
+              }
+            />
           ) : null}
         </>
       ) : (

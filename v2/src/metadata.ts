@@ -142,6 +142,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     ...(session.slots ? { slots: session.slots } : {}),
+    ...(session.sidecarPorts ? { sidecarPorts: session.sidecarPorts } : {}),
     ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
     ...(session.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(session.queuedMessages) }

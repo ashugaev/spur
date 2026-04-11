@@ -9,14 +9,14 @@ import { captureTmuxPane, tmuxSessionExists } from "../runtime-tmux.js";
 import type { ServiceProblemEventData, ServiceSourceConfig, ServiceSourceState } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 
-function normalizeLines(content: string): string[] {
+export function normalizeLines(content: string): string[] {
   return content
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
 }
 
-function appendedLines(previous: string[], next: string[]): string[] {
+export function appendedLines(previous: string[], next: string[]): string[] {
   const limit = Math.min(previous.length, next.length);
   for (let overlap = limit; overlap >= 0; overlap -= 1) {
     let matches = true;

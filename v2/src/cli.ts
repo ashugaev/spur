@@ -7,7 +7,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
 import {
+  connectProjectConfig,
+  disconnectProjectConfig,
   getJson,
+  listProjects,
   postJson,
   postPreflight,
   restartDaemonIfRunning,
@@ -15,6 +18,13 @@ import {
   type RestartDaemonResult,
   type StopDaemonResult,
 } from "./client.js";
+import {
+  defaultVoiceModelPath,
+  ensureInstanceConfig,
+  findProjectConfigPath,
+  loadConfig,
+  loadProjectConfig,
+} from "./config.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
   accent,
@@ -35,9 +45,11 @@ import {
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
 import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
-import { devServerTmuxSession } from "./runtime-tmux.js";
+import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
+  ProjectConfigMutationResponse,
+  RespawnSessionRequest,
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
@@ -62,7 +74,7 @@ const SESSION_LOG_LOCAL_LIMIT = 8;
 
 function enableTmuxMouse(sessionName: string): void {
   try {
-    execFileSync("tmux", ["set-option", "-t", sessionName, "mouse", "on"], {
+    execFileSync("tmux", withTmuxSocketArgs(["set-option", "-t", sessionName, "mouse", "on"]), {
       stdio: "ignore",
     });
   } catch {
@@ -75,17 +87,21 @@ function isInsideTmuxSession(): boolean {
 }
 
 function tmuxOutput(args: string[]): string {
-  return execFileSync("tmux", args, {
+  return execFileSync("tmux", withTmuxSocketArgs(args), {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 }
 
 function captureTmuxTarget(sessionName: string, lines = 200): string {
-  return execFileSync("tmux", ["capture-pane", "-t", `=${sessionName}:`, "-p", "-S", `-${lines}`], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trimEnd();
+  return execFileSync(
+    "tmux",
+    withTmuxSocketArgs(["capture-pane", "-t", `=${sessionName}:`, "-p", "-S", `-${lines}`]),
+    {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  ).trimEnd();
 }
 
 function tryCaptureTmuxTarget(sessionName: string, lines = 200): string | null {
@@ -103,7 +119,7 @@ function currentTmuxSessionHasAttachedClient(): boolean {
 function attachTmuxTargetFromList(targetSession: string): void {
   const target = `=${targetSession}`;
   if (!isInsideTmuxSession()) {
-    execFileSync("tmux", ["attach-session", "-t", target], {
+    execFileSync("tmux", withTmuxSocketArgs(["attach-session", "-t", target]), {
       stdio: "inherit",
     });
     return;
@@ -116,7 +132,7 @@ function attachTmuxTargetFromList(targetSession: string): void {
   try {
     execFileSync(
       "tmux",
-      [
+      withTmuxSocketArgs([
         "bind-key",
         "-T",
         returnTable,
@@ -132,30 +148,30 @@ function attachTmuxTargetFromList(targetSession: string): void {
         "wait-for",
         "-S",
         returnSignal,
-      ],
+      ]),
       {
         stdio: "ignore",
       },
     );
-    execFileSync("tmux", ["set-option", "key-table", returnTable], {
+    execFileSync("tmux", withTmuxSocketArgs(["set-option", "key-table", returnTable]), {
       stdio: "ignore",
     });
-    execFileSync("tmux", ["switch-client", "-t", target], {
+    execFileSync("tmux", withTmuxSocketArgs(["switch-client", "-t", target]), {
       stdio: "inherit",
     });
-    execFileSync("tmux", ["wait-for", returnSignal], {
+    execFileSync("tmux", withTmuxSocketArgs(["wait-for", returnSignal]), {
       stdio: "ignore",
     });
   } finally {
     try {
-      execFileSync("tmux", ["set-option", "key-table", "root"], {
+      execFileSync("tmux", withTmuxSocketArgs(["set-option", "key-table", "root"]), {
         stdio: "ignore",
       });
     } catch {
       // Best effort only.
     }
     try {
-      execFileSync("tmux", ["unbind-key", "-T", returnTable, "C-g"], {
+      execFileSync("tmux", withTmuxSocketArgs(["unbind-key", "-T", returnTable, "C-g"]), {
         stdio: "ignore",
       });
     } catch {
@@ -199,6 +215,63 @@ function renderDaemonRestartResult(result: RestartDaemonResult): string {
 function getConfigPath(program: Command): string | undefined {
   const options = program.opts<{ config?: string }>();
   return options.config;
+}
+
+function prepareInstanceConfig(program: Command): { configPath: string; initialized: boolean } {
+  const ensured = ensureInstanceConfig(getConfigPath(program));
+  setTmuxSocketName(loadConfig(ensured.configPath).tmux.socketName);
+  return ensured;
+}
+
+async function maybeAutoConnectProject(
+  cliEntrypoint: string,
+  configPath: string,
+  explicitProjectConfigPath?: string,
+): Promise<{ notice?: string; warning?: string }> {
+  const candidates = new Set<string>();
+  if (explicitProjectConfigPath) {
+    try {
+      const parsed = loadProjectConfig(explicitProjectConfigPath, loadConfig(configPath));
+      if (Object.keys(parsed.projects).length > 0) {
+        candidates.add(parsed.configPath);
+      }
+    } catch {
+      // Explicit config may be instance-only; ignore for auto-connect.
+    }
+  }
+  const discoveredProjectConfigPath = findProjectConfigPath();
+  if (discoveredProjectConfigPath) {
+    candidates.add(discoveredProjectConfigPath);
+  }
+  const projectConfigPath = [...candidates][0];
+  if (!projectConfigPath) {
+    return {};
+  }
+
+  try {
+    const result = await connectProjectConfig(cliEntrypoint, projectConfigPath, configPath);
+    return result.changed ? { notice: `Connected project config from ${projectConfigPath}.` } : {};
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { warning: `Auto-connect skipped for ${projectConfigPath}: ${message}` };
+  }
+}
+
+function printBootstrapNotice(initialized: boolean, json: boolean, configPath: string): void {
+  if (initialized && !json) {
+    writeStdout(brandLine(`Initialized Spur instance config at ${configPath}.`));
+    writeStdout(brandLine(`Voice input is off until local dependencies are installed.`));
+    writeStdout(
+      brandLine(
+        `Default voice uses \`whisper_cpp\`: install \`whisper-cli\`, \`ffmpeg\`, and a model at ${defaultVoiceModelPath()}.`,
+      ),
+    );
+    writeStdout(
+      brandLine(
+        `Switch providers with \`voice.provider\`, or set \`voice.modelPath\` to override the model source.`,
+      ),
+    );
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -403,6 +476,8 @@ function renderSessionLogView(args: SessionLogViewState): string {
   const sections = [
     brandLine(`Logs ${session.id}`),
     "",
+    dimText("Ctrl+G back"),
+    "",
     dimText(summary),
     dimText(`project ${session.project}  agent ${session.agent}  branch ${session.branch}`),
     "",
@@ -412,13 +487,7 @@ function renderSessionLogView(args: SessionLogViewState): string {
   if (args.localLines.length > 0) {
     sections.push("", boldText("Live Transitions"), ...args.localLines);
   }
-  sections.push(
-    "",
-    boldText("Agent Output"),
-    args.agentPane || dimText("(agent is not live)"),
-    "",
-    dimText("Ctrl+G back"),
-  );
+  sections.push("", boldText("Agent Output"), args.agentPane || dimText("(agent is not live)"));
   return sections.join("\n");
 }
 
@@ -455,11 +524,54 @@ function parseSlotLink(value: string): SessionLink {
 }
 
 function currentSessionId(): string {
-  const sessionId = process.env["SPUR_SESSION"]?.trim();
+  const sessionId = runningSessionId();
   if (!sessionId) {
     throw new Error("service run requires a live Spur session");
   }
   return sessionId;
+}
+
+function runningSessionId(): string | undefined {
+  const sessionId = process.env["SPUR_SESSION"]?.trim();
+  return sessionId ? sessionId : undefined;
+}
+
+function respawnParentSessionId(): string | undefined {
+  const sessionId = runningSessionId();
+  if (!sessionId) {
+    return undefined;
+  }
+  if (process.env["SPUR_SIDECAR_NAME"]?.trim()) {
+    return undefined;
+  }
+  const sessionToolDir = process.env["SPUR_SESSION_TOOL_DIR"]?.trim();
+  return sessionToolDir ? sessionId : undefined;
+}
+
+function respawnRequestBody(): RespawnSessionRequest {
+  const sessionId = respawnParentSessionId();
+  return sessionId ? { terminateSessionId: sessionId } : {};
+}
+
+export function terminateRespawnParentProcess(): boolean {
+  if (process.env["TEST"] || process.env["VITEST"]) {
+    return false;
+  }
+  if (!process.env["TMUX"]) {
+    return false;
+  }
+  if (!respawnParentSessionId()) {
+    return false;
+  }
+  try {
+    process.kill(process.ppid, "SIGTERM");
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function parsePortOption(value: string, label: string): number {
@@ -496,7 +608,7 @@ function helpNotes(command: Command): string[] {
   if (command.name() === "list") {
     return [
       "On a TTY, this opens the live selector instead of printing a one-shot list.",
-      "TTY keys: ↑↓ move, Enter attach, l logs, d dev-server, p pause, c complete, r restore, k kill, Ctrl+G detach, Esc quit.",
+      "TTY keys: ↑↓ move, Enter attach, l logs, d sidecar, p pause, c complete, r restore, s respawn, k kill, Ctrl+G detach, Esc quit.",
       "Risky kill requires a second `k` when the worktree is dirty or has unpushed commits.",
     ];
   }
@@ -794,20 +906,28 @@ async function runInteractiveSessionList(
     }
   };
 
-  const startOrAttachDevServer = async (): Promise<void> => {
+  const startOrAttachSidecar = async (): Promise<void> => {
     const session = getSelectedSessionOrWarn();
     if (!session) return;
 
+    const firstSidecar = session.sidecars[0];
+    if (!firstSidecar) {
+      statusMessage = brandLine(`No sidecars configured for ${session.id}`);
+      render();
+      return;
+    }
+    const scName = firstSidecar.name;
+
     busy = true;
-    statusMessage = brandLine(`Starting dev server for ${session.id}...`);
+    statusMessage = brandLine(`Starting sidecar ${scName} for ${session.id}...`);
     render();
 
-    const devTmuxSession = devServerTmuxSession(session.id);
+    const scTmuxSession = sidecarTmuxSession(session.id, scName);
     try {
-      if (!session.devServerAlive) {
+      if (!firstSidecar.alive) {
         await postJson<SessionView>(
           cliEntrypoint,
-          `/sessions/${session.id}/dev-server/start`,
+          `/sessions/${session.id}/sidecars/${scName}/start`,
           {},
           configPath,
         );
@@ -818,13 +938,13 @@ async function runInteractiveSessionList(
 
       if (isInsideTmuxSession() && !currentTmuxSessionHasAttachedClient()) {
         busy = false;
-        openAttachedPane(devTmuxSession, `Dev Server ${session.id}`);
+        openAttachedPane(scTmuxSession, `Sidecar ${scName} ${session.id}`);
         return;
       }
 
       disableTerminal();
       try {
-        attachTmuxTargetFromList(devTmuxSession);
+        attachTmuxTargetFromList(scTmuxSession);
       } finally {
         if (!closed) {
           enableTerminal();
@@ -927,6 +1047,45 @@ async function runInteractiveSessionList(
     }
   };
 
+  const respawnSelectedSession = async (): Promise<void> => {
+    const session = getSelectedSessionOrWarn();
+    if (!session) return;
+    if (
+      session.status !== "completed" &&
+      session.status !== "killed" &&
+      session.status !== "errored"
+    ) {
+      statusMessage = brandLine(`Session ${session.id} is not in a terminal state.`);
+      render();
+      return;
+    }
+
+    busy = true;
+    statusMessage = brandLine(`Respawning ${session.id}...`);
+    render();
+
+    try {
+      const respawned = await postJson<SessionView>(
+        cliEntrypoint,
+        `/sessions/${session.id}/respawn`,
+        respawnRequestBody(),
+        configPath,
+      );
+      sessions = sortSessionsForList([...sessions, respawned]);
+      selectedSessionId = respawned.id;
+      pendingKillConfirmationSessionId = null;
+      statusMessage = brandLine(`Respawned as ${respawned.id}.`);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      statusMessage = brandLine(message);
+    } finally {
+      busy = false;
+      render();
+      await refresh();
+    }
+  };
+
   await new Promise<void>((resolve, reject) => {
     const finish = (): void => {
       cleanup();
@@ -988,7 +1147,7 @@ async function runInteractiveSessionList(
       }
       if (key.name === "d" || key.sequence === "d") {
         pendingKillConfirmationSessionId = null;
-        void startOrAttachDevServer().catch(fail);
+        void startOrAttachSidecar().catch(fail);
         return;
       }
       if (key.name === "p" || key.sequence === "p") {
@@ -1008,6 +1167,11 @@ async function runInteractiveSessionList(
       }
       if (key.name === "k" || key.sequence === "k") {
         void killSelectedSession().catch(fail);
+        return;
+      }
+      if (key.name === "s" || key.sequence === "s") {
+        pendingKillConfirmationSessionId = null;
+        void respawnSelectedSession().catch(fail);
       }
     };
 
@@ -1090,7 +1254,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
-    .argument("<prompt...>", "Task prompt")
+    .argument("[prompt...]", "Optional task prompt")
     .option("--agent <name>", "Agent to start: claude or codex")
     .option("--member <name>", "Add one grouped member agent: claude or codex", appendOptionValue)
     .option(
@@ -1105,14 +1269,32 @@ export function createProgram(cliEntrypoint: string): Command {
     )
     .option("--shared", "Use the project path directly for this session (no worktree)")
     .option("--json", "Print raw JSON")
-    .action(async (project: string, promptParts: string[], options, command) => {
-      const overrides = resolveCliSpawnOverrides(options);
-      const prompt = promptParts.join(" ").trim();
-      if (!prompt) {
-        throw new Error("spawn requires a non-empty prompt");
+    .action(async (project: string, promptParts: string[] | undefined, options, command) => {
+      const parentProgram = command.parent as Command;
+      const explicitConfigPath = getConfigPath(parentProgram);
+      const instance = prepareInstanceConfig(parentProgram);
+      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+      const autoConnect = await maybeAutoConnectProject(
+        cliEntrypoint,
+        instance.configPath,
+        explicitConfigPath,
+      );
+      if (autoConnect.notice && !options.json) {
+        writeStdout(brandLine(autoConnect.notice));
       }
-      const configPath = getConfigPath(command.parent as Command);
+      if (autoConnect.warning && !options.json) {
+        writeStdout(brandLine(autoConnect.warning));
+      }
+      const overrides = resolveCliSpawnOverrides(options);
+      const prompt = (promptParts ?? []).join(" ").trim();
+      const configPath = instance.configPath;
       const members = options.member as string[] | undefined;
+      const availableProjects = await listProjects(cliEntrypoint, configPath);
+      if (!availableProjects.some((entry) => entry.id === project)) {
+        throw new Error(
+          `Unknown project: ${project}. Run \`spur connect\` in the project directory or add it to the global registry first.`,
+        );
+      }
       if (options.agent && members?.length) {
         throw new Error("--agent cannot be combined with --member");
       }
@@ -1121,12 +1303,8 @@ export function createProgram(cliEntrypoint: string): Command {
 
       // Interactive branch confirmation: TTY, no --json, no explicit --branch
       const interactive =
-        !options.json &&
-        !branch &&
-        !members?.length &&
-        process.stdin.isTTY &&
-        process.stdout.isTTY;
-      if (interactive) {
+        !options.json && !branch && !members?.length && process.stdin.isTTY && process.stdout.isTTY;
+      if (interactive && prompt) {
         const preflight = await withSpinner("running preflight", () =>
           postPreflight(
             cliEntrypoint,
@@ -1174,7 +1352,22 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Show sessions; on a TTY, open the live selector.")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const parentProgram = command.parent as Command;
+      const explicitConfigPath = getConfigPath(parentProgram);
+      const instance = prepareInstanceConfig(parentProgram);
+      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+      const autoConnect = await maybeAutoConnectProject(
+        cliEntrypoint,
+        instance.configPath,
+        explicitConfigPath,
+      );
+      if (autoConnect.notice && !options.json) {
+        writeStdout(brandLine(autoConnect.notice));
+      }
+      if (autoConnect.warning && !options.json) {
+        writeStdout(brandLine(autoConnect.warning));
+      }
+      const configPath = instance.configPath;
       if (options.json) {
         await outputResult({
           json: true,
@@ -1195,13 +1388,64 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
+    .command("connect")
+    .description("Connect a local Spur project config to the running instance.")
+    .argument("[path]", "Path to a project spur.yaml")
+    .option("--json", "Print raw JSON")
+    .action(async (path: string | undefined, options, command) => {
+      const instance = prepareInstanceConfig(command.parent as Command);
+      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+      const projectConfigPath = path ?? findProjectConfigPath();
+      if (!projectConfigPath) {
+        throw new Error("No local spur.yaml or spur.yml found to connect");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "connecting project config",
+        action: () => connectProjectConfig(cliEntrypoint, projectConfigPath, instance.configPath),
+        success: (result: ProjectConfigMutationResponse) =>
+          result.changed
+            ? `Connected ${projectConfigPath}.`
+            : `${projectConfigPath} already connected.`,
+        render: (result: ProjectConfigMutationResponse) =>
+          brandLine(`${result.projects.length} projects available.`),
+      });
+    });
+
+  program
+    .command("disconnect")
+    .description("Disconnect a local Spur project config from the running instance.")
+    .argument("[path]", "Path to a project spur.yaml")
+    .option("--json", "Print raw JSON")
+    .action(async (path: string | undefined, options, command) => {
+      const instance = prepareInstanceConfig(command.parent as Command);
+      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+      const projectConfigPath = path ?? findProjectConfigPath();
+      if (!projectConfigPath) {
+        throw new Error("No local spur.yaml or spur.yml found to disconnect");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: "disconnecting project config",
+        action: () =>
+          disconnectProjectConfig(cliEntrypoint, projectConfigPath, instance.configPath),
+        success: (result: ProjectConfigMutationResponse) =>
+          result.changed
+            ? `Disconnected ${projectConfigPath}.`
+            : `${projectConfigPath} was not changing the active registry.`,
+        render: (result: ProjectConfigMutationResponse) =>
+          brandLine(`${result.projects.length} projects available.`),
+      });
+    });
+
+  program
     .command("send")
     .description("Send a follow-up message to a session.")
     .argument("<sessionId>", "Session id")
     .argument("<message...>", "Message to send")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, messageParts: string[], options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: SendMessageRequest = { message: messageParts.join(" ") };
       await outputResult({
         json: Boolean(options.json),
@@ -1219,7 +1463,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<sessionId>", "Session id")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "pausing session",
@@ -1235,7 +1479,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("<sessionId>", "Session id")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "completing session",
@@ -1252,7 +1496,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--force", "Skip dirty-worktree and unpushed-commit confirmation")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "killing session",
@@ -1269,6 +1513,29 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
+  program
+    .command("respawn")
+    .description("Spawn a new session with the same config as a terminal session.")
+    .argument("<sessionId>", "Session id")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "respawning session",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${sessionId}/respawn`,
+            respawnRequestBody(),
+            configPath,
+          ),
+        success: (session) => `Respawned as ${session.id}.`,
+        render: renderSessionCard,
+      });
+      terminateRespawnParentProcess();
+    });
+
   const service = program
     .command("service")
     .description("Run and inspect session-bound sidecar services.");
@@ -1281,7 +1548,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--port <number>", "Port held by this service")
     .option("--json", "Print raw JSON")
     .action(async (serviceId: string, commandParts: string[], options, command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       const sessionId = currentSessionId();
       const shellCommand = commandParts.join(" ").trim();
       if (!shellCommand) {
@@ -1314,7 +1581,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .argument("[serviceId]", "Optional service id")
     .option("--json", "Print raw JSON")
     .action(async (sessionId: string, serviceId: string | undefined, options, command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       if (serviceId) {
         await outputResult({
           json: Boolean(options.json),
@@ -1348,7 +1615,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const payload: UpdateSessionSlotsRequest = {
         ...(options.title !== undefined ? { title: options.title as string } : {}),
         ...(options.clearTitle ? { clearTitle: true } : {}),
@@ -1375,23 +1642,32 @@ export function createProgram(cliEntrypoint: string): Command {
     });
 
   program
-    .command("dev-server", { hidden: true })
-    .description("Internal dev server management.")
+    .command("sidecar", { hidden: true })
+    .description("Internal sidecar management.")
+    .command("start")
     .requiredOption("--session <id>", "Session id")
+    .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      const configPath = getConfigPath(command.parent as Command);
+      if (process.env["SPUR_SIDECAR_NAME"]) {
+        throw new Error(
+          `Cannot start sidecar "${options.name as string}" from inside sidecar "${process.env["SPUR_SIDECAR_NAME"]}". Start sidecars only from the main session shell.`,
+        );
+      }
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
       await outputResult({
         json: Boolean(options.json),
-        label: "starting dev server",
+        label: "starting sidecar",
         action: () =>
           postJson<SessionView>(
             cliEntrypoint,
-            `/sessions/${options.session as string}/dev-server/start`,
+            `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
             {},
             configPath,
           ),
-        success: (session) => `Started dev server for ${session.id}.`,
+        success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1405,7 +1681,9 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start the local daemon.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
+      const instance = prepareInstanceConfig(command.parent?.parent as Command);
+      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+      const configPath = instance.configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "starting daemon",
@@ -1431,7 +1709,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Stop the local daemon if it is running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "stopping daemon",
@@ -1446,7 +1724,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Restart the local daemon if it is already running.")
     .option("--json", "Print raw JSON")
     .action(async (options: { json?: boolean }, command: Command) => {
-      const configPath = getConfigPath(command.parent?.parent as Command);
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
       await outputResult({
         json: Boolean(options.json),
         label: "restarting daemon",

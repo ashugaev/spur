@@ -5,7 +5,7 @@ interface EmptyStateProps {
 export function EmptyState({ message }: EmptyStateProps) {
   const text =
     message ??
-    "No Spur sessions are visible yet. Start one with `spur spawn <project> <prompt...>` and it will appear here.";
+    "No Spur sessions are visible yet. Start one with `spur spawn <project>` and it will appear here.";
 
   return (
     <div className="flex flex-col items-center justify-center rounded-sm border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-6 py-10 text-center">

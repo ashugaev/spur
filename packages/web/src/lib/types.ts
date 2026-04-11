@@ -55,7 +55,7 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
-  devServerAlive?: boolean;
+  sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
@@ -100,8 +100,14 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
   error?: string;
+}
+
+export interface SpawnOverrides {
+  worktree?: boolean;
+  defaultBranch?: string;
 }
 
 export function toDashboardSession(
@@ -129,6 +135,7 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    sidecars: session.sidecars ?? [],
     links,
     error: session.error,
   };
@@ -160,6 +167,13 @@ export function canPause(session: DashboardSession): boolean {
 
 export function canComplete(session: DashboardSession): boolean {
   return !isTerminalSession(session);
+}
+
+export function canRespawn(session: DashboardSession): boolean {
+  return (
+    (session.status === "completed" || session.status === "killed" || session.status === "errored") &&
+    !session.runtimeAlive
+  );
 }
 
 export function canSendMessage(session: DashboardSession): boolean {

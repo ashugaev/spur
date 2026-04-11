@@ -158,7 +158,7 @@ class ServiceSendBatch implements SendBatch {
   }
 }
 
-function isGitHubEventData(value: unknown): value is GitHubEventData {
+export function isGitHubEventData(value: unknown): value is GitHubEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
   return (
@@ -169,7 +169,7 @@ function isGitHubEventData(value: unknown): value is GitHubEventData {
   );
 }
 
-function isServiceProblemEventData(value: unknown): value is ServiceProblemEventData {
+export function isServiceProblemEventData(value: unknown): value is ServiceProblemEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
   return (
