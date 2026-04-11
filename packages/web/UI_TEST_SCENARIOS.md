@@ -205,6 +205,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Row 1: logo + project title
 - Row 2: Needs Input / Working / Waiting stats
 - Row 3: search input + project filter + Spawn Session button
+- Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
 - Attention zones use accordion (tap to expand/collapse)
