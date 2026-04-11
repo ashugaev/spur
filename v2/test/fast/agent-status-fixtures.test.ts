@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, readFile, stat } from "node:fs/promises";
+import { access, chmod, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
 
@@ -107,6 +107,15 @@ async function parseManifest(): Promise<Map<string, string>> {
 // ── Fixture integrity ───────────────────────────────────────────────────
 
 describe("Fixture integrity", () => {
+  beforeAll(async () => {
+    const manifest = await parseManifest();
+    await Promise.all(
+      Array.from(manifest.keys()).map((relativePath) =>
+        chmod(join(FIXTURES_DIR, relativePath), 0o444),
+      ),
+    );
+  });
+
   it("all fixture files match their SHA-256 manifest entries", async () => {
     const manifest = await parseManifest();
     expect(manifest.size).toBeGreaterThan(0);
