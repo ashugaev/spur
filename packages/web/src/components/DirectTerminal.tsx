@@ -457,13 +457,6 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
         <div className="flex items-center gap-1">
-          <button
-            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
-            onClick={() => sendTerminalInput("\x1b")}
-            type="button"
-          >
-            Esc
-          </button>
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
