@@ -265,6 +265,12 @@ export async function startServer(
         return;
       }
 
+      const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
+      if (method === "GET" && conversationSessionId) {
+        sendJson(response, 200, await service.getConversation(conversationSessionId));
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request);
         sendJson(response, 201, await service.spawn(body));
@@ -315,7 +321,7 @@ export async function startServer(
           terminateSessionId !== respawnSessionId
         ) {
           queueMicrotask(() => {
-            void service.complete(terminateSessionId).catch((error) => {
+            void service.complete(terminateSessionId, { retainInList: true }).catch((error) => {
               const message = error instanceof Error ? error.message : String(error);
               logger.warn?.(
                 `Respawned ${respawnSessionId} as ${respawned.id}, but failed to complete ${terminateSessionId}: ${message}`,
@@ -333,15 +339,9 @@ export async function startServer(
         return;
       }
 
-      const sidecarMatch = path.match(
-        /^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/,
-      );
+      const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        sendJson(
-          response,
-          200,
-          await service.startSidecar(sidecarMatch[1], sidecarMatch[2]),
-        );
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
         return;
       }
 

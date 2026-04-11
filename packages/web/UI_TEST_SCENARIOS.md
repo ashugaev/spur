@@ -21,6 +21,7 @@ tailscale serve --https=443 off
 ```
 
 Server-side dependencies are provider-specific:
+
 - `voice.provider=whisper_cpp`: requires `whisper-cli`, `ffmpeg`, and a whisper.cpp model (default path `~/.cache/whisper.cpp/ggml-base.bin`).
 - `voice.provider=faster_whisper`: requires Python and the `faster-whisper` package. Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present and uses `int8` by default.
 - `voice.provider=azure_openai`: requires `AZURE_OPENAI_ENDPOINT` and `AZURE_OPENAI_API_KEY` in `~/.spur/.env`; `voice.model` is the Azure deployment name.
@@ -87,6 +88,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Version is static (no ticking), set at build time
 - Falls back to `dev` in development when no build version is injected
 
+### D6c: Footer resource metrics
+
+- On Linux hosts with available runtime metrics, footer left side shows `CPU <n>%`, `RAM <n>%`, `DISK <n>%` in uppercase compact format
+- On unsupported hosts (macOS/Windows) or when runtime metrics source is unavailable, footer resource metrics are hidden with no red/error UI
+
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
@@ -145,6 +151,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+
+### S2b: Conversation dialog (Claude only)
+
+- Visible only for `agent === "claude"` sessions with conversation messages
+- Hidden for codex sessions and when no messages exist
+- Section header: "DIALOG" with duration (e.g., "2h 15m") on the right
+- Scrollable message list (max-h-80) in bordered surface container
+- User messages: right-aligned, accent border/background tint
+- Assistant messages: left-aligned, default border, secondary text
+- While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
+- When the conversation state is `working`, the page header status also shows `working`
+- Messages truncated at 500 chars with "..."
+- Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
+- Polls at same interval as session (4s)
 
 ### S3: Message section
 

@@ -146,7 +146,9 @@ voice:
 
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
-    expect(status.detail).toContain('voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"');
+    expect(status.detail).toContain(
+      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+    );
   });
 
   it("reports missing runtime for faster_whisper directly from voice.ts", async () => {
@@ -243,8 +245,15 @@ voice:
       child.stderr = stderr;
       child.kill = () => undefined;
       child.stdin = new MockStdin((chunk) => {
-        const payload = JSON.parse(chunk.trim()) as { id: string; action: string; audioPath: string; language: string };
-        reader.emit(JSON.stringify({ id: payload.id, text: `ok:${payload.language}:${payload.audioPath}` }));
+        const payload = JSON.parse(chunk.trim()) as {
+          id: string;
+          action: string;
+          audioPath: string;
+          language: string;
+        };
+        reader.emit(
+          JSON.stringify({ id: payload.id, text: `ok:${payload.language}:${payload.audioPath}` }),
+        );
       });
       queueMicrotask(() => {
         reader.emit(JSON.stringify({ type: "ready" }));
@@ -400,12 +409,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
           status: 200,
         }),
       );
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
-      if (typeof handler === "function") {
-        handler();
-      }
-      return { unref() {} } as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout);
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          handler();
+        }
+        return { unref() {} } as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    );
     const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue(now);
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
@@ -459,12 +470,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
           status: 200,
         }),
       );
-    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: TimerHandler) => {
-      if (typeof handler === "function") {
-        handler();
-      }
-      return { unref() {} } as ReturnType<typeof setTimeout>;
-    }) as typeof setTimeout);
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          handler();
+        }
+        return { unref() {} } as ReturnType<typeof setTimeout>;
+      }) as unknown as typeof setTimeout,
+    );
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
@@ -494,7 +507,9 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
     try {
       const { transcribeAudio } = await import("./voice");
-      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow("bad request");
+      await expect(transcribeAudio(Buffer.from("audio"), "clip.webm")).rejects.toThrow(
+        "bad request",
+      );
       expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
@@ -503,12 +518,14 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
   it("switches faster_whisper models without letting the old worker exit fail the new startup", async () => {
     const readers: MockLineReader[] = [];
-    const children: Array<EventEmitter & {
-      stdin: MockStdin;
-      stdout: EventEmitter;
-      stderr: EventEmitter;
-      kill: () => void;
-    }> = [];
+    const children: Array<
+      EventEmitter & {
+        stdin: MockStdin;
+        stdout: EventEmitter;
+        stderr: EventEmitter;
+        kill: () => void;
+      }
+    > = [];
     mockCreateInterface.mockImplementation(() => {
       const reader = new MockLineReader();
       readers.push(reader);
@@ -616,8 +633,14 @@ voice:
         child.stderr = stderr;
         child.kill = () => undefined;
         child.stdin = new MockStdin((chunk) => {
-          const payload = JSON.parse(chunk.trim()) as { id: string; audioPath: string; language: string };
-          reader.emit(JSON.stringify({ id: payload.id, text: `ok:${payload.language}:${payload.audioPath}` }));
+          const payload = JSON.parse(chunk.trim()) as {
+            id: string;
+            audioPath: string;
+            language: string;
+          };
+          reader.emit(
+            JSON.stringify({ id: payload.id, text: `ok:${payload.language}:${payload.audioPath}` }),
+          );
         });
         queueMicrotask(() => {
           reader.emit(JSON.stringify({ type: "ready" }));

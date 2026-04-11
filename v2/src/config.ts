@@ -335,10 +335,7 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   };
 }
 
-function parseSidecars(
-  projectId: string,
-  value: unknown,
-): Record<string, SidecarConfig> {
+function parseSidecars(projectId: string, value: unknown): Record<string, SidecarConfig> {
   if (value === undefined) return {};
   const label = `projects.${projectId}.sidecars`;
   const raw = asObject(value, label);
@@ -392,9 +389,7 @@ function parseSidecars(
   return result;
 }
 
-function parseDevServerAsSidecar(
-  devServer: DevServerConfig,
-): Record<string, SidecarConfig> {
+function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {
   return {
     dev: {
       command: devServer.command,
@@ -500,9 +495,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const hasDevServerKey = raw["devServer"] !== undefined;
   const hasSidecarsKey = raw["sidecars"] !== undefined;
   if (hasDevServerKey && hasSidecarsKey) {
-    throw new Error(
-      `projects.${projectId} defines both "devServer" and "sidecars"; pick one`,
-    );
+    throw new Error(`projects.${projectId} defines both "devServer" and "sidecars"; pick one`);
   }
   const sidecars = hasSidecarsKey
     ? parseSidecars(projectId, raw["sidecars"])
@@ -634,7 +627,9 @@ function parseConfigFile(
         mode === "instance"
           ? asOptionalString(voice["modelPath"], "voice.modelPath")
           : asOptionalString(voice["modelPath"], "voice.modelPath");
-      const modelPath = configuredModelPath ? resolveFrom(configDir, configuredModelPath) : undefined;
+      const modelPath = configuredModelPath
+        ? resolveFrom(configDir, configuredModelPath)
+        : undefined;
 
       return {
         provider,

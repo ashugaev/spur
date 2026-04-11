@@ -324,9 +324,7 @@ describe("DirectTerminal scroll integration", () => {
     await mountTerminal("test-voice-insert");
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Start voice recording" }),
-      ).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
