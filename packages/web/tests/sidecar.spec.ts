@@ -103,4 +103,24 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     // URL should contain terminal param with sidecar suffix
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}--my-sidecar`));
   });
+
+  test("isolated-ui sidecar with sidecar-ui link shows Open link", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "sc-open-1",
+      sidecars: [{ name: "isolated-ui", alive: true }],
+      slots: {
+        title: "Session with sidecar UI",
+        links: [{ label: "sidecar-ui", url: "http://example.com:5601" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(sidecarSection).toBeVisible();
+
+    const openLink = sidecarSection.getByRole("link", { name: /open/i });
+    await expect(openLink).toBeVisible();
+    await expect(openLink).toHaveAttribute("href", "http://example.com:5601");
+  });
 });

@@ -3,7 +3,7 @@ import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
-  test.use({ viewport: { width: 390, height: 844 } });
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
   test("header visible at mobile width", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "mob-1" })]);
@@ -26,6 +26,36 @@ test.describe("R1: Mobile viewport", () => {
     );
     const innerWidth = await page.evaluate(() => window.innerWidth);
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
+  test("inputs and selects have font-size >= 16px to prevent auto-zoom", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    const minFontSize = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll("input, select, textarea"));
+      if (els.length === 0) return 16;
+      return els.reduce((min, el) => {
+        const size = parseFloat(window.getComputedStyle(el).fontSize);
+        return size < min ? size : min;
+      }, Infinity);
+    });
+
+    expect(minFontSize).toBeGreaterThanOrEqual(16);
+  });
+
+  test("attention zone collapses and expands on tap at mobile", async ({ page }) => {
+    await gotoMocked(page, "/", [makeWorkingSession({ id: "acc-1", prompt: "Accordion session" })]);
+
+    await expect(page.getByText("Accordion session")).toBeVisible();
+
+    const zoneToggle = page.locator("section button").filter({ hasText: /working/i }).first();
+    await expect(zoneToggle).toBeVisible({ timeout: 5000 });
+    await zoneToggle.click();
+    await expect(page.getByText("Accordion session")).not.toBeVisible();
+
+    await zoneToggle.click();
+    await expect(page.getByText("Accordion session")).toBeVisible();
   });
 });
 

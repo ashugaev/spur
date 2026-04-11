@@ -157,6 +157,62 @@ test.describe("S3: Message section", () => {
 
     await expect(page.getByText(/not accepting input/i)).toBeVisible();
   });
+
+  test("drop image file shows thumbnail", async ({ page }) => {
+    const session = makeWorkingSession({ id: "drop-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea");
+    await expect(textarea).toBeVisible();
+
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "test.png", { type: "image/png" }));
+      return dt;
+    });
+    await textarea.dispatchEvent("drop", { dataTransfer });
+
+    await expect(page.locator('img[alt="test.png"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test("paste image shows thumbnail", async ({ page }) => {
+    const session = makeWorkingSession({ id: "paste-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.locator("textarea");
+    await expect(textarea).toBeVisible();
+
+    await page.evaluate(() => {
+      const ta = document.querySelector("textarea");
+      if (!ta) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "paste.png", { type: "image/png" }));
+      const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+      ta.dispatchEvent(ev);
+    });
+
+    await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
+  });
+
+  test("Send enabled when attachment present with empty text", async ({ page }) => {
+    const session = makeWorkingSession({ id: "attach-send-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const sendBtn = page.getByRole("button", { name: /^send$/i });
+    await expect(sendBtn).toBeDisabled();
+
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "attach.png", { type: "image/png" }));
+      return dt;
+    });
+    await page.locator("textarea").dispatchEvent("drop", { dataTransfer });
+
+    await expect(sendBtn).not.toBeDisabled({ timeout: 5000 });
+  });
 });
 
 // S4: Links section
@@ -258,5 +314,22 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     // URL should no longer contain terminal param
     await expect(page).not.toHaveURL(new RegExp(`terminal=`));
+  });
+
+  test("opening terminal sets body overflow hidden to block page scroll", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s6-3" });
+    await mockSessionDetail(page, session);
+    await page.route("**/api/runtime/terminal**", (route) => void route.abort());
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page).toHaveURL(new RegExp(`terminal=`));
+
+    const overflow = await page.evaluate(() => document.body.style.overflow);
+    expect(overflow).toBe("hidden");
+
+    await page.getByRole("button", { name: /close terminal/i }).click();
+    const overflowRestored = await page.evaluate(() => document.body.style.overflow);
+    expect(overflowRestored).not.toBe("hidden");
   });
 });
