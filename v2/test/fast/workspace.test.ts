@@ -208,9 +208,9 @@ HEAD 2222222
 branch refs/heads/feature/runtime-preflight
 `);
 
-    await expect(
-      findWorktreePathForBranch("/repo/api", "feature/runtime-preflight"),
-    ).resolves.toBe("/tmp/spur-worktrees/api/api-1");
+    await expect(findWorktreePathForBranch("/repo/api", "feature/runtime-preflight")).resolves.toBe(
+      "/tmp/spur-worktrees/api/api-1",
+    );
   });
 
   it("returns null when no worktree has the branch checked out", async () => {

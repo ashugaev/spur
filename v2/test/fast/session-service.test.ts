@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
+const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
@@ -58,6 +59,16 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+
+vi.mock("../../src/registry.js", async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+    writeConfigRegistry: vi.fn(),
+  };
+});
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -254,6 +265,8 @@ describe("SessionService", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
 
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
+
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
@@ -407,6 +420,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -842,6 +856,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -1932,6 +1947,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -2728,6 +2744,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
