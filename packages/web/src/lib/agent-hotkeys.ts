@@ -33,9 +33,13 @@ function command(id: string, label: string, detail: string): AgentHotkey {
   };
 }
 
+const COMMON_HOTKEYS: AgentHotkey[] = [
+  shortcut("slash", "Slash", "/", "/", "Start a slash command"),
+  shortcut("escape", "Esc", "Esc", "\x1b", "Back out of the current terminal state"),
+  shortcut("switch-mode", "Switch mode", "Shift+Tab", "\x1b[Z", "Switch the current work mode"),
+];
+
 const CLAUDE_HOTKEYS: AgentHotkey[] = [
-  shortcut("interrupt", "Interrupt / Back", "Esc", "\x1b", "Stop work or move up one level"),
-  shortcut("cycle-mode", "Cycle mode", "Shift+Tab", "\x1b[Z", "Cycle Claude permission mode"),
   shortcut("history", "History search", "Ctrl+R", ctrl("R"), "Search previous prompts"),
   command("compact", "/compact", "Summarize chat and free context"),
   command("clear", "/clear", "Start a fresh Claude chat"),
@@ -58,8 +62,8 @@ const CODEX_HOTKEYS: AgentHotkey[] = [
 ];
 
 const HOTKEYS_BY_AGENT: Record<AgentName, AgentHotkey[]> = {
-  claude: CLAUDE_HOTKEYS,
-  codex: CODEX_HOTKEYS,
+  claude: [...COMMON_HOTKEYS, ...CLAUDE_HOTKEYS],
+  codex: [...COMMON_HOTKEYS, ...CODEX_HOTKEYS],
 };
 
 export function getAgentHotkeys(agent: AgentName): AgentHotkey[] {

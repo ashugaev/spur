@@ -185,8 +185,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `ESC`, `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`); clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
+- Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
