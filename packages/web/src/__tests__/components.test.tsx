@@ -67,6 +67,7 @@ describe("Dashboard", () => {
   it("renders Spur dashboard sessions from API", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsPayload()));
     });
@@ -86,6 +87,7 @@ describe("Dashboard", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
@@ -149,6 +151,7 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -169,6 +172,7 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -191,6 +195,7 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -210,6 +215,7 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -249,6 +255,7 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsData));
     });
@@ -279,6 +286,8 @@ describe("Dashboard", () => {
   it("allows spawning from the dashboard without a prompt", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -340,6 +349,8 @@ describe("Dashboard", () => {
   ])("submits spawn when pressing $label in prompt textarea", async ({ keydown, prompt: value }) => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
@@ -380,6 +391,8 @@ describe("Dashboard", () => {
     let spawnCalls = 0;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/sessions")
@@ -416,6 +429,8 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       return new Response(JSON.stringify(sessionsData));
@@ -444,6 +459,8 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       return new Response(JSON.stringify(sessionsData));
@@ -474,6 +491,8 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       return new Response(JSON.stringify(sessionsData));
@@ -512,6 +531,8 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       if (url === "/api/spawn") return new Response("ok", { status: 200 });
@@ -586,8 +607,48 @@ describe("Dashboard", () => {
 });
 
 describe("StatusBar", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("renders build version without hydration mismatch", () => {
     const html = renderToString(<StatusBar sessions={[]} />);
     expect(html).toContain("dev");
+  });
+
+  it("renders resource metrics when runtime resources are available", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      const footerText = screen.getByRole("contentinfo").textContent ?? "";
+      expect(footerText).toContain("CPU12%");
+      expect(footerText).toContain("RAM34%");
+      expect(footerText).toContain("DISK56%");
+    });
+  });
+
+  it("hides resource metrics when runtime resources are unavailable", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ available: false })),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/CPU \d+%/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/RAM \d+%/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
+    });
   });
 });
