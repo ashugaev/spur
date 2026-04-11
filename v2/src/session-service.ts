@@ -440,9 +440,7 @@ function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
-    ...(session.worktree && session.branchSource === "explicit"
-      ? { branch: session.branch }
-      : {}),
+    ...(session.worktree && session.branchSource === "explicit" ? { branch: session.branch } : {}),
   };
 }
 
@@ -1151,7 +1149,10 @@ export class SessionService {
         fallbackBranch: sessionId,
       });
       if (worktree && resolvedBranch.branch !== sessionId) {
-        const branchConflictPath = await findWorktreePathForBranch(project.path, resolvedBranch.branch);
+        const branchConflictPath = await findWorktreePathForBranch(
+          project.path,
+          resolvedBranch.branch,
+        );
         if (branchConflictPath) {
           if (resolvedBranch.branchSource === "explicit") {
             throw new Error(
@@ -1162,8 +1163,7 @@ export class SessionService {
             level: "warn",
             sessionId,
             projectId: request.project,
-            message:
-              `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+            message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
             details: {
               occupiedBranch: resolvedBranch.branch,
               conflictingWorktreePath: branchConflictPath,
