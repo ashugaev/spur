@@ -65,6 +65,14 @@ button {
   white-space: nowrap;
 }
 
+@media (hover: none) and (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+  textarea:not(.xterm-helper-textarea),
+  select {
+    font-size: 16px;
+  }
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {
