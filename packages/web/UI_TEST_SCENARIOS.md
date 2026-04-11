@@ -87,6 +87,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Version is static (no ticking), set at build time
 - Falls back to `dev` in development when no build version is injected
 
+### D6c: Footer resource metrics
+
+- On Linux hosts with available runtime metrics, footer left side shows `CPU <n>%`, `RAM <n>%`, `DISK <n>%` in uppercase compact format
+- On unsupported hosts (macOS/Windows) or when runtime metrics source is unavailable, footer resource metrics are hidden with no red/error UI
+
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
