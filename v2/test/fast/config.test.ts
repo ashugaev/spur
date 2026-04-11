@@ -484,6 +484,11 @@ projects:
       dev:
         command: "pnpm dev"
         autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
       worker:
         command: "pnpm worker"
         env:
@@ -493,9 +498,35 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.projects["backend"]?.sidecars).toEqual({
-      dev: { command: "pnpm dev", autoStart: true },
+      dev: {
+        command: "pnpm dev",
+        autoStart: true,
+        ports: {
+          http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3099 },
+        },
+      },
       worker: { command: "pnpm worker", autoStart: false, env: { NODE_ENV: "production" } },
     });
+  });
+
+  it("rejects invalid sidecar port ranges", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3100
+            end: 3000
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.end must be greater than or equal to projects.backend.sidecars.dev.ports.http.start",
+    );
   });
 
   it("rejects both devServer and sidecars", async () => {

@@ -21,6 +21,7 @@ import {
   deleteServiceSourceStatesForService,
   deleteServiceSourceStatesForSession,
   listActiveServiceProblems,
+  listServiceInstances,
   listServiceInstancesForSession,
   listSessions,
   readServiceInstance,
@@ -319,6 +320,68 @@ function buildSessionEnv(args: {
     env["npm_config_virtual_store_dir"] = join(args.repoPath, "node_modules/.pnpm");
   }
   return env;
+}
+
+function collectReservedSidecarPorts(
+  session: Pick<SessionRecord, "status" | "sidecarPorts">,
+): number[] {
+  if (isTerminalSessionStatus(session.status)) {
+    return [];
+  }
+  return Object.values(session.sidecarPorts ?? {}).flatMap((sidecarPorts) =>
+    Object.values(sidecarPorts),
+  );
+}
+
+function reserveSidecarPorts(
+  dataDir: string,
+  sidecars: ProjectConfig["sidecars"],
+): SessionRecord["sidecarPorts"] | undefined {
+  const unavailable = new Set<number>();
+  for (const service of listServiceInstances(dataDir)) {
+    if (service.port !== undefined) {
+      unavailable.add(service.port);
+    }
+  }
+  for (const session of listSessions(dataDir)) {
+    for (const port of collectReservedSidecarPorts(session)) {
+      unavailable.add(port);
+    }
+  }
+
+  const reserved: NonNullable<SessionRecord["sidecarPorts"]> = {};
+  for (const [sidecarName, sidecar] of Object.entries(sidecars)) {
+    if (!sidecar.ports) continue;
+    const reservedEnvPorts: Record<string, number> = {};
+    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
+      let selectedPort: number | undefined;
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        if (unavailable.has(candidate)) continue;
+        selectedPort = candidate;
+        unavailable.add(candidate);
+        break;
+      }
+      if (selectedPort === undefined) {
+        throw new Error(
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+        );
+      }
+      reservedEnvPorts[portConfig.env] = selectedPort;
+    }
+    if (Object.keys(reservedEnvPorts).length > 0) {
+      reserved[sidecarName] = reservedEnvPorts;
+    }
+  }
+
+  return Object.keys(reserved).length > 0 ? reserved : undefined;
+}
+
+function sidecarPortEnv(
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+): Record<string, string> {
+  const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
+  return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
 async function waitForRestorePlan(
@@ -1027,6 +1090,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
+      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
       if (preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -1082,6 +1146,7 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -1232,6 +1297,7 @@ export class SessionService {
               ...sessionEnv,
               SPUR_SIDECAR_NAME: name,
               ...(sidecar.env ?? {}),
+              ...sidecarPortEnv(runningRecord, name),
             },
           });
           this.logEvent("session.sidecar.started", {
@@ -1568,6 +1634,7 @@ export class SessionService {
         ...sessionEnv,
         SPUR_SIDECAR_NAME: sidecarName,
         ...(sidecar.env ?? {}),
+        ...sidecarPortEnv(session, sidecarName),
       },
     });
 

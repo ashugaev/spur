@@ -97,6 +97,13 @@ function asOptionalNumber(value: unknown, label: string): number | undefined {
   return value;
 }
 
+function asPortNumber(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > 65_535) {
+    throw new Error(`${label} must be an integer between 1 and 65535`);
+  }
+  return value;
+}
+
 function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "boolean") {
@@ -355,7 +362,32 @@ function parseSidecars(
         env[k] = asString(v, `${entryLabel}.env.${k}`);
       }
     }
-    result[name] = { command, autoStart, ...(env ? { env } : {}) };
+    const portsRaw = entryRaw["ports"];
+    let ports: SidecarConfig["ports"];
+    if (portsRaw !== undefined) {
+      const portsObj = asObject(portsRaw, `${entryLabel}.ports`);
+      ports = {};
+      for (const [portId, portValue] of Object.entries(portsObj)) {
+        if (!VALID_ID_RE.test(portId)) {
+          throw new Error(
+            `${entryLabel}.ports.${portId} is invalid: port ids must match ${VALID_ID_RE.source}`,
+          );
+        }
+        const portLabel = `${entryLabel}.ports.${portId}`;
+        const portObj = asObject(portValue, portLabel);
+        const start = asPortNumber(portObj["start"], `${portLabel}.start`);
+        const end = asPortNumber(portObj["end"], `${portLabel}.end`);
+        if (end < start) {
+          throw new Error(`${portLabel}.end must be greater than or equal to ${portLabel}.start`);
+        }
+        ports[portId] = {
+          env: asString(portObj["env"], `${portLabel}.env`),
+          start,
+          end,
+        };
+      }
+    }
+    result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
   }
   return result;
 }
