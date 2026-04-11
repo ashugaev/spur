@@ -129,19 +129,34 @@ describe("runtime-tmux", () => {
     ]);
   });
 
-  it("uses atomic newline paste for codex sends without a separate Enter", async () => {
+  it("uses bracketed paste plus a real Enter for codex sends", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
 
     await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
 
-    const commandCalls = execFileAsyncMock.mock.calls.map(([, args]) => args[0]);
-    expect(commandCalls).toContain("load-buffer");
-    expect(commandCalls).toContain("paste-buffer");
-    expect(commandCalls).toContain("delete-buffer");
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(pasteCall?.[1]).toContain("-d");
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args[0] === "paste-buffer");
+    const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
     expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps multiline codex payloads inside bracketed paste before submit", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "line one\nline two", { agent: "codex" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args[0] === "paste-buffer");
+    const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
+    expect(pasteIndex).toBeGreaterThan(-1);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
   });
 
   it("keeps interrupt behavior before codex atomic send", async () => {
@@ -153,7 +168,9 @@ describe("runtime-tmux", () => {
 
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
 });

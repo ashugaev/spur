@@ -37,6 +37,7 @@ const getTmuxSessionActivityMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
 const killTmuxSessionMock = vi.fn();
 const sendMessageToTmuxMock = vi.fn();
+const sendSubmitKeyToTmuxMock = vi.fn();
 const syncTmuxStatusMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const tmuxPaneDeadMock = vi.fn();
@@ -125,6 +126,7 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   killTmuxSession: killTmuxSessionMock,
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: sendMessageToTmuxMock,
+  sendSubmitKeyToTmux: sendSubmitKeyToTmuxMock,
   syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: tmuxPaneDeadMock,
   tmuxSessionExists: tmuxSessionExistsMock,
@@ -323,6 +325,7 @@ describe("SessionService", () => {
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
     sendMessageToTmuxMock.mockReset().mockResolvedValue(undefined);
+    sendSubmitKeyToTmuxMock.mockReset().mockResolvedValue(undefined);
     tmuxPaneDeadMock.mockReset().mockResolvedValue(false);
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
@@ -613,6 +616,12 @@ describe("SessionService", () => {
   it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(service as any, "waitForCodexHookBaseline").mockResolvedValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+      hookEvent: "Stop",
+    });
+    vi.spyOn(service as any, "waitForCodexSubmitAck").mockResolvedValue(true);
 
     const result = await service.spawn({
       project: "api",
@@ -898,6 +907,7 @@ describe("SessionService", () => {
 
   it("passes the codex agent to tmux delivery", async () => {
     const sessions = createSessionStore();
+    listSessionsMock.mockReturnValue([]);
     sessions.set("api-1", {
       id: "api-1",
       project: "api",
@@ -912,22 +922,160 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    readAgentHookStateMock.mockReturnValue({
-      state: "waiting",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        hookEvent: "Stop",
+      })
+      .mockReturnValue({
+        state: "working",
+        updatedAt: "2026-03-18T10:05:01.000Z",
+        hookEvent: "UserPromptSubmit",
+      });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(service as any, "waitForCodexSubmitAck").mockResolvedValue(true);
     service.dispose();
 
-    await service.send("api-1", { message: "follow up" });
-    await vi.advanceTimersByTimeAsync(0);
+    await (service as any).sendAgentMessage(
+      {
+        id: "api-1",
+        tmuxSession: "api-1",
+        agent: "codex",
+      },
+      "follow up",
+      { interrupt: false },
+    );
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       interrupt: false,
       agent: "codex",
     });
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts a rewritten codex hook file even after UserPromptSubmit has already advanced", async () => {
+    const sessions = createSessionStore();
+    listSessionsMock.mockReturnValue([]);
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        hookEvent: "Stop",
+        fileMtimeMs: 1_000,
+      })
+      .mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        hookEvent: "Stop",
+        fileMtimeMs: 1_001,
+      });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    const sendPromise = service.deliver("api-1", "follow up");
+    await vi.advanceTimersByTimeAsync(250);
+    await sendPromise;
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      interrupt: false,
+      agent: "codex",
+    });
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("retries codex submit with a bare Enter when the first ack does not arrive", async () => {
+    const sessions = createSessionStore();
+    listSessionsMock.mockReturnValue([]);
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      })
+      .mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    const sendPromise = service.deliver("api-1", "follow up");
+    await vi.advanceTimersByTimeAsync(5_000);
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:05:06.000Z",
+      hookEvent: "UserPromptSubmit",
+    });
+    await vi.advanceTimersByTimeAsync(250);
+    await sendPromise;
+
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+  });
+
+  it("fails codex delivery when submit ack never arrives", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    vi.spyOn(service as any, "waitForCodexHookBaseline").mockResolvedValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+      hookEvent: "Stop",
+    });
+    const waitForAckMock = vi
+      .spyOn(service as never, "waitForCodexSubmitAck")
+      .mockResolvedValue(false);
+
+    await expect(
+      (service as any).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "codex",
+        },
+        "follow up",
+      ),
+    ).rejects.toThrow(
+      "Timed out waiting for Codex submit acknowledgment for api-1",
+    );
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
+      agent: "codex",
+    });
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(waitForAckMock).toHaveBeenCalledTimes(2);
   });
 
   it("queues manual send messages while the agent is busy", async () => {
