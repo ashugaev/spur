@@ -22,6 +22,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+      - run: pnpm store verify 2>/dev/null || rm -rf "$(pnpm store path)"
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
@@ -41,6 +42,7 @@ jobs:
           cache: pnpm
       - name: Start tmux server
         run: tmux start-server
+      - run: pnpm store verify 2>/dev/null || rm -rf "$(pnpm store path)"
       - run: pnpm install --frozen-lockfile
       - run: pnpm --dir v2 build
       - run: pnpm test:integration

@@ -1,8 +1,8 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { rmSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
+const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
@@ -58,6 +58,15 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+
+vi.mock("../../src/registry.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/registry.js")>();
+  return {
+    ...actual,
+    upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+    writeConfigRegistry: vi.fn(),
+  };
+});
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -249,14 +258,11 @@ function mockClaudeJsonlState(state: string) {
 }
 
 describe("SessionService", () => {
-  beforeAll(() => {
-    // Remove stale /tmp/spur-data from previous CI runs to avoid EACCES failures.
-    rmSync("/tmp/spur-data", { recursive: true, force: true });
-  });
-
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
 
     buildAgentLaunchPlanMock
       .mockReset()
