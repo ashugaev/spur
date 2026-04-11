@@ -251,27 +251,32 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   }
 }
 
+async function pasteLiteral(sessionName: string, payload: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  const bufferName = `spur-${randomUUID()}`;
+  const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
+  writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
+  try {
+    await tmux("load-buffer", "-b", bufferName, tempPath);
+    await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
+  } finally {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Ignore cleanup failures.
+    }
+    try {
+      await tmux("delete-buffer", "-b", bufferName);
+    } catch {
+      // Ignore cleanup failures.
+    }
+  }
+}
+
 async function sendLiteral(sessionName: string, message: string): Promise<void> {
   const target = exactPaneTarget(sessionName);
   if (message.includes("\n") || message.length > 200) {
-    const bufferName = `spur-${randomUUID()}`;
-    const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
-    writeFileSync(tempPath, message, { encoding: "utf-8", mode: 0o600 });
-    try {
-      await tmux("load-buffer", "-b", bufferName, tempPath);
-      await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
-    } finally {
-      try {
-        unlinkSync(tempPath);
-      } catch {
-        // Ignore cleanup failures.
-      }
-      try {
-        await tmux("delete-buffer", "-b", bufferName);
-      } catch {
-        // Ignore cleanup failures.
-      }
-    }
+    await pasteLiteral(sessionName, message);
     return;
   }
 
@@ -293,6 +298,10 @@ export async function sendMessageToTmux(
     await sleep(500);
   }
   await tmux("send-keys", "-t", target, "C-u");
+  if (options?.agent === "codex") {
+    await pasteLiteral(sessionName, `${message}\n`);
+    return;
+  }
   await sendLiteral(sessionName, message);
   await sleep(submitDelayMs(options?.agent));
   await tmux("send-keys", "-t", target, "Enter");

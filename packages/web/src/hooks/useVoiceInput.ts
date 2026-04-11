@@ -76,7 +76,7 @@ export interface UseVoiceInput {
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
   toggleRecording: () => void;
-  confirmDraft: (onInsert: (text: string) => unknown) => void;
+  confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
   dismissModal: () => void;
   voiceError: string | null;
   clearVoiceError: () => void;
@@ -218,11 +218,11 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   }, [recording, stopStream, voiceStatus]);
 
   const confirmDraft = useCallback(
-    (onInsert: (text: string) => unknown) => {
+    async (onInsert: (text: string) => unknown) => {
       const trimmed = voiceDraft.trim();
       if (!trimmed) return;
       try {
-        const inserted = onInsert(trimmed);
+        const inserted = await onInsert(trimmed);
         if (inserted === false) {
           throw new Error(INSERT_ERROR);
         }

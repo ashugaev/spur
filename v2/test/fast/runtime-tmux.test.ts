@@ -60,7 +60,7 @@ describe("runtime-tmux", () => {
       "-c",
       "/tmp/worktree",
     ]);
-    expect(sleepMock).toHaveBeenCalledWith(1_000);
+    expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
   it("registers status-right link click handling when syncing tmux status", async () => {
@@ -129,18 +129,31 @@ describe("runtime-tmux", () => {
     ]);
   });
 
-  it("waits longer before pressing Enter for codex sends", async () => {
+  it("uses atomic newline paste for codex sends without a separate Enter", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
 
     await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
 
-    expect(sleepMock).toHaveBeenCalledWith(1_000);
-    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
-      "C-u",
-      "follow up",
-      "Enter",
-    ]);
+    const commandCalls = execFileAsyncMock.mock.calls.map(([, args]) => args[0]);
+    expect(commandCalls).toContain("load-buffer");
+    expect(commandCalls).toContain("paste-buffer");
+    expect(commandCalls).toContain("delete-buffer");
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps interrupt behavior before codex atomic send", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { interrupt: true, agent: "codex" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    expect(sleepMock).toHaveBeenCalledWith(500);
   });
 });
