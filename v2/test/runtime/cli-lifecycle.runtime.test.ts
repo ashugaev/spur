@@ -2261,27 +2261,19 @@ projects:
     expect(respawned.id).not.toBe(target.id);
     expect(respawned.status).toBe("running");
 
-    const sessions = await pollUntil(
-      async () =>
-        JSON.parse(
-          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
-        ) as SessionView[],
+    const completedCaller = await pollUntil(
+      () => context.fetchJson<SessionView>(`/sessions/${caller.id}`),
       {
         timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (session) =>
-              session.id === caller.id &&
-              session.status === "completed" &&
-              session.runtimeAlive === false &&
-              session.workspaceExists === false,
-          ),
+        accept: (session) =>
+          session.status === "completed" &&
+          session.runtimeAlive === false &&
+          session.workspaceExists === false,
       },
     );
-    const completedCaller = sessions.find((session) => session.id === caller.id);
-    expect(completedCaller?.status).toBe("completed");
-    expect(completedCaller?.runtimeAlive).toBe(false);
-    expect(completedCaller?.workspaceExists).toBe(false);
+    expect(completedCaller.status).toBe("completed");
+    expect(completedCaller.runtimeAlive).toBe(false);
+    expect(completedCaller.workspaceExists).toBe(false);
   });
 
   it("keeps the calling live session running when a session-bound respawn fails", async () => {
