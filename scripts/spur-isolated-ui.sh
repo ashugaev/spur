@@ -36,8 +36,8 @@ fi
 # shellcheck source=/dev/null
 source "$RUNTIME_FILE"
 
-UI_PORT=$(find_free_port "$UI_PORT_START" "$UI_PORT_END")
-TERMINAL_PORT=$(find_free_port "$TERMINAL_PORT_START" "$TERMINAL_PORT_END")
+UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")
+TERMINAL_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_TERMINAL" "$TERMINAL_PORT_START" "$TERMINAL_PORT_END")
 PUBLIC_URL="${PUBLIC_SCHEME}://${PUBLIC_HOST}:${UI_PORT}"
 
 cleanup() {

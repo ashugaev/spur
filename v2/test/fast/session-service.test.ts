@@ -22,6 +22,7 @@ const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
+const listServiceInstancesMock = vi.fn();
 const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
@@ -98,6 +99,7 @@ vi.mock("../../src/metadata.js", () => ({
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
   deleteServiceSourceStatesForSession: deleteServiceSourceStatesForSessionMock,
   listActiveServiceProblems: listActiveServiceProblemsMock,
+  listServiceInstances: listServiceInstancesMock,
   listServiceInstancesForSession: listServiceInstancesForSessionMock,
   listSessions: listSessionsMock,
   readServiceInstance: readServiceInstanceMock,
@@ -200,6 +202,9 @@ function serviceKey(sessionId: string, serviceId: string): string {
 
 function resetServiceStore() {
   serviceRecords.clear();
+  listServiceInstancesMock.mockImplementation(() =>
+    [...serviceRecords.values()].map((service) => clone(service)),
+  );
   listServiceInstancesForSessionMock.mockImplementation((_dataDir: string, sessionId: string) =>
     [...serviceRecords.values()]
       .filter((service) => service.sessionId === sessionId)
@@ -303,6 +308,7 @@ describe("SessionService", () => {
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
     listActiveServiceProblemsMock.mockReset().mockReturnValue([]);
+    listServiceInstancesMock.mockReset().mockReturnValue([]);
     listServiceInstancesForSessionMock.mockReset().mockReturnValue([]);
     readServiceInstanceMock.mockReset().mockReturnValue(undefined);
     writeServiceInstanceMock.mockReset();
@@ -471,6 +477,105 @@ describe("SessionService", () => {
       expect.stringContaining("Available: `dev`."),
       { agent: "claude" },
     );
+  });
+
+  it("reserves sidecar ports during spawn and passes them into sidecar env", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: true,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+              },
+            },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(writeSessionMock.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        sidecarPorts: {
+          dev: {
+            SPUR_RESERVED_PORT_DEV: 3000,
+          },
+        },
+      }),
+    );
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sidecarName: "dev",
+        env: expect.objectContaining({
+          SPUR_SIDECAR_NAME: "dev",
+          SPUR_RESERVED_PORT_DEV: "3000",
+        }),
+      }),
+    );
+  });
+
+  it("fails spawn when another live session already holds the only reserved sidecar port", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+              },
+            },
+          },
+        },
+      },
+    });
+    listSessionsMock.mockReturnValue([
+      {
+        id: "api-existing",
+        project: "api",
+        agent: "claude",
+        prompt: "existing",
+        branch: "api-existing",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-existing",
+        tmuxSession: "api-existing",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T09:00:00.000Z",
+        updatedAt: "2026-03-18T09:01:00.000Z",
+        sidecarPorts: {
+          dev: {
+            SPUR_RESERVED_PORT_DEV: 3000,
+          },
+        },
+      },
+    ]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+      }),
+    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 3000-3000");
+    expect(writeSessionMock).not.toHaveBeenCalled();
   });
 
   it("passes planMode to launch planning and persists it on the session", async () => {
@@ -2911,6 +3016,25 @@ describe("SessionService", () => {
   });
 
   it("startSidecar prefers sidecars from the session worktree config", async () => {
+    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    loadProjectConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          path: "/tmp/spur-worktrees/api/api-1",
+          sidecars: {
+            dev: {
+              command: "./scripts/dev.sh",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+              },
+            },
+          },
+        },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2924,15 +3048,9 @@ describe("SessionService", () => {
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
-    });
-    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
-    loadProjectConfigMock.mockReturnValue({
-      ...baseConfig(),
-      projects: {
-        api: {
-          ...baseConfig().projects.api,
-          path: "/tmp/spur-worktrees/api/api-1",
-          sidecars: { dev: { command: "./scripts/dev.sh", autoStart: false } },
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
         },
       },
     });
@@ -2950,6 +3068,7 @@ describe("SessionService", () => {
         command: "./scripts/dev.sh",
         env: expect.objectContaining({
           SPUR_SIDECAR_NAME: "dev",
+          SPUR_RESERVED_PORT_DEV: "3000",
         }),
       }),
     );

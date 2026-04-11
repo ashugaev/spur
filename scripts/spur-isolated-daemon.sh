@@ -7,7 +7,7 @@ source "$SCRIPT_DIR/spur-sidecar-common.sh"
 
 PORT_START=${SPUR_SIDECAR_DAEMON_PORT_START:-4320}
 PORT_END=${SPUR_SIDECAR_DAEMON_PORT_END:-4399}
-AGENT_PORT=$(find_free_port "$PORT_START" "$PORT_END")
+AGENT_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_DAEMON" "$PORT_START" "$PORT_END")
 PROJECT_CONFIG_PATH="${SPUR_PROJECT_CONFIG_PATH:-$(realpath "$SCRIPT_DIR/../spur.yaml")}"
 
 CONFIG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/spur-isolated-daemon.XXXXXX")
