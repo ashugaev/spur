@@ -91,6 +91,24 @@ function sessionFixture() {
   };
 }
 
+function conversationFixture(
+  overrides?: Partial<{
+    messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
+    durationMs: number;
+    state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  }>,
+) {
+  return {
+    messages: [
+      { role: "user" as const, text: "Original prompt", timestampMs: 1 },
+      { role: "assistant" as const, text: "First reply", timestampMs: 2 },
+    ],
+    durationMs: 60_000,
+    state: "waiting" as const,
+    ...overrides,
+  };
+}
+
 describe("SessionDetail voice input", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -497,5 +515,126 @@ describe("SessionDetail voice input", () => {
         "http://openclaw-dev.tail90e846.ts.net:5601",
       );
     });
+  });
+
+  it("shows a pending assistant bubble and promotes the header state to working", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            state: "waiting",
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              state: "working",
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /dialog/i })).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("working")).toBeInTheDocument();
+    expect(screen.queryByText("waiting")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Assistant is responding")).toHaveTextContent("...");
+    expect(screen.getAllByText("working")).toHaveLength(1);
+  });
+
+  it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
+    const intervalCallbacks: Array<() => void | Promise<void>> = [];
+    const setIntervalSpy = vi
+      .spyOn(global, "setInterval")
+      .mockImplementation((handler: TimerHandler) => {
+        if (typeof handler === "function") {
+          intervalCallbacks.push(handler as () => void);
+        }
+        return 1 as unknown as ReturnType<typeof setInterval>;
+      });
+    const clearIntervalSpy = vi.spyOn(global, "clearInterval").mockImplementation(() => {});
+    const scrollTo = vi.fn();
+    const scrollToDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
+    const scrollHeightDescriptor = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollHeight",
+    );
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        return 420;
+      },
+    });
+    let sessionRequests = 0;
+    let conversationRequests = 0;
+    try {
+      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/sessions/api-a1") {
+          sessionRequests += 1;
+          return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        }
+        if (url === "/api/sessions/api-a1/conversation") {
+          conversationRequests += 1;
+          const payload =
+            conversationRequests === 1
+              ? conversationFixture({
+                  messages: [{ role: "user", text: "Original prompt", timestampMs: 1 }],
+                })
+              : conversationFixture({
+                  messages: [{ role: "user", text: "Original prompt", timestampMs: 1 }],
+                  state: "working",
+                });
+          return new Response(JSON.stringify(payload), { status: 200 });
+        }
+        if (url === "/api/runtime/voice") {
+          return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+        }
+        throw new Error(`Unexpected fetch: ${url}`);
+      });
+
+      render(<SessionDetail sessionId="api-a1" />);
+
+      await screen.findByRole("heading", { name: /dialog/i });
+
+      expect(intervalCallbacks.length).toBeGreaterThan(0);
+      await act(async () => {
+        await Promise.all(intervalCallbacks.map((callback) => callback()));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByLabelText("Assistant is responding")).toBeInTheDocument();
+      });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 420, behavior: "smooth" });
+      expect(sessionRequests).toBeGreaterThan(1);
+    } finally {
+      if (scrollToDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "scrollTo", scrollToDescriptor);
+      }
+      if (scrollHeightDescriptor) {
+        Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDescriptor);
+      }
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
   });
 });

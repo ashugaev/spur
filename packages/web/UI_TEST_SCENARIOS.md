@@ -152,6 +152,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 
+### S2b: Conversation dialog (Claude only)
+
+- Visible only for `agent === "claude"` sessions with conversation messages
+- Hidden for codex sessions and when no messages exist
+- Section header: "DIALOG" with duration (e.g., "2h 15m") on the right
+- Scrollable message list (max-h-80) in bordered surface container
+- User messages: right-aligned, accent border/background tint
+- Assistant messages: left-aligned, default border, secondary text
+- While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
+- When the conversation state is `working`, the page header status also shows `working`
+- Messages truncated at 500 chars with "..."
+- Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
+- Polls at same interval as session (4s)
+
 ### S3: Message section
 
 - Textarea for sending messages when session accepts input

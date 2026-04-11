@@ -167,6 +167,18 @@ export function canSendMessage(session: DashboardSession): boolean {
   return session.runtimeAlive && !isTerminalSession(session);
 }
 
+export interface ConversationMessage {
+  role: "user" | "assistant";
+  text: string;
+  timestampMs: number;
+}
+
+export interface ConversationResponse {
+  messages: ConversationMessage[];
+  durationMs: number;
+  state: SpurSessionState;
+}
+
 export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   if (isTerminalSession(session)) {
     return "done";

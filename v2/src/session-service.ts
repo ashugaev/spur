@@ -10,7 +10,11 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import {
+  readClaudeConversation,
+  readClaudeJsonlState,
+  type ClaudeJsonlReaderState,
+} from "./claude-jsonl-state.js";
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -63,6 +67,7 @@ import {
   type AgentName,
   type AppConfig,
   type BranchSource,
+  type ConversationResponse,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -275,7 +280,7 @@ export function isRestorableSession(
   );
 }
 
-function buildRestorePrompt(prompt: string): string {
+export function buildRestorePrompt(prompt: string): string {
   return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
 }
 
@@ -841,7 +846,7 @@ export class SessionService {
 
   async list(): Promise<SessionView[]> {
     const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !isTerminalSessionStatus(session.status),
+      (session) => !isTerminalSessionStatus(session.status) || session.retainInList === true,
     );
     const views: SessionView[] = [];
     for (const session of sessions) {
@@ -856,6 +861,16 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  async getConversation(sessionId: string): Promise<ConversationResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const durationMs = Date.now() - new Date(session.createdAt).getTime();
+    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    if (session.agent !== "claude") return fallback;
+    const result = await readClaudeConversation(session.worktreePath);
+    return result ? { ...result, durationMs } : fallback;
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -1560,8 +1575,8 @@ export class SessionService {
     });
   }
 
-  async complete(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed");
+  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", options);
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -1684,6 +1699,7 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    options?: { retainInList?: boolean },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -1723,7 +1739,11 @@ export class SessionService {
       ...session,
       status: targetStatus,
       updatedAt: nowIso(),
+      ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (!options?.retainInList) {
+      delete record.retainInList;
+    }
     writeSession(this.config.dataDir, record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -1796,6 +1816,7 @@ export class SessionService {
       status: "killed",
       updatedAt: nowIso(),
     };
+    delete record.retainInList;
     writeSession(this.config.dataDir, record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -2687,7 +2708,7 @@ export class SessionService {
           message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
-        state = "working";
+        state = "waiting";
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -2764,6 +2785,6 @@ export class SessionService {
 
     // Codex: hooks only
     const hookState = readAgentHookState(this.config.dataDir, session.id);
-    return hookState?.state ?? "working";
+    return hookState?.state ?? "waiting";
   }
 }
