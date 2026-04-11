@@ -2688,7 +2688,7 @@ export class SessionService {
           message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
-        state = "working";
+        state = "waiting";
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -2765,6 +2765,6 @@ export class SessionService {
 
     // Codex: hooks only
     const hookState = readAgentHookState(this.config.dataDir, session.id);
-    return hookState?.state ?? "working";
+    return hookState?.state ?? "waiting";
   }
 }

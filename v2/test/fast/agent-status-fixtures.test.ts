@@ -212,6 +212,30 @@ describe("Codex hook state fixture classification", () => {
     expect(parsed.state).toBe(expectedState);
   });
 
+  it("absent hook file → readAgentHookState returns null → classified as waiting (SPUR1614 regression)", async () => {
+    // SPUR1614: Codex session with tmux+process alive but no hook state file.
+    // All 20 events in fixtures/agent-history/codex/no-hook-spur1614.jsonl showed
+    // "State: working (no hook)" — the bug. Fix: null hook → "waiting", not "working".
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const tmpDir = await mkdtemp(join(tmpdir(), "spur1614-no-hook-"));
+    try {
+      const fixture = await readFile(join(CODEX_DIR, "no-hook-spur1614.jsonl"), "utf8");
+      const lines = fixture.trim().split("\n").filter(Boolean);
+      expect(lines).toHaveLength(20);
+      for (const line of lines) {
+        const ev = JSON.parse(line) as { message: string };
+        expect(ev.message).toBe("State: working (no hook)");
+      }
+      // No hook file written — simulates a Codex session whose Stop hook never fired.
+      // Production mapping (null hook → "waiting") is covered by session-service.test.ts.
+      const hookState = readAgentHookState(tmpDir, "spur-1614");
+      expect(hookState).toBeNull();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("readAgentHookState parses fixture files correctly", async () => {
     const { mkdtemp, rm } = await import("node:fs/promises");
     const { tmpdir } = await import("node:os");

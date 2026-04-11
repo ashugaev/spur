@@ -184,8 +184,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   });
 
   // ── Codex hook-based state detection ───────────────────────────────────
-  // Codex hook propagation needs extra time due to initial "working" default
-  // plus STATE_HOLD_MS (4s) debounce before "waiting" becomes visible.
+  // Codex hook propagation: no-hook default is "waiting"; STATE_HOLD_MS (4s) debounce applies.
 
   it("Codex: spawn reaches waiting state from Stop hook", async () => {
     const { context, configPath, port } = await setup("codex-wait");
