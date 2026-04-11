@@ -95,16 +95,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
 - Button labels stay on one line
 - Modal has: project select, agent select, branch input, workspace select, plan checkbox, steps list, multiline textarea, Spawn button
-- Branch input: placeholder "branch name", optional
+- Branch input: placeholder "Branch name", optional
 - Workspace select: Default / Worktree / Shared options
-- When Worktree selected: base branch input appears with placeholder "base branch (defaults to project default)"
+- When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
-- Prompt textarea placeholder is "Optional prompt (leave empty to open the agent session)..."
+- Prompt textarea placeholder is "Prompt for the new session..."
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size

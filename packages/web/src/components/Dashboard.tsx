@@ -536,7 +536,7 @@ export function Dashboard() {
                 <path d="m21 21-4.35-4.35" />
               </svg>
               <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Filter sessions..."
                 value={searchQuery}
@@ -614,7 +614,7 @@ export function Dashboard() {
                     aria-label="branch name"
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => setSpawnBranch(event.target.value)}
-                    placeholder="branch name"
+                    placeholder="Branch name"
                     value={spawnBranch}
                   />
                   <select
@@ -645,7 +645,7 @@ export function Dashboard() {
                   <input
                     className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
-                    placeholder="base branch (defaults to project default)"
+                    placeholder="Base branch"
                     value={spawnDefaultBranch}
                   />
                 ) : null}
@@ -680,13 +680,13 @@ export function Dashboard() {
                 </div>
                 <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
-                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] sm:min-h-[10rem]"
+                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)] sm:min-h-[10rem]"
                     onChange={(event) => setSpawnPrompt(event.target.value)}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
                     }}
-                    placeholder="Optional prompt (leave empty to open the agent session)..."
+                    placeholder="Prompt for the new session..."
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />

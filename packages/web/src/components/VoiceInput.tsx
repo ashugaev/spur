@@ -84,7 +84,7 @@ export function VoiceConfirmModal({
           </p>
           <div className="relative">
             <textarea
-              className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)]"
+              className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
               onChange={(event) => voice.setVoiceDraft(event.target.value)}
               value={voice.voiceDraft}
             />
