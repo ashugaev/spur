@@ -556,6 +556,12 @@ projects:
       stderr: expect.stringContaining("Session not found: api-999"),
     });
 
+    await expect(
+      context.execCli(["--config", configPath, "respawn", "api-999"]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Session not found: api-999"),
+    });
+
     const listed = JSON.parse(
       (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
     ) as SessionView[];
@@ -563,6 +569,65 @@ projects:
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toEqual(
       expect.arrayContaining(["daemon.started", "http.request.failed"]),
     );
+  });
+
+  it("respawns a completed session and rejects respawn for a running session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("respawn.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "respawn runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.execCli(["--config", configPath, "respawn", spawned.id]),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining(`Session ${spawned.id} is not in a terminal state`),
+    });
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(completed.status).toBe("completed");
+    expect(completed.runtimeAlive).toBe(false);
+    expect(completed.workspaceExists).toBe(false);
+
+    const respawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "respawn", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(respawned.status).toBe("running");
+    expect(respawned.project).toBe(spawned.project);
+
+    const listed = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    expect(listed.map((session) => session.id)).toContain(respawned.id);
+
+    const killed = JSON.parse(
+      (await context.execCli(["--config", configPath, "kill", respawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(killed.status).toBe("killed");
+    expect(killed.runtimeAlive).toBe(false);
+    expect(killed.workspaceExists).toBe(false);
   });
 
   it("keeps kill and complete working for existing sessions after the project id is renamed", async () => {
@@ -2136,6 +2201,139 @@ projects:
   it("restores a codex session through the native resume command", async () => {
     const result = await runRestoreScenario({ agent: "codex", configName: "restore-codex.yaml" });
     expect(result.spawned.agent).toBe("codex");
+  });
+
+  it("completes the calling live session after a session-bound respawn succeeds", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-parent-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig("respawn-parent.yaml", baseConfig(context, sessionPrefix));
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const caller = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "caller runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const target = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "respawn target prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    await context.execCli(["--config", configPath, "complete", target.id, "--json"]);
+
+    const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
+    const respawned = JSON.parse(
+      (
+        await execFileAsync(helperPath, ["respawn", target.id, "--json"], {
+          cwd: caller.worktreePath,
+          env: {
+            ...context.env,
+            SPUR_SESSION: caller.id,
+            SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", caller.id),
+          },
+        })
+      ).stdout,
+    ) as SessionView;
+
+    expect(respawned.id).not.toBe(target.id);
+    expect(respawned.status).toBe("running");
+
+    const sessions = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value.some(
+            (session) =>
+              session.id === caller.id &&
+              session.status === "completed" &&
+              session.runtimeAlive === false &&
+              session.workspaceExists === false,
+          ),
+      },
+    );
+    const completedCaller = sessions.find((session) => session.id === caller.id);
+    expect(completedCaller?.status).toBe("completed");
+    expect(completedCaller?.runtimeAlive).toBe(false);
+    expect(completedCaller?.workspaceExists).toBe(false);
+  });
+
+  it("keeps the calling live session running when a session-bound respawn fails", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-parent-fail-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "respawn-parent-fail.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const caller = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "caller runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const helperPath = join(context.dataDir, "session-tools", caller.id, "spur");
+
+    await expect(
+      execFileAsync(helperPath, ["respawn", "api-999", "--json"], {
+        cwd: caller.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: caller.id,
+          SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", caller.id),
+        },
+      }),
+    ).rejects.toThrow("Session not found: api-999");
+
+    const sessions = JSON.parse(
+      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+    ) as SessionView[];
+    const liveCaller = sessions.find((session) => session.id === caller.id);
+    expect(liveCaller?.status).toBe("running");
+    expect(liveCaller?.runtimeAlive).toBe(true);
+    expect(liveCaller?.workspaceExists).toBe(true);
   });
 
   it("shows a restore error in the TTY list when native resume state is missing", async () => {

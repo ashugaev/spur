@@ -278,6 +278,10 @@ export interface KillSessionRequest {
   force?: boolean;
 }
 
+export interface RespawnSessionRequest {
+  terminateSessionId?: string;
+}
+
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
