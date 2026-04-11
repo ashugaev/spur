@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-008"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run tests"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"progress","content":{"type":"text","text":"Running tests..."}}

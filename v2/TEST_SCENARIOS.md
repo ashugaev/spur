@@ -64,6 +64,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Codex hook-based state: hook state is returned directly; defaults to `working` when no hook state exists.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
 - State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
+- Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest, are read-only (mode 444), and are not writable by the test process.
+- Claude JSONL fixture classification covers all waiting reasons (end_turn, stop_sequence, refusal, max_tokens, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh tool_use), and needs_input (stale tool_use).
+- Codex hook state fixture classification covers all hook events: Stop and SessionStart→waiting, UserPromptSubmit, PreToolUse, and PostToolUse→working, including `readAgentHookState` parsing from disk.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.
@@ -139,6 +142,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
 
+- Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` after 3s stale window, and normal message exchange cycles waiting→working→waiting.
+- Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), and normal message exchange cycles waiting→working→waiting.
+- Session-level states for both Claude and Codex: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
+- State history records transitions during a Claude session lifecycle.
 - Sidecar auto-starts on spawn when `autoStart: true`.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete.

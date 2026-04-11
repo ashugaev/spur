@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-002"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Say hello"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello!"}],"stop_reason":"stop_sequence"}}

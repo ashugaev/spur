@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-005"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Start working"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"stop_reason":"end_turn"}}
+{"type":"system","subtype":"result","result":"Session completed"}

@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-007"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Edit the file"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"File edited."}],"stop_reason":"end_turn"}}
+{"type":"file-history-snapshot","files":{"src/main.ts":"abc123"}}

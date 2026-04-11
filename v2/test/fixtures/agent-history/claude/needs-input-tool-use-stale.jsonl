@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-013"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Edit the file"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I need to edit this file."},{"type":"tool_use","id":"toolu_03","name":"Edit","input":{"file_path":"/tmp/test.ts","old_string":"old","new_string":"new"}}]}}

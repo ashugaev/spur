@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-006"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Run the build"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Build completed."}],"stop_reason":"end_turn"}}
+{"type":"stop_hook_summary","session_id":"test-session-006","hooks":[{"name":"post-stop","result":"ok"}]}

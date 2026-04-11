@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/tmp/spur-test","session_id":"test-session-012"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Read the file"}]},"permissionMode":"dangerously-skip-permissions"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reading..."},{"type":"tool_use","id":"toolu_02","name":"Read","input":{"file_path":"/tmp/test.ts"}}]}}
