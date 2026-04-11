@@ -1085,7 +1085,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("defaults codex to working when no hook state exists", async () => {
+  it("defaults codex to waiting when no hook state exists (SPUR1614 regression)", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1107,7 +1107,7 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.state).toBe("working");
+    expect(result.state).toBe("waiting");
   });
 
   it("Claude: defaults to working when no JSONL exists yet", async () => {
