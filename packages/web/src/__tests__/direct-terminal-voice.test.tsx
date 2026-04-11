@@ -68,7 +68,22 @@ const MockWebSocket = vi.fn(() => {
   const ws: Record<string, unknown> = {
     readyState: 0,
     binaryType: "arraybuffer",
-    send: wsSend,
+    send: vi.fn((payload: unknown) => {
+      wsSend(payload);
+      if (typeof payload !== "string" || !payload.startsWith("{")) return;
+      try {
+        const parsed = JSON.parse(payload) as { type?: string; id?: string };
+        if (parsed.type === "input" && typeof parsed.id === "string") {
+          queueMicrotask(() => {
+            (ws.onmessage as ((event: { data: string }) => void) | null)?.({
+              data: JSON.stringify({ type: "ack", id: parsed.id }),
+            });
+          });
+        }
+      } catch {
+        // Ignore malformed payloads in tests.
+      }
+    }),
     close: vi.fn(),
     onopen: null,
     onmessage: null,
@@ -110,6 +125,9 @@ describe("DirectTerminal voice confirm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
-    expect(wsSend).toHaveBeenCalledWith("git status\r");
+    await waitFor(() => {
+      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"type":"input"'));
+      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"data":"git status\\r"'));
+    });
   });
 });

@@ -52,6 +52,9 @@ const terminalTheme: ITheme = {
 const TOUCH_SCROLL_THRESHOLD = 20;
 const RECONNECT_DELAY_MS = 1_000;
 const VISIBILITY_REFRESH_AFTER_MS = 1_000;
+const INPUT_ACK_TIMEOUT_MS = 600;
+const INPUT_RETRY_DELAY_MS = 200;
+const INPUT_MAX_ATTEMPTS = 4;
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -76,10 +79,27 @@ function sgrScroll(up: boolean): string {
   return `\x1b[<${button};1;1M`;
 }
 
+interface InputAckMessage {
+  type: "ack";
+  id?: string;
+}
+
+interface PendingInputAck {
+  attempts: number;
+  data: string;
+  id: string;
+  ackTimer: number | null;
+  retryTimer: number | null;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 export function DirectTerminal({ sessionId, agent = "claude", label, title, onClose }: DirectTerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const hotkeyMenuRef = useRef<HTMLDivElement>(null);
   const websocketRef = useRef<WebSocket | null>(null);
+  const inputSeqRef = useRef(0);
+  const pendingAckRef = useRef<PendingInputAck | null>(null);
   const hotkeys = getAgentHotkeys(agent);
   const [status, setStatus] = useState<"connecting" | "connected" | "reconnecting" | "error">("connecting");
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
@@ -90,11 +110,80 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
     websocketRef.current.send(data);
     return true;
   }, []);
+  const clearPendingAckTimers = useCallback((pending: PendingInputAck) => {
+    if (pending.ackTimer !== null) {
+      window.clearTimeout(pending.ackTimer);
+      pending.ackTimer = null;
+    }
+    if (pending.retryTimer !== null) {
+      window.clearTimeout(pending.retryTimer);
+      pending.retryTimer = null;
+    }
+  }, []);
+
+  const rejectPendingAck = useCallback((pending: PendingInputAck, message: string) => {
+    clearPendingAckTimers(pending);
+    if (pendingAckRef.current?.id === pending.id) {
+      pendingAckRef.current = null;
+    }
+    pending.reject(new Error(message));
+  }, [clearPendingAckTimers]);
+
+  const sendWithAck = useCallback((data: string): Promise<void> => {
+    const id = `${Date.now()}-${inputSeqRef.current++}`;
+
+    return new Promise<void>((resolve, reject) => {
+      const existing = pendingAckRef.current;
+      if (existing) {
+        reject(new Error("Failed to insert transcription"));
+        return;
+      }
+      const pending: PendingInputAck = {
+        attempts: 0,
+        data,
+        id,
+        ackTimer: null,
+        retryTimer: null,
+        resolve,
+        reject,
+      };
+
+      const trySend = () => {
+        pending.attempts += 1;
+        if (pending.attempts > INPUT_MAX_ATTEMPTS) {
+          rejectPendingAck(pending, "Failed to insert transcription");
+          return;
+        }
+        const socket = websocketRef.current;
+        if (!socket || socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+          rejectPendingAck(pending, "Failed to insert transcription");
+          return;
+        }
+
+        if (socket.readyState !== WebSocket.OPEN) {
+          pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+          return;
+        }
+
+        socket.send(JSON.stringify({ type: "input", id: pending.id, data: pending.data }));
+        pending.ackTimer = window.setTimeout(() => {
+          pending.retryTimer = window.setTimeout(trySend, INPUT_RETRY_DELAY_MS);
+        }, INPUT_ACK_TIMEOUT_MS);
+      };
+
+      pendingAckRef.current = pending;
+      trySend();
+    });
+  }, [rejectPendingAck]);
+
   const submitVoiceDraft = useCallback((text: string) => {
-    if (!sendTerminalInput(`${text}\r`)) {
+    const socket = websocketRef.current;
+    if (!socket || socket.readyState === WebSocket.CLOSING || socket.readyState === WebSocket.CLOSED) {
       throw new Error("Failed to insert transcription");
     }
-  }, [sendTerminalInput]);
+    setError(null);
+    return sendWithAck(`${text}\r`);
+  }, [sendWithAck]);
 
   const voice = useVoiceInput();
 
@@ -285,6 +374,22 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
             if (websocket !== nextSocket) return;
             const data =
               typeof event.data === "string" ? event.data : new TextDecoder().decode(event.data);
+            if (typeof data === "string" && data.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(data) as InputAckMessage;
+                if (parsed.type === "ack" && typeof parsed.id === "string") {
+                  const pending = pendingAckRef.current;
+                  if (pending?.id === parsed.id) {
+                    clearPendingAckTimers(pending);
+                    pendingAckRef.current = null;
+                    pending.resolve();
+                  }
+                  return;
+                }
+              } catch {
+                // Fall through to terminal output.
+              }
+            }
             terminal?.write(data);
           };
 
@@ -375,6 +480,11 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
     return () => {
       mounted = false;
       closingForUnmount = true;
+      const pending = pendingAckRef.current;
+      if (pending) {
+        rejectPendingAck(pending, "Failed to insert transcription");
+      }
+      pendingAckRef.current = null;
       if (reconnectTimer !== null) {
         window.clearTimeout(reconnectTimer);
       }
@@ -388,7 +498,7 @@ export function DirectTerminal({ sessionId, agent = "claude", label, title, onCl
       websocketRef.current = null;
       terminal?.dispose();
     };
-  }, [sessionId]);
+  }, [clearPendingAckTimers, rejectPendingAck, sendTerminalInput, sessionId]);
 
   const statusDotClass =
     status === "connected"

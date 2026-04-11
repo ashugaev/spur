@@ -37,6 +37,19 @@ interface TerminalSession {
   sessionId: string;
   pty: Pty;
   ws: WebSocket;
+  seenInputIds: Set<string>;
+}
+
+interface ResizeMessage {
+  type: "resize";
+  cols?: number;
+  rows?: number;
+}
+
+interface InputMessage {
+  type: "input";
+  id?: string;
+  data?: string;
 }
 
 function parsePort(value: string | undefined, fallback: number): number {
@@ -124,7 +137,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       env: createTerminalEnvironment(),
     });
 
-    sessions.set(sessionId, { sessionId, pty, ws });
+    sessions.set(sessionId, { sessionId, pty, ws, seenInputIds: new Set() });
 
     pty.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -145,9 +158,23 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
       const message = data.toString("utf8");
       if (message.startsWith("{")) {
         try {
-          const parsed = JSON.parse(message) as { type?: string; cols?: number; rows?: number };
+          const parsed = JSON.parse(message) as ResizeMessage | InputMessage;
           if (parsed.type === "resize" && parsed.cols && parsed.rows) {
             pty.resize(parsed.cols, parsed.rows);
+            return;
+          }
+          if (parsed.type === "input" && typeof parsed.id === "string" && typeof parsed.data === "string") {
+            const session = sessions.get(sessionId);
+            if (!session) {
+              return;
+            }
+            if (!session.seenInputIds.has(parsed.id)) {
+              session.seenInputIds.add(parsed.id);
+              pty.write(parsed.data);
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "ack", id: parsed.id }));
+            }
             return;
           }
         } catch {
