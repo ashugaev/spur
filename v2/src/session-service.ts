@@ -1669,8 +1669,8 @@ export class SessionService {
   ): Promise<void> {
     const codexBaseline =
       session.agent === "codex"
-        ? ((readAgentHookState(this.config.dataDir, session.id) ??
-            (await this.waitForCodexHookBaseline(session.id))) ??
+        ? (readAgentHookState(this.config.dataDir, session.id) ??
+          (await this.waitForCodexHookBaseline(session.id)) ??
           null)
         : null;
     await sendMessageToTmux(session.tmuxSession, message, {
@@ -2862,6 +2862,7 @@ export class SessionService {
     // State debounce: suppress single-poll flicker for running sessions.
     const cached = this.stateCache.get(session.id);
     const now = Date.now();
+    let classifiedAt = now;
     if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
       if (
         state !== "needs_input" &&
@@ -2870,9 +2871,10 @@ export class SessionService {
         state !== "error"
       ) {
         state = cached.state;
+        classifiedAt = cached.classifiedAt;
       }
     }
-    this.stateCache.set(session.id, { state, classifiedAt: now });
+    this.stateCache.set(session.id, { state, classifiedAt });
 
     // State history: ring buffer of transitions.
     const history = this.stateHistory.get(session.id) ?? [];

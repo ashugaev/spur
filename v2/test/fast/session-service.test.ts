@@ -262,6 +262,35 @@ function mockClaudeJsonlState(state: string) {
   });
 }
 
+type SessionServiceInternals = {
+  waitForCodexHookBaseline(sessionId: string): Promise<{
+    state: "working" | "waiting";
+    updatedAt: string;
+    hookEvent?: string;
+    turnId?: string;
+    fileMtimeMs?: number;
+  } | null>;
+  waitForCodexSubmitAck(
+    sessionId: string,
+    baseline: {
+      state: "working" | "waiting";
+      updatedAt: string;
+      hookEvent?: string;
+      turnId?: string;
+      fileMtimeMs?: number;
+    } | null,
+  ): Promise<boolean>;
+  sendAgentMessage(
+    session: { id: string; tmuxSession: string; agent: "claude" | "codex" },
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<void>;
+};
+
+function sessionServiceInternals(service: unknown): SessionServiceInternals {
+  return service as SessionServiceInternals;
+}
+
 describe("SessionService", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -635,12 +664,12 @@ describe("SessionService", () => {
   it("accepts planMode for codex spawn but keeps codex launch behavior unchanged", async () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(service as any, "waitForCodexHookBaseline").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexHookBaseline").mockResolvedValue({
       state: "waiting",
       updatedAt: "2026-03-18T10:05:00.000Z",
       hookEvent: "Stop",
     });
-    vi.spyOn(service as any, "waitForCodexSubmitAck").mockResolvedValue(true);
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexSubmitAck").mockResolvedValue(true);
 
     const result = await service.spawn({
       project: "api",
@@ -956,10 +985,10 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(service as any, "waitForCodexSubmitAck").mockResolvedValue(true);
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexSubmitAck").mockResolvedValue(true);
     service.dispose();
 
-    await (service as any).sendAgentMessage(
+    await sessionServiceInternals(service).sendAgentMessage(
       {
         id: "api-1",
         tmuxSession: "api-1",
@@ -1070,7 +1099,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     service.dispose();
-    vi.spyOn(service as any, "waitForCodexHookBaseline").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexHookBaseline").mockResolvedValue({
       state: "waiting",
       updatedAt: "2026-03-18T10:05:00.000Z",
       hookEvent: "Stop",
@@ -1080,7 +1109,7 @@ describe("SessionService", () => {
       .mockResolvedValue(false);
 
     await expect(
-      (service as any).sendAgentMessage(
+      sessionServiceInternals(service).sendAgentMessage(
         {
           id: "api-1",
           tmuxSession: "api-1",
@@ -1088,9 +1117,7 @@ describe("SessionService", () => {
         },
         "follow up",
       ),
-    ).rejects.toThrow(
-      "Timed out waiting for Codex submit acknowledgment for api-1",
-    );
+    ).rejects.toThrow("Timed out waiting for Codex submit acknowledgment for api-1");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
@@ -1499,6 +1526,50 @@ describe("SessionService", () => {
     const second = await service.get("api-1");
 
     expect(second.state).toBe("waiting");
+  });
+
+  it("debounce: repeated polls do not extend the hold window forever", async () => {
+    const runningCodexSession = {
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running" as const,
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+    readSessionMock.mockReturnValue(runningCodexSession);
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("working");
+
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+
+    const second = await service.get("api-1");
+    expect(second.state).toBe("working");
+
+    vi.advanceTimersByTime(3_000);
+    const third = await service.get("api-1");
+    expect(third.state).toBe("working");
+
+    vi.advanceTimersByTime(1_500);
+    const fourth = await service.get("api-1");
+    expect(fourth.state).toBe("waiting");
   });
 
   it("notifies once per attention transition and re-notifies only after the session clears", async () => {

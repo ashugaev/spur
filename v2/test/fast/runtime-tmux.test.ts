@@ -139,7 +139,9 @@ describe("runtime-tmux", () => {
     const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
     expect(pasteCall?.[1]).toContain("-p");
     expect(pasteCall?.[1]).toContain("-d");
-    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args[0] === "paste-buffer");
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
     const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
     expect(enterIndex).toBeGreaterThan(pasteIndex);
     expect(sleepMock).not.toHaveBeenCalled();
@@ -153,7 +155,9 @@ describe("runtime-tmux", () => {
     await sendMessageToTmux("api-1", "line one\nline two", { agent: "codex" });
 
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
-    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args[0] === "paste-buffer");
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
     const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
     expect(pasteIndex).toBeGreaterThan(-1);
     expect(enterIndex).toBeGreaterThan(pasteIndex);
