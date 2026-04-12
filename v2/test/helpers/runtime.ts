@@ -159,11 +159,11 @@ fi`;
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
-      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"waiting","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"Stop"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
+      : `emit_hook_event "Stop"`;
   const signalWorking =
     agentName === "claude"
       ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"working","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"UserPromptSubmit"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
+      : `emit_hook_event "UserPromptSubmit"`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
@@ -174,6 +174,12 @@ log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
 mkdir -p "$log_dir"
 log_file="$log_dir/\${SPUR_SESSION:-no-session}.log"
 ${startup}
+hook_seq=0
+emit_hook_event() {
+  local event_name="$1"
+  hook_seq=$((hook_seq + 1))
+  printf '{"hook_event_name":"%s","turn_id":"%s-%s"}' "$event_name" "\${SPUR_SESSION:-no-session}" "$hook_seq" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
+}
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 if [[ "$mode" == "launch" ]]; then
   printf '%s\n' "${header}"

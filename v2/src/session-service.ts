@@ -21,6 +21,7 @@ import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteSessionGroup,
+  deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
@@ -48,6 +49,7 @@ import {
   isProcessRunningInTmux,
   killSidecarTmux,
   killTmuxSession,
+  sendSubmitKeyToTmux,
   setTmuxSocketName,
   sendMessageToTmux,
   syncTmuxStatus,
@@ -121,6 +123,8 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+const CODEX_SUBMIT_ACK_TIMEOUT_MS = 5_000;
+const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const PR_CHECK_WAITING_LIMIT = 5;
@@ -259,6 +263,59 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
+}
+
+function hookStateTimestampMs(updatedAt: string | undefined): number | null {
+  if (!updatedAt) {
+    return null;
+  }
+  const parsed = Date.parse(updatedAt);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function hookStateFileAdvanced(
+  baseline: ReturnType<typeof readAgentHookState>,
+  current: ReturnType<typeof readAgentHookState>,
+): boolean {
+  if (!baseline || !current) {
+    return false;
+  }
+  return (
+    typeof baseline.fileMtimeMs === "number" &&
+    typeof current.fileMtimeMs === "number" &&
+    current.fileMtimeMs > baseline.fileMtimeMs
+  );
+}
+
+function isCodexSubmitAcknowledged(
+  baseline: ReturnType<typeof readAgentHookState>,
+  current: ReturnType<typeof readAgentHookState>,
+): boolean {
+  if (!current) {
+    return false;
+  }
+  if (!baseline) {
+    return current.hookEvent === "UserPromptSubmit";
+  }
+  if (current.turnId && baseline.turnId && current.turnId !== baseline.turnId) {
+    return true;
+  }
+  if (hookStateFileAdvanced(baseline, current)) {
+    return true;
+  }
+  const baselineMs = hookStateTimestampMs(baseline.updatedAt);
+  const currentMs = hookStateTimestampMs(current.updatedAt);
+  const advanced =
+    baselineMs === null || currentMs === null
+      ? current.updatedAt !== baseline.updatedAt
+      : currentMs > baselineMs;
+  if (!advanced) {
+    return false;
+  }
+  // Codex can emit UserPromptSubmit and then quickly overwrite the hook state with
+  // a follow-up event (for example Stop) before the daemon polls. Any newer hook
+  // record after the pre-send baseline means Codex observed and processed the submit.
+  return true;
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
@@ -1785,14 +1842,61 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
-    session: Pick<SessionRecord, "tmuxSession" | "agent">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent">,
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    const codexBaseline =
+      session.agent === "codex"
+        ? (readAgentHookState(this.config.dataDir, session.id) ??
+          (await this.waitForCodexHookBaseline(session.id)) ??
+          null)
+        : null;
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
+    if (session.agent !== "codex") {
+      return;
+    }
+    for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
+      if (await this.waitForCodexSubmitAck(session.id, codexBaseline)) {
+        return;
+      }
+      if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
+        await sendSubmitKeyToTmux(session.tmuxSession);
+      }
+    }
+    throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
+  }
+
+  private async waitForCodexSubmitAck(
+    sessionId: string,
+    baseline: ReturnType<typeof readAgentHookState>,
+  ): Promise<boolean> {
+    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const current = readAgentHookState(this.config.dataDir, sessionId);
+      if (isCodexSubmitAcknowledged(baseline, current)) {
+        return true;
+      }
+      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
+    }
+    return false;
+  }
+
+  private async waitForCodexHookBaseline(
+    sessionId: string,
+  ): Promise<ReturnType<typeof readAgentHookState>> {
+    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const current = readAgentHookState(this.config.dataDir, sessionId);
+      if (current) {
+        return current;
+      }
+      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
+    }
+    return null;
   }
 
   async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
@@ -1914,6 +2018,7 @@ export class SessionService {
 
   private removeSessionArtifacts(sessionId: string): void {
     deleteAgentHookState(this.config.dataDir, sessionId);
+    deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
@@ -2937,6 +3042,7 @@ export class SessionService {
     // State debounce: suppress single-poll flicker for running sessions.
     const cached = this.stateCache.get(session.id);
     const now = Date.now();
+    let classifiedAt = now;
     if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
       if (
         state !== "needs_input" &&
@@ -2945,9 +3051,10 @@ export class SessionService {
         state !== "error"
       ) {
         state = cached.state;
+        classifiedAt = cached.classifiedAt;
       }
     }
-    this.stateCache.set(session.id, { state, classifiedAt: now });
+    this.stateCache.set(session.id, { state, classifiedAt });
 
     // State history: ring buffer of transitions.
     const history = this.stateHistory.get(session.id) ?? [];

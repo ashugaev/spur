@@ -10,6 +10,7 @@ import {
 import { dirname, join } from "node:path";
 import type {
   GitHubSignal,
+  RuntimeLogCursorState,
   SessionQueuedMessagesState,
   SessionGroupRecord,
   ServiceInstanceRecord,
@@ -42,6 +43,14 @@ function serviceSourceStateDir(dataDir: string, projectId: string, sourceId: str
   return join(dataDir, "source-state", "service", projectId, sourceId);
 }
 
+function runtimeLogCursorDir(dataDir: string, sessionId: string): string {
+  return join(dataDir, "runtime-log-state", sessionId);
+}
+
+function runtimeLogCursorFilePath(dataDir: string, sessionId: string, key: string): string {
+  return join(runtimeLogCursorDir(dataDir, sessionId), `${key}.json`);
+}
+
 function serviceSourceStateFilePath(
   dataDir: string,
   projectId: string,
@@ -70,6 +79,10 @@ function readServiceInstanceFile(path: string): ServiceInstanceRecord {
 
 function readServiceSourceStateFile(path: string): ServiceSourceState {
   return JSON.parse(readFileSync(path, "utf-8")) as ServiceSourceState;
+}
+
+function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
+  return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
@@ -284,6 +297,56 @@ export function deleteServiceInstancesForSession(dataDir: string, sessionId: str
     force: true,
     recursive: true,
   });
+}
+
+export function writeRuntimeLogCursor(
+  dataDir: string,
+  sessionId: string,
+  key: string,
+  state: RuntimeLogCursorState,
+): void {
+  writeJsonFile(runtimeLogCursorFilePath(dataDir, sessionId, key), state);
+}
+
+export function readRuntimeLogCursor(
+  dataDir: string,
+  sessionId: string,
+  key: string,
+): RuntimeLogCursorState | null {
+  const path = runtimeLogCursorFilePath(dataDir, sessionId, key);
+  return existsSync(path) ? readRuntimeLogCursorFile(path) : null;
+}
+
+export function deleteRuntimeLogCursor(dataDir: string, sessionId: string, key: string): void {
+  rmSync(runtimeLogCursorFilePath(dataDir, sessionId, key), { force: true });
+}
+
+export function deleteRuntimeLogCursorsForSession(dataDir: string, sessionId: string): void {
+  rmSync(runtimeLogCursorDir(dataDir, sessionId), {
+    force: true,
+    recursive: true,
+  });
+}
+
+export function listRuntimeLogCursorKeys(
+  dataDir: string,
+): Array<{ sessionId: string; key: string }> {
+  const rootDir = join(dataDir, "runtime-log-state");
+  if (!existsSync(rootDir)) return [];
+
+  const keys: Array<{ sessionId: string; key: string }> = [];
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sessionDir = join(rootDir, entry.name);
+    for (const fileName of readdirSync(sessionDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      keys.push({
+        sessionId: entry.name,
+        key: fileName.slice(0, -".json".length),
+      });
+    }
+  }
+  return keys;
 }
 
 export function readGitHubSourceSnapshots(

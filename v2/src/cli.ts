@@ -324,6 +324,30 @@ async function loadServices(
   );
 }
 
+async function loadSessionLogs(
+  cliEntrypoint: string,
+  sessionId: string,
+  options?: { scope?: "runtime" | "service" | "sidecar"; name?: string; limit?: number },
+  configPath?: string,
+): Promise<SpurLogEntry[]> {
+  const params = new URLSearchParams();
+  if (options?.scope) {
+    params.set("scope", options.scope);
+  }
+  if (options?.name) {
+    params.set("name", options.name);
+  }
+  if (options?.limit !== undefined) {
+    params.set("limit", String(options.limit));
+  }
+  const query = params.toString();
+  return getJson<SpurLogEntry[]>(
+    cliEntrypoint,
+    `/sessions/${sessionId}/logs${query ? `?${query}` : ""}`,
+    configPath,
+  );
+}
+
 async function loadHumanListData(
   cliEntrypoint: string,
   configPath?: string,
@@ -435,6 +459,13 @@ function formatEventLine(entry: SpurLogEntry): string {
   return summary === entry.event
     ? `${time} ${level} ${entry.event}`
     : `${time} ${level} ${entry.event} ${summary}`;
+}
+
+function renderEventLines(entries: SpurLogEntry[]): string {
+  if (entries.length === 0) {
+    return dimText("(no log entries)");
+  }
+  return entries.map(formatEventLine).join("\n");
 }
 
 function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
@@ -1580,6 +1611,42 @@ export function createProgram(cliEntrypoint: string): Command {
           ),
         success: (service) => `Started ${service.serviceId} for ${service.sessionId}.`,
         render: renderServiceCard,
+      });
+    });
+
+  service
+    .command("logs")
+    .description("Show session-bound service and sidecar logs.")
+    .argument("[sessionId]", "Session id; defaults to SPUR_SESSION")
+    .argument("[name]", "Optional service or sidecar id")
+    .option("--sidecar", "Only show sidecar logs")
+    .option("--limit <number>", "Maximum number of log entries", "200")
+    .option("--json", "Print raw JSON")
+    .action(async (sessionId: string | undefined, name: string | undefined, options, command) => {
+      const configPath = prepareInstanceConfig(command.parent?.parent as Command).configPath;
+      const resolvedSessionId = sessionId?.trim() || runningSessionId();
+      if (!resolvedSessionId) {
+        throw new Error("service logs requires a session id or SPUR_SESSION");
+      }
+      const limit = Number.parseInt(String(options.limit), 10);
+      if (!Number.isInteger(limit) || limit <= 0) {
+        throw new Error("--limit must be a positive integer");
+      }
+      await outputResult({
+        json: Boolean(options.json),
+        label: `loading logs for ${resolvedSessionId}`,
+        action: () =>
+          loadSessionLogs(
+            cliEntrypoint,
+            resolvedSessionId,
+            {
+              scope: options.sidecar ? "sidecar" : "runtime",
+              ...(name ? { name } : {}),
+              limit,
+            },
+            configPath,
+          ),
+        render: renderEventLines,
       });
     });
 

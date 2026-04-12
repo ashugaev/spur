@@ -155,9 +155,11 @@ export function withSessionSlotInstructions(prompt: string): string {
   return `${prompt}
 
 Session metadata:
+- Update the session title and related links as soon as you know them.
 - Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
-- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.`;
+- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
