@@ -109,6 +109,7 @@ ensure_workspace_deps
 setsid env -u npm_config_virtual_store_dir \
   PORT="$UI_PORT" \
   WEB_HOST="0.0.0.0" \
+  DIRECT_TERMINAL_BIND_HOST="0.0.0.0" \
   DIRECT_TERMINAL_BIND_PORT="$TERMINAL_PORT" \
   DIRECT_TERMINAL_PORT="$TERMINAL_PORT" \
   NEXT_DIST_DIR=".next-sidecars/${SPUR_SIDECAR_NAME:-isolated-ui}" \
