@@ -159,11 +159,11 @@ fi`;
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
-      : `printf '{"hook_event_name":"Stop"}' | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true`;
+      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"waiting","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"Stop"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
   const signalWorking =
     agentName === "claude"
       ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : `printf '{"hook_event_name":"UserPromptSubmit"}' | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true`;
+      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"working","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"UserPromptSubmit"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
