@@ -194,7 +194,11 @@ describe("Codex hook state fixture classification", () => {
 
   it("keeps the spur-436f JSONL snapshot aligned with the working hook-state turn", async () => {
     const hookContent = await readFile(join(CODEX_DIR, "working-spur-436f.json"), "utf8");
-    const hookState = JSON.parse(hookContent) as { state: string; hookEvent?: string; turnId?: string };
+    const hookState = JSON.parse(hookContent) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
     const jsonlContent = await readFile(join(CODEX_DIR, "working-spur-436f.jsonl"), "utf8");
     const lines = jsonlContent.trim().split("\n").filter(Boolean);
 

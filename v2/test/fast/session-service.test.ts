@@ -1088,9 +1088,7 @@ describe("SessionService", () => {
         },
         "follow up",
       ),
-    ).rejects.toThrow(
-      "Timed out waiting for Codex submit acknowledgment for api-1",
-    );
+    ).rejects.toThrow("Timed out waiting for Codex submit acknowledgment for api-1");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
@@ -1633,6 +1631,46 @@ describe("SessionService", () => {
     const second = await service.get("api-1");
 
     expect(second.state).toBe("working");
+  });
+
+  it("debounce: repeated polls do not extend the hold window", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const first = await service.get("api-1");
+    expect(first.state).toBe("waiting");
+
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+    });
+
+    vi.advanceTimersByTime(1_000);
+    const second = await service.get("api-1");
+    expect(second.state).toBe("waiting");
+
+    vi.advanceTimersByTime(3_500);
+    const third = await service.get("api-1");
+    expect(third.state).toBe("working");
   });
 
   it("debounce: transitions to needs_input bypass hold window", async () => {

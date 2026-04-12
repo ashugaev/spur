@@ -2382,8 +2382,7 @@ projects:
     expect(respawned.status).toBe("running");
 
     const completedCaller = await pollUntil(
-      async () =>
-        context.fetchJson<SessionView>(`/sessions/${encodeURIComponent(caller.id)}`),
+      async () => context.fetchJson<SessionView>(`/sessions/${encodeURIComponent(caller.id)}`),
       {
         timeoutMs: 15_000,
         accept: (session) =>
