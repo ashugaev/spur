@@ -371,7 +371,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
   });
 
-  test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
+  test("footer shows aggregated online tooltip with daemon and resource details", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.route("/api/runtime/resources", (route) => {
       void route.fulfill({
@@ -379,6 +381,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
         contentType: "application/json",
         body: JSON.stringify({
           available: true,
+          daemonAlive: true,
           cpuPercent: 21,
           memoryPercent: 43,
           diskPercent: 65,
@@ -387,13 +390,20 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const footer = page.locator("footer");
-    await expect(footer).toContainText("CPU 21%");
-    await expect(footer).toContainText("RAM 43%");
-    await expect(footer).toContainText("DISK 65%");
+    const onlineButton = page.getByRole("button", { name: "Show aggregated online status" });
+    await expect(onlineButton).toBeVisible();
+    await onlineButton.click();
+
+    await expect(page.getByText("System")).toBeVisible();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU 21% healthy")).toBeVisible();
+    await expect(page.getByLabel("RAM 43% healthy")).toBeVisible();
+    await expect(page.getByLabel("HDD 65% healthy")).toBeVisible();
   });
 
-  test("footer hides resource metrics when runtime resources are unavailable", async ({ page }) => {
+  test("footer keeps system metrics inside the tooltip when runtime resources are unavailable", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.goto("/");
 
@@ -401,6 +411,12 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/CPU \d+%/);
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
+
+    await page.getByRole("button", { name: "Show aggregated online status" }).click();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
   });
 });
 
