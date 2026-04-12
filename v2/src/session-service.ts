@@ -1071,9 +1071,6 @@ export class SessionService {
     try {
       project = this.getProject(request.project);
       ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
-      if (!prompt) {
-        throw new Error("prompt must be a non-empty string");
-      }
       if (
         request.branch !== undefined &&
         (typeof request.branch !== "string" || !request.branch.trim())
