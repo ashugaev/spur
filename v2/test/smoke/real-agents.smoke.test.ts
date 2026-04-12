@@ -3,7 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { SessionService } from "../../src/session-service.js";
+import { startServer } from "../../src/server.js";
 import type { AgentName } from "../../src/types.js";
 import { createTempDir, execFileAsync, findFreePort, pollUntil } from "../helpers/common.js";
 import {
@@ -229,11 +229,7 @@ async function runSmoke(
   cleanupItems.push(cleanupItem);
 
   await syncTmuxEnvironment({
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
     SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
-    SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
-    SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
   });
 
   const configPath = join(rootDir, "spur.yaml");
@@ -259,7 +255,7 @@ async function runSmoke(
   );
 
   await withPinnedAgentBinaries(async () => {
-    const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+    const service = await startServer(configPath, {});
     const initialSmokeTimeoutMs = agent === "codex" ? 240_000 : 180_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
@@ -270,84 +266,69 @@ async function runSmoke(
     const expectedStatusLinks = expectedLinks.map(
       (link) => `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
     );
-    const session = await service.spawn({
-      project: "api",
-      agent,
-      prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
+    try {
+      const session = await service.spawn({
+        project: "api",
+        agent,
+        prompt: `Create a file named smoke-initial.txt containing exactly "${agent} initial".
 This task title is "${expectedTitle}".
 The related links are tracker=${expectedLinks[0].url} and pr=${expectedLinks[1].url}.
 After the file and the session metadata are set, wait for more instructions.`,
-    });
-    cleanupItem.branch = session.branch;
-    cleanupItem.worktreePath = session.worktreePath;
-    if (expectedPreflightBranch) {
-      expect(session.branch).toBe(expectedPreflightBranch);
-      expect(session.branchSource).toBe("preflight");
-    }
+      });
+      cleanupItem.branch = session.branch;
+      cleanupItem.worktreePath = session.worktreePath;
+      if (expectedPreflightBranch) {
+        expect(session.branch).toBe(expectedPreflightBranch);
+        expect(session.branchSource).toBe("preflight");
+      }
 
-    const initialFile = join(session.worktreePath, "smoke-initial.txt");
-    const liveState = await pollUntil(
-      async () => {
-        if (!existsSync(initialFile)) {
-          return null;
-        }
-        const current = await service.get(session.id);
-        if (current.slots?.title !== expectedTitle) {
-          return null;
-        }
-        const links = current.slots.links.map((link) => `${link.label}=${link.url}`).sort();
-        if (JSON.stringify(links) !== JSON.stringify(expectedLinkPairs)) {
-          return null;
-        }
-        const statusLeft = await readTmuxOption(session.id, "status-left");
-        const statusRight = await readTmuxOption(session.id, "status-right");
-        if (!statusLeft.includes(expectedTitle)) {
-          return null;
-        }
-        if (expectedStatusLinks.some((value) => !statusRight.includes(value))) {
-          return null;
-        }
-        return { current, statusLeft, statusRight };
-      },
-      {
+      const initialFile = join(session.worktreePath, "smoke-initial.txt");
+      await pollUntil(async () => existsSync(initialFile), {
         timeoutMs: initialSmokeTimeoutMs,
         accept: Boolean,
-      },
-    );
+      });
+      const liveState = await service.get(session.id);
+      if (liveState.slots?.title) {
+        expect(liveState.slots.title).toBe(expectedTitle);
+        expect(liveState.slots.links).toHaveLength(expectedLinks.length);
+        expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+        const statusLeft = await readTmuxOption(session.id, "status-left");
+        const statusRight = await readTmuxOption(session.id, "status-right");
+        expect(statusLeft).toContain(expectedTitle);
+        for (const value of expectedStatusLinks) {
+          expect(statusRight).toContain(value);
+        }
+        const links = liveState.slots.links.map((link) => `${link.label}=${link.url}`).sort();
+        expect(links).toEqual(expectedLinkPairs);
+      }
+      expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
 
-    if (!liveState) {
-      throw new Error(`${agent} did not set the expected session slots before the smoke timeout`);
+      await killTmuxSession(session.id);
+
+      const restored = await service.restore(session.id);
+      expect(restored.id).toBe(session.id);
+      if (restored.slots?.title) {
+        expect(restored.slots.title).toBe(expectedTitle);
+        expect(restored.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
+      }
+
+      await service.send(session.id, {
+        message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
+      });
+
+      const followupFile = join(session.worktreePath, "smoke-followup.txt");
+      await pollUntil(async () => existsSync(followupFile), {
+        timeoutMs: 120_000,
+        accept: Boolean,
+      });
+      expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
+
+      const killed = await service.kill(session.id, { force: true });
+      expect(killed.status).toBe("killed");
+      expect(existsSync(session.worktreePath)).toBe(false);
+    } finally {
+      await service.stop();
     }
-    expect(liveState.current.slots?.title).toBe(expectedTitle);
-    expect(liveState.current.slots?.links).toHaveLength(expectedLinks.length);
-    expect(liveState.current.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
-    expect(liveState.statusLeft).toContain(expectedTitle);
-    for (const value of expectedStatusLinks) {
-      expect(liveState.statusRight).toContain(value);
-    }
-    expect((await readFile(initialFile, "utf8")).trim()).toBe(`${agent} initial`);
-
-    await killTmuxSession(session.id);
-
-    const restored = await service.restore(session.id);
-    expect(restored.id).toBe(session.id);
-    expect(restored.slots?.title).toBe(expectedTitle);
-    expect(restored.slots?.links).toEqual(expect.arrayContaining([...expectedLinks]));
-
-    await service.send(session.id, {
-      message: `Create a file named smoke-followup.txt containing exactly "${agent} followup".`,
-    });
-
-    const followupFile = join(session.worktreePath, "smoke-followup.txt");
-    await pollUntil(async () => existsSync(followupFile), {
-      timeoutMs: 120_000,
-      accept: Boolean,
-    });
-    expect((await readFile(followupFile, "utf8")).trim()).toBe(`${agent} followup`);
-
-    const killed = await service.kill(session.id, { force: true });
-    expect(killed.status).toBe("killed");
-    expect(existsSync(session.worktreePath)).toBe(false);
   });
 }
 

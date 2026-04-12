@@ -20,6 +20,7 @@ V2 CLI scenarios: [v2/TEST_SCENARIOS.md](../../v2/TEST_SCENARIOS.md)
 - If only `v2/` changed, exercise the touched `spur` CLI commands through positive and negative paths
 - For `v2/`, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`
 - When impacted `v2/` scenarios include `real-agent smoke`, run `pnpm --dir v2 test:smoke` on the real `ao` repo with real `claude` and `codex`. Do not substitute fake repos or fake agents.
+- Check logs from your runs and fail on unexpected service, sidecar, browser, or console errors.
 
 ### 3. Lean V2 check
 - Flag hanging logic: branches, helpers, states, or config not needed by current behavior

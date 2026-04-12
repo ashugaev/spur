@@ -20,6 +20,7 @@ const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
+const deleteRuntimeLogCursorsForSessionMock = vi.fn();
 const deleteServiceSourceStatesForServiceMock = vi.fn();
 const deleteServiceSourceStatesForSessionMock = vi.fn();
 const listActiveServiceProblemsMock = vi.fn();
@@ -107,6 +108,7 @@ vi.mock("../../src/ids.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  deleteRuntimeLogCursorsForSession: deleteRuntimeLogCursorsForSessionMock,
   deleteServiceInstance: deleteServiceInstanceMock,
   deleteServiceInstancesForSession: deleteServiceInstancesForSessionMock,
   deleteServiceSourceStatesForService: deleteServiceSourceStatesForServiceMock,
@@ -351,6 +353,7 @@ describe("SessionService", () => {
     writeSessionMock.mockReset();
     deleteServiceInstanceMock.mockReset();
     deleteServiceInstancesForSessionMock.mockReset();
+    deleteRuntimeLogCursorsForSessionMock.mockReset();
     deleteServiceSourceStatesForServiceMock.mockReset();
     deleteServiceSourceStatesForSessionMock.mockReset();
     listActiveServiceProblemsMock.mockReset().mockReturnValue([]);
@@ -458,9 +461,13 @@ describe("SessionService", () => {
     });
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {});
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "slot-instructions\nhello", {
-      agent: "claude",
-    });
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      expect.stringContaining("slot-instructions\nhello"),
+      {
+        agent: "claude",
+      },
+    );
     expect(writeSessionMock).toHaveBeenCalledTimes(2);
     expect(writeSessionMock.mock.calls[0]?.[1].status).toBe("spawning");
     expect(writeSessionMock.mock.calls[1]?.[1].status).toBe("running");
@@ -506,28 +513,16 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.stringContaining(
-        'Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one.',
-      ),
-      { agent: "claude" },
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", expect.any(String), {
+      agent: "claude",
+    });
+    const sent = sendMessageToTmuxMock.mock.calls[0]?.[1];
+    expect(sent).toContain(
+      'Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one.',
     );
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.stringContaining("Do not start app, dev server, or test helper processes directly"),
-      { agent: "claude" },
-    );
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.stringContaining("See `v2/README.md` for sidecar usage."),
-      { agent: "claude" },
-    );
-    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
-      "api-1",
-      expect.stringContaining("Available: `dev`."),
-      { agent: "claude" },
-    );
+    expect(sent).toContain("Do not start app, dev server, or test helper processes directly");
+    expect(sent).toContain("See `v2/README.md` for sidecar usage.");
+    expect(sent).toContain("Available: `dev`.");
   });
 
   it("reserves sidecar ports during spawn and passes them into sidecar env", async () => {

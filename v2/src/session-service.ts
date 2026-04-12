@@ -20,6 +20,7 @@ import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
   deleteServiceSourceStatesForService,
@@ -1839,6 +1840,7 @@ export class SessionService {
 
   private removeSessionArtifacts(sessionId: string): void {
     deleteAgentHookState(this.config.dataDir, sessionId);
+    deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
