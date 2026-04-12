@@ -1,11 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  classifyClaudeJsonlState,
+  parseConversationLines,
+  readClaudeJsonlState,
+  type ParsedRecord,
+} from "../../src/claude-jsonl-state.js";
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = 1_700_000_000_000;
 
 function rec(overrides: Partial<ParsedRecord> & { type: string }): ParsedRecord {
   return { timestampMs: NOW - 10_000, ...overrides };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("classifyClaudeJsonlState", () => {
   it("returns working for empty records", () => {
@@ -129,5 +143,149 @@ describe("classifyClaudeJsonlState", () => {
   it("returns working for unknown record types (fallback)", () => {
     const records = [rec({ type: "unknown_type" })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+});
+
+// ── parseConversationLines ──────────────────────────────────────────
+
+describe("parseConversationLines", () => {
+  function jsonl(...records: Record<string, unknown>[]): string[] {
+    return records.map((r) => JSON.stringify(r));
+  }
+
+  it("extracts text from user and assistant messages", () => {
+    const lines = jsonl(
+      { type: "user", message: { role: "user", content: [{ type: "text", text: "hello" }] } },
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        },
+      },
+    );
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({ role: "user", text: "hello" });
+    expect(messages[1]).toMatchObject({ role: "assistant", text: "hi" });
+  });
+
+  it("excludes tool_result-only user messages", () => {
+    const lines = jsonl({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "x", content: "ok" }],
+      },
+    });
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(0);
+  });
+
+  it("excludes tool_use-only assistant messages", () => {
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "tool_use", id: "x", name: "Read", input: {} }],
+      },
+    });
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(0);
+  });
+
+  it("extracts only text from mixed content", () => {
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Let me read that." },
+          { type: "tool_use", id: "x", name: "Read", input: {} },
+        ],
+      },
+    });
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.text).toBe("Let me read that.");
+  });
+
+  it("handles string content (user prompt via spur send)", () => {
+    const lines = jsonl({ type: "user", message: { role: "user", content: "fix the bug" } });
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ role: "user", text: "fix the bug" });
+  });
+
+  it("returns empty for file with no conversation records", () => {
+    const lines = jsonl({ type: "progress" }, { type: "system" });
+    const { messages } = parseConversationLines(lines, NOW);
+    expect(messages).toHaveLength(0);
+  });
+
+  it("classifies state alongside conversation extraction", () => {
+    const lines = jsonl({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+        stop_reason: "end_turn",
+      },
+    });
+    const { state } = parseConversationLines(lines, NOW);
+    expect(state).toBe("waiting");
+  });
+
+  it("classifies unchanged spur-0190 tail fixture as needs_input", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
+    );
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
+    const tempFile = join(tempDir, "spur-0190-tail.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-11T16:44:46.500Z"));
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("needs_input");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the same spur-0190 tail fixture working inside the stale window", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
+    );
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
+    const tempFile = join(tempDir, "spur-0190-tail.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-11T16:44:38.000Z"));
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("working");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

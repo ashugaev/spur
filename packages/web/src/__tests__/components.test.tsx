@@ -67,8 +67,10 @@ describe("Dashboard", () => {
   it("renders Spur dashboard sessions from API", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsPayload()));
     });
 
@@ -87,8 +89,10 @@ describe("Dashboard", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
@@ -110,7 +114,10 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("button", { name: "Complete" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Kill" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Details" })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute("href", "/sessions/api-a1");
+    expect(screen.getByRole("link", { name: "Fix auth" })).toHaveAttribute(
+      "href",
+      "/sessions/api-a1",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
 
@@ -151,7 +158,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -172,7 +180,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -195,7 +204,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?project=api");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -215,7 +225,8 @@ describe("Dashboard", () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
@@ -255,8 +266,10 @@ describe("Dashboard", () => {
     };
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources") return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice") return new Response(JSON.stringify({ available: false, language: "" }));
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, language: "" }));
       return new Response(JSON.stringify(sessionsData));
     });
 
@@ -296,9 +309,7 @@ describe("Dashboard", () => {
       }
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
-        expect(init?.body).toBe(
-          JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }),
-        );
+        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "claude" }));
         return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -346,46 +357,49 @@ describe("Dashboard", () => {
       prompt: "Ship cmd hotkey",
       keydown: { key: "Enter", metaKey: true },
     },
-  ])("submits spawn when pressing $label in prompt textarea", async ({ keydown, prompt: value }) => {
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      if (url === "/api/sessions")
-        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-      if (url === "/api/sessions?project=api")
-        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-      if (url === "/api/spawn")
-        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
-      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
-    });
+  ])(
+    "submits spawn when pressing $label in prompt textarea",
+    async ({ keydown, prompt: value }) => {
+      const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        if (url === "/api/runtime/resources")
+          return new Response(JSON.stringify({ available: false }));
+        if (url === "/api/runtime/voice")
+          return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+        if (url === "/api/sessions")
+          return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+        if (url === "/api/sessions?project=api")
+          return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+        if (url === "/api/spawn")
+          return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+        throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+      });
 
-    render(<Dashboard />);
+      render(<Dashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
-    });
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+      });
 
-    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
-    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
-    fireEvent.change(prompt, { target: { value } });
-    fireEvent.keyDown(prompt, keydown);
+      fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+      fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+      const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+      fireEvent.change(prompt, { target: { value } });
+      fireEvent.keyDown(prompt, keydown);
 
-    await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/spawn",
-        expect.objectContaining({
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
-        }),
-      );
-      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
-    });
-  });
+      await waitFor(() => {
+        expect(fetchMock).toHaveBeenCalledWith(
+          "/api/spawn",
+          expect.objectContaining({
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ projectId: "api", prompt: value, agent: "claude" }),
+          }),
+        );
+        expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      });
+    },
+  );
 
   it("does not submit spawn on plain Enter in prompt textarea", async () => {
     let spawnCalls = 0;
@@ -439,7 +453,9 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
@@ -469,7 +485,9 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
@@ -502,7 +520,9 @@ describe("Dashboard", () => {
     const { unmount } = render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
     expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
 
@@ -514,7 +534,9 @@ describe("Dashboard", () => {
     window.localStorage.setItem("spur:last-spawn-project", "missing-project");
     render(<Dashboard />);
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
     spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
@@ -546,7 +568,9 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open web terminal for api-a1" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
@@ -554,12 +578,9 @@ describe("Dashboard", () => {
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
 
-    fireEvent.change(
-      screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER),
-      {
-        target: { value: "Ship it" },
-      },
-    );
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Ship it" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
@@ -639,9 +660,7 @@ describe("StatusBar", () => {
   });
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ available: false })),
-    );
+    vi.spyOn(global, "fetch").mockResolvedValue(new Response(JSON.stringify({ available: false })));
 
     render(<StatusBar sessions={[]} />);
 

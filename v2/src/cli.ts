@@ -67,7 +67,7 @@ const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
 const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
 const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
 const SESSION_LOG_EVENT_LIMIT = 16;
-const SESSION_LOG_OUTPUT_LINES = 80;
+const SESSION_LOG_OUTPUT_LINES = 16;
 const SESSION_LOG_LOCAL_LIMIT = 8;
 
 function enableTmuxMouse(sessionName: string): void {
@@ -304,6 +304,12 @@ async function loadRawSessions(cliEntrypoint: string, configPath?: string): Prom
   return getJson<SessionView[]>(cliEntrypoint, "/sessions", configPath);
 }
 
+function visibleSessionsForHumanList(sessions: SessionView[]): SessionView[] {
+  return sessions.filter(
+    (session) => session.status !== "completed" && session.status !== "killed",
+  );
+}
+
 async function loadServices(
   cliEntrypoint: string,
   sessionId: string,
@@ -324,7 +330,7 @@ async function loadHumanListData(
     getJson<RuntimeInfo>(cliEntrypoint, "/info", configPath),
     loadRawSessions(cliEntrypoint, configPath),
   ]);
-  return { info, sessions: sortSessionsForList(sessions) };
+  return { info, sessions: sortSessionsForList(visibleSessionsForHumanList(sessions)) };
 }
 
 function replaceListedSession(sessions: SessionView[], updated: SessionView): SessionView[] {
@@ -427,6 +433,13 @@ function formatEventLine(entry: SpurLogEntry): string {
   return summary === entry.event
     ? `${time} ${level} ${entry.event}`
     : `${time} ${level} ${entry.event} ${summary}`;
+}
+
+function readDisplaySessionEventLines(dataDir: string, sessionId: string): string[] {
+  return readSessionEventLog(dataDir, sessionId)
+    .filter((entry) => entry.event !== "session.state.classified")
+    .slice(-SESSION_LOG_EVENT_LIMIT)
+    .map(formatEventLine);
 }
 
 function buildStateChangeLine(previous: SessionView, next: SessionView): string | null {
@@ -756,11 +769,7 @@ async function runInteractiveSessionList(
         logView = {
           ...logView,
           session: nextSession,
-          eventLines: readSessionEventLog(
-            info.dataDir,
-            logView.session.id,
-            SESSION_LOG_EVENT_LIMIT,
-          ).map(formatEventLine),
+          eventLines: readDisplaySessionEventLines(info.dataDir, logView.session.id),
           agentPane: nextSession.runtimeAlive
             ? (tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
               dimText("(agent output unavailable)"))
@@ -772,7 +781,9 @@ async function runInteractiveSessionList(
         attachedPaneContent = captureTmuxTarget(attachedPane.tmuxSession);
         return;
       }
-      const nextSessions = sortSessionsForList(await loadRawSessions(cliEntrypoint, configPath));
+      const nextSessions = sortSessionsForList(
+        visibleSessionsForHumanList(await loadRawSessions(cliEntrypoint, configPath)),
+      );
       sessions = nextSessions;
       if (selectedSessionId && !nextSessions.some((session) => session.id === selectedSessionId)) {
         const vanishedId = selectedSessionId;
@@ -814,9 +825,7 @@ async function runInteractiveSessionList(
     if (!session) return;
     logView = {
       session,
-      eventLines: readSessionEventLog(info.dataDir, session.id, SESSION_LOG_EVENT_LIMIT).map(
-        formatEventLine,
-      ),
+      eventLines: readDisplaySessionEventLines(info.dataDir, session.id),
       localLines: [],
       agentPane: session.runtimeAlive
         ? (tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { ActivityDot } from "@/components/ActivityDot";
@@ -37,6 +37,7 @@ import {
   isRestorable,
   isTerminalSession,
   toDashboardSession,
+  type ConversationResponse,
   type DashboardSession,
   type SpurSessionView,
 } from "@/lib/types";
@@ -97,6 +98,13 @@ interface LogEntry {
   sessionId?: string;
 }
 
+interface DialogMessage {
+  key: string;
+  role: "user" | "assistant";
+  text: string;
+  pending?: boolean;
+}
+
 function formatLogTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -112,6 +120,15 @@ const LOG_LEVEL_COLORS: Record<string, string> = {
   error: "var(--color-status-error)",
 };
 
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return "<1m";
+}
+
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
@@ -124,12 +141,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const voice = useVoiceInput({
-    onTranscribed: (text) => setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
+    onTranscribed: (text) =>
+      setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const lastDialogTailRef = useRef<string | null>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -154,6 +175,52 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadSession]);
+
+  const loadConversation = useCallback(async () => {
+    if (!session || session.agent !== "claude") {
+      setConversation(null);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/conversation`, {
+        cache: "no-store",
+      });
+      if (res.ok) {
+        setConversation((await res.json()) as ConversationResponse);
+      } else {
+        setConversation(null);
+      }
+    } catch {
+      setConversation(null);
+    }
+  }, [session?.agent, sessionId]);
+
+  useEffect(() => {
+    void loadConversation();
+    const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [loadConversation]);
+
+  useEffect(() => {
+    const lastMessage = conversation?.messages.at(-1);
+    const nextDialogTail =
+      conversation?.state === "working"
+        ? `pending:${lastMessage?.timestampMs ?? "none"}:${lastMessage?.role ?? "none"}:${lastMessage?.text ?? ""}`
+        : lastMessage?.role === "assistant"
+          ? `assistant:${lastMessage.timestampMs}:${lastMessage.text}`
+          : null;
+    if (!nextDialogTail || nextDialogTail === lastDialogTailRef.current) {
+      return;
+    }
+    lastDialogTailRef.current = nextDialogTail;
+    const el = dialogRef.current;
+    if (!el) return;
+    if (typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      return;
+    }
+    el.scrollTop = el.scrollHeight;
+  }, [conversation]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -199,17 +266,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRespawn = async () => {
     setBusyAction("respawn");
     try {
-      const response = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/respawn`,
-        { method: "POST" },
-      );
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
+        method: "POST",
+      });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
-      setError(
-        respawnError instanceof Error ? respawnError.message : "Failed to respawn session",
-      );
+      setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
     } finally {
       setBusyAction(null);
     }
@@ -257,6 +321,34 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
+  const displayState = useMemo(
+    () =>
+      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
+    [conversation?.state, session?.agent, session?.state],
+  );
+  const dialogMessages = useMemo<DialogMessage[]>(
+    () =>
+      conversation
+        ? [
+            ...conversation.messages.map((msg) => ({
+              key: `${msg.timestampMs}:${msg.role}:${msg.text}`,
+              role: msg.role,
+              text: msg.text,
+            })),
+            ...(conversation.state === "working"
+              ? [
+                  {
+                    key: "pending-assistant-response",
+                    role: "assistant" as const,
+                    text: "...",
+                    pending: true,
+                  },
+                ]
+              : []),
+          ]
+        : [],
+    [conversation],
+  );
   const requestedTerminalSessionId = useMemo(
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
@@ -270,9 +362,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
   const isSessionTerminal = Boolean(
     session &&
-      (requestedTerminalSessionId === session.id ||
-        (requestedTerminalSessionId !== null &&
-          requestedTerminalSessionId.startsWith(`${session.id}--`))),
+    (requestedTerminalSessionId === session.id ||
+      (requestedTerminalSessionId !== null &&
+        requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
@@ -281,14 +373,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     if (isSessionTerminal && canAttach) return;
 
     const query = withTerminalQuery(window.location.search, null);
-    window.history.replaceState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   }, [canAttach, isSessionTerminal, requestedTerminalSessionId, session]);
 
   const syncTerminalFilter = (terminalSessionId: string | null) => {
     if (typeof window === "undefined") return;
     const query = withTerminalQuery(window.location.search, terminalSessionId);
-    window.history.pushState(null, "", `${window.location.pathname}${query}${window.location.hash}`);
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${query}${window.location.hash}`,
+    );
     setLocationSearch(window.location.search);
   };
 
@@ -327,7 +427,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             ) : null}
 
             <div className="mt-3 flex flex-wrap items-center gap-2">
-              <ActivityDot activity={session.state} />
+              {displayState ? <ActivityDot activity={displayState} /> : null}
               {session.branch ? (
                 <span className="border border-[var(--color-border-default)] px-2 py-0.5 font-mono text-[var(--color-text-secondary)]">
                   {session.branch}
@@ -422,6 +522,49 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Content */}
           <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(16rem,0.8fr)]">
             <div className="space-y-4">
+              {/* Conversation dialog - Claude only */}
+              {session.agent === "claude" && conversation?.messages.length ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Dialog
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                    {conversation.durationMs > 0 ? (
+                      <span className="font-normal normal-case tracking-normal">
+                        {formatDuration(conversation.durationMs)}
+                      </span>
+                    ) : null}
+                  </h2>
+                  <div
+                    ref={dialogRef}
+                    className="flex max-h-80 flex-col gap-2 overflow-y-auto border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] p-3"
+                  >
+                    {dialogMessages.map((msg) => (
+                      <div
+                        key={msg.key}
+                        aria-label={msg.pending ? "Assistant is responding" : undefined}
+                        className={`max-w-[85%] px-3 py-2 text-sm ${
+                          msg.role === "user"
+                            ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
+                            : msg.pending
+                              ? "mr-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-elevated)] text-[var(--color-text-tertiary)]"
+                              : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
+                        }`}
+                      >
+                        <div
+                          className={`whitespace-pre-wrap break-words ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
+                        >
+                          {msg.pending
+                            ? msg.text
+                            : msg.text.length > 500
+                              ? msg.text.slice(0, 500) + "..."
+                              : msg.text}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
               {/* Message */}
               <section>
                 <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -480,7 +623,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     )}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} /> {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                        <VoiceStatusHint voice={voice} />{" "}
+                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <button
                         type="button"

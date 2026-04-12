@@ -1,5 +1,5 @@
-import { open, stat } from "node:fs/promises";
-import type { SessionState } from "./types.js";
+import { open, readFile, stat } from "node:fs/promises";
+import type { ConversationMessage, SessionState } from "./types.js";
 import { findLatestSessionFile } from "./agents/claude.js";
 
 /** Minimal shape extracted from a JSONL record for state classification. */
@@ -79,75 +79,119 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
   return "working";
 }
 
-// ── JSONL parser ──────────────────────────────────────────────────────
+// ── JSONL helpers ─────────────────────────────────────────────────────
 
-function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
-  let parsed: Record<string, unknown>;
+function tryParseJson(line: string): Record<string, unknown> | null {
   try {
-    parsed = JSON.parse(line) as Record<string, unknown>;
+    return JSON.parse(line) as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** Unwrap the nested "message" envelope that Claude JSONL uses. */
+function unwrapMessage(parsed: Record<string, unknown>): Record<string, unknown> {
+  return typeof parsed["message"] === "object" && parsed["message"] !== null
+    ? (parsed["message"] as Record<string, unknown>)
+    : parsed;
+}
+
+function extractRole(parsed: Record<string, unknown>, message: Record<string, unknown>): string {
+  return typeof message["role"] === "string"
+    ? message["role"]
+    : typeof parsed["role"] === "string"
+      ? parsed["role"]
+      : "";
+}
+
+function contentBlocks(message: Record<string, unknown>): unknown[] {
+  return Array.isArray(message["content"]) ? (message["content"] as unknown[]) : [];
+}
+
+function extractTimestampMs(
+  parsed: Record<string, unknown>,
+  message: Record<string, unknown>,
+  fallbackTimestampMs: number,
+): number {
+  const rawTimestamp = parsed["timestamp"] ?? message["timestamp"];
+  if (typeof rawTimestamp === "number" && Number.isFinite(rawTimestamp)) {
+    return rawTimestamp;
+  }
+  if (typeof rawTimestamp === "string") {
+    const timestampMs = Date.parse(rawTimestamp);
+    if (Number.isFinite(timestampMs)) {
+      return timestampMs;
+    }
+  }
+  return fallbackTimestampMs;
+}
+
+function hasBlockType(blocks: unknown[], type: string): boolean {
+  return blocks.some(
+    (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
+  );
+}
+
+function extractTextContent(message: Record<string, unknown>): string {
+  const raw = message["content"];
+  if (typeof raw === "string") return raw.trim();
+  const parts: string[] = [];
+  for (const block of contentBlocks(message)) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as Record<string, unknown>)["type"] === "text" &&
+      typeof (block as Record<string, unknown>)["text"] === "string"
+    ) {
+      parts.push((block as Record<string, unknown>)["text"] as string);
+    }
+  }
+  return parts.join("\n").trim();
+}
+
+// ── JSONL parser ──────────────────────────────────────────────────────
+
+function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
+  const parsed = tryParseJson(line);
+  if (!parsed) return null;
 
   const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
+  const message = unwrapMessage(parsed);
+  const recordTimestampMs = extractTimestampMs(parsed, message, timestampMs);
 
   if (type === "progress") {
-    return { type: "progress", timestampMs };
+    return { type: "progress", timestampMs: recordTimestampMs };
   }
 
   if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
-    return { type, timestampMs };
+    return { type, timestampMs: recordTimestampMs };
   }
 
-  // Assistant and user messages come nested under "message"
-  const message =
-    typeof parsed["message"] === "object" && parsed["message"] !== null
-      ? (parsed["message"] as Record<string, unknown>)
-      : parsed;
-
-  const role =
-    typeof message["role"] === "string"
-      ? message["role"]
-      : typeof parsed["role"] === "string"
-        ? parsed["role"]
-        : "";
+  const role = extractRole(parsed, message);
 
   if (role === "assistant") {
     const stopReason =
       typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
-    const content = Array.isArray(message["content"]) ? message["content"] : [];
-    const hasToolUse = content.some(
-      (block: unknown) =>
-        typeof block === "object" &&
-        block !== null &&
-        (block as Record<string, unknown>)["type"] === "tool_use",
-    );
+    const blocks = contentBlocks(message);
     return {
       type: "assistant",
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
-      hasToolUse,
-      timestampMs,
+      hasToolUse: hasBlockType(blocks, "tool_use"),
+      timestampMs: recordTimestampMs,
     };
   }
 
   if (role === "user") {
-    const content = Array.isArray(message["content"]) ? message["content"] : [];
-    const hasToolResult = content.some(
-      (block: unknown) =>
-        typeof block === "object" &&
-        block !== null &&
-        (block as Record<string, unknown>)["type"] === "tool_result",
-    );
     return {
       type: "user",
-      role: hasToolResult ? "tool_result" : "user",
-      timestampMs,
+      role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
+      timestampMs: recordTimestampMs,
     };
   }
 
   if (type) {
-    return { type, timestampMs };
+    return { type, timestampMs: recordTimestampMs };
   }
 
   return null;
@@ -230,4 +274,55 @@ export async function readClaudeJsonlState(
     state: classifyClaudeJsonlState(combined, nowMs),
     reader: nextReader,
   };
+}
+
+// ── Conversation parser (pure, no I/O) ───────────────────────────────
+
+export function parseConversationLines(
+  lines: string[],
+  nowMs: number,
+): { messages: ConversationMessage[]; state: SessionState } {
+  const messages: ConversationMessage[] = [];
+  const stateRecords: ParsedRecord[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const stateRecord = parseJsonlRecord(trimmed, nowMs);
+    if (stateRecord) stateRecords.push(stateRecord);
+
+    const parsed = tryParseJson(trimmed);
+    if (!parsed) continue;
+
+    const message = unwrapMessage(parsed);
+    const role = extractRole(parsed, message);
+    if (role !== "user" && role !== "assistant") continue;
+
+    const combinedText = extractTextContent(message);
+    if (!combinedText) continue;
+
+    const ts = extractTimestampMs(parsed, message, nowMs);
+    messages.push({ role, text: combinedText, timestampMs: ts });
+  }
+
+  return { messages, state: classifyClaudeJsonlState(stateRecords, nowMs) };
+}
+
+// ── Full conversation reader ──────────────────────────────────────────
+
+export async function readClaudeConversation(
+  worktreePath: string,
+): Promise<{ messages: ConversationMessage[]; state: SessionState } | null> {
+  const filePath = await findLatestSessionFile(worktreePath);
+  if (!filePath) return null;
+
+  let text: string;
+  try {
+    text = await readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+
+  return parseConversationLines(text.split("\n"), Date.now());
 }
