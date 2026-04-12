@@ -251,14 +251,22 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   }
 }
 
-async function pasteLiteral(sessionName: string, payload: string): Promise<void> {
+async function pasteLiteral(
+  sessionName: string,
+  payload: string,
+  bracketed = false,
+): Promise<void> {
   const target = exactPaneTarget(sessionName);
   const bufferName = `spur-${randomUUID()}`;
   const tempPath = join(tmpdir(), `spur-${randomUUID()}.txt`);
   writeFileSync(tempPath, payload, { encoding: "utf-8", mode: 0o600 });
   try {
     await tmux("load-buffer", "-b", bufferName, tempPath);
-    await tmux("paste-buffer", "-b", bufferName, "-t", target, "-d");
+    const args = ["paste-buffer", "-b", bufferName, "-t", target, "-d"];
+    if (bracketed) {
+      args.splice(1, 0, "-p");
+    }
+    await tmux(...args);
   } finally {
     try {
       unlinkSync(tempPath);
@@ -283,9 +291,7 @@ async function sendLiteral(sessionName: string, message: string): Promise<void> 
   await tmux("send-keys", "-t", target, "-l", message);
 }
 
-function submitDelayMs(agent: AgentName | undefined): number {
-  return agent === "codex" ? 1_000 : 300;
-}
+const DEFAULT_SUBMIT_DELAY_MS = 300;
 
 export async function sendMessageToTmux(
   sessionName: string,
@@ -299,11 +305,20 @@ export async function sendMessageToTmux(
   }
   await tmux("send-keys", "-t", target, "C-u");
   if (options?.agent === "codex") {
-    await pasteLiteral(sessionName, `${message}\n`);
+    // Codex TUI enables bracketed paste and handles it as a distinct paste event.
+    // Submit with a real Enter key so delivery does not depend on newline characters
+    // inside the pasted payload or on Codex's paste-burst heuristics.
+    await pasteLiteral(sessionName, message, true);
+    await tmux("send-keys", "-t", target, "Enter");
     return;
   }
   await sendLiteral(sessionName, message);
-  await sleep(submitDelayMs(options?.agent));
+  await sleep(DEFAULT_SUBMIT_DELAY_MS);
+  await tmux("send-keys", "-t", target, "Enter");
+}
+
+export async function sendSubmitKeyToTmux(sessionName: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
   await tmux("send-keys", "-t", target, "Enter");
 }
 

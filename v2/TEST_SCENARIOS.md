@@ -45,6 +45,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Spawn captures Claude/Codex native session ids when the agent writes them to disk.
 - Paused and crashed worktree-backed sessions can resume on later `send` by reusing stored native resume state when available, re-discovering it from agent state on disk when missing, and falling back to a fresh launch when native resume is stale.
 - `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
+- `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.

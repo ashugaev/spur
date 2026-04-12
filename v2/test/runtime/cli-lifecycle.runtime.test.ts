@@ -430,6 +430,7 @@ projects:
         body: JSON.stringify({
           project: "api",
           prompt: "registry survived restart",
+          agent: "claude",
         }),
       });
       expect(apiSpawn.project).toBe("api");
@@ -1544,7 +1545,7 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "l");
 
-    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName, 1000), {
       timeoutMs: 15_000,
       accept: (value) =>
         value.includes(`Logs ${spawned.id}`) &&
@@ -2381,7 +2382,7 @@ projects:
     expect(respawned.status).toBe("running");
 
     const completedCaller = await pollUntil(
-      () => context.fetchJson<SessionView>(`/sessions/${caller.id}`),
+      async () => context.fetchJson<SessionView>(`/sessions/${encodeURIComponent(caller.id)}`),
       {
         timeoutMs: 15_000,
         accept: (session) =>
@@ -2447,7 +2448,7 @@ projects:
     expect(liveCaller?.workspaceExists).toBe(true);
   });
 
-  it("falls back to a fresh launch from the TTY list when native resume state is missing", async () => {
+  it("falls back to a fresh restore in the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-restore-missing-${port}`;
