@@ -21,9 +21,7 @@ test.describe("R1: Mobile viewport", () => {
     await mockSessions(page, [makeWorkingSession({ id: "mob-scroll-1" })]);
     await page.goto("/");
 
-    const scrollWidth = await page.evaluate(
-      () => document.documentElement.scrollWidth,
-    );
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     const innerWidth = await page.evaluate(() => window.innerWidth);
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
   });
@@ -64,9 +62,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
   test.use({ viewport: { width: 768, height: 1024 } });
 
   test("agent column visible at md breakpoint", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "tablet-1", agent: "claude" }),
-    ]);
+    await mockSessions(page, [makeWorkingSession({ id: "tablet-1", agent: "claude" })]);
     await page.goto("/");
 
     // agent column has class md:inline, so at 768px it should be visible

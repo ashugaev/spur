@@ -10,7 +10,11 @@ import {
   setupAgentHooks,
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
-import { readClaudeJsonlState, type ClaudeJsonlReaderState } from "./claude-jsonl-state.js";
+import {
+  readClaudeConversation,
+  readClaudeJsonlState,
+  type ClaudeJsonlReaderState,
+} from "./claude-jsonl-state.js";
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
@@ -63,6 +67,7 @@ import {
   type AgentName,
   type AppConfig,
   type BranchSource,
+  type ConversationResponse,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -85,6 +90,7 @@ import {
 } from "./types.js";
 import {
   createWorktree,
+  findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
   readCurrentBranch,
@@ -161,7 +167,7 @@ function normalizeSpawnRequest(
   planMode: boolean;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
-  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -270,10 +276,12 @@ function withQueuedMessages(
 export function isRestorableSession(
   session: Pick<SessionView, "status" | "state" | "workspaceExists">,
 ): boolean {
-  return isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists;
+  return (
+    isRestorableStatus(session.status) && session.state === "stopped" && session.workspaceExists
+  );
 }
 
-function buildRestorePrompt(prompt: string): string {
+export function buildRestorePrompt(prompt: string): string {
   return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
 }
 
@@ -300,6 +308,7 @@ function buildSessionEnv(args: {
   projectId: string;
   sessionId: string;
   sessionToolDir: string;
+  dataDir: string;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -310,6 +319,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
+    SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -420,6 +430,18 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: session.prompt,
+    agent: session.agent,
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+    overrides: { worktree: session.worktree },
+    ...(session.worktree && session.branchSource === "explicit" ? { branch: session.branch } : {}),
+  };
 }
 
 async function resolveSpawnBranch(args: {
@@ -788,7 +810,9 @@ export class SessionService {
     }
 
     try {
-      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[session.project];
+      const localProject = loadProjectConfig(projectConfigPath, this.config).projects[
+        session.project
+      ];
       if (localProject) {
         return localProject;
       }
@@ -837,7 +861,7 @@ export class SessionService {
 
   async list(): Promise<SessionView[]> {
     const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !isTerminalSessionStatus(session.status),
+      (session) => !isTerminalSessionStatus(session.status) || session.retainInList === true,
     );
     const views: SessionView[] = [];
     for (const session of sessions) {
@@ -852,6 +876,16 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  async getConversation(sessionId: string): Promise<ConversationResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    const durationMs = Date.now() - new Date(session.createdAt).getTime();
+    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    if (session.agent !== "claude") return fallback;
+    const result = await readClaudeConversation(session.worktreePath);
+    return result ? { ...result, durationMs } : fallback;
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -1114,6 +1148,32 @@ export class SessionService {
         worktree,
         fallbackBranch: sessionId,
       });
+      if (worktree && resolvedBranch.branch !== sessionId) {
+        const branchConflictPath = await findWorktreePathForBranch(
+          project.path,
+          resolvedBranch.branch,
+        );
+        if (branchConflictPath) {
+          if (resolvedBranch.branchSource === "explicit") {
+            throw new Error(
+              `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+            );
+          }
+          this.logEvent("session.spawn.branch_conflict", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+            details: {
+              occupiedBranch: resolvedBranch.branch,
+              conflictingWorktreePath: branchConflictPath,
+              fallbackBranch: sessionId,
+              branchSource: resolvedBranch.branchSource ?? null,
+            },
+          });
+          resolvedBranch = { branch: sessionId };
+        }
+      }
       const tmuxSession = sessionId;
       createdAt = nowIso();
 
@@ -1228,6 +1288,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         sessionToolDir,
+        dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
       });
@@ -1262,10 +1323,7 @@ export class SessionService {
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
         const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(
-          launchPlan.initialMessage,
-          sidecarNames,
-        );
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
         await this.sendAgentMessage(runningRecord, spawnInitialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -1559,8 +1617,8 @@ export class SessionService {
     });
   }
 
-  async complete(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "completed");
+  async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
+    return this.applyManualStatus(sessionId, "completed", options);
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
@@ -1621,6 +1679,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: project.path,
       symlinks: project.symlinks,
     });
@@ -1683,6 +1742,7 @@ export class SessionService {
   private async applyManualStatus(
     sessionId: string,
     targetStatus: ManualSessionStatus,
+    options?: { retainInList?: boolean },
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -1722,7 +1782,11 @@ export class SessionService {
       ...session,
       status: targetStatus,
       updatedAt: nowIso(),
+      ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (!options?.retainInList) {
+      delete record.retainInList;
+    }
     writeSession(this.config.dataDir, record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
@@ -1795,6 +1859,7 @@ export class SessionService {
       status: "killed",
       updatedAt: nowIso(),
     };
+    delete record.retainInList;
     writeSession(this.config.dataDir, record);
     this.logEvent("session.kill.completed", {
       level: "info",
@@ -1922,6 +1987,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -2043,11 +2109,7 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ??
-        buildAgentLaunchPlan(
-          current.agent,
-          restorePrompt,
-          withPlanMode(hookSetup, planMode),
-        );
+        buildAgentLaunchPlan(current.agent, restorePrompt, withPlanMode(hookSetup, planMode));
       if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
@@ -2087,6 +2149,7 @@ export class SessionService {
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
+          dataDir: this.config.dataDir,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),
@@ -2155,7 +2218,9 @@ export class SessionService {
       session.status !== "killed" &&
       session.status !== "errored"
     ) {
-      throw new Error(`Session ${sessionId} is not in a terminal state (status: ${session.status})`);
+      throw new Error(
+        `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
+      );
     }
 
     this.logEvent("session.respawn.started", {
@@ -2166,14 +2231,7 @@ export class SessionService {
       details: { agent: session.agent },
     });
 
-    const request: SpawnSessionRequest = {
-      project: session.project,
-      prompt: session.prompt,
-      agent: session.agent,
-      ...(session.planMode !== undefined && { planMode: session.planMode }),
-      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
-    };
-    return this.spawn(request);
+    return this.spawn(resolveRespawnRequest(session));
   }
 
   private resumeSessionDelivery(): void {
@@ -2688,7 +2746,7 @@ export class SessionService {
           message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
-        state = "working";
+        state = "waiting";
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -2765,6 +2823,6 @@ export class SessionService {
 
     // Codex: hooks only
     const hookState = readAgentHookState(this.config.dataDir, session.id);
-    return hookState?.state ?? "working";
+    return hookState?.state ?? "waiting";
   }
 }

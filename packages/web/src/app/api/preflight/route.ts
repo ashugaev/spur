@@ -24,7 +24,8 @@ export async function POST(request: NextRequest) {
 
     const payload: Record<string, unknown> = { project, prompt };
     if (body.agent) payload.agent = body.agent;
-    if (body.overrides && Object.keys(body.overrides).length > 0) payload.overrides = body.overrides;
+    if (body.overrides && Object.keys(body.overrides).length > 0)
+      payload.overrides = body.overrides;
 
     const result = await spurRequestJson<{ branch: string | null }>(
       `/projects/${encodeURIComponent(project)}/preflight`,

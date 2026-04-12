@@ -87,9 +87,7 @@ function baseSession(id: string): SpurSessionView {
   };
 }
 
-export function makeWorkingSession(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeWorkingSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-working-1"),
     runtimeAlive: true,
@@ -100,9 +98,7 @@ export function makeWorkingSession(
   };
 }
 
-export function makeStoppedSession(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-stopped-1"),
     runtimeAlive: false,
@@ -113,9 +109,7 @@ export function makeStoppedSession(
   };
 }
 
-export function makeCompletedSession(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeCompletedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-completed-1"),
     runtimeAlive: false,
@@ -126,9 +120,7 @@ export function makeCompletedSession(
   };
 }
 
-export function makeNeedsInputSession(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeNeedsInputSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-needs-input-1"),
     runtimeAlive: true,
@@ -139,9 +131,7 @@ export function makeNeedsInputSession(
   };
 }
 
-export function makeWaitingSession(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeWaitingSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-waiting-1"),
     runtimeAlive: true,
@@ -152,9 +142,7 @@ export function makeWaitingSession(
   };
 }
 
-export function makeSessionWithPR(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeSessionWithPR(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-pr-1"),
     runtimeAlive: true,
@@ -163,17 +151,13 @@ export function makeSessionWithPR(
     state: "working",
     slots: {
       title: "Session with PR",
-      links: [
-        { label: "pr", url: "https://github.com/test/repo/pull/42" },
-      ],
+      links: [{ label: "pr", url: "https://github.com/test/repo/pull/42" }],
     },
     ...overrides,
   };
 }
 
-export function makeSessionWithTracker(
-  overrides?: Partial<SpurSessionView>,
-): SpurSessionView {
+export function makeSessionWithTracker(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-tracker-1"),
     runtimeAlive: true,
@@ -225,6 +209,14 @@ export async function mockSessions(
       status: 200,
       contentType: "application/json",
       body,
+    });
+  });
+
+  await page.route("/api/runtime/resources", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ available: false }),
     });
   });
 }

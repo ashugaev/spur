@@ -216,7 +216,12 @@ test.describe("D4b: Merged-PR done button", () => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ state: "merged", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
+        body: JSON.stringify({
+          state: "merged",
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
       });
     });
 
@@ -250,7 +255,12 @@ test.describe("D5: Tracker and PR links", () => {
       void route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ state: "open", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
+        body: JSON.stringify({
+          state: "open",
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
       });
     });
     await page.goto("/");
@@ -358,14 +368,48 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     // NEXT_PUBLIC_BUILD_VERSION env var or "dev" fallback in development
     await expect(page.locator("footer")).toContainText(/dev|v20\d\d\.\d\d\.\d\d/);
   });
+
+  test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const footer = page.locator("footer");
+    await expect(footer).toContainText("CPU 21%");
+    await expect(footer).toContainText("RAM 43%");
+    await expect(footer).toContainText("DISK 65%");
+  });
+
+  test("footer hides resource metrics when runtime resources are unavailable", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    const footer = page.locator("footer");
+    await expect(footer).not.toContainText(/CPU \d+%/);
+    await expect(footer).not.toContainText(/RAM \d+%/);
+    await expect(footer).not.toContainText(/DISK \d+%/);
+  });
 });
 
 // D7: Spawn modal
 test.describe("D7: Spawn modal", () => {
   test("clicking Spawn Session button opens modal", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-test-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-test-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -373,9 +417,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("modal has project select, agent select, branch input, plan checkbox", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-fields-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-fields-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -391,9 +437,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("modal has Spawn button", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-btn-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-btn-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -412,9 +460,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("clicking outside backdrop closes modal", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-backdrop-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-backdrop-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -426,9 +476,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("✕ button closes modal", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-close-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-close-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -440,9 +492,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("Enter in textarea creates newline not submit", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-enter-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-enter-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
@@ -459,9 +513,11 @@ test.describe("D7: Spawn modal", () => {
   });
 
   test("Ctrl+Enter in textarea submits spawn request", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "spawn-ctrlenter-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-ctrlenter-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
 
     // Mock spawn endpoint
     await page.route("**/api/spawn", (route) => {
@@ -492,7 +548,9 @@ test.describe("D7: Spawn modal", () => {
     await textarea.press("Control+Enter");
 
     // Modal should close after spawn
-    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({ timeout: 5000 });
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
   });
 });
 
@@ -550,9 +608,11 @@ test.describe("D7: Spawn modal – workspace and steps", () => {
 // D7b: Silent branch preflight
 test.describe("D7b: Silent branch preflight", () => {
   test("preflight called and branch input auto-populated", async ({ page }) => {
-    await mockSessions(page, [
-      makeWorkingSession({ id: "preflight-1", project: "my-project" }),
-    ], [{ id: "my-project", name: "my-project" }]);
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "preflight-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
 
     let preflightCalled = false;
     await page.route("**/api/preflight", (route) => {

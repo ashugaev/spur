@@ -1,10 +1,7 @@
 import { test, expect, type Page } from "playwright/test";
 import { makeWorkingSession, makeSessionWithSidecar } from "./fixtures.js";
 
-function mockSessionDetail(
-  page: Page,
-  session: ReturnType<typeof makeWorkingSession>,
-) {
+function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
       status: 200,

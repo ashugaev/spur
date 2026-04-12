@@ -135,6 +135,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     status: session.status,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    ...(session.retainInList ? { retainInList: true } : {}),
     ...(session.slots ? { slots: session.slots } : {}),
     ...(session.sidecarPorts ? { sidecarPorts: session.sidecarPorts } : {}),
     ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
