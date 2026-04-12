@@ -176,7 +176,7 @@ function normalizeSpawnRequest(
   if (request.agent !== undefined && request.members !== undefined) {
     throw new Error("agent and members cannot be combined");
   }
-  const steps = (prompt ? request.steps ?? defaultSteps : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaultSteps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }
@@ -187,7 +187,10 @@ function normalizeSpawnRequest(
       throw new Error(`members[${index}] must be an object`);
     }
     const parsedAgent = parseAgentName(member.agent);
-    if (member.branch !== undefined && (typeof member.branch !== "string" || !member.branch.trim())) {
+    if (
+      member.branch !== undefined &&
+      (typeof member.branch !== "string" || !member.branch.trim())
+    ) {
       throw new Error(`members[${index}].branch must be a non-empty string when provided`);
     }
     if (member.name !== undefined && (typeof member.name !== "string" || !member.name.trim())) {
@@ -1101,7 +1104,10 @@ export class SessionService {
   async spawn(request: SpawnSessionRequest): Promise<SpawnResult> {
     try {
       const project = this.getProject(request.project);
-      const { prompt, steps, planMode, members } = normalizeSpawnRequest(request, project.spawn?.steps);
+      const { prompt, steps, planMode, members } = normalizeSpawnRequest(
+        request,
+        project.spawn?.steps,
+      );
       const overrides = parseSpawnOverrides(request.overrides, "overrides");
       const worktree = resolveSpawnWorktree(project, overrides);
       if (members && request.branch !== undefined) {
@@ -1111,14 +1117,12 @@ export class SessionService {
         throw new Error("multi-agent spawn requires worktree mode");
       }
 
-      const spawnMembers =
-        members ??
-        [
-          {
-            agent: parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
-            ...(request.branch?.trim() ? { branch: request.branch.trim() } : {}),
-          },
-        ];
+      const spawnMembers = members ?? [
+        {
+          agent: parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          ...(request.branch?.trim() ? { branch: request.branch.trim() } : {}),
+        },
+      ];
 
       if (spawnMembers.length === 1) {
         const session = await this.spawnSingleSession({

@@ -54,17 +54,17 @@ export async function POST(request: NextRequest) {
         })
       : undefined;
     if (body.agent && filteredMembers?.length) {
-      return NextResponse.json(
-        { error: "agent cannot be combined with members" },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: "agent cannot be combined with members" }, { status: 400 });
     }
     if (
       !body.agent &&
       body.members !== undefined &&
       (!filteredMembers || filteredMembers.length === 0)
     ) {
-      return NextResponse.json({ error: "members must contain at least one entry" }, { status: 400 });
+      return NextResponse.json(
+        { error: "members must contain at least one entry" },
+        { status: 400 },
+      );
     }
 
     const overrides =

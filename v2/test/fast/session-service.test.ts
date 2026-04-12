@@ -605,7 +605,10 @@ describe("SessionService", () => {
 
   it("creates grouped sibling sessions and persists shared group metadata", async () => {
     const sessions = createSessionStore();
-    reserveNextSessionIdMock.mockReset().mockResolvedValueOnce("api-1").mockResolvedValueOnce("api-2");
+    reserveNextSessionIdMock
+      .mockReset()
+      .mockResolvedValueOnce("api-1")
+      .mockResolvedValueOnce("api-2");
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
@@ -655,8 +658,14 @@ describe("SessionService", () => {
 
   it("rolls back grouped sessions when a later member fails to spawn", async () => {
     createSessionStore();
-    reserveNextSessionIdMock.mockReset().mockResolvedValueOnce("api-1").mockResolvedValueOnce("api-2");
-    createTmuxSessionMock.mockReset().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("tmux boom"));
+    reserveNextSessionIdMock
+      .mockReset()
+      .mockResolvedValueOnce("api-1")
+      .mockResolvedValueOnce("api-2");
+    createTmuxSessionMock
+      .mockReset()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("tmux boom"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

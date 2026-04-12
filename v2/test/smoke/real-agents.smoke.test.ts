@@ -394,70 +394,73 @@ if (codexAuth.error) {
   });
 }
 
-describe.skipIf(!claudeAuth.available || !codexAuth.available)("Spur real-agent smoke (grouped)", () => {
-  it(
-    "launches grouped claude and codex sessions for one task",
-    async () => {
-      const rootDir = await createTempDir("spur-smoke-group-");
-      const port = await findFreePort();
-      const dataDir = join(rootDir, "data");
-      const worktreeDir = join(rootDir, "worktrees");
-      const sessionPrefix = `smoke-group-${port}`;
-      const tmuxSocketName = `spur-${port}`;
+describe.skipIf(!claudeAuth.available || !codexAuth.available)(
+  "Spur real-agent smoke (grouped)",
+  () => {
+    it(
+      "launches grouped claude and codex sessions for one task",
+      async () => {
+        const rootDir = await createTempDir("spur-smoke-group-");
+        const port = await findFreePort();
+        const dataDir = join(rootDir, "data");
+        const worktreeDir = join(rootDir, "worktrees");
+        const sessionPrefix = `smoke-group-${port}`;
+        const tmuxSocketName = `spur-${port}`;
 
-      await syncTmuxEnvironment({
-        HOME: process.env.HOME,
-        PATH: process.env.PATH,
-        SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
-        SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
-        SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
-      });
+        await syncTmuxEnvironment({
+          HOME: process.env.HOME,
+          PATH: process.env.PATH,
+          SPUR_TMUX_SOCKET_NAME: tmuxSocketName,
+          SPUR_CLAUDE_BIN: CLAUDE_BIN ?? undefined,
+          SPUR_CODEX_BIN: CODEX_BIN ?? undefined,
+        });
 
-      const configPath = join(rootDir, "spur.yaml");
-      await writeFile(
-        configPath,
-        smokeConfig({
-          port,
-          dataDir,
-          worktreeDir,
-          repoDir: SMOKE_REPO_DIR,
-          baseRef: SMOKE_BASE_REF,
-          sessionPrefix,
-          agent: "claude",
-        }),
-        "utf8",
-      );
-
-      await withPinnedAgentBinaries(async () => {
-        const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
-        const spawned = (await service.spawn({
-          project: "api",
-          prompt:
-            'Create a file named smoke-group.txt containing exactly your agent name, then wait for more instructions.',
-          members: [{ agent: "claude" }, { agent: "codex" }],
-        })) as SpawnResult;
-
-        expect(spawned.groupId).toBeTruthy();
-        expect(spawned.sessions).toHaveLength(2);
-
-        for (const session of spawned.sessions) {
-          cleanupItems.push({
-            rootDir,
+        const configPath = join(rootDir, "spur.yaml");
+        await writeFile(
+          configPath,
+          smokeConfig({
+            port,
+            dataDir,
+            worktreeDir,
+            repoDir: SMOKE_REPO_DIR,
+            baseRef: SMOKE_BASE_REF,
             sessionPrefix,
-            branch: session.branch,
-            worktreePath: session.worktreePath,
-          });
-          const groupFile = join(session.worktreePath, "smoke-group.txt");
-          await pollUntil(async () => existsSync(groupFile), {
-            timeoutMs: session.agent === "codex" ? 240_000 : 180_000,
-            accept: Boolean,
-          });
-          expect((await readFile(groupFile, "utf8")).trim()).toBe(session.agent);
-          const killed = await service.kill(session.id, { force: true });
-          expect(killed.status).toBe("killed");
-        }
-      });
-    },
-    GROUP_SMOKE_TEST_TIMEOUT_MS,
-  );
-});
+            agent: "claude",
+          }),
+          "utf8",
+        );
+
+        await withPinnedAgentBinaries(async () => {
+          const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+          const spawned = (await service.spawn({
+            project: "api",
+            prompt:
+              "Create a file named smoke-group.txt containing exactly your agent name, then wait for more instructions.",
+            members: [{ agent: "claude" }, { agent: "codex" }],
+          })) as SpawnResult;
+
+          expect(spawned.groupId).toBeTruthy();
+          expect(spawned.sessions).toHaveLength(2);
+
+          for (const session of spawned.sessions) {
+            cleanupItems.push({
+              rootDir,
+              sessionPrefix,
+              branch: session.branch,
+              worktreePath: session.worktreePath,
+            });
+            const groupFile = join(session.worktreePath, "smoke-group.txt");
+            await pollUntil(async () => existsSync(groupFile), {
+              timeoutMs: session.agent === "codex" ? 240_000 : 180_000,
+              accept: Boolean,
+            });
+            expect((await readFile(groupFile, "utf8")).trim()).toBe(session.agent);
+            const killed = await service.kill(session.id, { force: true });
+            expect(killed.status).toBe("killed");
+          }
+        });
+      },
+      GROUP_SMOKE_TEST_TIMEOUT_MS,
+    );
+  },
+);

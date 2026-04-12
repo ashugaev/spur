@@ -393,10 +393,11 @@ export function Dashboard() {
   const addStep = () => {
     setSpawnSteps((prev) => [...prev, { id: Date.now(), value: "" }]);
   };
-  const addMember = () =>
-    setSpawnMembers((prev) => [...prev, { id: Date.now(), agent: "claude" }]);
+  const addMember = () => setSpawnMembers((prev) => [...prev, { id: Date.now(), agent: "claude" }]);
   const removeMember = (id: number) =>
-    setSpawnMembers((prev) => (prev.length <= 1 ? prev : prev.filter((member) => member.id !== id)));
+    setSpawnMembers((prev) =>
+      prev.length <= 1 ? prev : prev.filter((member) => member.id !== id),
+    );
   const updateMember = (id: number, agent: "claude" | "codex") =>
     setSpawnMembers((prev) =>
       prev.map((member) => (member.id === id ? { ...member, agent } : member)),

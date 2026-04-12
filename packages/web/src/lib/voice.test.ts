@@ -439,14 +439,12 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
   it("fails with explicit message after exhausting retryable azure errors and still cleans up temp files", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
-      Promise.resolve(
-        {
-          ok: false,
-          status: 503,
-          headers: new Headers({ "retry-after": "0" }),
-          json: async () => ({ error: { message: "service unavailable" } }),
-        },
-      ),
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        headers: new Headers({ "retry-after": "0" }),
+        json: async () => ({ error: { message: "service unavailable" } }),
+      }),
     );
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
@@ -506,14 +504,12 @@ AZURE_OPENAI_API_VERSION=2024-10-21
   });
 
   it("does not retry non-retryable azure 400 errors", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      {
-        ok: false,
-        status: 400,
-        headers: new Headers(),
-        json: async () => ({ error: { message: "bad request" } }),
-      },
-    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      headers: new Headers(),
+      json: async () => ({ error: { message: "bad request" } }),
+    });
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 

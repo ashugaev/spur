@@ -4,7 +4,12 @@ import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
-import type { RuntimeInfo, ServiceInstanceView, SessionView, SpawnResult } from "../../src/types.js";
+import type {
+  RuntimeInfo,
+  ServiceInstanceView,
+  SessionView,
+  SpawnResult,
+} from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -1866,7 +1871,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("grouped.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "grouped.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -1911,7 +1919,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("single-member.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "single-member.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -2459,13 +2470,16 @@ projects:
     expect(respawned.id).not.toBe(target.id);
     expect(respawned.status).toBe("running");
 
-    const completedCaller = await pollUntil(() => context.fetchJson<SessionView>(`/sessions/${caller.id}`), {
-      timeoutMs: 15_000,
-      accept: (session) =>
-        session.status === "completed" &&
-        session.runtimeAlive === false &&
-        session.workspaceExists === false,
-    });
+    const completedCaller = await pollUntil(
+      () => context.fetchJson<SessionView>(`/sessions/${caller.id}`),
+      {
+        timeoutMs: 15_000,
+        accept: (session) =>
+          session.status === "completed" &&
+          session.runtimeAlive === false &&
+          session.workspaceExists === false,
+      },
+    );
     expect(completedCaller.status).toBe("completed");
     expect(completedCaller.runtimeAlive).toBe(false);
     expect(completedCaller.workspaceExists).toBe(false);
