@@ -789,6 +789,119 @@ projects:
     },
   );
 
+  it("falls back to a fresh session branch when respawn preflight picks a branch already used by another worktree", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-respawn-occupied-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const occupiedBranch = "feature/respawn-occupied";
+    const configPath = await context.writeConfig(
+      "respawn-occupied.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    preflight:
+      prompt: "Use branch hint: ${occupiedBranch}"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "runtime respawn occupied prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    expect(spawned.branch).toBe(occupiedBranch);
+
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+
+    const occupiedWorktreePath = join(context.rootDir, "occupied-respawn-branch");
+    await execFileAsync("git", ["worktree", "add", occupiedWorktreePath, occupiedBranch], {
+      cwd: context.repoDir,
+    });
+
+    try {
+      const respawned = JSON.parse(
+        (await context.execCli(["--config", configPath, "respawn", spawned.id, "--json"])).stdout,
+      ) as SessionView;
+
+      expect(respawned.status).toBe("running");
+      expect(respawned.branch).toBe(respawned.id);
+
+      const branch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: respawned.worktreePath,
+      });
+      expect(branch.stdout.trim()).toBe(respawned.id);
+    } finally {
+      await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
+        cwd: context.repoDir,
+      });
+    }
+  });
+
+  it("rejects an explicit branch when another worktree already has it checked out", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-branch-conflict-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const occupiedBranch = "feature/branch-conflict";
+    const occupiedWorktreePath = join(context.rootDir, "occupied-explicit-branch");
+    await execFileAsync(
+      "git",
+      ["worktree", "add", "-b", occupiedBranch, occupiedWorktreePath, "main"],
+      { cwd: context.repoDir },
+    );
+
+    try {
+      const configPath = await context.writeConfig(
+        "branch-conflict.yaml",
+        baseConfig(context, sessionPrefix),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      await expect(
+        context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "runtime explicit branch conflict",
+          "--branch",
+          occupiedBranch,
+          "--json",
+        ]),
+      ).rejects.toMatchObject({
+        stderr: expect.stringContaining(
+          `branch "${occupiedBranch}" is already checked out in worktree ${occupiedWorktreePath}`,
+        ),
+      });
+    } finally {
+      await execFileAsync("git", ["worktree", "remove", "--force", occupiedWorktreePath], {
+        cwd: context.repoDir,
+      });
+    }
+  });
+
   it("fetches origin before spawn so the worktree and local base branch use the freshest main", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -2408,14 +2521,27 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "q");
 
-    const listed = JSON.parse(
-      (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
-    ) as SessionView[];
-    expect(listed[0]?.id).toBe(spawned.id);
-    expect(listed[0]?.state).toBe("waiting");
-    expect(listed[0]?.runtimeAlive).toBe(true);
-    expect(listed[0]?.workspaceExists).toBe(true);
+    const restoreLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("startup:launch::"),
+    });
+
+    const listedSessions = await pollUntil(
+      async () =>
+        JSON.parse(
+          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
+        ) as SessionView[],
+      {
+        timeoutMs: 30_000,
+        accept: (sessions) =>
+          sessions[0]?.runtimeAlive === true && sessions[0]?.state !== "stopped",
+      },
+    );
+    expect(listedSessions[0]?.id).toBe(spawned.id);
+    expect(listedSessions[0]?.runtimeAlive).toBe(true);
+    expect(listedSessions[0]?.workspaceExists).toBe(true);
     expect(controllerPane).toContain(`Restored ${spawned.id}.`);
+    expect(restoreLog).toContain("startup:launch::");
   });
 
   it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {

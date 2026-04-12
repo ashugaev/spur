@@ -6,7 +6,6 @@ import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
 import { Command, type Help } from "commander";
-import { buildAgentRestorePlan } from "./agents/index.js";
 import {
   connectProjectConfig,
   disconnectProjectConfig,
@@ -44,11 +43,7 @@ import {
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
-import {
-  buildRestorePrompt,
-  isKillConfirmationRequiredMessage,
-  isRestorableSession,
-} from "./session-service.js";
+import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
@@ -857,17 +852,6 @@ async function runInteractiveSessionList(
     render();
 
     try {
-      const restorePlan = await buildAgentRestorePlan(
-        session.agent,
-        session.worktreePath,
-        buildRestorePrompt(session.prompt),
-      );
-      if (!restorePlan) {
-        statusMessage = brandLine(
-          `No native resume state found for ${session.agent} session ${session.id}`,
-        );
-        return;
-      }
       const restored = await postJson<SessionView>(
         cliEntrypoint,
         `/sessions/${session.id}/restore`,
