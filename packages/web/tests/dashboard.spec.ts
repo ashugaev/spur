@@ -386,9 +386,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await page.goto("/");
 
     const footer = page.locator("footer");
-    await expect(footer).toContainText("CPU 21%");
-    await expect(footer).toContainText("RAM 43%");
-    await expect(footer).toContainText("DISK 65%");
+    await expect(footer).toContainText(/CPU\s*21%/);
+    await expect(footer).toContainText(/RAM\s*43%/);
+    await expect(footer).toContainText(/DISK\s*65%/);
   });
 
   test("footer hides resource metrics when runtime resources are unavailable", async ({ page }) => {
