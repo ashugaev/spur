@@ -47,7 +47,10 @@ test.describe("R1: Mobile viewport", () => {
 
     await expect(page.getByText("Accordion session")).toBeVisible();
 
-    const zoneToggle = page.locator("section button").filter({ hasText: /working/i }).first();
+    const zoneToggle = page
+      .locator("section button")
+      .filter({ hasText: /working/i })
+      .first();
     await expect(zoneToggle).toBeVisible({ timeout: 5000 });
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).not.toBeVisible();
@@ -87,11 +90,14 @@ test.describe("R3: Desktop viewport (1280px)", () => {
 
   test("session row renders with project column at sm", async ({ page }) => {
     await gotoMocked(
-      page, "/",
+      page,
+      "/",
       [makeWorkingSession({ id: "desktop-row-1", project: "desktop-project" })],
       [{ id: "desktop-project", name: "desktop-project" }],
     );
 
-    await expect(page.locator(".data-row span").filter({ hasText: "desktop-project" })).toBeVisible();
+    await expect(
+      page.locator(".data-row span").filter({ hasText: "desktop-project" }),
+    ).toBeVisible();
   });
 });
