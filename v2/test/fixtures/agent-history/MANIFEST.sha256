@@ -1,4 +1,4 @@
-22c8e2532bd2e9ad311423a8fbae386048853997896031374de183f9185081a9  claude/needs-input-spur-0190-tail.jsonl
+d486d39fef6bbf6c84739df9405bd327ac2567858e88adb3bf7b14772a122758  claude/needs-input-spur-0190-tail.jsonl
 4a50787c1c58b3e77d00035b4ebdd04ce56862bd9fb74400eb036a0817f34f86  claude/needs-input-tool-use-stale.jsonl
 966fa23eed93a89e13111dd52f49e05b41f981b660fbe1a7aadaf87835bf8c3e  claude/waiting-end-turn.jsonl
 aebef1e770fde6d2a33a66d28f1072e571c882d4416bf3bf9aaa4e316c267551  claude/waiting-file-history-snapshot.jsonl
