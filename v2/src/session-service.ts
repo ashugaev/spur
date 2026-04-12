@@ -181,7 +181,7 @@ function normalizeSpawnRequest(
   planMode: boolean;
 } {
   const prompt = typeof request.prompt === "string" ? request.prompt.trim() : "";
-  const steps = (prompt ? request.steps ?? defaults?.steps : undefined)?.map((step, index) => {
+  const steps = (prompt ? (request.steps ?? defaults?.steps) : undefined)?.map((step, index) => {
     if (typeof step !== "string" || !step.trim()) {
       throw new Error(`steps[${index}] must be a non-empty string`);
     }

@@ -1872,7 +1872,15 @@ projects:
 
     const spawned = JSON.parse(
       (
-        await context.execCli(["--config", configPath, "spawn", "api", "ship the task", "--todo", "--json"])
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--todo",
+          "--json",
+        ])
       ).stdout,
     ) as SessionView;
 

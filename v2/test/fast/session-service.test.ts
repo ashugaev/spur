@@ -840,11 +840,7 @@ describe("SessionService", () => {
     const sessions = createSessionStore();
     const worktreePath = "/tmp/spur-worktrees/api/api-todo-codex";
     mkdirSync(`${worktreePath}/.spur`, { recursive: true });
-    writeFileSync(
-      `${worktreePath}/.spur/todo.md`,
-      "- [x] #1 done\n- [ ] #2 next task\n",
-      "utf8",
-    );
+    writeFileSync(`${worktreePath}/.spur/todo.md`, "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
     sessions.set("api-1", {
       id: "api-1",
       project: "api",
@@ -873,10 +869,11 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     try {
-      await (service as { checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void> }).checkTodoProgress(
-        "api-1",
-        sessions.get("api-1") as SessionRecord,
-      );
+      await (
+        service as {
+          checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void>;
+        }
+      ).checkTodoProgress("api-1", sessions.get("api-1") as SessionRecord);
     } finally {
       service.dispose();
       rmSync(worktreePath, { recursive: true, force: true });
