@@ -120,7 +120,8 @@ function useResourceMetrics() {
               ? payload
               : {
                   available: false,
-                  daemonAlive: typeof payload.daemonAlive === "boolean" ? payload.daemonAlive : false,
+                  daemonAlive:
+                    typeof payload.daemonAlive === "boolean" ? payload.daemonAlive : false,
                 },
           );
         }
@@ -274,7 +275,9 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
                       ? resourceLevel("cpu", resourceMetrics.cpuPercent)
                       : "unknown"
                   }
-                  value={resourceMetrics.available ? `${resourceMetrics.cpuPercent}%` : "unavailable"}
+                  value={
+                    resourceMetrics.available ? `${resourceMetrics.cpuPercent}%` : "unavailable"
+                  }
                 />
                 <ResourceStatusRow
                   label="RAM"
@@ -294,7 +297,9 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
                       ? resourceLevel("disk", resourceMetrics.diskPercent)
                       : "unknown"
                   }
-                  value={resourceMetrics.available ? `${resourceMetrics.diskPercent}%` : "unavailable"}
+                  value={
+                    resourceMetrics.available ? `${resourceMetrics.diskPercent}%` : "unavailable"
+                  }
                 />
               </div>
             </div>
@@ -329,7 +334,6 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
             </div>
           </div>
         ) : null}
-
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">

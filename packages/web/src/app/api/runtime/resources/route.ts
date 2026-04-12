@@ -17,7 +17,10 @@ export async function GET() {
     }
   })();
 
-  return NextResponse.json({ ...resourceSnapshot, daemonAlive }, {
-    headers: { "Cache-Control": "no-store" },
-  });
+  return NextResponse.json(
+    { ...resourceSnapshot, daemonAlive },
+    {
+      headers: { "Cache-Control": "no-store" },
+    },
+  );
 }
