@@ -870,7 +870,7 @@ describe("SessionService", () => {
 
     try {
       await (
-        service as {
+        service as unknown as {
           checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void>;
         }
       ).checkTodoProgress("api-1", sessions.get("api-1") as SessionRecord);
