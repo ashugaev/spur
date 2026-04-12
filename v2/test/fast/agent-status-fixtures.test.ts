@@ -245,6 +245,7 @@ describe("Codex hook state fixture classification", () => {
         "waiting-stop.json",
         "working-pre-tool-use.json",
         "working-post-tool-use.json",
+        "working-spur-436f.json",
       ];
 
       for (const fixture of fixtures) {

@@ -93,8 +93,7 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     worktree: true
-    symlinks:
-      - node_modules
+    symlinks: []
 ```
 
 Notes:
@@ -102,7 +101,7 @@ Notes:
 - keep the daemon on loopback
 - keep the instance config global and the project config repo-local
 - point `projects.<id>.path` at the real checkout
-- keep `node_modules` as a symlink when using worktrees for this repo
+- sidecars install their own local `node_modules` inside the worktree on first start
 - add GitHub sources or triggers only after `gh auth login` is working on the VM
 
 ## Systemd Services

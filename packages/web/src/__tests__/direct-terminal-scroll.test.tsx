@@ -123,9 +123,16 @@ beforeEach(() => {
   mockTerminal.onBinary.mockClear();
   mockTerminal.onData.mockClear();
   mockTerminal.open.mockClear();
-  vi.spyOn(global, "fetch").mockResolvedValue(
-    new Response(JSON.stringify({ directTerminalPort: 14801 })),
-  );
+  vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url === "/api/runtime/terminal") {
+      return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+    }
+    if (url === "/api/runtime/voice") {
+      return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
   vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
@@ -158,6 +165,17 @@ async function mountTerminal(sessionId = "test-session", agent: "claude" | "code
 }
 
 describe("DirectTerminal scroll integration", () => {
+  it("uses the runtime terminal port when opening the websocket", async () => {
+    await mountTerminal("port-test");
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(MockWebSocket).toHaveBeenCalledWith("ws://localhost:14801/ws?session=port-test");
+    expect(fetch).toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+  });
+
   it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
     await mountTerminal();
 

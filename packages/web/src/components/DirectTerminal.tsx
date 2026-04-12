@@ -23,6 +23,10 @@ interface TerminalLocation {
   port: string;
 }
 
+interface DirectTerminalConfig {
+  directTerminalPort?: string | number;
+}
+
 const terminalTheme: ITheme = {
   background: "#0a0a0f",
   foreground: "#d4d4d8",
@@ -60,9 +64,24 @@ function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
 }
 
-export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: string): string {
+function normalizeTerminalPort(value: string | number | undefined, fallback: string): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 && value <= 65535 ? String(value) : fallback;
+  }
+  const trimmed = value?.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
+}
+
+export function buildDirectTerminalWsUrl(
+  location: TerminalLocation,
+  sessionId: string,
+  portOverride?: string | number,
+): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const portSuffix = location.port ? `:${location.port}` : "";
+  const port = normalizeTerminalPort(portOverride, location.port);
+  const portSuffix = port ? `:${port}` : "";
   return `${protocol}//${location.hostname}${portSuffix}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
@@ -332,7 +351,8 @@ export function DirectTerminal({
           touchTarget.removeEventListener("touchmove", onTouchMove);
         };
 
-        const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
+        let directTerminalPort: string | number | undefined;
+
         const sendResize = () => {
           if (!terminal || !fit || websocket?.readyState !== WebSocket.OPEN) return;
           fit.fit();
@@ -361,7 +381,7 @@ export function DirectTerminal({
           }, RECONNECT_DELAY_MS);
         };
 
-        const connect = (force = false) => {
+        const connect = async (force = false) => {
           if (!mounted || !terminal) return;
           const readyState = websocket?.readyState;
           if (!force && (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)) {
@@ -379,7 +399,22 @@ export function DirectTerminal({
           setStatus((current) =>
             current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
           );
-          const nextSocket = new WebSocket(wsUrl);
+
+          if (directTerminalPort === undefined) {
+            try {
+              const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
+              if (response.ok) {
+                const payload = (await response.json()) as DirectTerminalConfig;
+                directTerminalPort = payload.directTerminalPort;
+              }
+            } catch {
+              // Fall back to the current page port when the terminal config request fails.
+            }
+          }
+
+          const nextSocket = new WebSocket(
+            buildDirectTerminalWsUrl(window.location, sessionId, directTerminalPort),
+          );
           websocket = nextSocket;
           websocketRef.current = nextSocket;
           nextSocket.binaryType = "arraybuffer";

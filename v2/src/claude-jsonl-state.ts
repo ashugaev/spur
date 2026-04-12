@@ -108,6 +108,24 @@ function contentBlocks(message: Record<string, unknown>): unknown[] {
   return Array.isArray(message["content"]) ? (message["content"] as unknown[]) : [];
 }
 
+function extractTimestampMs(
+  parsed: Record<string, unknown>,
+  message: Record<string, unknown>,
+  fallbackTimestampMs: number,
+): number {
+  const rawTimestamp = parsed["timestamp"] ?? message["timestamp"];
+  if (typeof rawTimestamp === "number" && Number.isFinite(rawTimestamp)) {
+    return rawTimestamp;
+  }
+  if (typeof rawTimestamp === "string") {
+    const timestampMs = Date.parse(rawTimestamp);
+    if (Number.isFinite(timestampMs)) {
+      return timestampMs;
+    }
+  }
+  return fallbackTimestampMs;
+}
+
 function hasBlockType(blocks: unknown[], type: string): boolean {
   return blocks.some(
     (b) => typeof b === "object" && b !== null && (b as Record<string, unknown>)["type"] === type,
@@ -138,16 +156,17 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
   if (!parsed) return null;
 
   const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
+  const message = unwrapMessage(parsed);
+  const recordTimestampMs = extractTimestampMs(parsed, message, timestampMs);
 
   if (type === "progress") {
-    return { type: "progress", timestampMs };
+    return { type: "progress", timestampMs: recordTimestampMs };
   }
 
   if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
-    return { type, timestampMs };
+    return { type, timestampMs: recordTimestampMs };
   }
 
-  const message = unwrapMessage(parsed);
   const role = extractRole(parsed, message);
 
   if (role === "assistant") {
@@ -159,7 +178,7 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
       hasToolUse: hasBlockType(blocks, "tool_use"),
-      timestampMs,
+      timestampMs: recordTimestampMs,
     };
   }
 
@@ -167,12 +186,12 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     return {
       type: "user",
       role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
-      timestampMs,
+      timestampMs: recordTimestampMs,
     };
   }
 
   if (type) {
-    return { type, timestampMs };
+    return { type, timestampMs: recordTimestampMs };
   }
 
   return null;
@@ -283,7 +302,7 @@ export function parseConversationLines(
     const combinedText = extractTextContent(message);
     if (!combinedText) continue;
 
-    const ts = typeof parsed["timestamp"] === "number" ? parsed["timestamp"] : nowMs;
+    const ts = extractTimestampMs(parsed, message, nowMs);
     messages.push({ role, text: combinedText, timestampMs: ts });
   }
 
