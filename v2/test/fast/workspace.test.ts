@@ -17,7 +17,11 @@ vi.mock("node:fs", () => ({
 
 import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { createWorktree, resolveRepoPathFromWorktree } from "../../src/workspace.js";
+import {
+  createWorktree,
+  findWorktreePathForBranch,
+  resolveRepoPathFromWorktree,
+} from "../../src/workspace.js";
 
 const PROMISIFY_CUSTOM = Symbol.for("nodejs.util.promisify.custom");
 
@@ -185,5 +189,37 @@ describe("resolveRepoPathFromWorktree", () => {
     await expect(resolveRepoPathFromWorktree("/tmp/spur-worktrees/api/api-1")).resolves.toBe(
       undefined,
     );
+  });
+});
+
+describe("findWorktreePathForBranch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the checked-out worktree path for the branch", async () => {
+    mockGitSuccess();
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+
+worktree /tmp/spur-worktrees/api/api-1
+HEAD 2222222
+branch refs/heads/feature/runtime-preflight
+`);
+
+    await expect(findWorktreePathForBranch("/repo/api", "feature/runtime-preflight")).resolves.toBe(
+      "/tmp/spur-worktrees/api/api-1",
+    );
+  });
+
+  it("returns null when no worktree has the branch checked out", async () => {
+    mockGitSuccess();
+    mockGitSuccess(`worktree /repo/api
+HEAD 1111111
+branch refs/heads/main
+`);
+
+    await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
   });
 });
