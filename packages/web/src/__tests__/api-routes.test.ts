@@ -98,7 +98,10 @@ describe("Spur web API routes", () => {
         sessionFixture(),
         sessionFixture({ id: "b1", project: "web", tmuxSession: "b1", worktreePath: "/tmp/b1" }),
       ])
-      .mockResolvedValueOnce([{ id: "api", name: "API" }, { id: "web", name: "Web" }]);
+      .mockResolvedValueOnce([
+        { id: "api", name: "API" },
+        { id: "web", name: "Web" },
+      ]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
     const payload = (await response.json()) as { sessions: unknown[] };
@@ -111,11 +114,21 @@ describe("Spur web API routes", () => {
     mockedSpurRequestJson
       .mockResolvedValueOnce([
         sessionFixture(),
-        sessionFixture({ id: "web-b2", project: "web", tmuxSession: "web-b2", worktreePath: "/tmp/web-b2" }),
+        sessionFixture({
+          id: "web-b2",
+          project: "web",
+          tmuxSession: "web-b2",
+          worktreePath: "/tmp/web-b2",
+        }),
       ])
-      .mockResolvedValueOnce([{ id: "api", name: "API" }, { id: "web", name: "Web" }]);
+      .mockResolvedValueOnce([
+        { id: "api", name: "API" },
+        { id: "web", name: "Web" },
+      ]);
 
-    const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions?project=api"));
+    const response = await listSessions(
+      new NextRequest("http://localhost:3000/api/sessions?project=api"),
+    );
     const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
 
     expect(response.status).toBe(200);
@@ -127,7 +140,12 @@ describe("Spur web API routes", () => {
     mockedSpurRequestJson
       .mockResolvedValueOnce([
         sessionFixture(),
-        sessionFixture({ id: "ops-a1", project: "ops", tmuxSession: "ops-a1", worktreePath: "/tmp/ops-a1" }),
+        sessionFixture({
+          id: "ops-a1",
+          project: "ops",
+          tmuxSession: "ops-a1",
+          worktreePath: "/tmp/ops-a1",
+        }),
       ])
       .mockResolvedValueOnce([{ id: "sp", name: "Spur Core" }]);
 
@@ -154,10 +172,9 @@ describe("Spur web API routes", () => {
     const session = sessionFixture({ id: "sid-1" });
     mockedSpurRequestJson.mockResolvedValue(session);
 
-    const response = await getSession(
-      new Request("http://localhost:3000/api/sessions/sid-1"),
-      { params: Promise.resolve({ id: "sid-1" }) },
-    );
+    const response = await getSession(new Request("http://localhost:3000/api/sessions/sid-1"), {
+      params: Promise.resolve({ id: "sid-1" }),
+    });
     const payload = await response.json();
 
     expect(response.status).toBe(200);
@@ -168,10 +185,9 @@ describe("Spur web API routes", () => {
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "my/session 1" }));
 
-    await getSession(
-      new Request("http://localhost:3000/api/sessions/my%2Fsession%201"),
-      { params: Promise.resolve({ id: "my/session 1" }) },
-    );
+    await getSession(new Request("http://localhost:3000/api/sessions/my%2Fsession%201"), {
+      params: Promise.resolve({ id: "my/session 1" }),
+    });
 
     expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
   });
@@ -179,10 +195,9 @@ describe("Spur web API routes", () => {
   it("GET /api/sessions/:id returns 502 when daemon fails", async () => {
     mockedSpurRequestJson.mockRejectedValue(new Error("Session not found"));
 
-    const response = await getSession(
-      new Request("http://localhost:3000/api/sessions/bad-id"),
-      { params: Promise.resolve({ id: "bad-id" }) },
-    );
+    const response = await getSession(new Request("http://localhost:3000/api/sessions/bad-id"), {
+      params: Promise.resolve({ id: "bad-id" }),
+    });
     const payload = (await response.json()) as { error: string };
 
     expect(response.status).toBe(502);
@@ -847,7 +862,9 @@ describe("Spur web API routes", () => {
 
     it("returns 400 for a non-GitHub URL", async () => {
       const response = await getPrStatus(
-        new NextRequest("http://localhost:3000/api/pr-status?url=https://gitlab.com/foo/bar/issues/1"),
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/foo/bar/issues/1",
+        ),
       );
       expect(response.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
@@ -908,7 +925,11 @@ describe("Spur web API routes", () => {
 
     it("returns CI success status", async () => {
       fetchMock.mockResolvedValue(
-        ghOk(makePrGql({ commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] } })),
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+          }),
+        ),
       );
 
       const response = await getPrStatus(
@@ -921,7 +942,11 @@ describe("Spur web API routes", () => {
 
     it("returns CI failure for FAILURE rollup", async () => {
       fetchMock.mockResolvedValue(
-        ghOk(makePrGql({ commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] } })),
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "FAILURE" } } }] },
+          }),
+        ),
       );
 
       const response = await getPrStatus(
@@ -934,7 +959,11 @@ describe("Spur web API routes", () => {
 
     it("maps ERROR rollup state to CI failure", async () => {
       fetchMock.mockResolvedValue(
-        ghOk(makePrGql({ commits: { nodes: [{ commit: { statusCheckRollup: { state: "ERROR" } } }] } })),
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "ERROR" } } }] },
+          }),
+        ),
       );
 
       const response = await getPrStatus(
@@ -947,7 +976,11 @@ describe("Spur web API routes", () => {
 
     it("returns CI pending status", async () => {
       fetchMock.mockResolvedValue(
-        ghOk(makePrGql({ commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] } })),
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING" } } }] },
+          }),
+        ),
       );
 
       const response = await getPrStatus(
@@ -960,17 +993,22 @@ describe("Spur web API routes", () => {
 
     it("counts total and unresolved review threads", async () => {
       fetchMock.mockResolvedValue(
-        ghOk(makePrGql({
-          reviewThreads: {
-            nodes: [{ isResolved: true }, { isResolved: false }, { isResolved: false }],
-          },
-        })),
+        ghOk(
+          makePrGql({
+            reviewThreads: {
+              nodes: [{ isResolved: true }, { isResolved: false }, { isResolved: false }],
+            },
+          }),
+        ),
       );
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
-      const payload = (await response.json()) as { totalThreads: number; unresolvedThreads: number };
+      const payload = (await response.json()) as {
+        totalThreads: number;
+        unresolvedThreads: number;
+      };
 
       expect(payload.totalThreads).toBe(3);
       expect(payload.unresolvedThreads).toBe(2);
@@ -1011,7 +1049,9 @@ describe("Spur web API routes", () => {
 
       const url = nextPrUrl();
       await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`));
-      const response2 = await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`));
+      const response2 = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(response2.status).toBe(200);
@@ -1029,9 +1069,7 @@ describe("Spur web API routes", () => {
       });
 
       // First call: triggers the 403 → sets rateLimitResetAt
-      await getPrStatus(
-        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
-      );
+      await getPrStatus(new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`));
 
       // Second call (different URL): should be blocked by in-memory rate limit
       const response = await getPrStatus(
@@ -1041,6 +1079,7 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(429);
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
+  });
 
   it("GET /api/runtime/resources returns metrics on linux after the first CPU baseline request", async () => {
     Object.defineProperty(process, "platform", { value: "linux" });

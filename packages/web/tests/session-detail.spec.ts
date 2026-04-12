@@ -190,7 +190,11 @@ test.describe("S3: Message section", () => {
       if (!ta) return;
       const dt = new DataTransfer();
       dt.items.add(new File(["PNG"], "paste.png", { type: "image/png" }));
-      const ev = new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true });
+      const ev = new ClipboardEvent("paste", {
+        clipboardData: dt,
+        bubbles: true,
+        cancelable: true,
+      });
       ta.dispatchEvent(ev);
     });
 

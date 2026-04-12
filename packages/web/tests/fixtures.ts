@@ -236,8 +236,7 @@ export async function gotoMocked(
   await page.goto(path);
   // Wait for the loading state to clear — the dashboard replaces "Loading
   // sessions..." with actual content once the first mocked fetch resolves.
-  await page.waitForFunction(
-    () => !document.body.innerText.includes("Loading sessions"),
-    { timeout: 8000 },
-  );
+  await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+    timeout: 8000,
+  });
 }
