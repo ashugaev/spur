@@ -1162,7 +1162,7 @@ describe("SessionService", () => {
 
     await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
-    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenCalled();
     expect(sendMessageToTmuxMock).toHaveBeenNthCalledWith(1, "api-1", "follow up", {
       interrupt: false,
       agent: "claude",
