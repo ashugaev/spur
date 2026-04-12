@@ -97,8 +97,8 @@ describe("spur help", () => {
 
     expect(help).toContain("Run and inspect session-bound sidecar services.");
     expect(help).toContain("run");
+    expect(help).toContain("logs");
     expect(help).toContain("status");
-    expect(help).not.toContain("logs");
     expect(help).not.toContain("attach");
   });
 

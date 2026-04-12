@@ -4,6 +4,7 @@ import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
+import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
@@ -78,6 +79,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
@@ -102,6 +104,7 @@ export async function startServer(
       });
       triggers = nextTriggers;
       sources = nextSources;
+      runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
       throw error;
@@ -128,6 +131,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    runtimeLogs?.stop();
+    runtimeLogs = null;
     if (triggers) {
       await triggers.stop();
       triggers = null;
@@ -260,7 +265,23 @@ export async function startServer(
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
         const info = service.info();
-        const entries = readSessionEventLog(info.dataDir, logsSessionId, 200);
+        const scopeParam = url.searchParams.get("scope");
+        const scope =
+          scopeParam === "all" ||
+          scopeParam === "runtime" ||
+          scopeParam === "service" ||
+          scopeParam === "sidecar"
+            ? scopeParam
+            : undefined;
+        const name = url.searchParams.get("name")?.trim() || undefined;
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        const entries = readSessionEventLog(info.dataDir, logsSessionId, {
+          limit,
+          ...(scope ? { scope } : {}),
+          ...(name ? { name } : {}),
+        });
         sendJson(response, 200, entries);
         return;
       }
@@ -447,6 +468,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {
       await triggerController.stop();

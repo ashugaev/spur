@@ -78,11 +78,14 @@ Use it from inside the session workspace when the agent needs to start a session
 
 ```bash
 spur service run web --port 3000 -- pnpm dev
+spur service logs
+spur service logs "$SPUR_SESSION" web
 spur service status api-a1b2
 ```
 
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
 If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
+Spur also collects sidecar and service output into the session event log, so `spur service logs` and `/sessions/:id/logs` can inspect those runtime lines alongside the normal session log stream.
 
 For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
 
