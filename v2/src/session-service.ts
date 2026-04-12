@@ -90,6 +90,7 @@ import {
 } from "./types.js";
 import {
   createWorktree,
+  findWorktreePathForBranch,
   hasUncommittedChanges,
   hasUnpushedCommits,
   readCurrentBranch,
@@ -307,6 +308,7 @@ function buildSessionEnv(args: {
   projectId: string;
   sessionId: string;
   sessionToolDir: string;
+  dataDir: string;
   repoPath: string;
   symlinks: string[];
 }): Record<string, string> {
@@ -317,6 +319,7 @@ function buildSessionEnv(args: {
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
+    SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -427,6 +430,18 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
+  return {
+    project: session.project,
+    prompt: session.prompt,
+    agent: session.agent,
+    ...(session.planMode !== undefined && { planMode: session.planMode }),
+    ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
+    overrides: { worktree: session.worktree },
+    ...(session.worktree && session.branchSource === "explicit" ? { branch: session.branch } : {}),
+  };
 }
 
 async function resolveSpawnBranch(args: {
@@ -1136,6 +1151,32 @@ export class SessionService {
         worktree,
         fallbackBranch: sessionId,
       });
+      if (worktree && resolvedBranch.branch !== sessionId) {
+        const branchConflictPath = await findWorktreePathForBranch(
+          project.path,
+          resolvedBranch.branch,
+        );
+        if (branchConflictPath) {
+          if (resolvedBranch.branchSource === "explicit") {
+            throw new Error(
+              `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+            );
+          }
+          this.logEvent("session.spawn.branch_conflict", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+            details: {
+              occupiedBranch: resolvedBranch.branch,
+              conflictingWorktreePath: branchConflictPath,
+              fallbackBranch: sessionId,
+              branchSource: resolvedBranch.branchSource ?? null,
+            },
+          });
+          resolvedBranch = { branch: sessionId };
+        }
+      }
       const tmuxSession = sessionId;
       createdAt = nowIso();
 
@@ -1250,6 +1291,7 @@ export class SessionService {
         projectId: request.project,
         sessionId,
         sessionToolDir,
+        dataDir: this.config.dataDir,
         repoPath: project.path,
         symlinks: project.symlinks,
       });
@@ -1640,6 +1682,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: project.path,
       symlinks: project.symlinks,
     });
@@ -1947,6 +1990,7 @@ export class SessionService {
       projectId: session.project,
       sessionId: session.id,
       sessionToolDir,
+      dataDir: this.config.dataDir,
       repoPath: this.getProject(session.project).path,
       symlinks: this.getProject(session.project).symlinks,
     });
@@ -2108,6 +2152,7 @@ export class SessionService {
           projectId: current.project,
           sessionId: current.id,
           sessionToolDir,
+          dataDir: this.config.dataDir,
           repoPath: this.getProject(current.project).path,
           symlinks: this.getProject(current.project).symlinks,
         }),
@@ -2189,14 +2234,7 @@ export class SessionService {
       details: { agent: session.agent },
     });
 
-    const request: SpawnSessionRequest = {
-      project: session.project,
-      prompt: session.prompt,
-      agent: session.agent,
-      ...(session.planMode !== undefined && { planMode: session.planMode }),
-      ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
-    };
-    return this.spawn(request);
+    return this.spawn(resolveRespawnRequest(session));
   }
 
   private resumeSessionDelivery(): void {

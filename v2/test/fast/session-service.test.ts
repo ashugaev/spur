@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
+const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
@@ -43,6 +44,7 @@ const tmuxPaneDeadMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const waitForTmuxReadyMock = vi.fn();
 const createWorktreeMock = vi.fn();
+const findWorktreePathForBranchMock = vi.fn();
 const hasUncommittedChangesMock = vi.fn();
 const hasUnpushedCommitsMock = vi.fn();
 const readCurrentBranchMock = vi.fn();
@@ -57,6 +59,16 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+
+vi.mock("../../src/registry.js", async (importOriginal) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+    writeConfigRegistry: vi.fn(),
+  };
+});
 
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -142,6 +154,7 @@ vi.mock("../../src/session-slots.js", () => ({
 
 vi.mock("../../src/workspace.js", () => ({
   createWorktree: createWorktreeMock,
+  findWorktreePathForBranch: findWorktreePathForBranchMock,
   hasUncommittedChanges: hasUncommittedChangesMock,
   hasUnpushedCommits: hasUnpushedCommitsMock,
   readCurrentBranch: readCurrentBranchMock,
@@ -252,6 +265,8 @@ describe("SessionService", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
 
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
+
     buildAgentLaunchPlanMock
       .mockReset()
       .mockImplementation(
@@ -329,6 +344,7 @@ describe("SessionService", () => {
     tmuxSessionExistsMock.mockReset().mockResolvedValue(true);
     waitForTmuxReadyMock.mockReset().mockResolvedValue(undefined);
     createWorktreeMock.mockReset().mockResolvedValue("/tmp/spur-worktrees/api/api-1");
+    findWorktreePathForBranchMock.mockReset().mockResolvedValue(null);
     hasUncommittedChangesMock.mockReset().mockResolvedValue(false);
     hasUnpushedCommitsMock.mockReset().mockResolvedValue(false);
     readCurrentBranchMock.mockReset().mockResolvedValue("main");
@@ -404,6 +420,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -864,6 +881,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -1997,6 +2015,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -2128,6 +2147,24 @@ describe("SessionService", () => {
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
   });
 
+  it("rejects an explicit branch that is already checked out in another worktree", async () => {
+    findWorktreePathForBranchMock.mockResolvedValue("/tmp/spur-worktrees/api/api-existing");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.spawn({
+        project: "api",
+        prompt: "hello",
+        branch: "feature/api-1",
+      }),
+    ).rejects.toThrow(
+      'branch "feature/api-1" is already checked out in worktree /tmp/spur-worktrees/api/api-existing',
+    );
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+  });
+
   it("uses a configured spawn preflight branch before creating the worktree", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -2189,6 +2226,55 @@ describe("SessionService", () => {
         details: expect.objectContaining({
           outcome: "branch",
           branch: "feature/runtime-preflight",
+        }),
+      }),
+    );
+  });
+
+  it("falls back to the session branch when a preflight branch is already checked out elsewhere", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        },
+      },
+    });
+    runSpawnPreflightMock.mockResolvedValue({ branch: "feature/runtime-preflight" });
+    findWorktreePathForBranchMock.mockResolvedValue("/tmp/spur-worktrees/api/api-existing");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.spawn({
+      project: "api",
+      prompt: "Fix runtime regression from PR #42",
+    });
+
+    expect(createWorktreeMock).toHaveBeenCalledWith({
+      repoPath: "/repo/api",
+      worktreeBaseDir: "/tmp/spur-worktrees",
+      projectId: "api",
+      sessionId: "api-1",
+      defaultBranch: "main",
+      branch: "api-1",
+      symlinks: [".env"],
+    });
+    expect(result.branch).toBe("api-1");
+    expect(result.branchSource).toBeUndefined();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.spawn.branch_conflict",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          occupiedBranch: "feature/runtime-preflight",
+          conflictingWorktreePath: "/tmp/spur-worktrees/api/api-existing",
+          fallbackBranch: "api-1",
+          branchSource: "preflight",
         }),
       }),
     );
@@ -2726,6 +2812,7 @@ describe("SessionService", () => {
         SPUR_SESSION_TOOL_DIR: expect.any(String),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
+        SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -3437,6 +3524,77 @@ describe("SessionService", () => {
 
       expect(result.id).toBe("api-1");
       expect(result.status).toBe("running");
+    });
+
+    it("respawns a shared session back into the shared workspace", async () => {
+      mockClaudeJsonlState("waiting");
+      loadConfigMock.mockReturnValue({
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            worktree: true,
+          },
+        },
+      });
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "main",
+        branchSource: "shared_workspace",
+        worktree: false,
+        worktreePath: "/repo/api",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1");
+
+      expect(result.status).toBe("running");
+      expect(result.worktree).toBe(false);
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+    });
+
+    it("preserves an explicit branch on respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "feature/api-1",
+        branchSource: "explicit",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1");
+
+      expect(createWorktreeMock).toHaveBeenCalledWith({
+        repoPath: "/repo/api",
+        worktreeBaseDir: "/tmp/spur-worktrees",
+        projectId: "api",
+        sessionId: "api-1",
+        defaultBranch: "main",
+        branch: "feature/api-1",
+        symlinks: [".env"],
+      });
     });
 
     it("rejects respawn of a running session", async () => {
