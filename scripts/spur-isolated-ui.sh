@@ -44,6 +44,12 @@ const builtinErrorModule = path.join(
 if (!fs.existsSync(builtinErrorModule)) {
   process.exit(1);
 }
+
+try {
+  require("node-pty");
+} catch {
+  process.exit(1);
+}
 INNER
   )
 }
@@ -54,7 +60,7 @@ ensure_workspace_deps() {
   fi
 
   rm -rf "$ROOT_NODE_MODULES" "$WEB_NODE_MODULES" "$V2_NODE_MODULES"
-  env -u npm_config_virtual_store_dir pnpm install --frozen-lockfile --ignore-scripts
+  env -u npm_config_virtual_store_dir HUSKY=0 pnpm install --frozen-lockfile
 }
 
 for _ in $(seq 1 30); do
