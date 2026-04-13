@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { ActivityDot } from "@/components/ActivityDot";
+import { MarkdownMessage } from "@/components/MarkdownMessage";
 import { TerminalModal } from "@/components/TerminalModal";
 import {
   formatAbsoluteTime,
@@ -550,15 +551,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               : "mr-auto border border-[var(--color-border-default)] text-[var(--color-text-secondary)]"
                         }`}
                       >
-                        <div
-                          className={`whitespace-pre-wrap break-words ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
-                        >
-                          {msg.pending
-                            ? msg.text
-                            : msg.text.length > 500
-                              ? msg.text.slice(0, 500) + "..."
-                              : msg.text}
-                        </div>
+                        {msg.pending ? (
+                          <div className="animate-pulse tracking-[0.3em]">{msg.text}</div>
+                        ) : (
+                          <MarkdownMessage text={msg.text} />
+                        )}
                       </div>
                     ))}
                   </div>
