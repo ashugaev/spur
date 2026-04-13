@@ -210,6 +210,7 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;

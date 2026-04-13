@@ -451,6 +451,13 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function sessionSidecarNames(
+  session: Pick<SessionRecord, "sidecarNames">,
+  project?: Pick<ProjectConfig, "sidecars">,
+): string[] {
+  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
 async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
@@ -1263,6 +1270,9 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
         ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
@@ -1801,7 +1811,14 @@ export class SessionService {
       },
     });
 
-    const updated: SessionRecord = { ...session, updatedAt: nowIso() };
+    const sidecarNames = sessionSidecarNames(session, project);
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+      ...(sidecarNames.includes(sidecarName)
+        ? {}
+        : { sidecarNames: [...sidecarNames, sidecarName] }),
+    };
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.started", {
       level: "info",
@@ -1818,8 +1835,8 @@ export class SessionService {
   }
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
-    const project = this.config.projects[session.project];
-    for (const scName of Object.keys(project?.sidecars ?? {})) {
+    const project = this.resolveProjectForSession(session);
+    for (const scName of sessionSidecarNames(session, project)) {
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -2894,9 +2911,9 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
-    const projectSidecars = this.resolveProjectForSession(session)?.sidecars ?? {};
+    const project = this.resolveProjectForSession(session);
     const sidecars: { name: string; alive: boolean }[] = [];
-    for (const name of Object.keys(projectSidecars)) {
+    for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
 

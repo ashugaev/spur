@@ -85,6 +85,18 @@ printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
   return logPath;
 }
 
+async function processExists(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .includes(String(pid));
+  } catch {
+    return false;
+  }
+}
+
 async function runRestoreScenario(args: {
   agent?: "claude" | "codex";
   configName: string;
@@ -692,6 +704,118 @@ projects:
     expect(killed.status).toBe("killed");
     expect(killed.workspaceExists).toBe(false);
     expect(listed).toEqual([]);
+  });
+
+  it("complete after a project rename still tears down sidecar tmux and processes", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-sidecar-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const sidecarPath = join(context.repoDir, "record-dev-sidecar.sh");
+    await writeFile(
+      sidecarPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$$" > ".sidecar-pid-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+      "utf8",
+    );
+    await chmod(sidecarPath, 0o755);
+    const configPath = await context.writeConfig(
+      "rename-sidecar.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "${sidecarPath}"
+        autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "rename sidecar complete",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const devSessionName = `${spawned.id}--dev`;
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    const sidecarPid = Number.parseInt(
+      await pollUntil(
+        async () =>
+          readFile(join(spawned.worktreePath, `.sidecar-pid-${spawned.id}`), "utf8").catch(
+            () => "",
+          ),
+        { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+      ),
+      10,
+    );
+    expect(Number.isInteger(sidecarPid)).toBe(true);
+    expect(await processExists(sidecarPid)).toBe(true);
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(completed.status).toBe("completed");
+    expect(completed.workspaceExists).toBe(false);
+
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
+    expect(devSessionGone).toBe(true);
+    await pollUntil(() => processExists(sidecarPid), {
+      timeoutMs: 15_000,
+      accept: (value) => value === false,
+    });
   });
 
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
