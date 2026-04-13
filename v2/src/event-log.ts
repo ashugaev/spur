@@ -73,8 +73,7 @@ export function readSessionEventLog(
   sessionId: string,
   limitOrQuery?: number | SessionLogQuery,
 ): SpurLogEntry[] {
-  const query =
-    typeof limitOrQuery === "number" ? { limit: limitOrQuery } : (limitOrQuery ?? {});
+  const query = typeof limitOrQuery === "number" ? { limit: limitOrQuery } : (limitOrQuery ?? {});
   const entries = readEventLog(dataDir).filter(
     (entry) => entry.sessionId === sessionId && matchesSessionLogQuery(entry, query),
   );
