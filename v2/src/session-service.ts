@@ -187,9 +187,6 @@ function normalizeSpawnRequest(
     return step.trim();
   });
   const members = request.members?.map((member, index) => {
-    if (!member || typeof member !== "object") {
-      throw new Error(`members[${index}] must be an object`);
-    }
     const parsedAgent = parseAgentName(member.agent);
     if (
       member.branch !== undefined &&
@@ -1181,13 +1178,14 @@ export class SessionService {
         },
       ];
 
-      if (spawnMembers.length === 1) {
+      const [singleMember] = spawnMembers;
+      if (singleMember && spawnMembers.length === 1) {
         const session = await this.spawnSingleSession({
           project: request.project,
           prompt,
           ...(steps ? { steps } : {}),
-          agent: spawnMembers[0]!.agent,
-          ...(spawnMembers[0]!.branch ? { branch: spawnMembers[0]!.branch } : {}),
+          agent: singleMember.agent,
+          ...(singleMember.branch ? { branch: singleMember.branch } : {}),
           ...(planMode ? { planMode } : {}),
           ...(overrides ? { overrides } : {}),
         });
@@ -1222,39 +1220,51 @@ export class SessionService {
           );
         }
 
-        groupId = `${spawned[0]!.id}-group`;
+        const firstSpawned = spawned[0];
+        if (!firstSpawned) {
+          throw new Error("Grouped spawn produced no sessions");
+        }
+        groupId = `${firstSpawned.id}-group`;
         const updatedSessions: SessionView[] = [];
         for (const [index, spawnedSession] of spawned.entries()) {
           const current = readSession(this.config.dataDir, spawnedSession.id);
           if (!current) {
             throw new Error(`Session not found after grouped spawn: ${spawnedSession.id}`);
           }
+          const memberName = spawnMembers[index]?.name;
           writeSession(this.config.dataDir, {
             ...current,
             group: {
               id: groupId,
               index,
               total: spawned.length,
-              ...(spawnMembers[index]?.name ? { name: spawnMembers[index]!.name } : {}),
+              ...(memberName ? { name: memberName } : {}),
             },
             updatedAt: nowIso(),
           });
           updatedSessions.push(await this.get(spawnedSession.id));
         }
 
+        const firstUpdatedSession = updatedSessions[0];
+        if (!firstUpdatedSession) {
+          throw new Error("Grouped spawn produced no persisted sessions");
+        }
         const groupRecord: SessionGroupRecord = {
           id: groupId,
           project: request.project,
           prompt,
           ...(steps ? { steps } : {}),
           planMode,
-          members: updatedSessions.map((session, index) => ({
-            sessionId: session.id,
-            agent: session.agent,
-            branch: session.branch,
-            ...(spawnMembers[index]?.name ? { name: spawnMembers[index]!.name } : {}),
-          })),
-          createdAt: updatedSessions[0]!.createdAt,
+          members: updatedSessions.map((session, index) => {
+            const memberName = spawnMembers[index]?.name;
+            return {
+              sessionId: session.id,
+              agent: session.agent,
+              branch: session.branch,
+              ...(memberName ? { name: memberName } : {}),
+            };
+          }),
+          createdAt: firstUpdatedSession.createdAt,
           updatedAt: nowIso(),
         };
         writeSessionGroup(this.config.dataDir, groupRecord);
@@ -1268,7 +1278,7 @@ export class SessionService {
           },
         });
         return {
-          ...updatedSessions[0]!,
+          ...firstUpdatedSession,
           sessions: updatedSessions,
           groupId,
         };
