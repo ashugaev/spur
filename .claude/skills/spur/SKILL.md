@@ -150,7 +150,7 @@ Port map:
 - Systemd units: `spur-daemon.service`, `spur-web.service`
 - Nginx config: `/etc/nginx/sites-enabled/spur-ao`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
-- `DIRECT_TERMINAL_PUBLIC_PORT=5555` tells the browser to connect WebSocket through the nginx proxy port.
+- `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
 - Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation
