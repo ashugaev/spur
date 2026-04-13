@@ -137,8 +137,8 @@ describe("readSessionEventLog", () => {
     expect(readSessionEventLog(dataDir, "api-1", { scope: "service" })).toEqual([
       expect.objectContaining({ event: "service.output", message: "SERVICE_BOOT" }),
     ]);
-    expect(readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" })).toEqual([
-      expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" }),
-    ]);
+    expect(
+      readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" }),
+    ).toEqual([expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" })]);
   });
 });
