@@ -155,7 +155,6 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - State history records transitions during a Claude session lifecycle.
 - Sidecar auto-starts on spawn when `autoStart: true`.
 - Multiple sidecars per session get separate tmux panes.
-- Sidecar cleanup on kill/complete.
 - Manual sidecar start via `spur sidecar start --session <id> --name <name>`.
 - Sidecar status reported in session view.
 
@@ -207,10 +206,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - Sidecar auto-starts on spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
-- Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
+- Reserved sidecar ports are assigned when a sidecar starts, injected into sidecar env, and released after cleanup
+- Spawn continues when sidecar autostart cannot reserve a port; manual `sidecar start` fails fast until a port is released, then succeeds
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
-- Sidecar cleanup on kill/complete
+- Sidecar cleanup on kill/complete/pause and failed spawn rollback
 - Manual sidecar start via `spur sidecar start --session <id> --name <name>`
 - Sidecar status reported in session view
 

@@ -400,49 +400,6 @@ function collectReservedSidecarPorts(
   );
 }
 
-function reserveSidecarPorts(
-  dataDir: string,
-  sidecars: ProjectConfig["sidecars"],
-): SessionRecord["sidecarPorts"] | undefined {
-  const unavailable = new Set<number>();
-  for (const service of listServiceInstances(dataDir)) {
-    if (service.port !== undefined) {
-      unavailable.add(service.port);
-    }
-  }
-  for (const session of listSessions(dataDir)) {
-    for (const port of collectReservedSidecarPorts(session)) {
-      unavailable.add(port);
-    }
-  }
-
-  const reserved: NonNullable<SessionRecord["sidecarPorts"]> = {};
-  for (const [sidecarName, sidecar] of Object.entries(sidecars)) {
-    if (!sidecar.ports) continue;
-    const reservedEnvPorts: Record<string, number> = {};
-    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
-      let selectedPort: number | undefined;
-      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (unavailable.has(candidate)) continue;
-        selectedPort = candidate;
-        unavailable.add(candidate);
-        break;
-      }
-      if (selectedPort === undefined) {
-        throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
-        );
-      }
-      reservedEnvPorts[portConfig.env] = selectedPort;
-    }
-    if (Object.keys(reservedEnvPorts).length > 0) {
-      reserved[sidecarName] = reservedEnvPorts;
-    }
-  }
-
-  return Object.keys(reserved).length > 0 ? reserved : undefined;
-}
-
 function sidecarPortEnv(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
@@ -893,6 +850,164 @@ export class SessionService {
     );
   }
 
+  private ensureSidecarReservation(
+    session: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): SessionRecord {
+    if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
+      return session;
+    }
+
+    const currentSidecarPorts = session.sidecarPorts?.[sidecarName] ?? {};
+    const keepReserved = new Set(Object.values(currentSidecarPorts));
+    const unavailable = new Set<number>();
+
+    for (const service of listServiceInstances(this.config.dataDir)) {
+      if (service.port !== undefined) {
+        unavailable.add(service.port);
+      }
+    }
+    for (const liveSession of listSessions(this.config.dataDir)) {
+      for (const port of collectReservedSidecarPorts(liveSession)) {
+        if (liveSession.id === session.id && keepReserved.has(port)) {
+          continue;
+        }
+        unavailable.add(port);
+      }
+    }
+
+    const reservedForSidecar: Record<string, number> = {};
+    let changed = false;
+    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
+      const existingPort = currentSidecarPorts[portConfig.env];
+      if (existingPort !== undefined) {
+        reservedForSidecar[portConfig.env] = existingPort;
+        unavailable.add(existingPort);
+        continue;
+      }
+
+      let selectedPort: number | undefined;
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        if (unavailable.has(candidate)) continue;
+        selectedPort = candidate;
+        unavailable.add(candidate);
+        break;
+      }
+      if (selectedPort === undefined) {
+        throw new Error(
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+        );
+      }
+      reservedForSidecar[portConfig.env] = selectedPort;
+      changed = true;
+    }
+
+    if (!changed) {
+      return session;
+    }
+
+    const updated: SessionRecord = {
+      ...session,
+      sidecarPorts: {
+        ...(session.sidecarPorts ?? {}),
+        [sidecarName]: {
+          ...currentSidecarPorts,
+          ...reservedForSidecar,
+        },
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  private releaseSidecarReservation(session: SessionRecord, sidecarName: string): SessionRecord {
+    const sidecarPorts = session.sidecarPorts?.[sidecarName];
+    if (!sidecarPorts) {
+      return session;
+    }
+
+    const remainingSidecarPorts = { ...(session.sidecarPorts ?? {}) };
+    delete remainingSidecarPorts[sidecarName];
+
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+    };
+    if (Object.keys(remainingSidecarPorts).length > 0) {
+      updated.sidecarPorts = remainingSidecarPorts;
+    } else {
+      delete updated.sidecarPorts;
+    }
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  private clearSidecarReservations(session: SessionRecord): SessionRecord {
+    if (!session.sidecarPorts) {
+      return session;
+    }
+    const updated = { ...session };
+    delete updated.sidecarPorts;
+    return updated;
+  }
+
+  private async startSidecarInternal(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+  }): Promise<SessionRecord> {
+    if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+      return args.session;
+    }
+
+    const reservedSession = this.ensureSidecarReservation(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+    );
+
+    const sessionToolDir = this.prepareSessionTools(args.session.id, args.session.agent);
+    const sessionEnv = buildSessionEnv({
+      agent: args.session.agent,
+      projectId: args.session.project,
+      sessionId: args.session.id,
+      sessionToolDir,
+      dataDir: this.config.dataDir,
+      repoPath: args.project.path,
+      symlinks: args.project.symlinks,
+    });
+
+    try {
+      await createTmuxSidecarSession({
+        sessionId: args.session.id,
+        sidecarName: args.sidecarName,
+        cwd: args.session.worktreePath,
+        command: args.sidecar.command,
+        env: {
+          ...sessionEnv,
+          SPUR_SIDECAR_NAME: args.sidecarName,
+          ...(args.sidecar.env ?? {}),
+          ...sidecarPortEnv(reservedSession, args.sidecarName),
+        },
+      });
+    } catch (error) {
+      if (reservedSession !== args.session) {
+        this.releaseSidecarReservation(reservedSession, args.sidecarName);
+      }
+      throw error;
+    }
+
+    const updated: SessionRecord = {
+      ...reservedSession,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
     const currentProject = this.config.projects[session.project];
     if (currentProject) {
@@ -1181,7 +1296,6 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
-      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
       if (preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -1263,7 +1377,6 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
-        ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -1394,7 +1507,7 @@ export class SessionService {
       }
 
       stage = "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let persistedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
@@ -1403,17 +1516,11 @@ export class SessionService {
       for (const [name, sidecar] of Object.entries(projectSidecars)) {
         if (!sidecar.autoStart) continue;
         try {
-          await createTmuxSidecarSession({
-            sessionId,
+          persistedRecord = await this.startSidecarInternal({
+            session: persistedRecord,
+            project,
             sidecarName: name,
-            cwd: workspacePath,
-            command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
+            sidecar,
           });
           this.logEvent("session.sidecar.started", {
             level: "info",
@@ -1797,36 +1904,12 @@ export class SessionService {
       throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
     }
 
-    if (await sidecarTmuxAlive(sessionId, sidecarName)) {
-      return this.enrich(session);
-    }
-
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
-    const sessionEnv = buildSessionEnv({
-      agent: session.agent,
-      projectId: session.project,
-      sessionId: session.id,
-      sessionToolDir,
-      dataDir: this.config.dataDir,
-      repoPath: project.path,
-      symlinks: project.symlinks,
-    });
-
-    await createTmuxSidecarSession({
-      sessionId,
+    const updated = await this.startSidecarInternal({
+      session,
+      project,
       sidecarName,
-      cwd: session.worktreePath,
-      command: sidecar.command,
-      env: {
-        ...sessionEnv,
-        SPUR_SIDECAR_NAME: sidecarName,
-        ...(sidecar.env ?? {}),
-        ...sidecarPortEnv(session, sidecarName),
-      },
+      sidecar,
     });
-
-    const updated: SessionRecord = { ...session, updatedAt: nowIso() };
-    writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.started", {
       level: "info",
       sessionId,
@@ -1908,7 +1991,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
     const record: SessionRecord = {
-      ...session,
+      ...this.clearSidecarReservations(session),
       status: targetStatus,
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
@@ -1984,7 +2067,7 @@ export class SessionService {
     }
 
     const record: SessionRecord = {
-      ...session,
+      ...this.clearSidecarReservations(session),
       status: "killed",
       updatedAt: nowIso(),
     };

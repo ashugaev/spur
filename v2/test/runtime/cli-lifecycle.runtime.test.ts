@@ -2874,7 +2874,7 @@ projects:
     expect(thirdPort.trim()).toBe("4600");
   });
 
-  it("fails spawn when no reserved sidecar ports remain", async () => {
+  it("keeps spawn running when no reserved sidecar ports remain and allows manual retry later", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-ports-full-${port}`;
@@ -2926,11 +2926,38 @@ projects:
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
-    await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"]);
+    const first = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
+    ) as SessionView;
+    const second = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"])).stdout,
+    ) as SessionView;
+
+    await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim() === "4700" },
+    );
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
+      "session.sidecar.autostart.failed",
+    );
 
     await expect(
-      context.execCli(["--config", configPath, "spawn", "api", "second", "--json"]),
+      context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+        method: "POST",
+      }),
     ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
+
+    await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
+    await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+      method: "POST",
+    });
+    const secondPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    expect(secondPort.trim()).toBe("4700");
   });
 
   it("kill cleans up the --dev tmux session", async () => {
@@ -2995,5 +3022,119 @@ projects:
 
     const devSessionGone = !(await tmuxSessionExists(devSessionName));
     expect(devSessionGone).toBe(true);
+  });
+
+  it("pause cleans up the sidecar tmux session and keeps the workspace", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-pause-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = join(context.repoDir, "record-sidecar-port.sh");
+    await writeFile(
+      recorderPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
+tail -f /dev/null
+`,
+      "utf8",
+    );
+    await chmod(recorderPath, 0o755);
+    const configPath = await context.writeConfig(
+      "sidecar-pause.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "./record-sidecar-port.sh"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 4700
+            end: 4700
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const first = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar pause owner",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const second = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar pause waiter",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${first.id}--dev`;
+
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (v) => v === true,
+    });
+    await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim() === "4700" },
+    );
+    await expect(
+      context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+        method: "POST",
+      }),
+    ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
+
+    const paused = JSON.parse(
+      (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(paused.status).toBe("paused");
+    expect(paused.workspaceExists).toBe(true);
+
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
+    expect(devSessionGone).toBe(true);
+
+    await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+      method: "POST",
+    });
+    const secondPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    expect(secondPort.trim()).toBe("4700");
   });
 });
