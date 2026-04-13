@@ -4,7 +4,7 @@ import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
-import { listSessions, writeSession } from "./metadata.js";
+import { listSessions } from "./metadata.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { tmuxSessionExists } from "./runtime-tmux.js";
 import { SessionService } from "./session-service.js";
@@ -462,19 +462,13 @@ export async function startServer(
         continue;
       }
       drifted += 1;
-      const reconciled = {
-        ...session,
-        status: "errored" as const,
-        updatedAt: new Date().toISOString(),
-      };
-      writeSession(service.config.dataDir, reconciled);
       logEvent("session.reconcile.drift", {
         level: "warn",
         sessionId: session.id,
         projectId: session.project,
-        message: `Marked ${session.id} errored: tmux session ${session.tmuxSession} missing at boot`,
+        message: `Drift: ${session.id} status=${session.status} but tmux ${session.tmuxSession} missing at boot`,
         details: {
-          previousStatus: session.status,
+          status: session.status,
           tmuxSession: session.tmuxSession,
           agent: session.agent,
         },
