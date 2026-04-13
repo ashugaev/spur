@@ -72,10 +72,7 @@ function logRuntimeLine(config: AppConfig, target: RuntimeLogTarget, line: strin
     sessionId: target.sessionId,
     projectId: target.projectId,
     message: line,
-    details:
-      target.kind === "service"
-        ? { serviceId: target.name }
-        : { sidecarName: target.name },
+    details: target.kind === "service" ? { serviceId: target.name } : { sidecarName: target.name },
   });
 }
 
@@ -98,7 +95,9 @@ export function startRuntimeLogCollector(config: AppConfig): RuntimeLogCollector
           continue;
         }
 
-        const lines = normalizeLines(await captureTmuxPane(target.tmuxSession, RUNTIME_LOG_TAIL_LINES));
+        const lines = normalizeLines(
+          await captureTmuxPane(target.tmuxSession, RUNTIME_LOG_TAIL_LINES),
+        );
         const prior = readRuntimeLogCursor(config.dataDir, target.sessionId, target.key);
         const nextLines = prior ? appendedLines(prior.lastTailLines, lines) : lines;
         for (const line of nextLines) {

@@ -894,13 +894,23 @@ describe("SessionService", () => {
         done: 0,
       },
     });
-    readAgentHookStateMock.mockReturnValue({
-      state: "waiting",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+        hookEvent: "Stop",
+        fileMtimeMs: 1_000,
+      })
+      .mockReturnValue({
+        state: "waiting",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+        hookEvent: "UserPromptSubmit",
+        fileMtimeMs: 1_001,
+      });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexSubmitAck").mockResolvedValue(true);
 
     try {
       await (

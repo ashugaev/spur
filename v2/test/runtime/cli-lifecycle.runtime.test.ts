@@ -1539,7 +1539,9 @@ projects:
       {
         timeoutMs: 15_000,
         accept: (value) =>
-          value.some((entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT"),
+          value.some(
+            (entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT",
+          ),
       },
     );
     expect(helperLogs.some((entry) => entry.event === "service.output")).toBe(true);
@@ -1657,7 +1659,9 @@ projects:
       {
         timeoutMs: 15_000,
         accept: (value) =>
-          value.some((entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY"),
+          value.some(
+            (entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY",
+          ),
       },
     );
     expect(sidecarLogs).toEqual(
@@ -1772,7 +1776,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("service-logs-errors.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "service-logs-errors.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
