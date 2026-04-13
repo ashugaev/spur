@@ -19,7 +19,11 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+const ACTIVITY_STALE_MS = 3_000;
+
+function isFresh(timestampMs: number, nowMs: number): boolean {
+  return nowMs - timestampMs <= ACTIVITY_STALE_MS;
+}
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
@@ -47,9 +51,9 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
         const hasRecentProgress = records
           .slice(i + 1)
           .some(
-            (r) => r.type === "progress" && r.timestampMs - record.timestampMs <= TOOL_USE_STALE_MS,
+            (r) => r.type === "progress" && r.timestampMs - record.timestampMs <= ACTIVITY_STALE_MS,
           );
-        if (hasRecentProgress || nowMs - record.timestampMs <= TOOL_USE_STALE_MS) {
+        if (hasRecentProgress || isFresh(record.timestampMs, nowMs)) {
           return "working";
         }
         return "needs_input";
@@ -66,12 +70,9 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
     }
 
     if (record.type === "user") {
-      // user + tool_result means the agent is processing tool output → working
-      if (record.role === "tool_result") {
-        return "working";
-      }
-      // user with permissionMode means a prompt was just sent → working
-      return "working";
+      // A fresh user/tool_result means Claude just received input.
+      // If it stays stale with no follow-up activity, treat the session as idle.
+      return isFresh(record.timestampMs, nowMs) ? "working" : "waiting";
     }
   }
 

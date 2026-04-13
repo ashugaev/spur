@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  classifyClaudeJsonlState,
+  readClaudeJsonlState,
+  type ParsedRecord,
+} from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -167,6 +172,29 @@ describe("Claude JSONL fixture classification", () => {
     const records = parseFixtureJsonl(content, STALE);
     expect(records.length).toBeGreaterThan(0);
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
+  });
+
+  it("classifies the raw spur-0190 tail fixture as waiting once stale", async () => {
+    const fixture = await readFile(join(CLAUDE_DIR, "waiting-spur-0190-tail.jsonl"), "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
+    const tempFile = join(tempDir, "spur-0190-tail.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-11T16:45:55.500Z"));
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      expect(result!.state).toBe("waiting");
+    } finally {
+      vi.useRealTimers();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

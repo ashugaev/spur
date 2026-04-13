@@ -14,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const NOW = 1_700_000_000_000;
 
 function rec(overrides: Partial<ParsedRecord> & { type: string }): ParsedRecord {
-  return { timestampMs: NOW - 10_000, ...overrides };
+  return { timestampMs: NOW - 1_000, ...overrides };
 }
 
 afterEach(() => {
@@ -103,6 +103,16 @@ describe("classifyClaudeJsonlState", () => {
   it("returns working for user tool_result", () => {
     const records = [rec({ type: "user", role: "tool_result" })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  it("returns waiting for stale user message", () => {
+    const records = [rec({ type: "user", role: "user", timestampMs: NOW - 5_000 })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
+  });
+
+  it("returns waiting for stale user tool_result", () => {
+    const records = [rec({ type: "user", role: "tool_result", timestampMs: NOW - 5_000 })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
   });
 
   // ── progress → working ─────────────────────────────────────────────
@@ -237,16 +247,16 @@ describe("parseConversationLines", () => {
     expect(state).toBe("waiting");
   });
 
-  it("classifies unchanged spur-0190 tail fixture as needs_input", async () => {
+  it("classifies raw spur-0190 tail fixture as waiting once stale", async () => {
     const fixturePath = join(
       __dirname,
-      "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
+      "../fixtures/agent-history/claude/waiting-spur-0190-tail.jsonl",
     );
     const fixture = await readFile(fixturePath, "utf8");
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:44:46.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:45:55.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
@@ -257,22 +267,22 @@ describe("parseConversationLines", () => {
         tailRecords: [],
       });
       expect(result).not.toBeNull();
-      expect(result!.state).toBe("needs_input");
+      expect(result!.state).toBe("waiting");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
 
-  it("keeps the same spur-0190 tail fixture working inside the stale window", async () => {
+  it("keeps the raw spur-0190 tail fixture working inside the stale window", async () => {
     const fixturePath = join(
       __dirname,
-      "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
+      "../fixtures/agent-history/claude/waiting-spur-0190-tail.jsonl",
     );
     const fixture = await readFile(fixturePath, "utf8");
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:44:38.000Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:45:51.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
