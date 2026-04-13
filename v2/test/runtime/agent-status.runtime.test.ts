@@ -116,7 +116,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     await waitForState(port, session.id, "waiting");
 
     // show-waiting-menu makes fake agent write tool_use JSONL without later ack.
-    // After the 3s stale window + debounce, daemon classifies as needs_input.
+    // After the 15s stale window + debounce, daemon classifies as needs_input.
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
     const view = await waitForState(port, session.id, "needs_input");

@@ -125,7 +125,7 @@ describe("Fixture integrity", () => {
 
 describe("Claude JSONL fixture classification", () => {
   const NOW = 1_700_000_000_000;
-  const STALE = NOW - 10_000; // 10s ago — past the 3s tool_use stale window
+  const STALE = NOW - 20_000; // 20s ago — past the 15s tool_use stale window
 
   // ── waiting states ──────────────────────────────────────────────────
 
@@ -162,13 +162,13 @@ describe("Claude JSONL fixture classification", () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Records timestamped at NOW, checked at NOW → within 3s window → working
+    // Records timestamped at NOW, checked at NOW → within 15s window → working
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
   it("classifies tool_use past stale window as needs_input", async () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
-    // Records timestamped 10s ago, checked at NOW → past 3s window → needs_input
+    // Records timestamped 20s ago, checked at NOW → past 15s window → needs_input
     const records = parseFixtureJsonl(content, STALE);
     expect(records.length).toBeGreaterThan(0);
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
@@ -179,7 +179,7 @@ describe("Claude JSONL fixture classification", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:45:55.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:46:10.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");

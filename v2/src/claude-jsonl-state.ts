@@ -19,7 +19,7 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const ACTIVITY_STALE_MS = 3_000;
+const ACTIVITY_STALE_MS = 15_000;
 
 function isFresh(timestampMs: number, nowMs: number): boolean {
   return nowMs - timestampMs <= ACTIVITY_STALE_MS;

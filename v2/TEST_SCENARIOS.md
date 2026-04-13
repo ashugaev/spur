@@ -61,7 +61,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook-based classification for Codex.
-- Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within 3s→working, assistant+tool_use stale→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, fresh user/tool_result→working, stale user/tool_result→waiting, progress→working, empty→working.
+- Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within 15s→working, assistant+tool_use stale→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, fresh user/tool_result→working, stale user/tool_result→waiting, progress→working, empty→working.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
 - Codex hook-based state: hook state is returned directly; defaults to `working` when no hook state exists.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
@@ -149,7 +149,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
 
-- Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` after 3s stale window, and normal message exchange cycles waiting→working→waiting.
+- Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` after 15s stale window, and normal message exchange cycles waiting→working→waiting.
 - Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), and normal message exchange cycles waiting→working→waiting.
 - Session-level states for both Claude and Codex: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
 - State history records transitions during a Claude session lifecycle.

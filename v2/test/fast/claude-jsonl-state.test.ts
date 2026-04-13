@@ -65,7 +65,7 @@ describe("classifyClaudeJsonlState", () => {
   });
 
   it("returns needs_input for tool_use past stale window with no progress", () => {
-    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 20_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
@@ -106,12 +106,12 @@ describe("classifyClaudeJsonlState", () => {
   });
 
   it("returns waiting for stale user message", () => {
-    const records = [rec({ type: "user", role: "user", timestampMs: NOW - 5_000 })];
+    const records = [rec({ type: "user", role: "user", timestampMs: NOW - 20_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
   });
 
   it("returns waiting for stale user tool_result", () => {
-    const records = [rec({ type: "user", role: "tool_result", timestampMs: NOW - 5_000 })];
+    const records = [rec({ type: "user", role: "tool_result", timestampMs: NOW - 20_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
   });
 
@@ -256,7 +256,7 @@ describe("parseConversationLines", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:45:55.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:46:10.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
@@ -282,7 +282,7 @@ describe("parseConversationLines", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:45:51.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:45:58.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
