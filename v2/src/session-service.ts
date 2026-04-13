@@ -1867,6 +1867,30 @@ export class SessionService {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
+    const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
+    const currentHook = readAgentHookState(this.config.dataDir, session.id);
+    this.logEvent("session.codex.submit.timeout", {
+      level: "warn",
+      sessionId: session.id,
+      message: `Codex submit ack timed out for ${session.id}`,
+      details: {
+        baseline: codexBaseline
+          ? {
+              turnId: codexBaseline.turnId ?? null,
+              updatedAt: codexBaseline.updatedAt,
+              hookEvent: codexBaseline.hookEvent ?? null,
+            }
+          : null,
+        current: currentHook
+          ? {
+              turnId: currentHook.turnId ?? null,
+              updatedAt: currentHook.updatedAt,
+              hookEvent: currentHook.hookEvent ?? null,
+            }
+          : null,
+        processAlive,
+      },
+    });
     throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
   }
 
@@ -2360,6 +2384,17 @@ export class SessionService {
 
     const current = await this.enrich(session);
     if (!isRestorableSession(current)) {
+      this.logEvent("session.restore.unrestorable", {
+        level: "warn",
+        sessionId,
+        projectId: current.project,
+        message: `Session ${sessionId} is not restorable`,
+        details: {
+          status: current.status,
+          state: current.state,
+          workspaceExists: current.workspaceExists,
+        },
+      });
       throw new Error(`Session is not restorable: ${sessionId}`);
     }
 
