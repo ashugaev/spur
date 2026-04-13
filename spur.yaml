@@ -3,7 +3,7 @@ projects:
     path: /home/alek/projects/ao
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: [node_modules, .env]
+    symlinks: [.env]
     preflight: {}
     sidecars:
       isolated-daemon:
