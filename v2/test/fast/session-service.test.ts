@@ -1,6 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
 const upsertConfigRegistryPathMock = vi.fn();
@@ -838,7 +839,7 @@ describe("SessionService", () => {
 
   it("sends todo nudges through the agent-aware tmux path", async () => {
     const sessions = createSessionStore();
-    const worktreePath = "/tmp/spur-worktrees/api/api-todo-codex";
+    const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-codex-"));
     mkdirSync(`${worktreePath}/.spur`, { recursive: true });
     writeFileSync(`${worktreePath}/.spur/todo.md`, "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
     sessions.set("api-1", {
