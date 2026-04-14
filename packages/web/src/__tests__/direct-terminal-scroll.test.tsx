@@ -134,8 +134,9 @@ function sentInputPayloads(): string[] {
     .map(([payload]) => payload)
     .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
     .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
-    .filter((payload): payload is { type: "input"; data: string } =>
-      payload.type === "input" && typeof payload.data === "string",
+    .filter(
+      (payload): payload is { type: "input"; data: string } =>
+        payload.type === "input" && typeof payload.data === "string",
     )
     .map((payload) => payload.data);
 }

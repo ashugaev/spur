@@ -650,7 +650,7 @@ export function DirectTerminal({
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
-      {voice.voiceError ?? submitError ? (
+      {(voice.voiceError ?? submitError) ? (
         <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
           {voice.voiceError ?? submitError}
         </div>
