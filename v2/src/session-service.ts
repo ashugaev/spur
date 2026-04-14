@@ -829,12 +829,11 @@ export class SessionService {
       return;
     }
 
-    let updated = current;
     if (!current.slots?.links.some((link) => link.label === "pr")) {
       const slots = applySlotsUpdate(current.slots, {
         links: [{ label: "pr", url: pr.url }],
       });
-      updated = { ...current, ...(slots ? { slots } : {}) };
+      const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
       writeSession(this.config.dataDir, updated);
       await syncTmuxStatus(updated.tmuxSession, updated.slots);
       this.logEvent("session.pr_auto_detect.found", {

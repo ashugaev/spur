@@ -305,7 +305,9 @@ describe("PR auto-detect", () => {
     });
     setupEnrich();
     ghMock.mockResolvedValue(
-      JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" }]),
+      JSON.stringify([
+        { url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" },
+      ]),
     );
     applySlotsUpdateMock.mockReturnValue({
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
@@ -317,7 +319,9 @@ describe("PR auto-detect", () => {
       session,
     );
 
-    expect(writeSessionMock.mock.calls.some(([, record]) => record.status === "completed")).toBe(true);
+    expect(writeSessionMock.mock.calls.some(([, record]) => record.status === "completed")).toBe(
+      true,
+    );
     expect(logSpurEventMock).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({ event: "session.pr_auto_complete.completed" }),
@@ -334,7 +338,9 @@ describe("PR auto-detect", () => {
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
     ghMock.mockResolvedValue(
-      JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" }]),
+      JSON.stringify([
+        { url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" },
+      ]),
     );
     applySlotsUpdateMock.mockReturnValue({
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
@@ -363,7 +369,9 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: null }]));
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: null }]),
+    );
     applySlotsUpdateMock.mockReturnValue({
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
     } satisfies SessionSlots);
