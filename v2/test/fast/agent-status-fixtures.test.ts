@@ -186,6 +186,7 @@ describe("Codex hook state fixture classification", () => {
     ["working-pre-tool-use.json", "working"],
     ["working-post-tool-use.json", "working"],
     ["working-spur-436f.json", "working"],
+    ["stale-working-spur-1c0e.json", "working"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CODEX_DIR, fixture), "utf8");
     const parsed = JSON.parse(content) as { state: string };
@@ -207,6 +208,31 @@ describe("Codex hook state fixture classification", () => {
     expect(lines).toHaveLength(20);
     expect(lines.some((line) => line.includes(hookState.turnId!))).toBe(true);
     expect(lines.some((line) => line.includes("Process running with session ID"))).toBe(true);
+  });
+
+  it("captures the spur-1c0e tail where the rollout completed after a stale working hook snapshot", async () => {
+    const hookContent = await readFile(join(CODEX_DIR, "stale-working-spur-1c0e.json"), "utf8");
+    const hookState = JSON.parse(hookContent) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+    const jsonlContent = await readFile(
+      join(CODEX_DIR, "stale-working-spur-1c0e-tail.jsonl"),
+      "utf8",
+    );
+    const lines = jsonlContent.trim().split("\n").filter(Boolean);
+
+    expect(hookState.state).toBe("working");
+    expect(hookState.hookEvent).toBe("PreToolUse");
+    expect(hookState.turnId).toBeTruthy();
+    expect(lines).toHaveLength(40);
+    expect(lines.some((line) => line.includes(hookState.turnId!))).toBe(true);
+    expect(
+      lines.some(
+        (line) => line.includes("\"type\":\"task_complete\"") && line.includes(hookState.turnId!),
+      ),
+    ).toBe(true);
   });
 
   it("absent hook file → readAgentHookState returns null → classified as waiting (SPUR1614 regression)", async () => {
