@@ -246,7 +246,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey];
+      const groups = content.hooks[groupKey]!;
       const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
@@ -279,7 +279,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     };
 
     // SessionStart should preserve the echo hello command AND add SPUR command
-    const sessionStart = content.hooks["SessionStart"];
+    const sessionStart = content.hooks["SessionStart"]!;
     const commands = sessionStart.flatMap((g) => g.hooks.map((h) => h.command));
     expect(commands).toContain("echo hello");
     expect(commands).toContain(SPUR_COMMAND);
@@ -310,7 +310,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey];
+      const groups = content.hooks[groupKey]!;
       const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
@@ -350,7 +350,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey];
+      const groups = content.hooks[groupKey]!;
       const spurCount = groups
         .flatMap((g) => g.hooks)
         .filter((h) => h.command === SPUR_COMMAND).length;
