@@ -86,7 +86,22 @@ const MockWebSocket = vi.fn(() => {
   const ws: Record<string, unknown> = {
     readyState: 0,
     binaryType: "arraybuffer",
-    send: wsSend,
+    send: vi.fn((payload: unknown) => {
+      wsSend(payload);
+      if (typeof payload !== "string" || !payload.startsWith("{")) return;
+      try {
+        const parsed = JSON.parse(payload) as { type?: string; id?: string };
+        if (parsed.type === "input" && typeof parsed.id === "string") {
+          queueMicrotask(() => {
+            (ws.onmessage as ((event: { data: string }) => void) | null)?.({
+              data: JSON.stringify({ type: "ack", id: parsed.id }),
+            });
+          });
+        }
+      } catch {
+        // Ignore malformed payloads in tests.
+      }
+    }),
     close: vi.fn(() => {
       ws.readyState = 3;
       (ws.onclose as (ev: { code: number; reason: string }) => void)?.({
@@ -113,6 +128,17 @@ const MockWebSocket = vi.fn(() => {
 (MockWebSocket as unknown as Record<string, number>).CLOSED = 3;
 
 vi.stubGlobal("WebSocket", MockWebSocket);
+
+function sentInputPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
+    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
+    .filter((payload): payload is { type: "input"; data: string } =>
+      payload.type === "input" && typeof payload.data === "string",
+    )
+    .map((payload) => payload.data);
+}
 
 beforeEach(() => {
   onBinaryCallback = null;
@@ -263,6 +289,18 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Start file picker/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+  });
+
+  it("submits codex slash hotkeys as bracketed paste plus enter", async () => {
+    await mountTerminal("test-codex-hotkey-submit", "codex");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
+
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~/permissions\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("/permissions\r");
+    });
   });
 
   it("does not render a standalone esc button in the control bar", async () => {
