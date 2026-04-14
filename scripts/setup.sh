@@ -131,8 +131,8 @@ echo "Cleaning stale build artifacts..."
 rm -rf packages/web/.next
 
 echo ""
-echo "Building all packages..."
-pnpm build
+echo "Building Spur CLI..."
+pnpm --dir v2 build
 
 echo ""
 echo "Linking CLI globally..."
