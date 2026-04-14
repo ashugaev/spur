@@ -93,9 +93,7 @@ describe("fetchPrInfo", () => {
   });
 
   it("non-ok response with JSON error returns EMPTY_PR_INFO", async () => {
-    mockFetch.mockResolvedValueOnce(
-      jsonResponse({ error: "Repository not found" }, false, 404),
-    );
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "Repository not found" }, false, 404));
 
     const result = await fetchPrInfo("https://github.com/org/repo/pull/3");
     expect(result.state).toBeNull();
