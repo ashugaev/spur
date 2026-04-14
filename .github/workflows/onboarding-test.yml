@@ -32,6 +32,12 @@ jobs:
         working-directory: tests/integration
         run: docker compose build
 
+      - name: Clear stale onboarding containers
+        working-directory: tests/integration
+        run: |
+          docker compose down -v --remove-orphans || true
+          docker rm -f spur-onboarding-test || true
+
       - name: Run onboarding test
         id: test
         working-directory: tests/integration
@@ -40,14 +46,15 @@ jobs:
 
       - name: Extract metrics
         if: always()
+        working-directory: tests/integration
         run: |
           # Extract onboarding time from container logs
-          docker logs spur-onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
+          docker compose logs onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
 
       - name: Cleanup
         if: always()
         working-directory: tests/integration
-        run: docker compose down -v
+        run: docker compose down -v --remove-orphans
 
       - name: Upload test logs
         if: failure()
