@@ -303,6 +303,18 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
+  it("shows a visible error when codex slash hotkey submit fails", async () => {
+    await mountTerminal("test-codex-hotkey-submit-error", "codex");
+
+    wsInstances[0].readyState = 3;
+    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+    });
+  });
+
   it("does not render a standalone esc button in the control bar", async () => {
     await mountTerminal("test-no-esc", "claude");
 
