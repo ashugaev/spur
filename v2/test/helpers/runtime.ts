@@ -34,6 +34,7 @@ export interface FakeGhState {
       number: number;
       title: string;
       url: string;
+      mergedAt?: string | null;
       reviewDecision?: string | null;
       mergeable?: string | null;
       mergeStateStatus?: string | null;

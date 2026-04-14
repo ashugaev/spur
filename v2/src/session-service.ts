@@ -128,7 +128,9 @@ interface PrCheckTracker {
   waitingChecks: number;
   lastState: SessionState | null;
   lastCheckAt: number;
-  found: boolean;
+  slotFound: boolean;
+  mergeHandled: boolean;
+  checking: boolean;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -732,46 +734,46 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    // Skip if PR slot already exists
-    if (session.slots?.links.some((link) => link.label === "pr")) {
+    if (session.status !== "running") {
       return;
     }
-    // Skip terminal states
-    if (isTerminalSessionStatus(session.status)) {
-      return;
-    }
-    // Skip if no worktree
     if (!session.worktree || !session.worktreePath) {
       return;
     }
 
+    const project = this.resolveProjectForSession(session);
+    const hasPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
     const tracker = this.prCheckTrackers.get(session.id) ?? {
       waitingChecks: 0,
       lastState: null,
       lastCheckAt: 0,
-      found: false,
+      slotFound: false,
+      mergeHandled: false,
+      checking: false,
     };
     if (!this.prCheckTrackers.has(session.id)) {
       this.prCheckTrackers.set(session.id, tracker);
     }
+    if (hasPrSlot) {
+      tracker.slotFound = true;
+    }
 
-    // Already found
-    if (tracker.found) {
+    if (
+      tracker.checking ||
+      (tracker.slotFound && (!project?.autoCompleteOnPrMerge || tracker.mergeHandled))
+    ) {
       return;
     }
 
-    // Reset waitingChecks on state change
     if (tracker.lastState !== null && tracker.lastState !== state) {
       tracker.waitingChecks = 0;
     }
     tracker.lastState = state;
 
-    // Back off after limit in waiting with no state change
     if (state === "waiting" && tracker.waitingChecks >= PR_CHECK_WAITING_LIMIT) {
       return;
     }
 
-    // Throttle between gh calls
     if (Date.now() - tracker.lastCheckAt < PR_CHECK_THROTTLE_MS) {
       return;
     }
@@ -781,19 +783,25 @@ export class SessionService {
       tracker.waitingChecks += 1;
     }
 
-    // Fire and forget
-    void this.runPrCheck(session).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logEvent("session.pr_auto_detect.failed", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `PR auto-detect failed for ${session.id}: ${message}`,
+    tracker.checking = true;
+    void this.runPrCheck(session)
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logEvent("session.pr_auto_detect.failed", {
+          level: "warn",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `PR auto-detect failed for ${session.id}: ${message}`,
+        });
+      })
+      .finally(() => {
+        tracker.checking = false;
       });
-    });
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
+    const project = this.resolveProjectForSession(session);
+    const autoCompleteOnPrMerge = project?.autoCompleteOnPrMerge ?? true;
     const raw = await gh(
       session.worktreePath,
       "pr",
@@ -801,11 +809,11 @@ export class SessionService {
       "--head",
       session.branch,
       "--json",
-      "url",
+      "url,mergedAt",
       "--limit",
       "1",
     );
-    const prs: Array<{ url: string }> = JSON.parse(raw);
+    const prs: Array<{ url: string; mergedAt?: string | null }> = JSON.parse(raw);
     const pr = prs[0];
     if (!pr?.url) {
       return;
@@ -813,26 +821,47 @@ export class SessionService {
 
     const tracker = this.prCheckTrackers.get(session.id);
     if (tracker) {
-      tracker.found = true;
+      tracker.slotFound = true;
     }
 
-    // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
-    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+    if (!current || current.status !== "running") {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
-    });
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
-    writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
-    this.logEvent("session.pr_auto_detect.found", {
+    let updated = current;
+    if (!current.slots?.links.some((link) => link.label === "pr")) {
+      const slots = applySlotsUpdate(current.slots, {
+        links: [{ label: "pr", url: pr.url }],
+      });
+      updated = { ...current, ...(slots ? { slots } : {}) };
+      writeSession(this.config.dataDir, updated);
+      await syncTmuxStatus(updated.tmuxSession, updated.slots);
+      this.logEvent("session.pr_auto_detect.found", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      });
+    }
+
+    if (!autoCompleteOnPrMerge || !pr.mergedAt) {
+      return;
+    }
+
+    await this.complete(current.id);
+    if (tracker) {
+      tracker.mergeHandled = true;
+    }
+    this.logEvent("session.pr_auto_complete.completed", {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      message: `Auto-completed ${session.id} after PR merge`,
+      details: {
+        prUrl: pr.url,
+        mergedAt: pr.mergedAt,
+      },
     });
   }
 

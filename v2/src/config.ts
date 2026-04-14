@@ -481,6 +481,8 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const defaultBranch = asOptionalString(raw["defaultBranch"], `${label}.defaultBranch`) ?? "main";
   const sessionPrefix =
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
+  const autoCompleteOnPrMerge =
+    asOptionalBoolean(raw["autoCompleteOnPrMerge"], `${label}.autoCompleteOnPrMerge`) ?? true;
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
@@ -517,6 +519,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     path,
     defaultBranch,
     sessionPrefix,
+    autoCompleteOnPrMerge,
     worktree,
     symlinks,
     ...(spawn !== undefined ? { spawn } : {}),

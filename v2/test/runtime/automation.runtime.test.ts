@@ -263,6 +263,83 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     });
   });
 
+  it("auto-completes a running session when its PR is merged", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-merged-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "github-merged.yaml",
+      automationConfig(context, sessionPrefix, ""),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-gh-merged": {
+          number: 42,
+          title: "Merge and finish",
+          url: "https://github.com/acme/api/pull/42",
+          mergedAt: "2026-04-14T10:00:00Z",
+          repo: "acme/api",
+          reviewDecision: null,
+        },
+      },
+    });
+
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const session = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "finish when the PR merges",
+          "--branch",
+          "feature-runtime-gh-merged",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await pollUntil(async () => captureTmuxPane(session.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("finish when the PR merges"),
+    });
+
+    const completedSession = await pollUntil(
+      async () => context.fetchJson<SessionView>(`/sessions/${session.id}`),
+      {
+        timeoutMs: 20_000,
+        accept: (value) => value.status === "completed",
+      },
+    );
+
+    expect(completedSession.status).toBe("completed");
+    expect(existsSync(session.worktreePath)).toBe(false);
+
+    const events = await pollUntil(
+      async () => readEventLog(context.dataDir).map((entry) => entry.event),
+      {
+        timeoutMs: 20_000,
+        accept: (value) =>
+          value.includes("session.pr_auto_detect.found") &&
+          value.includes("session.complete.completed") &&
+          value.includes("session.pr_auto_complete.completed"),
+      },
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        "session.pr_auto_detect.found",
+        "session.complete.completed",
+        "session.pr_auto_complete.completed",
+      ]),
+    );
+  });
+
   it("emits GitHub comment events when the source snapshot changes", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

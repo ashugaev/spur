@@ -13,6 +13,11 @@ const getTmuxSessionActivityMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const buildMergedConfigMock = vi.fn().mockReturnValue({
+  config: baseConfig(),
+  configPaths: ["/tmp/spur.yaml"],
+});
+const upsertConfigRegistryPathMock = vi.fn().mockReturnValue(["/tmp/spur.yaml"]);
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -46,6 +51,7 @@ vi.mock("../../src/ids.js", () => ({
   reserveNextSessionId: vi.fn(),
 }));
 vi.mock("../../src/metadata.js", () => ({
+  deleteRuntimeLogCursorsForSession: vi.fn(),
   deleteServiceInstance: vi.fn(),
   deleteServiceInstancesForSession: vi.fn(),
   deleteServiceSourceStatesForService: vi.fn(),
@@ -100,11 +106,8 @@ vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
 }));
 vi.mock("../../src/registry.js", () => ({
-  buildMergedConfig: vi.fn().mockReturnValue({
-    config: baseConfig(),
-    configPaths: ["/tmp/spur.yaml"],
-  }),
-  upsertConfigRegistryPath: vi.fn().mockReturnValue(["/tmp/spur.yaml"]),
+  buildMergedConfig: buildMergedConfigMock,
+  upsertConfigRegistryPath: upsertConfigRegistryPathMock,
   writeConfigRegistry: vi.fn(),
 }));
 vi.mock("../../src/pipeline.js", () => ({
@@ -136,6 +139,7 @@ function baseConfig() {
         path: "/repo/api",
         defaultBranch: "main",
         sessionPrefix: "api",
+        autoCompleteOnPrMerge: true,
         worktree: true,
         symlinks: [],
       },
@@ -182,6 +186,11 @@ describe("PR auto-detect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    buildMergedConfigMock.mockReturnValue({
+      config: baseConfig(),
+      configPaths: ["/tmp/spur.yaml"],
+    });
+    upsertConfigRegistryPathMock.mockReturnValue(["/tmp/spur.yaml"]);
   });
 
   afterEach(() => {
@@ -211,7 +220,7 @@ describe("PR auto-detect", () => {
       "--head",
       session.branch,
       "--json",
-      "url",
+      "url,mergedAt",
       "--limit",
       "1",
     );
@@ -224,19 +233,20 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("skips check when session already has a pr slot", async () => {
+  it("keeps checking merge state when session already has a pr slot", async () => {
     const session = makeSession({
       slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }] },
     });
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/1" }]));
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghMock).toHaveBeenCalledTimes(1);
     service.dispose();
   });
 
@@ -256,8 +266,10 @@ describe("PR auto-detect", () => {
     service.dispose();
   });
 
-  it("does not call gh again when PR already found", async () => {
+  it("does not call gh again when PR slot already exists and auto-complete is disabled", async () => {
     const session = makeSession();
+    const config = baseConfig();
+    config.projects.api.autoCompleteOnPrMerge = false;
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
@@ -265,6 +277,10 @@ describe("PR auto-detect", () => {
     applySlotsUpdateMock.mockReturnValue({
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
     } satisfies SessionSlots);
+    buildMergedConfigMock.mockReturnValue({
+      config,
+      configPaths: ["/tmp/spur.yaml"],
+    });
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -275,6 +291,93 @@ describe("PR auto-detect", () => {
     await vi.advanceTimersByTimeAsync(35_000);
     // gh should not be called again since tracker.found = true
     expect(ghMock).toHaveBeenCalledTimes(1);
+
+    service.dispose();
+  });
+
+  it("auto-completes the session when the PR is merged", async () => {
+    const session = makeSession();
+    let currentRecord: SessionRecord = { ...session };
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockImplementation(() => currentRecord);
+    writeSessionMock.mockImplementation((_dataDir: string, record: SessionRecord) => {
+      currentRecord = record;
+    });
+    setupEnrich();
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" }]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    } satisfies SessionSlots);
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
+      session,
+    );
+
+    expect(writeSessionMock.mock.calls.some(([, record]) => record.status === "completed")).toBe(true);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ event: "session.pr_auto_complete.completed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not auto-complete when project disables autoCompleteOnPrMerge", async () => {
+    const session = makeSession();
+    const config = baseConfig();
+    config.projects.api.autoCompleteOnPrMerge = false;
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: "2026-04-14T10:00:00Z" }]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    } satisfies SessionSlots);
+    buildMergedConfigMock.mockReturnValue({
+      config,
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
+      session,
+    );
+
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "completed" }),
+    );
+
+    service.dispose();
+  });
+
+  it("does not auto-complete when the PR is closed but not merged", async () => {
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42", mergedAt: null }]));
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    } satisfies SessionSlots);
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await (service as unknown as { runPrCheck(session: SessionRecord): Promise<void> }).runPrCheck(
+      session,
+    );
+
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ status: "completed" }),
+    );
 
     service.dispose();
   });

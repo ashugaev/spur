@@ -144,6 +144,7 @@ export interface ProjectConfig {
   path: string;
   defaultBranch: string;
   sessionPrefix: string;
+  autoCompleteOnPrMerge?: boolean;
   worktree: boolean;
   symlinks: string[];
   spawn?: ProjectSpawnConfig;

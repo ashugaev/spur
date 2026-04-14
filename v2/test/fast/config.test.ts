@@ -61,6 +61,7 @@ projects:
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
     expect(config.projects["backend"]?.sessionPrefix).toBe("backend");
+    expect(config.projects["backend"]?.autoCompleteOnPrMerge).toBe(true);
     expect(config.projects["backend"]?.worktree).toBe(true);
     expect(config.projects["backend"]?.sources["pr-watch"]).toEqual({
       type: "github",
@@ -115,6 +116,19 @@ projects:
         },
       },
     });
+  });
+
+  it("parses explicit autoCompleteOnPrMerge=false", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    autoCompleteOnPrMerge: false
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.autoCompleteOnPrMerge).toBe(false);
   });
 
   it("parses optional send prompt on triggers", async () => {
