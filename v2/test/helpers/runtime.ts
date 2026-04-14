@@ -168,6 +168,16 @@ fi`;
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
       : ":";
+  const signalSlowToolResult =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'
+      sleep 5
+      jsonl_append '{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}'
+      printf '%s\n' "${prompt}"
+      ${signalWaiting}`
+      : `printf '%s\n' "ack: slow tool"
+      printf '%s\n' "${prompt}"
+      ${signalWaiting}`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -197,6 +207,9 @@ while IFS= read -r line; do
       printf '%s\n' "2. runtime"
       printf '%s\n' "Enter to select"
       printf '%s\n' "Esc to cancel"
+      ;;
+    slow-tool-result)
+      ${signalSlowToolResult}
       ;;
     simulate-work)
       printf '%s\n' "• Working (simulated)"

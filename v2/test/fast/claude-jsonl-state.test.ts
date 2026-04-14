@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  TOOL_USE_STALE_MS,
   classifyClaudeJsonlState,
   parseConversationLines,
   readClaudeJsonlState,
@@ -60,12 +61,16 @@ describe("classifyClaudeJsonlState", () => {
   });
 
   it("returns working for tool_use within stale window", () => {
-    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 2_000 })];
+    const records = [
+      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - (TOOL_USE_STALE_MS - 1_000) }),
+    ];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
   it("returns needs_input for tool_use past stale window with no progress", () => {
-    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
+    const records = [
+      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - (TOOL_USE_STALE_MS + 1_000) }),
+    ];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
@@ -246,7 +251,7 @@ describe("parseConversationLines", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:44:46.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:44:52.500Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");

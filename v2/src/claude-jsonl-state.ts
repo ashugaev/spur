@@ -19,7 +19,9 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+// Claude may stay quiet for several seconds while a tool runs, so a short
+// stale window misclassifies normal tool execution as user attention needed.
+export const TOOL_USE_STALE_MS = 15_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 

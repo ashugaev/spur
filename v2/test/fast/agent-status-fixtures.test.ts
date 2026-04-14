@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
+import {
+  TOOL_USE_STALE_MS,
+  classifyClaudeJsonlState,
+  type ParsedRecord,
+} from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -120,7 +124,7 @@ describe("Fixture integrity", () => {
 
 describe("Claude JSONL fixture classification", () => {
   const NOW = 1_700_000_000_000;
-  const STALE = NOW - 10_000; // 10s ago — past the 3s tool_use stale window
+  const STALE = NOW - (TOOL_USE_STALE_MS + 10_000);
 
   // ── waiting states ──────────────────────────────────────────────────
 
@@ -157,13 +161,13 @@ describe("Claude JSONL fixture classification", () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Records timestamped at NOW, checked at NOW → within 3s window → working
+    // Records timestamped at NOW, checked at NOW → within stale window → working
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
   it("classifies tool_use past stale window as needs_input", async () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
-    // Records timestamped 10s ago, checked at NOW → past 3s window → needs_input
+    // Records timestamped well before the stale window, checked at NOW → needs_input
     const records = parseFixtureJsonl(content, STALE);
     expect(records.length).toBeGreaterThan(0);
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
