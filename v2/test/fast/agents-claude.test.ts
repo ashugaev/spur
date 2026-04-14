@@ -143,9 +143,7 @@ describe("findLatestSessionFile", () => {
   it("returns the most recent JSONL file by mtime", async () => {
     mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
     mockReaddir.mockResolvedValue(["old.jsonl", "new.jsonl"]);
-    mockStat
-      .mockResolvedValueOnce({ mtimeMs: 1000 })
-      .mockResolvedValueOnce({ mtimeMs: 2000 });
+    mockStat.mockResolvedValueOnce({ mtimeMs: 1000 }).mockResolvedValueOnce({ mtimeMs: 2000 });
 
     const result = await findLatestSessionFile("/worktree/path");
     expect(result).toContain("new.jsonl");
@@ -175,9 +173,7 @@ describe("findLatestSessionFile", () => {
       "/canonical/worktree/path",
     ]);
     // First candidate's directory fails
-    mockReaddir
-      .mockRejectedValueOnce(new Error("ENOENT"))
-      .mockResolvedValueOnce(["session.jsonl"]);
+    mockReaddir.mockRejectedValueOnce(new Error("ENOENT")).mockResolvedValueOnce(["session.jsonl"]);
     mockStat.mockResolvedValue({ mtimeMs: 1000 });
 
     const result = await findLatestSessionFile("/worktree/path");
@@ -211,9 +207,7 @@ describe("findLatestSessionFile", () => {
     await findLatestSessionFile("/home/user/project/path");
 
     // The readdir should have been called with a path derived from the worktree path
-    expect(mockReaddir).toHaveBeenCalledWith(
-      expect.stringContaining("-home-user-project-path"),
-    );
+    expect(mockReaddir).toHaveBeenCalledWith(expect.stringContaining("-home-user-project-path"));
   });
 });
 

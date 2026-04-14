@@ -247,9 +247,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "Stop",
     ] as const) {
       const groups = content.hooks[groupKey];
-      const hasSpurCommand = groups.some((g) =>
-        g.hooks.some((h) => h.command === SPUR_COMMAND),
-      );
+      const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
   });
@@ -313,9 +311,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "Stop",
     ] as const) {
       const groups = content.hooks[groupKey];
-      const hasSpurCommand = groups.some((g) =>
-        g.hooks.some((h) => h.command === SPUR_COMMAND),
-      );
+      const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
   });
@@ -385,7 +381,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   it("adds suppress_unstable_features_warning to config when missing", async () => {
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return "[model]\nname = \"test\"";
+        return '[model]\nname = "test"';
       }
       return "";
     });
@@ -399,7 +395,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   });
 
   it("does not duplicate suppress_unstable_features_warning when already present", async () => {
-    const config = "[model]\nname = \"test\"\nsuppress_unstable_features_warning = true\n";
+    const config = '[model]\nname = "test"\nsuppress_unstable_features_warning = true\n';
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
         return config;
