@@ -1,6 +1,7 @@
 # Local Reminders
 
 - Before marking any implementation complete, always run the relevant package `build` command(s) and fix any failures.
+- For every code change, always include a separate checklist item to write or update tests for the touched code. Tests must exist at the cheapest tier that still crosses the changed boundary.
 
 ## Lean Defaults
 
