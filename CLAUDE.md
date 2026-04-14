@@ -1,6 +1,7 @@
 # Local Reminders
 
 - Before marking any implementation complete, always run the relevant package `build` command(s) and fix any failures.
+- For every code change, always include a separate checklist item to write or update tests for the touched code. Tests must exist at the cheapest tier that still crosses the changed boundary.
 
 ## Lean Defaults
 
@@ -85,6 +86,7 @@
 - Every `packages/web` change requires a manual browser test by the agent (via Chrome automation tools) before marking the task complete. Run the dev server, navigate to `localhost`, and verify the touched scenarios visually.
 - Load `$frontend-codestyle` when implementing or reviewing `packages/web` changes.
 - `pnpm --dir packages/web build` and `pnpm --dir packages/web test` must pass before completion.
+- Every `packages/web` change that adds or alters visible behavior must include a Playwright E2E step in the task checklist: write or update tests in `packages/web/tests/`, then run `pnpm --dir packages/web exec playwright test` on the isolated-ui sidecar. All tests must pass before completion. Use the official Playwright MCP agent (`$playwright-test-generator`) when generating new tests.
 
 ## PR Pipeline Resolve Team (Terminal-Driven)
 
