@@ -40,9 +40,10 @@ jobs:
 
       - name: Extract metrics
         if: always()
+        working-directory: tests/integration
         run: |
           # Extract onboarding time from container logs
-          docker logs spur-onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
+          docker compose logs onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
 
       - name: Cleanup
         if: always()
