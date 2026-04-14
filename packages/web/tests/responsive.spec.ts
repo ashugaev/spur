@@ -1,9 +1,9 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions } from "./fixtures.js";
+import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
-  test.use({ viewport: { width: 390, height: 844 } });
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
   test("header visible at mobile width", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "mob-1" })]);
@@ -24,6 +24,39 @@ test.describe("R1: Mobile viewport", () => {
     const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
     const innerWidth = await page.evaluate(() => window.innerWidth);
     expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+  });
+
+  test("inputs and selects have font-size >= 16px to prevent auto-zoom", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    const minFontSize = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll("input, select, textarea"));
+      if (els.length === 0) return 16;
+      return els.reduce((min, el) => {
+        const size = parseFloat(window.getComputedStyle(el).fontSize);
+        return size < min ? size : min;
+      }, Infinity);
+    });
+
+    expect(minFontSize).toBeGreaterThanOrEqual(16);
+  });
+
+  test("attention zone collapses and expands on tap at mobile", async ({ page }) => {
+    await gotoMocked(page, "/", [makeWorkingSession({ id: "acc-1", prompt: "Accordion session" })]);
+
+    await expect(page.getByText("Accordion session")).toBeVisible();
+
+    const zoneToggle = page
+      .locator("section button")
+      .filter({ hasText: /working/i })
+      .first();
+    await expect(zoneToggle).toBeVisible({ timeout: 5000 });
+    await zoneToggle.click();
+    await expect(page.getByText("Accordion session")).not.toBeVisible();
+
+    await zoneToggle.click();
+    await expect(page.getByText("Accordion session")).toBeVisible();
   });
 });
 
@@ -48,30 +81,21 @@ test.describe("R3: Desktop viewport (1280px)", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
 
   test("full layout renders at desktop", async ({ page }) => {
-    await mockSessions(page, [makeWorkingSession({ id: "desktop-1" })]);
-    await page.goto("/");
+    await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
-    // Header with all elements
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
   test("session row renders with project column at sm", async ({ page }) => {
-    await mockSessions(
+    await gotoMocked(
       page,
-      [
-        makeWorkingSession({
-          id: "desktop-row-1",
-          project: "desktop-project",
-        }),
-      ],
+      "/",
+      [makeWorkingSession({ id: "desktop-row-1", project: "desktop-project" })],
       [{ id: "desktop-project", name: "desktop-project" }],
     );
-    await page.goto("/");
 
-    // project column (sm:inline) shows project name in the row
-    // The project name appears in both the filter select and the row span
     await expect(
       page.locator(".data-row span").filter({ hasText: "desktop-project" }),
     ).toBeVisible();
