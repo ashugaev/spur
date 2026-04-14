@@ -34,6 +34,25 @@ fail_step() {
     exit 1
 }
 
+cleanup_process() {
+    local pid="$1"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        return
+    fi
+
+    kill "$pid" 2>/dev/null || true
+    for _ in {1..20}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            return
+        fi
+        sleep 0.5
+    done
+
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 # Test starts here
 echo -e "${BLUE}╔════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║  Spur - Onboarding Integration Test                   ║${NC}"
@@ -185,17 +204,8 @@ end_step "Step 9: Web UI API responding"
 
 # Step 10: Cleanup
 start_step "Step 10: Cleanup"
-kill $WEB_PID 2>/dev/null || true
-kill $DAEMON_PID 2>/dev/null || true
-# Wait for process to exit
-sleep 2
-# Force kill if still running
-kill -9 $WEB_PID 2>/dev/null || true
-kill -9 $DAEMON_PID 2>/dev/null || true
-
-# Kill any remaining Node processes
-pkill -f "node.*next.*dev" || true
-pkill -f "dist/cli.js daemon start" || true
+cleanup_process "$WEB_PID"
+cleanup_process "$DAEMON_PID"
 
 end_step "Step 10: Cleanup completed"
 
