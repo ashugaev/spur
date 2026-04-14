@@ -150,6 +150,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     updatedAt: session.updatedAt,
     ...(session.retainInList ? { retainInList: true } : {}),
     ...(session.slots ? { slots: session.slots } : {}),
+    ...(session.sidecarNames ? { sidecarNames: session.sidecarNames } : {}),
     ...(session.sidecarPorts ? { sidecarPorts: session.sidecarPorts } : {}),
     ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
     ...(session.queuedMessages
