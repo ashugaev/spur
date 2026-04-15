@@ -19,12 +19,17 @@ vi.mock("node:os", () => ({
   homedir: vi.fn(() => "/home/testuser"),
 }));
 
+vi.mock("node:readline", () => ({
+  createInterface: vi.fn(),
+}));
+
 vi.mock("../../src/agents/worktree-path.js", () => ({
   resolveWorktreePathCandidates: vi.fn(),
 }));
 
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, writeFile, cp, readdir, stat, lstat } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
   codexCommand,
@@ -34,8 +39,12 @@ import {
   codexHookHomePath,
   ensureCodexHooksConfig,
   findCodexSessionId,
+  captureCodexRolloutBaseline,
+  scanCodexRolloutForMessage,
 } from "../../src/agents/codex.js";
 
+const mockCreateReadStream = createReadStream as ReturnType<typeof vi.fn>;
+const mockCreateInterface = createInterface as ReturnType<typeof vi.fn>;
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
 const mockReadFile = readFile as ReturnType<typeof vi.fn>;
@@ -148,11 +157,7 @@ describe("buildCodexRestorePlan", () => {
   });
 
   it("returns a resume plan with initialMessage when session is found", async () => {
-    // We use a custom sessionRootDir by providing codexHomePath
-    // which causes the code to bypass the default CODEX_SESSIONS_DIR
     mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
-
-    // Set up a JSONL file with a valid session
     mockReaddir.mockImplementation(async (dir: unknown) => {
       if (typeof dir === "string" && dir.includes("sessions")) {
         return ["session.jsonl"];
@@ -162,30 +167,11 @@ describe("buildCodexRestorePlan", () => {
     mockLstat.mockResolvedValue({ isDirectory: () => false });
     mockStat.mockResolvedValue({ mtimeMs: 1000 });
 
-    // Mock createReadStream for readSessionMeta
-    const { createReadStream } = await import("node:fs");
-    const mockCreateReadStream = createReadStream as ReturnType<typeof vi.fn>;
-
     const mockLines = [
       JSON.stringify({ type: "session_meta", cwd: "/worktree/path", threadId: "my-thread-id" }),
     ];
-    const asyncIterator = {
-      [Symbol.asyncIterator]: () => {
-        let i = 0;
-        return {
-          next: () =>
-            i < mockLines.length
-              ? Promise.resolve({ value: mockLines[i++], done: false })
-              : Promise.resolve({ value: undefined, done: true }),
-        };
-      },
-    };
     mockCreateReadStream.mockReturnValue({});
-
-    // Mock createInterface
-    vi.mock("node:readline", () => ({
-      createInterface: vi.fn(() => asyncIterator),
-    }));
+    mockCreateInterface.mockReturnValue(makeAsyncIterable(mockLines));
 
     // This test relies on the real agent-restore-plans integration tests
     // For unit tests we test via findCodexSessionId directly
@@ -461,5 +447,223 @@ describe("findCodexSessionId", () => {
     // readdir should have been called at most MAX_SESSION_SCAN_DEPTH+2 times
     // (root + depth 1 + depth 2 + depth 3 + depth 4 = 5 calls max)
     expect(mockReaddir.mock.calls.length).toBeLessThanOrEqual(6);
+  });
+});
+
+// Helper: create an async iterable of lines, compatible with the mocked createInterface.
+function makeAsyncIterable(lines: string[]) {
+  return {
+    [Symbol.asyncIterator]: () => {
+      let i = 0;
+      return {
+        next: () =>
+          i < lines.length
+            ? Promise.resolve({ value: lines[i++]!, done: false })
+            : Promise.resolve({ value: undefined, done: true }),
+      };
+    },
+    close: () => {
+      /* no-op for mock */
+    },
+  };
+}
+
+// Helper: mock collectJsonlFiles by configuring readdir/lstat to return flat files.
+function mockFlatJsonlDir(dir: string, files: string[]) {
+  mockReaddir.mockImplementation(async (d: unknown) => {
+    if (d === dir) return files;
+    return [];
+  });
+  mockLstat.mockResolvedValue({ isDirectory: () => false });
+}
+
+function mockStreamForFile(filePath: string, lines: string[]) {
+  mockCreateReadStream.mockReturnValue({});
+  mockCreateInterface.mockImplementation(() => {
+    return makeAsyncIterable(lines);
+  });
+}
+
+function mockStreamsForFiles(mapping: Record<string, string[]>) {
+  mockCreateReadStream.mockReturnValue({});
+  mockCreateInterface.mockImplementation((_opts?: unknown) => {
+    // We track which call it is to map to the right file's lines.
+    // Since collectJsonlFiles returns files in order, the nth call to
+    // createInterface corresponds to the nth file.
+    const callCount = mockCreateInterface.mock.calls.length;
+    const keys = Object.keys(mapping);
+    const key = keys[callCount - 1];
+    const lines = key ? mapping[key] ?? [] : [];
+    return makeAsyncIterable(lines);
+  });
+}
+
+describe("captureCodexRolloutBaseline", () => {
+  it("returns empty map when sessions dir is missing", async () => {
+    mockReaddir.mockRejectedValue(new Error("ENOENT"));
+    const result = await captureCodexRolloutBaseline("/missing/sessions");
+    expect(result.size).toBe(0);
+  });
+
+  it("returns correct byte sizes for existing jsonl files", async () => {
+    mockFlatJsonlDir("/sessions", ["a.jsonl", "b.jsonl"]);
+    mockStat
+      .mockResolvedValueOnce({ size: 100 })
+      .mockResolvedValueOnce({ size: 200 });
+
+    const result = await captureCodexRolloutBaseline("/sessions");
+    expect(result.get("/sessions/a.jsonl")).toBe(100);
+    expect(result.get("/sessions/b.jsonl")).toBe(200);
+  });
+});
+
+describe("scanCodexRolloutForMessage", () => {
+  it("finds response_item/message user text with exact trimmed match", async () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "hello world" }],
+      },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [line]);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "  hello world  ", new Map());
+    expect(result.found).toBe(true);
+    expect(result.lastScannedFile).toBe("/sessions/rollout.jsonl");
+  });
+
+  it("finds event_msg/user_message with exact trimmed match", async () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "do the thing" },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [line]);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "do the thing", new Map());
+    expect(result.found).toBe(true);
+    expect(result.lastScannedFile).toBe("/sessions/rollout.jsonl");
+  });
+
+  it("returns found: false when only assistant messages exist", async () => {
+    const line = JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "hello world" }],
+      },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [line]);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "hello world", new Map());
+    expect(result.found).toBe(false);
+    expect(result.lastScannedFile).toBe("/sessions/rollout.jsonl");
+  });
+
+  it("returns found: false when text differs by more than whitespace edges", async () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "do the other thing" },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [line]);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "do the thing", new Map());
+    expect(result.found).toBe(false);
+  });
+
+  it("skips bytes before baseline offset (old message below baseline does not match)", async () => {
+    // The old message is at byte 0, and the baseline says we already consumed those bytes.
+    const oldLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "old message" },
+    });
+    const newLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "new message" },
+    });
+    const oldBytes = Buffer.byteLength(oldLine + "\n", "utf-8");
+
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    // When createReadStream is called with start=oldBytes, the readline interface
+    // should only yield the new line (old line is before the offset).
+    mockCreateReadStream.mockReturnValue({});
+    mockCreateInterface.mockImplementation(() => {
+      // The implementation passes start offset to createReadStream, so readline
+      // only sees data after the baseline. Simulate by returning only newLine.
+      return makeAsyncIterable([newLine]);
+    });
+
+    const baseline = new Map<string, number>();
+    baseline.set("/sessions/rollout.jsonl", oldBytes);
+
+    // Searching for "old message" should NOT match because it's before baseline.
+    const result = await scanCodexRolloutForMessage("/sessions", "old message", baseline);
+    expect(result.found).toBe(false);
+
+    // Reset mocks for second call (same baseline logic applies).
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockCreateReadStream.mockReturnValue({});
+    mockCreateInterface.mockImplementation(() => makeAsyncIterable([newLine]));
+
+    // Searching for "new message" should match because it's after baseline.
+    const result2 = await scanCodexRolloutForMessage("/sessions", "new message", baseline);
+    expect(result2.found).toBe(true);
+  });
+
+  it("scans new files not in baseline from byte 0", async () => {
+    const line = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "first message" },
+    });
+    mockFlatJsonlDir("/sessions", ["new-rollout.jsonl"]);
+    mockStreamForFile("/sessions/new-rollout.jsonl", [line]);
+
+    // Baseline has no entry for new-rollout.jsonl, so scan from byte 0.
+    const baseline = new Map<string, number>();
+    baseline.set("/sessions/old-rollout.jsonl", 500);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "first message", baseline);
+    expect(result.found).toBe(true);
+  });
+
+  it("handles malformed jsonl lines (skipped silently)", async () => {
+    const goodLine = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "valid" },
+    });
+    mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
+    mockStreamForFile("/sessions/rollout.jsonl", [
+      "not valid json {{{",
+      goodLine,
+    ]);
+
+    const result = await scanCodexRolloutForMessage("/sessions", "valid", new Map());
+    expect(result.found).toBe(true);
+  });
+
+  it("scans multiple rollout files", async () => {
+    const line1 = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "in file one" },
+    });
+    const line2 = JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "in file two" },
+    });
+    mockFlatJsonlDir("/sessions", ["a.jsonl", "b.jsonl"]);
+    mockStreamsForFiles({
+      "/sessions/a.jsonl": [line1],
+      "/sessions/b.jsonl": [line2],
+    });
+
+    const result = await scanCodexRolloutForMessage("/sessions", "in file two", new Map());
+    expect(result.found).toBe(true);
+    expect(result.lastScannedFile).toBe("/sessions/b.jsonl");
   });
 });

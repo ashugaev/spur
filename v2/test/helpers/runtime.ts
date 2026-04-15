@@ -143,27 +143,35 @@ jsonl_append() {
   fi
   exit 0
 fi
+codex_base="\${CODEX_HOME:-$HOME/.codex}"
+session_rollout=""
 mode="launch"
 resume_id=""
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
 else
-  session_dir="$HOME/.codex/sessions/2026/03/18"
+  session_dir="$codex_base/sessions/2026/03/18"
   thread_id="thread-\${SPUR_SESSION:-no-session}"
   mkdir -p "$session_dir"
-  printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
-  printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+  printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
+  printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state files.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : `emit_hook_event "Stop"`;
+  // Codex signalWorking also writes a rollout jsonl user_message event so
+  // scanCodexRolloutForMessage can detect submitted text.
   const signalWorking =
     agentName === "claude"
       ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : `emit_hook_event "UserPromptSubmit"`;
+      : `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
+    printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$line")" >> "$session_rollout"
+  fi
+  emit_hook_event "UserPromptSubmit"`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`

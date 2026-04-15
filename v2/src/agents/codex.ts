@@ -169,7 +169,7 @@ function sessionResumeId(line: CodexSessionLine): string | null {
   return null;
 }
 
-async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
   if (depth > MAX_SESSION_SCAN_DEPTH) {
     return [];
   }
@@ -414,4 +414,120 @@ export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<st
   }
   await writeFile(hooksPath, JSON.stringify(next, null, 2) + "\n", "utf8");
   return codexDir;
+}
+
+// ---------------------------------------------------------------------------
+// Rollout JSONL scanning for submit acknowledgment
+// ---------------------------------------------------------------------------
+
+export type RolloutBaseline = Map<string, number>;
+
+export async function captureCodexRolloutBaseline(
+  sessionsDir: string,
+): Promise<RolloutBaseline> {
+  const baseline: RolloutBaseline = new Map();
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return baseline;
+  }
+  for (const filePath of files) {
+    try {
+      const fileStat = await stat(filePath);
+      baseline.set(filePath, fileStat.size);
+    } catch {
+      // Ignore inaccessible files.
+    }
+  }
+  return baseline;
+}
+
+interface RolloutResponseItemPayload {
+  type?: string;
+  role?: string;
+  content?: Array<{ type?: string; text?: string }>;
+}
+
+interface RolloutEventMsgPayload {
+  type?: string;
+  message?: string;
+}
+
+function extractUserTextFromLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "response_item") {
+    const p = payload as unknown as RolloutResponseItemPayload;
+    if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
+      const texts = p.content
+        .filter(
+          (c): c is { type: string; text: string } =>
+            isRecord(c) && c.type === "input_text" && typeof c.text === "string",
+        )
+        .map((c) => c.text);
+      return texts.length > 0 ? texts.join("") : null;
+    }
+  }
+
+  if (type === "event_msg") {
+    const p = payload as unknown as RolloutEventMsgPayload;
+    if (p.type === "user_message" && typeof p.message === "string") {
+      return p.message;
+    }
+  }
+
+  return null;
+}
+
+export async function scanCodexRolloutForMessage(
+  sessionsDir: string,
+  messageText: string,
+  baseline: RolloutBaseline,
+): Promise<{ found: boolean; lastScannedFile: string | null }> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return { found: false, lastScannedFile: null };
+  }
+  let lastScannedFile: string | null = null;
+  const trimmedTarget = messageText.trim();
+  for (const filePath of files) {
+    lastScannedFile = filePath;
+    const offset = baseline.get(filePath) ?? 0;
+    try {
+      const input = createReadStream(filePath, { encoding: "utf-8", start: offset });
+      const reader = createInterface({ input, crlfDelay: Infinity });
+      try {
+        for await (const rawLine of reader) {
+          const trimmedLine = rawLine.trim();
+          if (!trimmedLine) continue;
+          const extracted = extractUserTextFromLine(trimmedLine);
+          if (extracted !== null && extracted.trim() === trimmedTarget) {
+            reader.close();
+            return { found: true, lastScannedFile: filePath };
+          }
+        }
+      } finally {
+        reader.close();
+      }
+    } catch {
+      // Ignore unreadable files.
+    }
+  }
+  return { found: false, lastScannedFile };
 }
