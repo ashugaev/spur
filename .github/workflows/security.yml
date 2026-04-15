@@ -38,21 +38,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      # npm retired the legacy v1 audit endpoint (HTTP 410) and current
+      # `pnpm audit` still queries it, so the check can no longer run.
+      # `osv-scanner` reads `pnpm-lock.yaml` directly and sources advisories
+      # from the OSV database — no dependency on the retired endpoint.
+      - name: Run osv-scanner on the pnpm lockfile
+        uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
         with:
-          node-version: 20
-
-      - name: Install pnpm 10
-        # pnpm 9 queries the legacy v1 audit endpoint which npm retired
-        # (HTTP 410). pnpm 10 uses the bulk advisory endpoint. Installing via
-        # npm here avoids `pnpm/action-setup` rejecting a version mismatch
-        # against the repo-wide `packageManager` pin.
-        run: npm install -g pnpm@10
-
-      - name: Run npm audit
-        run: pnpm audit --audit-level=moderate
-        continue-on-error: true # Don't fail build on vulnerabilities in deps
-
-      - name: Run pnpm audit (strict)
-        run: pnpm audit --prod --audit-level=high
+          scan-args: |-
+            --lockfile=pnpm-lock.yaml
