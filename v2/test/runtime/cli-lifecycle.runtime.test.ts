@@ -2859,6 +2859,76 @@ projects:
       accept: (v) => v === true,
     });
     expect(devSessionAlive).toBe(true);
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "stop",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+
+    const devSessionStopped = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === false,
+    });
+    expect(devSessionStopped).toBe(false);
+  });
+
+  it("sidecar stop rejects when invoked from inside a sidecar shell", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-stop-guard-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-stop-guard.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli(
+        [
+          "--config",
+          configPath,
+          "sidecar",
+          "stop",
+          "--session",
+          "api-1",
+          "--name",
+          "dev",
+        ],
+        { env: { SPUR_SIDECAR_NAME: "isolated-ui" } },
+      ),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining('Cannot stop sidecar "dev" from inside sidecar "isolated-ui"'),
+    });
   });
 
   it("spawn with autoStart: true creates the --dev tmux session", async () => {
