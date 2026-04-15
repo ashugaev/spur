@@ -49,6 +49,10 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  queuedMessages?: {
+    messages: string[];
+    awaitingPrompt: boolean;
+  };
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -82,6 +86,10 @@ function baseSession(id: string): SpurSessionView {
     workspaceExists: true,
     worktreePath: `/tmp/worktrees/${id}`,
     services: [],
+    queuedMessages: {
+      messages: [],
+      awaitingPrompt: false,
+    },
     sidecars: [],
     slots: { links: [] },
   };

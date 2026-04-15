@@ -565,6 +565,39 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
+              {/* Queued messages */}
+              {session.queuedMessages.messages.length > 0 || session.queuedMessages.awaitingPrompt ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Queued messages
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  {session.queuedMessages.messages.length > 0 ? (
+                    <ol aria-label="Queued messages list" className="space-y-2">
+                      {session.queuedMessages.messages.map((queuedMessage, index) => (
+                        <li
+                          key={`${session.id}:queued:${index}:${queuedMessage}`}
+                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
+                        >
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                            #{index + 1}
+                          </div>
+                          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--color-text-secondary)]">
+                            {queuedMessage}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : null}
+                  {session.queuedMessages.awaitingPrompt ? (
+                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                      Awaiting agent prompt. Queued messages will send automatically when the agent
+                      is ready.
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+
               {/* Message */}
               <section>
                 <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">

@@ -85,6 +85,10 @@ function sessionFixture() {
     workspaceExists: true,
     worktreePath: "/tmp/api-a1",
     services: [],
+    queuedMessages: {
+      messages: [],
+      awaitingPrompt: false,
+    },
     slots: {
       links: [],
     },
@@ -636,5 +640,100 @@ describe("SessionDetail voice input", () => {
       setIntervalSpy.mockRestore();
       clearIntervalSpy.mockRestore();
     }
+  });
+
+  it("renders queued messages in FIFO order", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            queuedMessages: {
+              messages: ["First queued", "Second queued"],
+              awaitingPrompt: false,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /queued messages/i })).toBeInTheDocument();
+    });
+
+    const queuedItems = screen.getAllByRole("listitem");
+    expect(queuedItems).toHaveLength(2);
+    expect(queuedItems[0]).toHaveTextContent("First queued");
+    expect(queuedItems[1]).toHaveTextContent("Second queued");
+  });
+
+  it("renders awaiting-prompt hint when queue is blocked", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            queuedMessages: {
+              messages: [],
+              awaitingPrompt: true,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /queued messages/i })).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(/queued messages will send automatically when the agent is ready/i),
+    ).toBeInTheDocument();
+    expect(screen.queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  it("hides queued messages when the queue is empty and not awaiting a prompt", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /dialog/i })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
   });
 });

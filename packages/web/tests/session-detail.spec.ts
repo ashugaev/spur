@@ -220,6 +220,45 @@ test.describe("S3: Message section", () => {
   });
 });
 
+// S3b: Queued messages section
+test.describe("S3b: Queued messages section", () => {
+  test("shows queued messages in FIFO order", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s3b-1",
+      queuedMessages: {
+        messages: ["First queued message", "Second queued message"],
+        awaitingPrompt: false,
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+    const items = page.getByRole("list", { name: /queued messages list/i }).getByRole("listitem");
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toContainText("First queued message");
+    await expect(items.nth(1)).toContainText("Second queued message");
+  });
+
+  test("shows awaiting prompt hint when queue is blocked", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s3b-2",
+      queuedMessages: {
+        messages: [],
+        awaitingPrompt: true,
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+    await expect(
+      page.getByText(/queued messages will send automatically when the agent is ready/i),
+    ).toBeVisible();
+    await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
+  });
+});
+
 // S4: Links section
 test.describe("S4: Links section", () => {
   test("links section visible when session has links", async ({ page }) => {
