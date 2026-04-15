@@ -41,6 +41,9 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
+          # pnpm 10 uses the bulk advisory endpoint; the legacy v1 endpoint
+          # that pnpm 9 queries was retired and now returns HTTP 410.
+          version: 10
           dest: ${{ runner.temp }}/pnpm-setup
 
       - name: Setup Node.js
