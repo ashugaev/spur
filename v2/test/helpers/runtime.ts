@@ -150,6 +150,11 @@ resume_id=""
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
+  # Discover the existing rollout file so resumed sessions can still write event_msg entries.
+  existing_rollout="$(find "$codex_base/sessions" -name "rollout-\${SPUR_SESSION:-no-session}.jsonl" 2>/dev/null | head -n 1)"
+  if [[ -n "$existing_rollout" ]]; then
+    session_rollout="$existing_rollout"
+  fi
 else
   session_dir="$codex_base/sessions/2026/03/18"
   thread_id="thread-\${SPUR_SESSION:-no-session}"
@@ -163,19 +168,87 @@ fi`;
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : `emit_hook_event "Stop"`;
-  // Codex signalWorking also writes a rollout jsonl user_message event so
-  // scanCodexRolloutForMessage can detect submitted text.
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
-    printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$line")" >> "$session_rollout"
-  fi
-  emit_hook_event "UserPromptSubmit"`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
       : ":";
+  // Claude signals working per-line; codex buffers pasted multi-line input and
+  // writes a single rollout event_msg with the full message (matching real codex).
+  const signalWorking =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
+      : "";
+  // Codex uses a buffering read loop that drains pasted lines before emitting
+  // one event_msg entry, so scanCodexRolloutForMessage sees the full message.
+  const codexEmitBuffered = `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
+    printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")" >> "$session_rollout"
+  fi
+  emit_hook_event "UserPromptSubmit"`;
+  const readLoop =
+    agentName === "claude"
+      ? `while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$log_file"
+  ${signalWorking}
+  case "$line" in
+    show-waiting-menu)
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
+      ;;
+    simulate-work)
+      printf '%s\\n' "• Working (simulated)"
+      sleep 1
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+    exit-now)
+      exit 0
+      ;;
+    *)
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+  esac
+done`
+      : `while IFS= read -r line; do
+  full_msg="$line"
+  printf '%s\\n' "$line" >> "$log_file"
+  # Drain remaining lines from the same paste (arrive within 0.1s).
+  while IFS= read -r -t 0.1 extra; do
+    full_msg="$full_msg
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  ${codexEmitBuffered}
+  case "$line" in
+    show-waiting-menu)
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
+      ;;
+    simulate-work)
+      printf '%s\\n' "• Working (simulated)"
+      sleep 1
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+    exit-now)
+      exit 0
+      ;;
+    *)
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+  esac
+done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -194,34 +267,7 @@ if [[ "$mode" == "launch" ]]; then
 fi
 printf '%s\n' "${prompt}"
 ${signalWaiting}
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$log_file"
-  ${signalWorking}
-  case "$line" in
-    show-waiting-menu)
-      ${signalNeedsInput}
-      printf '%s\n' "Entered plan mode"
-      printf '%s\n' "1. fast"
-      printf '%s\n' "2. runtime"
-      printf '%s\n' "Enter to select"
-      printf '%s\n' "Esc to cancel"
-      ;;
-    simulate-work)
-      printf '%s\n' "• Working (simulated)"
-      sleep 1
-      printf '%s\n' "${prompt}"
-      ${signalWaiting}
-      ;;
-    exit-now)
-      exit 0
-      ;;
-    *)
-      printf '%s\n' "ack: $line"
-      printf '%s\n' "${prompt}"
-      ${signalWaiting}
-      ;;
-  esac
-done
+${readLoop}
 `;
 }
 
