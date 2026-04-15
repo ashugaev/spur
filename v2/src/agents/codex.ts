@@ -418,9 +418,7 @@ export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<st
 
 export type RolloutBaseline = Map<string, number>;
 
-export async function captureCodexRolloutBaseline(
-  sessionsDir: string,
-): Promise<RolloutBaseline> {
+export async function captureCodexRolloutBaseline(sessionsDir: string): Promise<RolloutBaseline> {
   const baseline: RolloutBaseline = new Map();
   let files: string[];
   try {

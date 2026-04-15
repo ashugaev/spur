@@ -1633,9 +1633,7 @@ export class SessionService {
   ): Promise<void> {
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
     const codexSessionsDir =
-      session.agent === "codex"
-        ? join(codexHookHomePath(sessionToolDir), "sessions")
-        : null;
+      session.agent === "codex" ? join(codexHookHomePath(sessionToolDir), "sessions") : null;
     const baseline: RolloutBaseline | null = codexSessionsDir
       ? await captureCodexRolloutBaseline(codexSessionsDir)
       : null;

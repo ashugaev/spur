@@ -61,9 +61,7 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
-const codexHookHomePathMock = vi.fn(
-  (sessionToolDir: string) => `${sessionToolDir}/codex-home`,
-);
+const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
 const captureCodexRolloutBaselineMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 

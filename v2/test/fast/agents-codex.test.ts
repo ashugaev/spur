@@ -472,10 +472,14 @@ function makeAsyncIterable(lines: string[]) {
     [Symbol.asyncIterator]: () => {
       let i = 0;
       return {
-        next: () =>
-          i < lines.length
-            ? Promise.resolve({ value: lines[i++]!, done: false })
-            : Promise.resolve({ value: undefined, done: true }),
+        next: () => {
+          if (i >= lines.length) {
+            return Promise.resolve({ value: undefined, done: true });
+          }
+          const value = requireValue(lines[i], "line index out of range");
+          i += 1;
+          return Promise.resolve({ value, done: false });
+        },
       };
     },
     close: () => {
@@ -504,7 +508,7 @@ function mockStreamsForFiles(mapping: Record<string, string[]>) {
     const callCount = mockCreateInterface.mock.calls.length;
     const keys = Object.keys(mapping);
     const key = keys[callCount - 1];
-    const lines = key ? mapping[key] ?? [] : [];
+    const lines = key ? (mapping[key] ?? []) : [];
     return makeAsyncIterable(lines);
   });
 }
@@ -518,9 +522,7 @@ describe("captureCodexRolloutBaseline", () => {
 
   it("returns correct byte sizes for existing jsonl files", async () => {
     mockFlatJsonlDir("/sessions", ["a.jsonl", "b.jsonl"]);
-    mockStat
-      .mockResolvedValueOnce({ size: 100 })
-      .mockResolvedValueOnce({ size: 200 });
+    mockStat.mockResolvedValueOnce({ size: 100 }).mockResolvedValueOnce({ size: 200 });
 
     const result = await captureCodexRolloutBaseline("/sessions");
     expect(result.get("/sessions/a.jsonl")).toBe(100);
@@ -649,10 +651,7 @@ describe("scanCodexRolloutForMessage", () => {
       payload: { type: "user_message", message: "valid" },
     });
     mockFlatJsonlDir("/sessions", ["rollout.jsonl"]);
-    mockStreamForFile("/sessions/rollout.jsonl", [
-      "not valid json {{{",
-      goodLine,
-    ]);
+    mockStreamForFile("/sessions/rollout.jsonl", ["not valid json {{{", goodLine]);
 
     const result = await scanCodexRolloutForMessage("/sessions", "valid", new Map());
     expect(result.found).toBe(true);
