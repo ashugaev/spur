@@ -2785,7 +2785,7 @@ projects:
     expect(controllerPane).toMatch(/no claude resume state|Failed to restore/);
   });
 
-  it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
+  it("manual sidecar start and stop toggles the --dev tmux session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-devserver-start-${port}`;
@@ -2831,16 +2831,46 @@ projects:
       ).stdout,
     ) as SessionView;
 
-    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/dev/start`, {
-      method: "POST",
-    });
-
     const devSessionName = `${spawned.id}--dev`;
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
     const devSessionAlive = await pollUntil(() => tmuxSessionExists(devSessionName), {
       timeoutMs: 10_000,
       accept: (v) => v === true,
     });
     expect(devSessionAlive).toBe(true);
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "stop",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+    const devSessionStopped = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === false,
+    });
+    expect(devSessionStopped).toBe(false);
+
+    const sidecarEvents = readEventLog(context.dataDir)
+      .map((e) => e.event)
+      .filter((ev) => typeof ev === "string" && ev.startsWith("session.sidecar"));
+    expect(sidecarEvents).toContain("session.sidecar.started");
+    expect(sidecarEvents).toContain("session.sidecar.stopped");
   });
 
   it("spawn with autoStart: true creates the --dev tmux session", async () => {

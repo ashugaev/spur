@@ -68,6 +68,32 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
   );
 }
 
+function PlayIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="currentColor"
+      viewBox="0 0 16 16"
+    >
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="currentColor"
+      viewBox="0 0 16 16"
+    >
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -274,6 +300,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+    setBusyAction(`sidecar:${action}:${sidecarName}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(payload));
+      setError(null);
+    } catch (sidecarError) {
+      setError(
+        sidecarError instanceof Error
+          ? sidecarError.message
+          : `Failed to ${action} sidecar ${sidecarName}`,
+      );
     } finally {
       setBusyAction(null);
     }
@@ -761,6 +809,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
+                        <button
+                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={busyAction !== null}
+                          onClick={() =>
+                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                          }
+                          type="button"
+                        >
+                          {sc.alive ? <StopIcon /> : <PlayIcon />}
+                        </button>
                         {sc.alive && canAttach ? (
                           <button
                             type="button"

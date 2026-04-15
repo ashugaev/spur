@@ -51,6 +51,64 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(sidecarTermBtn).not.toBeDisabled();
   });
 
+  test("offline sidecar shows play button", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", false, { id: "sc-start-1" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(sidecarSection.getByRole("button", { name: "Start sidecar dev" })).toBeVisible();
+  });
+
+  test("alive sidecar shows stop button", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", true, { id: "sc-stop-1" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const sidecarSection = page.locator("section").filter({ hasText: "Sidecars" });
+    await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+  });
+
+  test("clicking play updates the sidecar row to alive without leaving the page", async ({ page }) => {
+    const session = makeSessionWithSidecar("dev", false, { id: "sc-start-click-1" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSessionWithSidecar("dev", true, { id: session.id })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const startButton = page.getByRole("button", { name: "Start sidecar dev" });
+    await startButton.click();
+
+    await expect(page.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/sessions/${session.id}$`));
+  });
+
+  test("clicking stop updates the sidecar row to offline without leaving the page", async ({
+    page,
+  }) => {
+    const session = makeSessionWithSidecar("dev", true, { id: "sc-stop-click-1" });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/sidecars/dev/stop`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSessionWithSidecar("dev", false, { id: session.id })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    const stopButton = page.getByRole("button", { name: "Stop sidecar dev" });
+    await stopButton.click();
+
+    await expect(page.getByRole("button", { name: "Start sidecar dev" })).toBeVisible();
+    await expect(page).toHaveURL(new RegExp(`/sessions/${session.id}$`));
+  });
+
   test("dead sidecar shows offline status and no terminal button", async ({ page }) => {
     const session = makeSessionWithSidecar("dev", false, {
       id: "sc-dead-1",
