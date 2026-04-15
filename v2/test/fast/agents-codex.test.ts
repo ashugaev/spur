@@ -493,19 +493,14 @@ function mockFlatJsonlDir(dir: string, files: string[]) {
   mockLstat.mockResolvedValue({ isDirectory: () => false });
 }
 
-function mockStreamForFile(filePath: string, lines: string[]) {
+function mockStreamForFile(_filePath: string, lines: string[]) {
   mockCreateReadStream.mockReturnValue({});
-  mockCreateInterface.mockImplementation(() => {
-    return makeAsyncIterable(lines);
-  });
+  mockCreateInterface.mockReturnValue(makeAsyncIterable(lines));
 }
 
 function mockStreamsForFiles(mapping: Record<string, string[]>) {
   mockCreateReadStream.mockReturnValue({});
-  mockCreateInterface.mockImplementation((_opts?: unknown) => {
-    // We track which call it is to map to the right file's lines.
-    // Since collectJsonlFiles returns files in order, the nth call to
-    // createInterface corresponds to the nth file.
+  mockCreateInterface.mockImplementation(() => {
     const callCount = mockCreateInterface.mock.calls.length;
     const keys = Object.keys(mapping);
     const key = keys[callCount - 1];

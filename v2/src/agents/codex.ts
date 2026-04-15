@@ -416,10 +416,6 @@ export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<st
   return codexDir;
 }
 
-// ---------------------------------------------------------------------------
-// Rollout JSONL scanning for submit acknowledgment
-// ---------------------------------------------------------------------------
-
 export type RolloutBaseline = Map<string, number>;
 
 export async function captureCodexRolloutBaseline(
