@@ -29,6 +29,13 @@ function serviceEventData(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function requireBatch<T>(value: T | null, message: string): T {
+  if (!value) {
+    throw new Error(message);
+  }
+  return value;
+}
+
 describe("isGitHubEventData", () => {
   it("returns true for valid data", () => {
     expect(isGitHubEventData(githubEventData())).toBe(true);
@@ -77,7 +84,7 @@ describe("createSendBatchParser", () => {
       const parse = createSendBatchParser("github", "proj", "src-1");
       const batch = parse(githubEventData());
       expect(batch).not.toBeNull();
-      expect(batch!.sessionId).toBe("api-1");
+      expect(requireBatch(batch, "expected github batch").sessionId).toBe("api-1");
     });
 
     it("returns null for non-github data", () => {
@@ -91,7 +98,7 @@ describe("createSendBatchParser", () => {
       const parse = createSendBatchParser("service", "proj", "src-1");
       const batch = parse(serviceEventData());
       expect(batch).not.toBeNull();
-      expect(batch!.sessionId).toBe("api-1");
+      expect(requireBatch(batch, "expected service batch").sessionId).toBe("api-1");
     });
 
     it("returns null for non-service data", () => {
@@ -112,7 +119,7 @@ describe("createSendBatchParser", () => {
 describe("GitHub batch", () => {
   function makeBatch(overrides: Record<string, unknown> = {}) {
     const parse = createSendBatchParser("github", "proj", "src-1");
-    return parse(githubEventData(overrides))!;
+    return requireBatch(parse(githubEventData(overrides)), "expected github batch");
   }
 
   it("merge() updates signals, prNumber, and prTitle", () => {
@@ -127,8 +134,9 @@ describe("GitHub batch", () => {
         prTitle: "updated title",
         signals: [{ key: "ci_failed", kind: "ci_failed", text: "CI is red" }],
       }),
-    )!;
-    batch.merge(next);
+    );
+    const nextBatch = requireBatch(next, "expected github batch update");
+    batch.merge(nextBatch);
     const formatted = batch.format();
     expect(formatted).toContain("#99");
     expect(formatted).toContain("updated title");
@@ -200,7 +208,7 @@ describe("GitHub batch", () => {
 
   it("format() with custom prompt uses the prompt instead of action lines", () => {
     const parse = createSendBatchParser("github", "proj", "src-1", "Custom instruction");
-    const batch = parse(githubEventData())!;
+    const batch = requireBatch(parse(githubEventData()), "expected github batch");
     const formatted = batch.format();
     expect(formatted).toContain("Custom instruction");
     expect(formatted).not.toContain("Review the latest GitHub updates");
@@ -210,7 +218,7 @@ describe("GitHub batch", () => {
 describe("Service batch", () => {
   function makeBatch(prompt?: string) {
     const parse = createSendBatchParser("service", "proj", "src-1", prompt);
-    return parse(serviceEventData())!;
+    return requireBatch(parse(serviceEventData()), "expected service batch");
   }
 
   it("merge() accumulates ruleIds", () => {
@@ -219,8 +227,8 @@ describe("Service batch", () => {
       "service",
       "proj",
       "src-1",
-    )(serviceEventData({ ruleId: "timeout" }))!;
-    batch.merge(next);
+    )(serviceEventData({ ruleId: "timeout" }));
+    batch.merge(requireBatch(next, "expected service batch update"));
     const formatted = batch.format();
     expect(formatted).toContain("crash");
     expect(formatted).toContain("timeout");
@@ -232,8 +240,8 @@ describe("Service batch", () => {
       "service",
       "proj",
       "src-1",
-    )(serviceEventData({ ruleId: "alpha" }))!;
-    batch.merge(next);
+    )(serviceEventData({ ruleId: "alpha" }));
+    batch.merge(requireBatch(next, "expected service batch update"));
     const formatted = batch.format();
     expect(formatted).toContain("web");
     expect(formatted).toContain("Triggered rules: alpha, crash");

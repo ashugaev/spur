@@ -45,6 +45,14 @@ import {
 
 const mockCreateReadStream = createReadStream as ReturnType<typeof vi.fn>;
 const mockCreateInterface = createInterface as ReturnType<typeof vi.fn>;
+
+function requireValue<T>(value: T | null | undefined, message: string): T {
+  if (value === null || value === undefined) {
+    throw new Error(message);
+  }
+  return value;
+}
+
 const mockExistsSync = existsSync as ReturnType<typeof vi.fn>;
 const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
 const mockReadFile = readFile as ReturnType<typeof vi.fn>;
@@ -216,7 +224,9 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
     );
     expect(writeCall).toBeDefined();
-    const content = JSON.parse(writeCall![1] as string) as {
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
     };
     expect(content.hooks.SessionStart).toBeDefined();
@@ -232,7 +242,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey]!;
+      const groups = requireValue(content.hooks[groupKey], `expected hook group ${groupKey}`);
       const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
@@ -260,12 +270,14 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
     );
-    const content = JSON.parse(writeCall![1] as string) as {
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
     };
 
     // SessionStart should preserve the echo hello command AND add SPUR command
-    const sessionStart = content.hooks["SessionStart"]!;
+    const sessionStart = requireValue(content.hooks["SessionStart"], "expected SessionStart hook");
     const commands = sessionStart.flatMap((g) => g.hooks.map((h) => h.command));
     expect(commands).toContain("echo hello");
     expect(commands).toContain(SPUR_COMMAND);
@@ -284,7 +296,9 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
     );
-    const content = JSON.parse(writeCall![1] as string) as {
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
     };
 
@@ -296,7 +310,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey]!;
+      const groups = requireValue(content.hooks[groupKey], `expected hook group ${groupKey}`);
       const hasSpurCommand = groups.some((g) => g.hooks.some((h) => h.command === SPUR_COMMAND));
       expect(hasSpurCommand).toBe(true);
     }
@@ -324,7 +338,9 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("hooks.json"),
     );
-    const content = JSON.parse(writeCall![1] as string) as {
+    const content = JSON.parse(
+      requireValue(writeCall, "expected hooks.json write")[1] as string,
+    ) as {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
     };
 
@@ -336,7 +352,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
       "PostToolUse",
       "Stop",
     ] as const) {
-      const groups = content.hooks[groupKey]!;
+      const groups = requireValue(content.hooks[groupKey], `expected hook group ${groupKey}`);
       const spurCount = groups
         .flatMap((g) => g.hooks)
         .filter((h) => h.command === SPUR_COMMAND).length;
