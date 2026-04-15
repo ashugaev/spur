@@ -566,7 +566,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               ) : null}
 
               {/* Queued messages */}
-              {session.queuedMessages.messages.length > 0 || session.queuedMessages.awaitingPrompt ? (
+              {session.queuedMessages.messages.length > 0 ||
+              session.queuedMessages.awaitingPrompt ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Queued messages
