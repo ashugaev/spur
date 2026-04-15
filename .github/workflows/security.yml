@@ -38,25 +38,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          # pnpm 10 uses the bulk advisory endpoint; the legacy v1 endpoint
-          # that pnpm 9 queries was retired and now returns HTTP 410.
-          # `standalone: true` bypasses the repo-wide packageManager pin so the
-          # audit job can run a newer pnpm without touching package.json.
-          version: 10
-          standalone: true
-          dest: ${{ runner.temp }}/pnpm-setup
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Install pnpm 10
+        # pnpm 9 queries the legacy v1 audit endpoint which npm retired
+        # (HTTP 410). pnpm 10 uses the bulk advisory endpoint. Installing via
+        # npm here avoids `pnpm/action-setup` rejecting a version mismatch
+        # against the repo-wide `packageManager` pin.
+        run: npm install -g pnpm@10
 
       - name: Run npm audit
         run: pnpm audit --audit-level=moderate
