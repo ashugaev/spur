@@ -144,7 +144,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_PORT=14801
-Environment=DIRECT_TERMINAL_PUBLIC_PORT=5555
+Environment=DIRECT_TERMINAL_PUBLIC_PORT=443
 ExecStart=/usr/bin/pnpm ui:start
 Restart=always
 RestartSec=3

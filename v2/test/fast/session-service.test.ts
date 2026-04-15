@@ -1300,6 +1300,40 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it.fails(
+    "should classify the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes",
+    async () => {
+      vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
+      readSessionMock.mockReturnValue({
+        id: "spur-1c0e",
+        project: "api",
+        agent: "codex",
+        prompt: "header project select",
+        branch: "feature/header-project-select",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/spur-1c0e",
+        tmuxSession: "spur-1c0e",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        status: "running",
+        createdAt: "2026-04-14T13:34:40.615Z",
+        updatedAt: "2026-04-14T13:46:31.938Z",
+      });
+      readAgentHookStateMock.mockReturnValue({
+        state: "working",
+        updatedAt: "2026-04-14T13:45:22.442Z",
+        hookEvent: "PreToolUse",
+        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+
+      const result = await service.get("spur-1c0e");
+
+      expect(result.state).toBe("waiting");
+    },
+  );
+
   it("Claude: defaults to working when no JSONL exists yet", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -3187,6 +3221,94 @@ describe("SessionService", () => {
     await expect(service.restore("api-1")).rejects.toThrow("Session is not restorable: api-1");
     expect(buildAgentRestorePlanMock).not.toHaveBeenCalled();
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to fresh launch when codex resume submit times out during restore", async () => {
+    vi.useRealTimers();
+
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      initialMessage: "restore prompt",
+      readyMarkers: ["›"],
+    });
+    buildAgentLaunchPlanMock.mockReturnValue({
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      initialMessage: "restore prompt",
+      readyMarkers: ["OpenAI Codex", "›"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      hookEvent: "Stop",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    // Make submit ack fail for the resume attempt, succeed for the fresh launch.
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexHookBaseline").mockResolvedValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      hookEvent: "Stop",
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexSubmitAck")
+      .mockResolvedValueOnce(false) // resume attempt 0
+      .mockResolvedValueOnce(false) // resume retry
+      .mockResolvedValue(true); // fresh launch succeeds
+
+    const restored = await service.restore("api-1");
+
+    // Verify resume was attempted first, then fresh launch was used.
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(2);
+    expect(createTmuxSessionMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        launchCommand: expect.stringContaining("codex resume"),
+      }),
+    );
+    expect(createTmuxSessionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        launchCommand: expect.not.stringContaining("resume"),
+      }),
+    );
+    expect(killTmuxSessionMock).toHaveBeenCalled();
+    expect(deleteAgentHookStateMock).toHaveBeenCalledWith("/tmp/spur-data", "api-1");
+    expect(restored.id).toBe("api-1");
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.restore.resume_fallback",
+        level: "warn",
+        sessionId: "api-1",
+      }),
+    );
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.restore.completed",
+      }),
+    );
   });
 
   it("startSidecar rejects when project has no matching sidecar configured", async () => {

@@ -100,8 +100,8 @@ async function parseManifest(): Promise<Map<string, string>> {
   const entries = new Map<string, string>();
   for (const line of content.trim().split("\n")) {
     const match = line.match(/^([a-f0-9]{64})\s+(.+)$/);
-    if (match) {
-      entries.set(match[2]!, match[1]!);
+    if (match?.[1] && match[2]) {
+      entries.set(match[2], match[1]);
     }
   }
   return entries;
@@ -190,6 +190,7 @@ describe("Codex hook state fixture classification", () => {
     ["working-pre-tool-use.json", "working"],
     ["working-post-tool-use.json", "working"],
     ["working-spur-436f.json", "working"],
+    ["stale-working-spur-1c0e.json", "working"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CODEX_DIR, fixture), "utf8");
     const parsed = JSON.parse(content) as { state: string };
@@ -209,8 +210,39 @@ describe("Codex hook state fixture classification", () => {
     expect(hookState.state).toBe("working");
     expect(hookState.turnId).toBeTruthy();
     expect(lines).toHaveLength(20);
-    expect(lines.some((line) => line.includes(hookState.turnId!))).toBe(true);
+    const turnId = hookState.turnId;
+    if (!turnId) {
+      throw new Error("expected spur-436f fixture to include turnId");
+    }
+    expect(lines.some((line) => line.includes(turnId))).toBe(true);
     expect(lines.some((line) => line.includes("Process running with session ID"))).toBe(true);
+  });
+
+  it("captures the spur-1c0e tail where the rollout completed after a stale working hook snapshot", async () => {
+    const hookContent = await readFile(join(CODEX_DIR, "stale-working-spur-1c0e.json"), "utf8");
+    const hookState = JSON.parse(hookContent) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+    const jsonlContent = await readFile(
+      join(CODEX_DIR, "stale-working-spur-1c0e-tail.jsonl"),
+      "utf8",
+    );
+    const lines = jsonlContent.trim().split("\n").filter(Boolean);
+
+    expect(hookState.state).toBe("working");
+    expect(hookState.hookEvent).toBe("PreToolUse");
+    expect(hookState.turnId).toBeTruthy();
+    expect(lines).toHaveLength(40);
+    const turnId = hookState.turnId;
+    if (!turnId) {
+      throw new Error("expected spur-1c0e fixture to include turnId");
+    }
+    expect(lines.some((line) => line.includes(turnId))).toBe(true);
+    expect(
+      lines.some((line) => line.includes('"type":"task_complete"') && line.includes(turnId)),
+    ).toBe(true);
   });
 
   it("absent hook file → readAgentHookState returns null → classified as waiting (SPUR1614 regression)", async () => {
@@ -262,9 +294,12 @@ describe("Codex hook state fixture classification", () => {
         expect(state, `readAgentHookState for ${fixture}`).not.toBeNull();
 
         const parsed = JSON.parse(content) as { state: string; hookEvent?: string };
-        expect(state!.state).toBe(parsed.state);
+        if (!state) {
+          throw new Error(`expected readAgentHookState to return data for ${fixture}`);
+        }
+        expect(state.state).toBe(parsed.state);
         if (parsed.hookEvent) {
-          expect(state!.hookEvent).toBe(parsed.hookEvent);
+          expect(state.hookEvent).toBe(parsed.hookEvent);
         }
       }
     } finally {

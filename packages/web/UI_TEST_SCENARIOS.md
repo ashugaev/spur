@@ -82,11 +82,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
-### D6b: Footer build version
+### D6b: Footer
 
-- Footer right side shows a build version string in `YYYYMMDD.HHmmss` format (UTC)
-- Version is static (no ticking), set at build time
-- Falls back to `dev` in development when no build version is injected
+- Footer is visible after page load
+- Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
+- Footer left side shows Online status when daemon is reachable
 
 ### D6c: Footer resource metrics
 

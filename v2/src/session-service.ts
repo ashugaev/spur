@@ -451,6 +451,13 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function sessionSidecarNames(
+  session: Pick<SessionRecord, "sidecarNames">,
+  project?: Pick<ProjectConfig, "sidecars">,
+): string[] {
+  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
 async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
@@ -1263,6 +1270,9 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
         ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
@@ -1825,7 +1835,14 @@ export class SessionService {
       },
     });
 
-    const updated: SessionRecord = { ...session, updatedAt: nowIso() };
+    const sidecarNames = sessionSidecarNames(session, project);
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+      ...(sidecarNames.includes(sidecarName)
+        ? {}
+        : { sidecarNames: [...sidecarNames, sidecarName] }),
+    };
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.started", {
       level: "info",
@@ -1842,8 +1859,8 @@ export class SessionService {
   }
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
-    const project = this.config.projects[session.project];
-    for (const scName of Object.keys(project?.sidecars ?? {})) {
+    const project = this.resolveProjectForSession(session);
+    for (const scName of sessionSidecarNames(session, project)) {
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -2241,15 +2258,15 @@ export class SessionService {
       });
       const planMode = resolvePlanMode(current);
       const restorePrompt = buildRestorePrompt(current.prompt);
+      const planOptions = withPlanMode(hookSetup, planMode);
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,
         restorePrompt,
-        withPlanMode(hookSetup, planMode),
+        planOptions,
       );
       const effectivePlan =
-        launchPlan ??
-        buildAgentLaunchPlan(current.agent, restorePrompt, withPlanMode(hookSetup, planMode));
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
@@ -2272,40 +2289,79 @@ export class SessionService {
             current.agent,
             restoredAgentSessionId,
             effectivePlan.launchCommand,
-            withPlanMode(hookSetup, planMode),
+            planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
           restoreReadyMarkers = resumePlan.readyMarkers;
         }
       }
       restoredLaunchCommand = restoreLaunchCommand;
+      const restoreProject = this.config.projects[current.project];
+      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
+      const env = buildSessionEnv({
+        agent: current.agent,
+        projectId: current.project,
+        sessionId: current.id,
+        sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: this.getProject(current.project).path,
+        symlinks: this.getProject(current.project).symlinks,
+      });
+
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
         agent: current.agent,
-        env: buildSessionEnv({
-          agent: current.agent,
-          projectId: current.project,
-          sessionId: current.id,
-          sessionToolDir,
-          dataDir: this.config.dataDir,
-          repoPath: this.getProject(current.project).path,
-          symlinks: this.getProject(current.project).symlinks,
-        }),
+        env,
       });
       await syncTmuxStatus(current.tmuxSession, current.slots);
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
       const restoreInitialMessage = buildInitialMessage(
         effectivePlan.initialMessage,
         restoreSidecarNames,
       );
-      await this.sendAgentMessage(current, restoreInitialMessage);
+      try {
+        await this.sendAgentMessage(current, restoreInitialMessage);
+      } catch (sendError) {
+        // Codex resume doesn't reliably fire hooks, so submit acknowledgment
+        // can time out. When a native resume plan was used, fall back to a
+        // fresh launch instead of failing the entire restore.
+        if (!launchPlan || current.agent !== "codex") {
+          throw sendError;
+        }
+        const failure = sendError instanceof Error ? sendError.message : String(sendError);
+        this.logEvent("session.restore.resume_fallback", {
+          level: "warn",
+          sessionId,
+          projectId: current.project,
+          message: `Codex resume submit failed for ${sessionId}; retrying with fresh launch`,
+          details: { failure },
+        });
+        await killTmuxSession(current.tmuxSession);
+        deleteAgentHookState(this.config.dataDir, sessionId);
+        const freshPlan = buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
+        restoredLaunchCommand = freshPlan.launchCommand;
+        await createTmuxSession({
+          sessionName: current.tmuxSession,
+          cwd: current.worktreePath,
+          launchCommand: freshPlan.launchCommand,
+          agent: current.agent,
+          env,
+        });
+        await syncTmuxStatus(current.tmuxSession, current.slots);
+        await waitForTmuxReady(current.tmuxSession, freshPlan.readyMarkers);
+        if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
+          throw new Error(`Agent ${current.agent} exited before restore became ready`, {
+            cause: sendError,
+          });
+        }
+        const freshMessage = buildInitialMessage(freshPlan.initialMessage, restoreSidecarNames);
+        await this.sendAgentMessage(current, freshMessage);
+      }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -2929,9 +2985,9 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
-    const projectSidecars = this.resolveProjectForSession(session)?.sidecars ?? {};
+    const project = this.resolveProjectForSession(session);
     const sidecars: { name: string; alive: boolean }[] = [];
-    for (const name of Object.keys(projectSidecars)) {
+    for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
 

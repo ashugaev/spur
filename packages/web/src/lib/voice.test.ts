@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateInterface = vi.fn();
 const mockExecFile = vi.fn();
@@ -119,6 +119,8 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
 describe("voice runtime", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.resetModules();
     vi.clearAllMocks();
     delete process.env["SPUR_CONFIG"];
@@ -131,6 +133,11 @@ describe("voice runtime", () => {
     mockWriteFile.mockResolvedValue(undefined);
     mockReadFile.mockResolvedValue("transcribed text");
     mockRm.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("surfaces invalid voice.provider instead of silently coercing it", async () => {

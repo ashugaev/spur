@@ -43,7 +43,10 @@ describe("appendEventLog", () => {
     const entries = readEventLog(dataDir);
     const ts = entries[0]?.timestamp;
     expect(ts).toBeTruthy();
-    expect(new Date(ts!).getTime()).not.toBeNaN();
+    if (!ts) {
+      throw new Error("expected timestamp to be present");
+    }
+    expect(new Date(ts).getTime()).not.toBeNaN();
   });
 
   it("preserves an explicit timestamp", () => {
@@ -137,8 +140,8 @@ describe("readSessionEventLog", () => {
     expect(readSessionEventLog(dataDir, "api-1", { scope: "service" })).toEqual([
       expect.objectContaining({ event: "service.output", message: "SERVICE_BOOT" }),
     ]);
-    expect(readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" })).toEqual([
-      expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" }),
-    ]);
+    expect(
+      readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" }),
+    ).toEqual([expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" })]);
   });
 });

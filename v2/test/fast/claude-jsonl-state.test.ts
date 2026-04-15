@@ -213,7 +213,11 @@ describe("parseConversationLines", () => {
     });
     const { messages } = parseConversationLines(lines, NOW);
     expect(messages).toHaveLength(1);
-    expect(messages[0]!.text).toBe("Let me read that.");
+    const firstMessage = messages[0];
+    if (!firstMessage) {
+      throw new Error("expected one parsed message");
+    }
+    expect(firstMessage.text).toBe("Let me read that.");
   });
 
   it("handles string content (user prompt via spur send)", () => {
@@ -262,7 +266,10 @@ describe("parseConversationLines", () => {
         tailRecords: [],
       });
       expect(result).not.toBeNull();
-      expect(result!.state).toBe("needs_input");
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.state).toBe("needs_input");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -288,7 +295,10 @@ describe("parseConversationLines", () => {
         tailRecords: [],
       });
       expect(result).not.toBeNull();
-      expect(result!.state).toBe("working");
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.state).toBe("working");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

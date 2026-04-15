@@ -10,6 +10,7 @@ coverage/
 *.patch
 *-context.md
 packages/web/screenshots/
+packages/web/test-results/
 
 # Environment files (secrets)
 .env
