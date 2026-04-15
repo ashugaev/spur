@@ -289,7 +289,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" [start|stop] --name <name>\` (default: \`start\`). Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -1852,46 +1852,6 @@ export class SessionService {
       details: {
         sidecarName,
         command: sidecar.command,
-        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
-      },
-    });
-    return this.enrich(updated);
-  }
-
-  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
-    }
-
-    const project = this.resolveProjectForSession(session);
-    const alive = await sidecarTmuxAlive(sessionId, sidecarName);
-    const knownSidecar =
-      alive ||
-      sessionSidecarNames(session, project).includes(sidecarName) ||
-      Boolean(project?.sidecars[sidecarName]);
-
-    if (!knownSidecar) {
-      throw new Error(`Project ${session.project} has no sidecar "${sidecarName}" configured`);
-    }
-    if (!alive) {
-      return this.enrich(session);
-    }
-
-    await killSidecarTmux(sessionId, sidecarName);
-
-    const updated: SessionRecord = {
-      ...session,
-      updatedAt: nowIso(),
-    };
-    writeSession(this.config.dataDir, updated);
-    this.logEvent("session.sidecar.stopped", {
-      level: "info",
-      sessionId,
-      projectId: session.project,
-      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
-      details: {
-        sidecarName,
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });

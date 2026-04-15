@@ -362,18 +362,9 @@ export async function startServer(
         return;
       }
 
-      const sidecarActionMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/(start|stop)$/);
-      if (method === "POST" && sidecarActionMatch?.[1] && sidecarActionMatch[2]) {
-        const sessionId = sidecarActionMatch[1];
-        const sidecarName = sidecarActionMatch[2];
-        const action = sidecarActionMatch[3];
-        sendJson(
-          response,
-          200,
-          action === "start"
-            ? await service.startSidecar(sessionId, sidecarName)
-            : await service.stopSidecar(sessionId, sidecarName),
-        );
+      const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
+      if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
         return;
       }
 

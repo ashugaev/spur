@@ -1707,9 +1707,9 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-  const sidecar = program.command("sidecar", { hidden: true }).description("Internal sidecar management.");
-
-  sidecar
+  program
+    .command("sidecar", { hidden: true })
+    .description("Internal sidecar management.")
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
@@ -1734,35 +1734,6 @@ export function createProgram(cliEntrypoint: string): Command {
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
-        render: renderSessionCard,
-      });
-    });
-
-  sidecar
-    .command("stop")
-    .requiredOption("--session <id>", "Session id")
-    .requiredOption("--name <name>", "Sidecar name")
-    .option("--json", "Print raw JSON")
-    .action(async (options, command) => {
-      if (process.env["SPUR_SIDECAR_NAME"]) {
-        throw new Error(
-          `Cannot stop sidecar "${options.name as string}" from inside sidecar "${process.env["SPUR_SIDECAR_NAME"]}". Stop sidecars only from the main session shell.`,
-        );
-      }
-      const configPath = prepareInstanceConfig(
-        (command.parent as Command).parent as Command,
-      ).configPath;
-      await outputResult({
-        json: Boolean(options.json),
-        label: "stopping sidecar",
-        action: () =>
-          postJson<SessionView>(
-            cliEntrypoint,
-            `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
-            {},
-            configPath,
-          ),
-        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
     });

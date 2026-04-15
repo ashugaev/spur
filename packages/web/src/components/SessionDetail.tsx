@@ -129,22 +129,6 @@ function formatDuration(ms: number): string {
   return "<1m";
 }
 
-function SidecarPlayIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M5 3.5v9l7-4.5-7-4.5Z" />
-    </svg>
-  );
-}
-
-function SidecarStopIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor">
-      <rect x="4" y="4" width="8" height="8" />
-    </svg>
-  );
-}
-
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
@@ -216,11 +200,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     const timer = setInterval(() => void loadConversation(), POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [loadConversation]);
-
-  const applySessionPayload = useCallback((payload: SpurSessionView) => {
-    setSession(toDashboardSession(payload));
-    setError(null);
-  }, []);
 
   useEffect(() => {
     const lastMessage = conversation?.messages.at(-1);
@@ -295,27 +274,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
-    const sidecarActionId = `sidecar:${action}:${sidecarName}`;
-    setBusyAction(sidecarActionId);
-    try {
-      const response = await fetch(
-        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
-        { method: "POST" },
-      );
-      if (!response.ok) throw new Error(await response.text());
-      applySessionPayload((await response.json()) as SpurSessionView);
-    } catch (actionError) {
-      setError(
-        actionError instanceof Error
-          ? actionError.message
-          : `Failed to ${action} sidecar ${sidecarName}`,
-      );
     } finally {
       setBusyAction(null);
     }
@@ -789,7 +747,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 <div className="space-y-2">
                   {session.sidecars.map((sc) => (
-                    <div key={sc.name} className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5">
+                    <div
+                      key={sc.name}
+                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                    >
                       <div className="flex items-center gap-2">
                         <span
                           className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-green-400" : "bg-[var(--color-text-tertiary)]"}`}
@@ -800,29 +761,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {sc.alive ? (
-                          <button
-                            type="button"
-                            aria-label={`Stop sidecar ${sc.name}`}
-                            title={`Stop sidecar ${sc.name}`}
-                            disabled={busyAction !== null}
-                            className="border border-[var(--color-status-error)] px-2 py-1 text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
-                            onClick={() => void handleSidecarAction(sc.name, "stop")}
-                          >
-                            <SidecarStopIcon />
-                          </button>
-                        ) : session.status === "running" || session.status === "paused" ? (
-                          <button
-                            type="button"
-                            aria-label={`Start sidecar ${sc.name}`}
-                            title={`Start sidecar ${sc.name}`}
-                            disabled={busyAction !== null || !session.workspaceExists}
-                            className="border border-[var(--color-status-ready)] px-2 py-1 text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
-                            onClick={() => void handleSidecarAction(sc.name, "start")}
-                          >
-                            <SidecarPlayIcon />
-                          </button>
-                        ) : null}
                         {sc.alive && canAttach ? (
                           <button
                             type="button"

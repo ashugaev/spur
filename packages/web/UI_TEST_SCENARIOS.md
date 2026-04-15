@@ -253,10 +253,6 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sidecars section visible in session detail sidebar when session has sidecars
 - Each sidecar shows name and alive/offline status
-- Offline sidecars show an icon-only start control with `play` semantics
-- Alive sidecars show an icon-only stop control with `stop` semantics
-- Clicking start switches the row to `alive` and replaces play with stop
-- Clicking stop switches the row to `offline` and replaces stop with play
 - Terminal button visible only when sidecar is alive and session is attachable
 - `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
 - Clicking terminal button opens terminal modal for sidecar tmux session
