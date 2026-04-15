@@ -102,9 +102,9 @@ describe("Claude JSONL fixture classification", () => {
     expect(records.length).toBeGreaterThan(0);
     // Last record embeds ts 2026-04-07T22:45:14.391Z with no input.timeout →
     // default 3s window. +1s into the window → working.
-    expect(
-      classifyClaudeJsonlState(records, Date.parse("2026-04-07T22:45:15.391Z")),
-    ).toBe("working");
+    expect(classifyClaudeJsonlState(records, Date.parse("2026-04-07T22:45:15.391Z"))).toBe(
+      "working",
+    );
   });
 
   it("classifies tool_use past stale window as needs_input", async () => {
