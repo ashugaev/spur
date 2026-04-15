@@ -38,18 +38,28 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # npm retired the legacy v1 audit endpoint (HTTP 410) and current
-      # `pnpm audit` still queries it, so the prior check can no longer run.
-      # `osv-scanner` reads `pnpm-lock.yaml` directly and sources advisories
-      # from the OSV database — no dependency on the retired endpoint.
-      # Findings are informational: they live almost entirely in dev/build
-      # transitives (vite/rollup/esbuild/etc.), Dependabot already tracks
-      # them against `main`, and the prior `pnpm audit --prod` check would
-      # not have failed on them. Surface the report in logs but do not
-      # block PRs on vulnerabilities that also affect `main`.
-      - name: Run osv-scanner on the pnpm lockfile
-        uses: google/osv-scanner-action/osv-scanner-action@v2.3.5
-        continue-on-error: true
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
-          scan-args: |-
-            --lockfile=pnpm-lock.yaml
+          dest: ${{ runner.temp }}/pnpm-setup
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run npm audit
+        run: pnpm audit --audit-level=moderate
+        continue-on-error: true # Don't fail build on vulnerabilities in deps
+
+      - name: Run pnpm audit (strict)
+        run: pnpm audit --prod --audit-level=high
+        # pnpm still calls the retired npm /v1/security/audits endpoint
+        # (410 Gone). Dependabot already scans the default branch, so we
+        # surface this step as a soft signal until pnpm migrates to the
+        # bulk advisory endpoint.
+        continue-on-error: true

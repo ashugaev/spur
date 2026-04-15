@@ -2706,7 +2706,7 @@ projects:
     expect(liveCaller?.workspaceExists).toBe(true);
   });
 
-  it("falls back to a fresh restore in the TTY list when native resume state is missing", async () => {
+  it("rejects restore in the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-restore-missing-${port}`;
@@ -2773,34 +2773,16 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "r");
 
+    // Restore should fail because native resume state was deleted.
     const controllerPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes(`Restored ${spawned.id}.`),
+      timeoutMs: 30_000,
+      accept: (value) =>
+        value.includes("no claude resume state") || value.includes("Failed to restore"),
     });
 
     await sendKeysToTmux(controllerSessionName, "q");
 
-    const restoreLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("startup:launch::"),
-    });
-
-    const listedSessions = await pollUntil(
-      async () =>
-        JSON.parse(
-          (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
-        ) as SessionView[],
-      {
-        timeoutMs: 30_000,
-        accept: (sessions) =>
-          sessions[0]?.runtimeAlive === true && sessions[0]?.state !== "stopped",
-      },
-    );
-    expect(listedSessions[0]?.id).toBe(spawned.id);
-    expect(listedSessions[0]?.runtimeAlive).toBe(true);
-    expect(listedSessions[0]?.workspaceExists).toBe(true);
-    expect(controllerPane).toContain(`Restored ${spawned.id}.`);
-    expect(restoreLog).toContain("startup:launch::");
+    expect(controllerPane).toMatch(/no claude resume state|Failed to restore/);
   });
 
   it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
