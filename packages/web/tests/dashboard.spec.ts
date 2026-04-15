@@ -31,6 +31,12 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("completed toggle visible", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+    await expect(page.getByRole("switch", { name: /show completed tasks only/i })).toBeVisible();
+  });
+
   test("Filter select with All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -329,14 +335,54 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    // Completed sessions go into "done" zone which IS shown (but hidden by default if it had
-    // a "done" filter). The done zone label is "Done" per zoneConfig.
-    // The test scenario says "completed/killed sessions NOT visible by default" — meaning
-    // the done zone is hidden. But per the code, done zone IS shown (LANE_ORDER includes "done").
-    // The code shows done zone when grouped.done.length > 0.
-    // So completed session IS shown in done zone. Let's verify the done zone label IS shown.
+    await expect(page.getByText("Visible session")).toBeVisible();
+    await expect(page.getByText("Done zone session")).not.toBeVisible();
+    await expect(page.getByText("Done").first()).not.toBeVisible();
+  });
+
+  test("completed toggle shows only completed sessions", async ({ page }) => {
+    const working = makeWorkingSession({ id: "zone-visible-2", prompt: "Visible session two" });
+    const completed = makeCompletedSession({
+      id: "zone-done-2",
+      prompt: "Done zone session two",
+    });
+    await mockSessions(page, [working, completed]);
+    await page.goto("/");
+
+    await page.getByRole("switch", { name: /show completed tasks only/i }).click();
+
     await expect(page.getByText("Done").first()).toBeVisible();
-    await expect(page.getByText("Done zone session")).toBeVisible();
+    await expect(page.getByText("Done zone session two")).toBeVisible();
+    await expect(page.getByText("Visible session two")).not.toBeVisible();
+  });
+
+  test("turning completed toggle off restores active sessions", async ({ page }) => {
+    const working = makeWorkingSession({ id: "zone-visible-3", prompt: "Visible session three" });
+    const completed = makeCompletedSession({
+      id: "zone-done-3",
+      prompt: "Done zone session three",
+    });
+    await mockSessions(page, [working, completed]);
+    await page.goto("/");
+
+    const toggle = page.getByRole("switch", { name: /show completed tasks only/i });
+    await toggle.click();
+    await expect(page.getByText("Done zone session three")).toBeVisible();
+
+    await toggle.click();
+
+    await expect(page.getByText("Visible session three")).toBeVisible();
+    await expect(page.getByText("Done zone session three")).not.toBeVisible();
+  });
+
+  test("completed-only mode shows completed empty state when none exist", async ({ page }) => {
+    await mockSessions(page, [makeWorkingSession({ id: "zone-visible-4", prompt: "Active only" })]);
+    await page.goto("/");
+
+    await page.getByRole("switch", { name: /show completed tasks only/i }).click();
+
+    await expect(page.getByText(/no completed sessions are visible/i)).toBeVisible();
+    await expect(page.getByText("Active only")).not.toBeVisible();
   });
 
   test("zone count is shown", async ({ page }) => {

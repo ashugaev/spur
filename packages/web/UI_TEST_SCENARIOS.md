@@ -34,6 +34,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - 𖤓 icon + project title visible
 - Project filter dropdown with "All projects" default
+- Completed toggle visible
 - SPAWN_NEW_SESSION button visible
 
 ### D2: Header stats show correct counts
@@ -77,9 +78,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- 5 sections: RESPOND, REVIEW, PENDING, WORKING, DONE
+- Default dashboard shows current-session sections only; completed sessions are hidden
+- When Completed toggle is enabled, current-session sections are hidden and only completed sessions are shown
 - Each has colored dot + uppercase label + divider line + count
-- Empty sections show count "0", no "No sessions" message
+- Empty sections are omitted; when no sessions match the current mode/filter, the dashboard shows the empty state instead
 - Sessions sorted into correct sections by attention level
 
 ### D6b: Footer

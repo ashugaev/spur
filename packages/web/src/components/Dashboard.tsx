@@ -46,12 +46,23 @@ function deriveProjects(sessions: SpurSessionView[]): ProjectInfo[] {
     .map((id) => ({ id, name: id }));
 }
 
+function matchesSearchQuery(session: DashboardSession, query: string): boolean {
+  return (
+    session.id.toLowerCase().includes(query) ||
+    (session.title ?? "").toLowerCase().includes(query) ||
+    session.prompt.toLowerCase().includes(query) ||
+    session.projectName.toLowerCase().includes(query) ||
+    (session.branch ?? "").toLowerCase().includes(query)
+  );
+}
+
 function StatItem({
   icon,
   label,
   value,
   color,
   active,
+  disabled,
   onClick,
 }: {
   icon: React.ReactNode;
@@ -59,11 +70,14 @@ function StatItem({
   value: number | string;
   color?: string;
   active?: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }) {
   return (
     <button
-      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"}`}
+      aria-pressed={active}
+      className={`flex min-w-0 flex-row items-center justify-center gap-1.5 border px-1.5 py-0.5 transition sm:justify-start sm:shrink-0 ${active ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10" : "border-transparent hover:border-[var(--color-border-default)]"} ${disabled ? "cursor-not-allowed opacity-40 hover:border-transparent" : ""}`}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
@@ -178,6 +192,7 @@ export function Dashboard() {
     });
   }, []);
   const [activeStatFilter, setActiveStatFilter] = useState<AttentionLevel | null>(null);
+  const [showCompletedOnly, setShowCompletedOnly] = useState(false);
   const toggleStatFilter = (level: AttentionLevel) =>
     setActiveStatFilter((current) => (current === level ? null : level));
 
@@ -271,18 +286,33 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
-  const sessions = useMemo(() => {
+  const searchableSessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return allSessions;
-    return allSessions.filter(
-      (s) =>
-        s.id.toLowerCase().includes(q) ||
-        (s.title ?? "").toLowerCase().includes(q) ||
-        s.prompt.toLowerCase().includes(q) ||
-        s.projectName.toLowerCase().includes(q) ||
-        (s.branch ?? "").toLowerCase().includes(q),
-    );
+    return allSessions.filter((session) => matchesSearchQuery(session, q));
   }, [allSessions, searchQuery]);
+
+  const { activeSessions, completedSessions } = useMemo(() => {
+    const active: DashboardSession[] = [];
+    const completed: DashboardSession[] = [];
+    for (const session of searchableSessions) {
+      if (!isTerminalSession(session)) {
+        active.push(session);
+      }
+      if (session.status === "completed") {
+        completed.push(session);
+      }
+    }
+    return { activeSessions: active, completedSessions: completed };
+  }, [searchableSessions]);
+
+  const visibleSessions = useMemo(() => {
+    const source = showCompletedOnly ? completedSessions : activeSessions;
+    if (showCompletedOnly || activeStatFilter === null) {
+      return source;
+    }
+    return source.filter((session) => getAttentionLevel(session) === activeStatFilter);
+  }, [activeSessions, activeStatFilter, completedSessions, showCompletedOnly]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -292,21 +322,30 @@ export function Dashboard() {
       done: [],
     };
 
-    for (const session of sessions) {
+    for (const session of visibleSessions) {
       lanes[getAttentionLevel(session)].push(session);
     }
 
     return lanes;
-  }, [sessions]);
+  }, [visibleSessions]);
 
-  const stats = useMemo(
-    () => ({
-      respond: grouped.respond.length,
-      pending: grouped.pending.length,
-      working: grouped.working.length,
-    }),
-    [grouped],
-  );
+  const stats = useMemo(() => {
+    const counts = { respond: 0, pending: 0, working: 0 };
+    for (const session of activeSessions) {
+      switch (getAttentionLevel(session)) {
+        case "respond":
+          counts.respond += 1;
+          break;
+        case "pending":
+          counts.pending += 1;
+          break;
+        case "working":
+          counts.working += 1;
+          break;
+      }
+    }
+    return counts;
+  }, [activeSessions]);
 
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
@@ -477,6 +516,14 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
+  const toggleCompletedOnly = () => {
+    const next = !showCompletedOnly;
+    setShowCompletedOnly(next);
+    if (next) {
+      setActiveStatFilter(null);
+    }
+  };
+
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
     const session = allSessions.find((entry) => entry.id === requestedTerminalSessionId);
@@ -524,6 +571,7 @@ export function Dashboard() {
                 value={stats.respond}
                 color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
                 active={activeStatFilter === "respond"}
+                disabled={showCompletedOnly}
                 onClick={() => toggleStatFilter("respond")}
               />
               <StatItem
@@ -532,6 +580,7 @@ export function Dashboard() {
                 value={stats.working}
                 color={stats.working > 0 ? "var(--color-status-working)" : undefined}
                 active={activeStatFilter === "working"}
+                disabled={showCompletedOnly}
                 onClick={() => toggleStatFilter("working")}
               />
               <StatItem
@@ -540,6 +589,7 @@ export function Dashboard() {
                 value={stats.pending}
                 color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
                 active={activeStatFilter === "pending"}
+                disabled={showCompletedOnly}
                 onClick={() => toggleStatFilter("pending")}
               />
             </div>
@@ -564,6 +614,36 @@ export function Dashboard() {
               />
             </div>
             <div className="flex min-w-[280px] flex-1 items-center gap-2">
+              <button
+                aria-checked={showCompletedOnly}
+                aria-label="Show completed tasks only"
+                className={`inline-flex items-center gap-2 border px-2 py-1.5 font-bold uppercase tracking-[0.08em] transition ${
+                  showCompletedOnly
+                    ? "border-[var(--color-status-ready)] bg-[var(--color-status-ready)]/10 text-[var(--color-text-primary)]"
+                    : "border-[var(--color-border-default)] bg-[var(--color-bg-surface)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+                }`}
+                onClick={toggleCompletedOnly}
+                role="switch"
+                type="button"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`relative h-3.5 w-7 border transition ${
+                    showCompletedOnly
+                      ? "border-[var(--color-status-ready)] bg-[var(--color-status-ready)]/15"
+                      : "border-[var(--color-border-strong)] bg-[var(--color-bg-base)]"
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[1px] h-2.5 w-2.5 transition ${
+                      showCompletedOnly
+                        ? "left-[11px] bg-[var(--color-status-ready)]"
+                        : "left-[1px] bg-[var(--color-text-tertiary)]"
+                    }`}
+                  />
+                </span>
+                <span>Completed</span>
+              </button>
               <select
                 className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                 onChange={(event) => syncProjectFilter(event.target.value)}
@@ -753,25 +833,25 @@ export function Dashboard() {
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
 
-        {!loading && sessions.length === 0 ? (
+        {!loading && visibleSessions.length === 0 ? (
           <section className="mt-5">
             <EmptyState
               message={
-                projectId
-                  ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
-                  : undefined
+                showCompletedOnly
+                  ? projectId
+                    ? `No completed sessions are visible for ${activeProjectName}. Turn off the completed filter or finish a task.`
+                    : "No completed sessions are visible. Turn off the completed filter or finish a task."
+                  : projectId
+                    ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
+                    : undefined
               }
             />
           </section>
         ) : null}
 
-        {!loading && sessions.length > 0 ? (
+        {!loading && visibleSessions.length > 0 ? (
           <section className="mt-5 space-y-4">
-            {LANE_ORDER.filter(
-              (level) =>
-                grouped[level].length > 0 &&
-                (activeStatFilter === null || level === activeStatFilter),
-            ).map((level) => (
+            {LANE_ORDER.filter((level) => grouped[level].length > 0).map((level) => (
               <AttentionZone
                 key={level}
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}

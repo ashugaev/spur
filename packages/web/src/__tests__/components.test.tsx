@@ -58,6 +58,17 @@ function sessionsPayload() {
 const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
 
 describe("Dashboard", () => {
+  const runtimeUnavailable = JSON.stringify({ available: false });
+  const voiceUnavailable = JSON.stringify({ available: false, language: "" });
+  const mockDashboardFetch = (payload: ReturnType<typeof sessionsPayload>) => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") return new Response(runtimeUnavailable);
+      if (url === "/api/runtime/voice") return new Response(voiceUnavailable);
+      return new Response(JSON.stringify(payload));
+    });
+  };
+
   beforeEach(() => {
     vi.restoreAllMocks();
     window.localStorage.clear();
@@ -65,14 +76,7 @@ describe("Dashboard", () => {
   });
 
   it("renders Spur dashboard sessions from API", async () => {
-    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-      const url = typeof input === "string" ? input : input.url;
-      if (url === "/api/runtime/resources")
-        return new Response(JSON.stringify({ available: false }));
-      if (url === "/api/runtime/voice")
-        return new Response(JSON.stringify({ available: false, language: "" }));
-      return new Response(JSON.stringify(sessionsPayload()));
-    });
+    mockDashboardFetch(sessionsPayload());
 
     render(<Dashboard />);
 
@@ -82,6 +86,65 @@ describe("Dashboard", () => {
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
+    });
+  });
+
+  it("toggles between active sessions and completed-only sessions", async () => {
+    const base = sessionsPayload();
+    const data = {
+      projects: base.projects,
+      sessions: [
+        base.sessions[0],
+        {
+          ...base.sessions[0],
+          id: "api-done-1",
+          prompt: "Done task",
+          tmuxSession: null,
+          runtimeAlive: false,
+          status: "completed",
+          state: "stopped",
+        },
+      ],
+    };
+
+    mockDashboardFetch(data);
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Done task")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Show completed tasks only" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Done task")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Fix auth" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Show completed tasks only" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Done task")).not.toBeInTheDocument();
+  });
+
+  it("shows a completed-only empty state when no completed sessions exist", async () => {
+    mockDashboardFetch(sessionsPayload());
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("switch", { name: "Show completed tasks only" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("No completed sessions are visible. Turn off the completed filter or finish a task.")).toBeInTheDocument();
     });
   });
 
