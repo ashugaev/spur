@@ -59,6 +59,7 @@ id_ed25519
 .claude/settings.json
 .claude/metadata-updater.sh
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Optional local Spur config overrides
 spur.local.yaml

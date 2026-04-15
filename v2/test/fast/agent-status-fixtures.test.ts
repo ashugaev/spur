@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
+import {
+  classifyClaudeJsonlState,
+  parseJsonlRecord,
+  type ParsedRecord,
+} from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,74 +18,14 @@ const MANIFEST_PATH = join(FIXTURES_DIR, "MANIFEST.sha256");
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/** Parse a JSONL fixture into ParsedRecord[] with controlled timestamps. */
-function parseFixtureJsonl(content: string, timestampMs: number): ParsedRecord[] {
+/** Parse a JSONL fixture via the production parser, ignoring non-record lines. */
+function parseFixtureJsonl(content: string, fallbackTimestampMs: number): ParsedRecord[] {
   const records: ParsedRecord[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
-    if (type === "progress") {
-      records.push({ type: "progress", timestampMs });
-      continue;
-    }
-    if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
-      records.push({ type, timestampMs });
-      continue;
-    }
-    const message =
-      typeof parsed["message"] === "object" && parsed["message"] !== null
-        ? (parsed["message"] as Record<string, unknown>)
-        : parsed;
-    const role =
-      typeof message["role"] === "string"
-        ? message["role"]
-        : typeof parsed["role"] === "string"
-          ? parsed["role"]
-          : "";
-    if (role === "assistant") {
-      const stopReason =
-        typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
-      const content = Array.isArray(message["content"]) ? message["content"] : [];
-      const hasToolUse = content.some(
-        (block: unknown) =>
-          typeof block === "object" &&
-          block !== null &&
-          (block as Record<string, unknown>)["type"] === "tool_use",
-      );
-      records.push({
-        type: "assistant",
-        role: "assistant",
-        ...(stopReason ? { stopReason } : {}),
-        hasToolUse,
-        timestampMs,
-      });
-      continue;
-    }
-    if (role === "user") {
-      const content = Array.isArray(message["content"]) ? message["content"] : [];
-      const hasToolResult = content.some(
-        (block: unknown) =>
-          typeof block === "object" &&
-          block !== null &&
-          (block as Record<string, unknown>)["type"] === "tool_result",
-      );
-      records.push({
-        type: "user",
-        role: hasToolResult ? "tool_result" : "user",
-        timestampMs,
-      });
-      continue;
-    }
-    if (type) {
-      records.push({ type, timestampMs });
-    }
+    const record = parseJsonlRecord(trimmed, fallbackTimestampMs);
+    if (record) records.push(record);
   }
   return records;
 }
@@ -120,7 +64,6 @@ describe("Fixture integrity", () => {
 
 describe("Claude JSONL fixture classification", () => {
   const NOW = 1_700_000_000_000;
-  const STALE = NOW - 10_000; // 10s ago — past the 3s tool_use stale window
 
   // ── waiting states ──────────────────────────────────────────────────
 
@@ -157,16 +100,106 @@ describe("Claude JSONL fixture classification", () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Records timestamped at NOW, checked at NOW → within 3s window → working
-    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+    // Last record embeds ts 2026-04-07T22:45:14.391Z with no input.timeout →
+    // default 3s window. +1s into the window → working.
+    expect(classifyClaudeJsonlState(records, Date.parse("2026-04-07T22:45:15.391Z"))).toBe(
+      "working",
+    );
   });
 
   it("classifies tool_use past stale window as needs_input", async () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
-    // Records timestamped 10s ago, checked at NOW → past 3s window → needs_input
-    const records = parseFixtureJsonl(content, STALE);
+    const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
+    // Last record embeds ts 2026-04-11T15:02:06.116Z (AskUserQuestion, no timeout).
+    // +5.9s exceeds the 3s window and fileMtime matches the record → needs_input.
+    expect(
+      classifyClaudeJsonlState(
+        records,
+        Date.parse("2026-04-11T15:02:12.000Z"),
+        Date.parse("2026-04-11T15:02:06.116Z"),
+      ),
+    ).toBe("needs_input");
+  });
+
+  // ── Real-session tails: declared timeout + bg + user-input cases ─────
+
+  /**
+   * Real‑session tails exercising the deterministic stale‑window rules:
+   *   - Bash with declared `input.timeout` → budget = timeout + 3s
+   *   - Bash with `input.run_in_background: true` → always working
+   *   - AskUserQuestion / Bash without timeout → 3s default window
+   *   - `fileMtimeMs` is used as the anchor for "last activity" when > record ts
+   *
+   * Each case pins an exact `nowMs` and `fileMtimeMs` from its own tail, so
+   * the verdict is fully deterministic. No indirect heuristics.
+   */
+  it.each<[string, string, number, number, string]>([
+    // spur-052a: Bash timeout=900_000ms, last tool_use at 2026-04-15T12:47:58.984Z.
+    [
+      "working-spur-052a-tail.jsonl",
+      "inside the declared 15-minute Bash budget → working",
+      Date.parse("2026-04-15T12:57:00.000Z"), // +9 min < 15m03s
+      0,
+      "working",
+    ],
+    [
+      "working-spur-052a-tail.jsonl",
+      "past the declared budget and mtime is stale → needs_input",
+      Date.parse("2026-04-15T13:04:00.000Z"), // +16m 01s > 15m 03s
+      Date.parse("2026-04-15T12:48:00.000Z"), // file hasn't been touched since the tool_use
+      "needs_input",
+    ],
+    [
+      "working-spur-052a-tail.jsonl",
+      "past the declared budget but file mtime is fresh → working",
+      Date.parse("2026-04-15T13:04:00.000Z"),
+      Date.parse("2026-04-15T13:03:59.000Z"), // session actively writing
+      "working",
+    ],
+    // spur-0190: Bash timeout=60_000ms, last tool_use at 2026-04-11T16:44:36.778Z.
+    [
+      "needs-input-spur-0190-tail.jsonl",
+      "inside the 60s Bash budget → working (former false needs_input)",
+      Date.parse("2026-04-11T16:44:46.500Z"), // +9.7s < 63s
+      0,
+      "working",
+    ],
+    [
+      "needs-input-spur-0190-tail.jsonl",
+      "past the 60s Bash budget and mtime is stale → needs_input",
+      Date.parse("2026-04-11T16:45:45.000Z"), // +1m 08s > 63s
+      Date.parse("2026-04-11T16:44:37.000Z"),
+      "needs_input",
+    ],
+    // bg Bash: run_in_background=true, last tool_use at 2026-04-13T11:19:48.036Z.
+    [
+      "working-bg-bash-intelas-web-tail.jsonl",
+      "run_in_background ignores stale window regardless of age",
+      Date.parse("2026-04-13T12:19:48.036Z"), // +1 hour
+      Date.parse("2026-04-13T11:19:48.036Z"),
+      "working",
+    ],
+    // AskUserQuestion: no timeout, last tool_use at 2026-04-11T15:02:06.116Z.
+    [
+      "needs-input-ask-user-spur-6e9a-tail.jsonl",
+      "within the 3s default window → working",
+      Date.parse("2026-04-11T15:02:08.000Z"), // +1.9s
+      0,
+      "working",
+    ],
+    [
+      "needs-input-ask-user-spur-6e9a-tail.jsonl",
+      "past the 3s default window → needs_input",
+      Date.parse("2026-04-11T15:02:10.000Z"), // +3.9s
+      Date.parse("2026-04-11T15:02:06.116Z"),
+      "needs_input",
+    ],
+  ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
+    const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");
+    const records = parseFixtureJsonl(content, nowMs);
+    expect(records.length).toBeGreaterThan(0);
+    expect(classifyClaudeJsonlState(records, nowMs, fileMtimeMs)).toBe(expected);
   });
 });
 
