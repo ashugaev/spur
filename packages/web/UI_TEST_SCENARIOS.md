@@ -42,6 +42,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Labels use secondary text color, values use primary
 - Non-zero values show colored (error/working/attention)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
+- Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
 
