@@ -97,17 +97,20 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
 
   wss.on("connection", (ws, request) => {
     if (!ptySpawn) {
+      console.warn("[direct-terminal] close: node-pty not installed");
       ws.close(1011, "node-pty is not installed");
       return;
     }
 
     const sessionId = readSessionId(request.url);
     if (!sessionId || !validateSessionId(sessionId)) {
+      console.warn("[direct-terminal] close: invalid session id:", sessionId ?? "(none)");
       ws.close(1008, "Invalid session id");
       return;
     }
 
     if (!tmuxSessionExists(tmuxPath, sessionId)) {
+      console.warn("[direct-terminal] close: tmux session not found:", sessionId);
       ws.close(4004, "Session not found");
       return;
     }
@@ -145,6 +148,7 @@ export function createDirectTerminalServer(tmuxPath = findTmux()) {
     });
 
     sessions.set(sessionId, { sessionId, pty, ws, seenInputIds: new Set() });
+    console.log("[direct-terminal] attached:", sessionId);
 
     pty.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {

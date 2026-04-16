@@ -43,7 +43,10 @@ describe("appendEventLog", () => {
     const entries = readEventLog(dataDir);
     const ts = entries[0]?.timestamp;
     expect(ts).toBeTruthy();
-    expect(new Date(ts!).getTime()).not.toBeNaN();
+    if (!ts) {
+      throw new Error("expected timestamp to be present");
+    }
+    expect(new Date(ts).getTime()).not.toBeNaN();
   });
 
   it("preserves an explicit timestamp", () => {

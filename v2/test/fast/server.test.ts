@@ -50,6 +50,7 @@ describe("startServer", () => {
     }
 
     expect(readEventLog(dataDir).map((entry) => entry.event)).toEqual([
+      "daemon.startup.reconciled",
       "daemon.started",
       "http.route.not_found",
       "daemon.stopping",

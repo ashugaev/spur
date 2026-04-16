@@ -82,11 +82,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Empty sections show count "0", no "No sessions" message
 - Sessions sorted into correct sections by attention level
 
-### D6b: Footer build version
+### D6b: Footer
 
-- Footer right side shows a build version string in `YYYYMMDD.HHmmss` format (UTC)
-- Version is static (no ticking), set at build time
-- Falls back to `dev` in development when no build version is injected
+- Footer is visible after page load
+- Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
+- Footer left side shows Online status when daemon is reachable
 
 ### D6c: Footer resource metrics
 
@@ -212,7 +212,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error

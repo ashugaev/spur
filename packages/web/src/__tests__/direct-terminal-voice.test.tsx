@@ -104,6 +104,18 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function sentInputPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
+    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
+    .filter(
+      (payload): payload is { type: "input"; data: string } =>
+        payload.type === "input" && typeof payload.data === "string",
+    )
+    .map((payload) => payload.data);
+}
+
 describe("DirectTerminal voice confirm", () => {
   beforeEach(() => {
     wsSend.mockClear();
@@ -111,11 +123,11 @@ describe("DirectTerminal voice confirm", () => {
     MockWebSocket.mockClear();
   });
 
-  it("submits confirmed voice input with enter", async () => {
+  it("submits confirmed voice input with enter for claude", async () => {
     const { DirectTerminal } = await import("@/components/DirectTerminal");
 
     await act(async () => {
-      render(<DirectTerminal sessionId="voice-session" />);
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
     });
 
     await waitFor(() => {
@@ -126,8 +138,27 @@ describe("DirectTerminal voice confirm", () => {
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"type":"input"'));
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"data":"git status\\r"'));
+      expect(sentInputPayloads()).toEqual(["git status\r"]);
+    });
+  });
+
+  it("submits confirmed voice input as bracketed paste plus enter for codex", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="codex" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
     });
   });
 });

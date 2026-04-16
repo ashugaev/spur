@@ -30,6 +30,29 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+  playwright:
+    name: Playwright E2E
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/web exec playwright install chromium
+      - run: pnpm --dir packages/web build
+      - name: Start Next.js
+        run: pnpm --dir packages/web exec next start -p 5555 &
+      - name: Wait for server
+        run: npx wait-on http://localhost:5555 --timeout 30000
+      - run: pnpm --dir packages/web exec playwright test
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:5555
+
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
