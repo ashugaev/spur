@@ -197,6 +197,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("heading", { name: "API" })).toBeInTheDocument();
     });
 
+    expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
   });
 

@@ -564,18 +564,34 @@ export function Dashboard() {
               />
             </div>
             <div className="flex min-w-[280px] flex-1 items-center gap-2">
-              <select
-                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                onChange={(event) => syncProjectFilter(event.target.value)}
-                value={projectId}
-              >
-                <option value="">All projects</option>
-                {filterProjectOptions.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
+              <div className="relative min-w-0 flex-1">
+                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" data-testid="project-filter-chevron">
+                  <svg
+                    aria-hidden="true"
+                    className="h-3 w-3"
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="m3.5 6 4.5 4 4.5-4" />
+                  </svg>
+                </span>
+                <select
+                  className="min-w-0 w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] py-1.5 pl-7 pr-2 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                  onChange={(event) => syncProjectFilter(event.target.value)}
+                  value={projectId}
+                >
+                  <option value="">All projects</option>
+                  {filterProjectOptions.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <button
                 className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
                 onClick={openSpawnModal}
