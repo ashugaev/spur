@@ -320,7 +320,12 @@ function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipelin
   return pipeline.steps
     .slice(pipeline.nextStepIndex)
     .map((step, offset) =>
-      formatPipelineStepMessage(session.prompt, step, pipeline.nextStepIndex + offset, pipeline.steps.length),
+      formatPipelineStepMessage(
+        session.prompt,
+        step,
+        pipeline.nextStepIndex + offset,
+        pipeline.steps.length,
+      ),
     );
 }
 
