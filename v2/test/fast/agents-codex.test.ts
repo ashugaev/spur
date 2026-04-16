@@ -464,6 +464,43 @@ describe("findCodexSessionId", () => {
     // (root + depth 1 + depth 2 + depth 3 + depth 4 = 5 calls max)
     expect(mockReaddir.mock.calls.length).toBeLessThanOrEqual(6);
   });
+
+  it("prefers the first matching session root over a newer global match", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockImplementation(async (dir: unknown) => {
+      if (dir === "/session-root") return ["session.jsonl"];
+      if (dir === "/global-root") return ["global.jsonl"];
+      return [];
+    });
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/session-root/session.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/global-root/global.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/session-root/session.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "session-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDirs: ["/session-root", "/global-root"],
+    });
+
+    expect(result).toBe("session-thread");
+    expect(mockCreateInterface).toHaveBeenCalledTimes(1);
+  });
 });
 
 // Helper: create an async iterable of lines, compatible with the mocked createInterface.

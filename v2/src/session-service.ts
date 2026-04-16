@@ -1965,9 +1965,15 @@ export class SessionService {
       return session;
     }
 
+    const codexSessionRootDir =
+      session.agent === "codex"
+        ? join(codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)), "sessions")
+        : undefined;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     while (Date.now() <= deadline) {
-      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
+      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath, {
+        ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
+      });
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
           return session;

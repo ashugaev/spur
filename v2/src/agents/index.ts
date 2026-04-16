@@ -105,11 +105,14 @@ export function buildAgentResumePlan(
 export async function findAgentSessionId(
   agent: AgentName,
   worktreePath: string,
+  options?: { codexSessionRootDir?: string },
 ): Promise<string | null> {
   if (agent === "claude") {
     return findClaudeSessionId(worktreePath);
   }
-  return findCodexSessionId(worktreePath);
+  return findCodexSessionId(worktreePath, {
+    ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
+  });
 }
 
 export async function setupAgentHooks(args: {

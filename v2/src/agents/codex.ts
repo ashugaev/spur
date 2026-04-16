@@ -318,20 +318,21 @@ export async function findCodexSessionId(
   options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
 ): Promise<string | null> {
   const candidates = await resolveWorktreePathCandidates(worktreePath);
-  let bestMatch: IndexedSessionFile | null = null;
   for (const sessionRootDir of resolveSessionRootDirs(options)) {
     const sessionIndex = await loadSessionIndexForRoot(sessionRootDir);
+    let bestMatch: IndexedSessionFile | null = null;
     for (const candidate of candidates) {
       const match = sessionIndex.get(candidate);
       if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
         bestMatch = match;
       }
     }
+    if (!bestMatch) {
+      continue;
+    }
+    return bestMatch.threadId ?? readThreadId(bestMatch.path);
   }
-  if (!bestMatch) {
-    return null;
-  }
-  return bestMatch.threadId ?? readThreadId(bestMatch.path);
+  return null;
 }
 
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
