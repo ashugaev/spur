@@ -221,6 +221,94 @@ describe("Dashboard", () => {
     expect(sessionLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
   });
 
+  it("shows a reset-filters empty state when stat filters hide all sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Needs Input: 0" }));
+
+    expect(
+      screen.getByText("No sessions match the current filters.", { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+  });
+
+  it("resets search and project filters from the empty state action", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(
+          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+      ).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    fireEvent.change(searchInput, { target: { value: "zzz" } });
+    expect(searchInput).toHaveValue("zzz");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions", { cache: "no-store" });
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(searchInput).toHaveValue("");
+    expect(window.location.search).toBe("");
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {

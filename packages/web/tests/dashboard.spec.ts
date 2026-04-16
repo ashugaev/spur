@@ -115,6 +115,25 @@ test.describe("D2: Header stats show correct counts", () => {
     await statButtons.first().click();
     await expect(page.getByText("Working session two")).toBeVisible();
   });
+
+  test("shows placeholder with reset filters when a stat filter hides all sessions", async ({
+    page,
+  }) => {
+    const working = makeWorkingSession({ id: "wk-empty-1", prompt: "Only working session" });
+    await mockSessions(page, [working]);
+    await page.goto("/");
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+
+    await page.locator("header button").first().click();
+
+    await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Reset Filters" }).click();
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+  });
 });
 
 // D3: Session rows render with correct columns
