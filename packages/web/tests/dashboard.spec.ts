@@ -392,8 +392,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
     await expect(onlineButton).toBeVisible();
+    await expect(onlineButton).toContainText("Healthy");
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();
@@ -414,11 +415,40 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
 
-    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    await page.getByRole("button", { name: "Show aggregated system status" }).click();
     await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
     await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
+  });
+
+  test("footer syncs warning status text and closes the tooltip after clicking its content", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await expect(onlineButton).toContainText("Warning");
+    await onlineButton.click();
+
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.click();
+    await expect(page.getByText("System")).not.toBeVisible();
   });
 });
 
