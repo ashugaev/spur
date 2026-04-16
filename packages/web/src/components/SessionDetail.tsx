@@ -70,12 +70,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
 
 function PlayIcon() {
   return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="currentColor"
-      viewBox="0 0 16 16"
-    >
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 3.25v9.5L12 8 4 3.25Z" />
     </svg>
   );
@@ -83,12 +78,7 @@ function PlayIcon() {
 
 function StopIcon() {
   return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="currentColor"
-      viewBox="0 0 16 16"
-    >
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 4h8v8H4z" />
     </svg>
   );

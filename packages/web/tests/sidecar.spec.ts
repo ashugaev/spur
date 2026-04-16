@@ -69,7 +69,9 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(sidecarSection.getByRole("button", { name: "Stop sidecar dev" })).toBeVisible();
   });
 
-  test("clicking play updates the sidecar row to alive without leaving the page", async ({ page }) => {
+  test("clicking play updates the sidecar row to alive without leaving the page", async ({
+    page,
+  }) => {
     const session = makeSessionWithSidecar("dev", false, { id: "sc-start-click-1" });
     await mockSessionDetail(page, session);
     await page.route(`**/api/sessions/${session.id}/sidecars/dev/start`, (route) => {

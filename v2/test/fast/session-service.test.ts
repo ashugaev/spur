@@ -514,7 +514,7 @@ describe("SessionService", () => {
       agent: "claude",
     });
     const sent = sendMessageToTmuxMock.mock.calls[0]?.[1];
-    expect(sent).toContain('Sidecars: use Sidecar for testing by default.');
+    expect(sent).toContain("Sidecars: use Sidecar for testing by default.");
     expect(sent).toContain('`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one');
     expect(sent).toContain(
       '`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>` to stop one.',
