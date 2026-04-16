@@ -357,9 +357,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("no hydration error overlay visible after load", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // Next mounts an empty portal element even without any overlay UI.
+    // In dev, Next may mount an empty error portal. In production, it may be absent entirely.
     const errorOverlay = page.locator("nextjs-portal");
-    await expect(errorOverlay).toContainText(/^$/);
+    if ((await errorOverlay.count()) > 0) {
+      await expect(errorOverlay).toContainText(/^$/);
+    }
   });
 
   test("footer contains version text", async ({ page }) => {
