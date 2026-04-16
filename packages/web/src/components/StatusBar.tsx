@@ -157,7 +157,7 @@ function resourceLevel(kind: "cpu" | "memory" | "disk", value: number): HealthLe
 
 function aggregateOnlineLevel(metrics: ResourceMetrics): HealthLevel {
   if (!metrics.daemonAlive) return "error";
-  if (!metrics.available) return "ready";
+  if (!metrics.available) return "unknown";
 
   const cpu = resourceLevel("cpu", metrics.cpuPercent);
   const memory = resourceLevel("memory", metrics.memoryPercent);
@@ -228,8 +228,14 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
+  const onlineStatusLabel = statusText(onlineLevel);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
   const onlineOpen = onlineHovered || onlinePinned;
+  const onlineButtonLabel = `Show aggregated ${onlineStatusLabel} status`;
+  const closeOnlinePopover = () => {
+    setOnlineHovered(false);
+    setOnlinePinned(false);
+  };
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
@@ -245,21 +251,24 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         >
           <button
             aria-expanded={onlineOpen}
-            aria-label="Show aggregated healthy status"
-            className="flex items-center gap-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            aria-label={onlineButtonLabel}
+            className="-m-1 flex items-center gap-1.5 p-1 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
             type="button"
             onClick={() => setOnlinePinned((current) => !current)}
           >
             <StatusDot level={onlineLevel} />
-            <span>Healthy</span>
+            <span>{onlineStatusLabel}</span>
           </button>
 
           {onlineOpen ? (
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]">
+            <div
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
+              onClick={closeOnlinePopover}
+            >
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
                 <span className="text-[var(--color-text-secondary)]">System</span>
                 <span className="font-bold" style={{ color: healthColor(onlineLevel) }}>
-                  {statusText(onlineLevel)}
+                  {onlineStatusLabel}
                 </span>
               </div>
               <div className="flex flex-col gap-2">

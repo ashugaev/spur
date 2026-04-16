@@ -394,6 +394,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
 
     const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
     await expect(onlineButton).toBeVisible();
+    await expect(onlineButton).toContainText("healthy");
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();
@@ -407,6 +408,16 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     page,
   }) => {
     await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: false,
+          daemonAlive: true,
+        }),
+      });
+    });
     await page.goto("/");
 
     const footer = page.locator("footer");
@@ -414,11 +425,65 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
 
-    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    await page.getByRole("button", { name: "Show aggregated unavailable status" }).click();
+    await expect(
+      page.getByRole("button", { name: "Show aggregated unavailable status" }),
+    ).toContainText("unavailable");
     await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
     await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
+  });
+
+  test("footer status text syncs to critical when resources degrade", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 86,
+          diskPercent: 91,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated critical status" });
+    await expect(onlineButton).toContainText("critical");
+    await onlineButton.click();
+
+    await expect(page.getByText("System").locator("..").getByText("critical")).toBeVisible();
+    await expect(page.getByLabel("CPU 88% warning")).toBeVisible();
+    await expect(page.getByLabel("RAM 86% warning")).toBeVisible();
+    await expect(page.getByLabel("HDD 91% critical")).toBeVisible();
+  });
+
+  test("clicking inside the healthy tooltip closes it", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    const systemLabel = page.getByText("System");
+    await expect(systemLabel).toBeVisible();
+    await systemLabel.click();
+    await expect(systemLabel).not.toBeVisible();
   });
 });
 
