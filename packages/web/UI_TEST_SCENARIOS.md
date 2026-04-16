@@ -170,7 +170,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Visible when `queuedMessages.messages.length > 0` or `queuedMessages.awaitingPrompt=true`
 - Section header is `QUEUED MESSAGES`
-- Messages render in FIFO order (first queued message appears first)
+- Messages render the full send stack in FIFO order
+- Manual queued sends appear before future auto-step messages in the same stack
 - Each queued message is shown as its own stacked row with full wrapped text
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt

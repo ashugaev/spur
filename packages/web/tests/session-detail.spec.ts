@@ -222,11 +222,15 @@ test.describe("S3: Message section", () => {
 
 // S3b: Queued messages section
 test.describe("S3b: Queued messages section", () => {
-  test("shows queued messages in FIFO order", async ({ page }) => {
+  test("shows the full queued stack in FIFO order", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s3b-1",
       queuedMessages: {
-        messages: ["First queued message", "Second queued message"],
+        messages: [
+          "Manual queued follow-up",
+          "[Spur step 2/3: implement]\nDo only this step for the task below. When it is done, stop and wait for the next Spur message.\n\nTask:\nImplement the feature",
+          "[Spur step 3/3: test]\nThis is the final step for the task below.\n\nTask:\nImplement the feature",
+        ],
         awaitingPrompt: false,
       },
     });
@@ -235,9 +239,10 @@ test.describe("S3b: Queued messages section", () => {
 
     await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
     const items = page.getByRole("list", { name: /queued messages list/i }).getByRole("listitem");
-    await expect(items).toHaveCount(2);
-    await expect(items.nth(0)).toContainText("First queued message");
-    await expect(items.nth(1)).toContainText("Second queued message");
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText("Manual queued follow-up");
+    await expect(items.nth(1)).toContainText("[Spur step 2/3: implement]");
+    await expect(items.nth(2)).toContainText("[Spur step 3/3: test]");
   });
 
   test("shows awaiting prompt hint when queue is blocked", async ({ page }) => {

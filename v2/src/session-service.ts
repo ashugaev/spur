@@ -82,6 +82,7 @@ import {
   type SendMessageRequest,
   type SessionRecord,
   type SessionStatus,
+  type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
   type SessionStateTransition,
@@ -309,6 +310,27 @@ function queuedMessages(session: SessionRecord): string[] {
 
 function hasQueuedMessages(session: SessionRecord): boolean {
   return queuedMessages(session).length > 0;
+}
+
+function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipeline">): string[] {
+  const pipeline = session.pipeline;
+  if (!pipeline || pipeline.status !== "running") {
+    return [];
+  }
+  return pipeline.steps
+    .slice(pipeline.nextStepIndex)
+    .map((step, offset) =>
+      formatPipelineStepMessage(session.prompt, step, pipeline.nextStepIndex + offset, pipeline.steps.length),
+    );
+}
+
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
+  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
+  if (messages.length === 0 && !awaitingPrompt) {
+    return undefined;
+  }
+  return { messages, awaitingPrompt };
 }
 
 function withQueuedMessages(
@@ -2990,6 +3012,7 @@ export class SessionService {
     for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
+    const queuedMessagesView = displayQueuedMessages(session);
 
     return {
       ...session,
@@ -3001,6 +3024,7 @@ export class SessionService {
       lastActivityAt,
       services,
       sidecars,
+      ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }
 

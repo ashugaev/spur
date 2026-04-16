@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolve } from "node:path";
+import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
 const upsertConfigRegistryPathMock = vi.fn();
@@ -1957,6 +1958,48 @@ describe("SessionService", () => {
     expect(listed.map((session) => session.id)).toEqual(["api-1", "api-2"]);
     expect(listed[1]?.status).toBe("paused");
     expect(listed[1]?.state).toBe("stopped");
+  });
+
+  it("includes queued manual messages before future pipeline steps in session views", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "Ship the feature",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["Manual queued follow-up"],
+        awaitingPrompt: true,
+      },
+      pipeline: {
+        steps: ["research", "implement", "test"],
+        nextStepIndex: 1,
+        awaitingStepIndex: 0,
+        status: "running",
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const [listed] = await service.list();
+
+    expect(listed?.queuedMessages).toEqual({
+      messages: [
+        "Manual queued follow-up",
+        formatPipelineStepMessage("Ship the feature", "implement", 1, 3),
+        formatPipelineStepMessage("Ship the feature", "test", 2, 3),
+      ],
+      awaitingPrompt: true,
+    });
   });
 
   it("pauses a session without removing its worktree", async () => {

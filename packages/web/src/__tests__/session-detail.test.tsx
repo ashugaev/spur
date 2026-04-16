@@ -642,7 +642,7 @@ describe("SessionDetail voice input", () => {
     }
   });
 
-  it("renders queued messages in FIFO order", async () => {
+  it("renders the full queued stack in FIFO order", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -650,7 +650,11 @@ describe("SessionDetail voice input", () => {
           JSON.stringify({
             ...sessionFixture(),
             queuedMessages: {
-              messages: ["First queued", "Second queued"],
+              messages: [
+                "Manual queued follow-up",
+                "[Spur step 2/3: implement]\nDo only this step for the task below. When it is done, stop and wait for the next Spur message.\n\nTask:\nFix auth",
+                "[Spur step 3/3: test]\nThis is the final step for the task below.\n\nTask:\nFix auth",
+              ],
               awaitingPrompt: false,
             },
           }),
@@ -673,9 +677,10 @@ describe("SessionDetail voice input", () => {
     });
 
     const queuedItems = screen.getAllByRole("listitem");
-    expect(queuedItems).toHaveLength(2);
-    expect(queuedItems[0]).toHaveTextContent("First queued");
-    expect(queuedItems[1]).toHaveTextContent("Second queued");
+    expect(queuedItems).toHaveLength(3);
+    expect(queuedItems[0]).toHaveTextContent("Manual queued follow-up");
+    expect(queuedItems[1]).toHaveTextContent("[Spur step 2/3: implement]");
+    expect(queuedItems[2]).toHaveTextContent("[Spur step 3/3: test]");
   });
 
   it("renders awaiting-prompt hint when queue is blocked", async () => {
