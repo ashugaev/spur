@@ -654,11 +654,11 @@ describe("StatusBar", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show aggregated online status" }),
+        screen.getByRole("button", { name: "Show aggregated healthy status" }),
       ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated online status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
 
     expect(screen.getByText("System")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
@@ -680,7 +680,7 @@ describe("StatusBar", () => {
       expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated online status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
 
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
@@ -704,13 +704,13 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated online status" })).toHaveAttribute(
+      expect(screen.getByRole("button", { name: "Show aggregated healthy status" })).toHaveAttribute(
         "aria-expanded",
         "false",
       );
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated online status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
 
     expect(screen.getByText("critical")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();

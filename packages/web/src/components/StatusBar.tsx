@@ -245,13 +245,13 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         >
           <button
             aria-expanded={onlineOpen}
-            aria-label="Show aggregated online status"
+            aria-label="Show aggregated healthy status"
             className="flex items-center gap-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
             type="button"
             onClick={() => setOnlinePinned((current) => !current)}
           >
             <StatusDot level={onlineLevel} />
-            <span>Online</span>
+            <span>Healthy</span>
           </button>
 
           {onlineOpen ? (

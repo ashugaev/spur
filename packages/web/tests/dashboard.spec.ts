@@ -371,7 +371,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
   });
 
-  test("footer shows aggregated online tooltip with daemon and resource details", async ({
+  test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
     page,
   }) => {
     await mockSessions(page, []);
@@ -390,7 +390,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const onlineButton = page.getByRole("button", { name: "Show aggregated online status" });
+    const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
     await expect(onlineButton).toBeVisible();
     await onlineButton.click();
 
@@ -412,7 +412,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
 
-    await page.getByRole("button", { name: "Show aggregated online status" }).click();
+    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
     await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
     await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
