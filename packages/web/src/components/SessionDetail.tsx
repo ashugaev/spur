@@ -304,7 +304,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       .catch(() => {});
   };
 
-  const doSend = async () => {
+  const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
     const encoded = attachments.map((att) => ({
@@ -313,6 +313,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }));
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
+    if (options?.queue !== undefined) body.queue = options.queue;
+    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
     await handleAction("send", body);
   };
 
@@ -613,7 +615,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend();
+                            void doSend({ queue: true });
                           }
                         }}
                         onPaste={(e) => {
@@ -665,10 +667,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         disabled={
                           busyAction !== null || (!message.trim() && attachments.length === 0)
                         }
-                        onClick={() => void doSend()}
+                        onClick={() => void doSend({ queue: true })}
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                      >
+                        {busyAction === "send" ? "Queueing..." : "Queue"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          busyAction !== null || (!message.trim() && attachments.length === 0)
+                        }
+                        onClick={() => void doSend({ queue: false, interrupt: true })}
                         className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       >
-                        {busyAction === "send" ? "Sending..." : "Send"}
+                        {busyAction === "send" ? "Sending..." : "Send now"}
                       </button>
                     </div>
                   </div>

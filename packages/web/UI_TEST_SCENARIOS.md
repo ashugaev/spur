@@ -189,13 +189,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
-- Send button disabled when empty (no text and no attachments) or action in progress
+- `Queue` button adds the message to the queued stack and is the default composer action
+- `Send now` button bypasses the queue and sends immediately
+- Ctrl/Cmd+Enter triggers the queued send path
+- `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
 - Cmd+V paste with image on clipboard adds thumbnail preview below textarea
 - Drag-and-drop image file onto textarea adds thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
-- Send button enabled when attachments are present even with empty text
+- Both `Queue` and `Send now` are enabled when attachments are present even with empty text
 - Attachments and text cleared after successful send
 
 ### S4: Links section

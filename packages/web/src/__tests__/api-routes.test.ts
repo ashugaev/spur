@@ -377,6 +377,31 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/sessions/:id/send forwards direct-send options to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue({ ok: true });
+
+    const response = await sendMessage(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/send", {
+        method: "POST",
+        body: JSON.stringify({ message: "Hello now", queue: false, interrupt: true }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/send",
+      expect.objectContaining({
+        body: JSON.stringify({
+          message: "Hello now",
+          attachments: undefined,
+          queue: false,
+          interrupt: true,
+        }),
+      }),
+    );
+  });
+
   it("POST /api/sessions/:id/send accepts attachments with empty message", async () => {
     mockedSpurRequestJson.mockResolvedValue({ ok: true });
     const attachments = [{ name: "img.png", data: "base64data" }];

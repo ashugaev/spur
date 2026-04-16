@@ -2336,8 +2336,13 @@ projects:
       "--json",
     ]);
 
+    await sleep(10_000);
+    const earlyQueuedLog = await context.readAgentLog(spawned.id);
+    expect(earlyQueuedLog).toContain("simulate-work");
+    expect(earlyQueuedLog).not.toContain("queued follow up");
+
     const queuedLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
+      timeoutMs: 30_000,
       accept: (value) => value.includes("queued follow up"),
     });
     expect(queuedLog).toContain("simulate-work");

@@ -112,7 +112,7 @@ import { gh } from "./gh.js";
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
-const PIPELINE_READY_GRACE_MS = 2_000;
+const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -1524,45 +1524,15 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!message && !hasAttachments) {
+    if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
-
-    let finalMessage = message;
-    if (hasAttachments) {
-      const attachments = request.attachments ?? [];
-      if (attachments.length > MAX_ATTACHMENTS) {
-        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
-      }
-      const attachDir = join(session.worktreePath, ".spur", "attachments");
-      mkdirSync(attachDir, { recursive: true });
-      const prefixLines: string[] = [];
-      for (const att of attachments) {
-        if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
-          throw new Error(`Invalid attachment name: ${String(att.name)}`);
-        }
-        const ext = extname(att.name).toLowerCase();
-        if (!ALLOWED_EXT.has(ext)) {
-          throw new Error(`Unsupported attachment extension: ${ext}`);
-        }
-        if (typeof att.data !== "string" || !att.data) {
-          throw new Error("Attachment data must be a non-empty base64 string");
-        }
-        const buf = Buffer.from(att.data, "base64");
-        if (buf.length > MAX_DECODED_SIZE) {
-          throw new Error(`Attachment ${att.name} exceeds 5MB`);
-        }
-        const filename = `${Date.now()}-${att.name}`;
-        const filePath = join(attachDir, filename);
-        writeFileSync(filePath, buf, { mode: 0o644 });
-        prefixLines.push(`[Attached file: ${filePath}]`);
-      }
-      finalMessage = prefixLines.join("\n") + (message ? `\n${message}` : "");
+    const finalMessage = this.prepareSendMessage(session, request);
+    if (request.queue === false) {
+      return this.deliverPrepared(sessionId, finalMessage, { interrupt: request.interrupt === true });
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -1585,7 +1555,9 @@ export class SessionService {
         messageLength: finalMessage.length,
       },
     });
-    await this.tryDeliverQueuedMessage(sessionId);
+    if (updated.queuedMessages?.awaitingPrompt !== true) {
+      await this.tryDeliverQueuedMessage(sessionId);
+    }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
   }
@@ -1606,8 +1578,20 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
+    return this.deliverPrepared(sessionId, message, options);
+  }
+
+  private async deliverPrepared(
+    sessionId: string,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<SessionView> {
+    const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      const readySession = await this.ensureSessionReadyForSend(session);
+      if (!initialSession) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
@@ -1625,7 +1609,7 @@ export class SessionService {
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
-        projectId: session.project,
+        projectId: initialSession.project,
         message: `Delivered message to ${sessionId}`,
         details: {
           interrupt,
@@ -1639,7 +1623,7 @@ export class SessionService {
       this.logEvent("session.message.failed", {
         level: "error",
         sessionId,
-        projectId: session.project,
+        ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
           interrupt: options?.interrupt === true,
@@ -1647,6 +1631,46 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "worktreePath">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const attachments = request.attachments ?? [];
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+    }
+    const attachDir = join(session.worktreePath, ".spur", "attachments");
+    mkdirSync(attachDir, { recursive: true });
+    const prefixLines: string[] = [];
+    for (const att of attachments) {
+      if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
+        throw new Error(`Invalid attachment name: ${String(att.name)}`);
+      }
+      const ext = extname(att.name).toLowerCase();
+      if (!ALLOWED_EXT.has(ext)) {
+        throw new Error(`Unsupported attachment extension: ${ext}`);
+      }
+      if (typeof att.data !== "string" || !att.data) {
+        throw new Error("Attachment data must be a non-empty base64 string");
+      }
+      const buf = Buffer.from(att.data, "base64");
+      if (buf.length > MAX_DECODED_SIZE) {
+        throw new Error(`Attachment ${att.name} exceeds 5MB`);
+      }
+      const filename = `${Date.now()}-${att.name}`;
+      const filePath = join(attachDir, filename);
+      writeFileSync(filePath, buf, { mode: 0o644 });
+      prefixLines.push(`[Attached file: ${filePath}]`);
+    }
+    return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
   async pause(sessionId: string): Promise<SessionView> {
@@ -2680,7 +2704,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2715,7 +2739,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2947,4 +2971,11 @@ export class SessionService {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     return hookState?.state ?? "waiting";
   }
+}
+
+function hasMessageContent(request: SendMessageRequest): boolean {
+  return (
+    (typeof request.message === "string" && request.message.trim().length > 0) ||
+    (Array.isArray(request.attachments) && request.attachments.length > 0)
+  );
 }

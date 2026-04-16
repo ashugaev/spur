@@ -278,6 +278,8 @@ export interface SendMessageAttachment {
 export interface SendMessageRequest {
   message: string;
   attachments?: SendMessageAttachment[];
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export interface RunServiceRequest {
