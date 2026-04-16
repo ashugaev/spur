@@ -514,35 +514,35 @@ export function Dashboard() {
             <div className="flex min-w-0 shrink items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
               <h1 className="relative min-w-0 max-w-full text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
-                  <select
-                    aria-label="Project filter"
-                    className="min-w-0 max-w-full appearance-none truncate bg-transparent pr-5 uppercase outline-none"
-                    onChange={(event) => syncProjectFilter(event.target.value)}
-                    style={{
-                      color: "inherit",
-                      font: "inherit",
-                      letterSpacing: "inherit",
-                      textTransform: "inherit",
-                    }}
-                    value={projectId}
-                  >
-                    <option value="">All Projects</option>
-                    {filterProjectOptions.map((project) => (
-                      <option key={project.id} value={project.id}>
-                        {project.name}
-                      </option>
-                    ))}
-                  </select>
-                  <svg
-                    aria-hidden="true"
-                    className="pointer-events-none absolute right-0 h-3 w-3 text-[var(--color-text-tertiary)]"
-                    fill="none"
-                    viewBox="0 0 24 24"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                  >
-                    <path d="m6 9 6 6 6-6" />
-                  </svg>
+                <select
+                  aria-label="Project filter"
+                  className="min-w-0 max-w-full appearance-none truncate bg-transparent pr-5 uppercase outline-none"
+                  onChange={(event) => syncProjectFilter(event.target.value)}
+                  style={{
+                    color: "inherit",
+                    font: "inherit",
+                    letterSpacing: "inherit",
+                    textTransform: "inherit",
+                  }}
+                  value={projectId}
+                >
+                  <option value="">All Projects</option>
+                  {filterProjectOptions.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.name}
+                    </option>
+                  ))}
+                </select>
+                <svg
+                  aria-hidden="true"
+                  className="pointer-events-none absolute right-0 h-3 w-3 text-[var(--color-text-tertiary)]"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                >
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
               </h1>
             </div>
             <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
