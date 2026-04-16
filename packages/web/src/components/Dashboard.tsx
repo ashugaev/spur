@@ -312,8 +312,7 @@ export function Dashboard() {
     () =>
       LANE_ORDER.filter(
         (level) =>
-          grouped[level].length > 0 &&
-          (activeStatFilter === null || level === activeStatFilter),
+          grouped[level].length > 0 && (activeStatFilter === null || level === activeStatFilter),
       ),
     [activeStatFilter, grouped],
   );
