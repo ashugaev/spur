@@ -90,11 +90,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6c: Footer resource metrics
 
-- Footer left side shows an aggregated `HEALTHY` status trigger that is both hoverable and clickable
-- Opening the `HEALTHY` tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
+- Footer left side shows an aggregated health status trigger (`HEALTHY`, `WARNING`, `CRITICAL`, or `UNAVAILABLE`) that is both hoverable and clickable
+- Opening the health tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
+- Clicking inside the health tooltip content closes it
 - `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
-- Git / PR aggregate stays outside the `HEALTHY` tooltip
+- Git / PR aggregate stays outside the health tooltip
 
 ### D7: Spawn modal
 

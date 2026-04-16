@@ -660,6 +660,9 @@ describe("StatusBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
 
+    expect(
+      screen.getByRole("button", { name: "Show aggregated healthy status" }),
+    ).toHaveTextContent("healthy");
     expect(screen.getByText("System")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
@@ -680,8 +683,11 @@ describe("StatusBar", () => {
       expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated unavailable status" }));
 
+    expect(
+      screen.getByRole("button", { name: "Show aggregated unavailable status" }),
+    ).toHaveTextContent("unavailable");
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM unavailable unavailable")).toBeInTheDocument();
@@ -705,15 +711,136 @@ describe("StatusBar", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show aggregated healthy status" }),
+        screen.getByRole("button", { name: "Show aggregated critical status" }),
       ).toHaveAttribute("aria-expanded", "false");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated critical status" }));
 
-    expect(screen.getByText("critical")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Show aggregated critical status" }),
+    ).toHaveTextContent("critical");
+    expect(screen.getAllByText("critical")).toHaveLength(2);
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
+  });
+
+  it("shows warning status when cpu or memory crosses the attention threshold", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated warning status",
+    });
+    expect(onlineButton).toHaveTextContent("warning");
+
+    fireEvent.click(onlineButton);
+    expect(screen.getAllByText("warning")).toHaveLength(2);
+    expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 56% healthy")).toBeInTheDocument();
+  });
+
+  it("closes the online tooltip when clicking inside popup content", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated healthy status",
+    });
+    fireEvent.click(onlineButton);
+    expect(screen.getByText("System")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("System"));
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("opens on hover and closes on mouse leave", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated healthy status",
+    });
+    fireEvent.mouseEnter(onlineButton);
+    expect(screen.getByText("System")).toBeInTheDocument();
+
+    fireEvent.mouseLeave(onlineButton);
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("closes the online tooltip on blur after opening", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated healthy status",
+    });
+    fireEvent.click(onlineButton);
+    expect(screen.getByText("System")).toBeInTheDocument();
+
+    fireEvent.blur(onlineButton, { relatedTarget: null });
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("shows critical status when the daemon is offline", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ available: false, daemonAlive: false })),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated critical status",
+    });
+    expect(onlineButton).toHaveTextContent("critical");
+
+    fireEvent.click(onlineButton);
+    expect(screen.getByLabelText("Daemon offline critical")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
   });
 });
