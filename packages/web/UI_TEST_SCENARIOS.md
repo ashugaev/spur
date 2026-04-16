@@ -90,8 +90,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6c: Footer resource metrics
 
-- On Linux hosts with available runtime metrics, footer left side shows `CPU <n>%`, `RAM <n>%`, `DISK <n>%` in uppercase compact format
-- On unsupported hosts (macOS/Windows) or when runtime metrics source is unavailable, footer resource metrics are hidden with no red/error UI
+- Footer left side shows an aggregated `HEALTHY` status trigger that is both hoverable and clickable
+- Opening the `HEALTHY` tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
+- `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
+- When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
+- Git / PR aggregate stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
@@ -219,7 +222,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error

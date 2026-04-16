@@ -60,14 +60,17 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
+- Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
+- Codex restore throws when no native resume state (thread id) is found, without falling back to fresh launch.
+- Claude restore throws when no native resume state (session id) is found, without falling back to fresh launch.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook-based classification for Codex.
-- Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within 3s→working, assistant+tool_use stale→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, user→working, progress→working, empty→working.
+- Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within the stale window→working, assistant+tool_use past the stale window→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, user→working, progress→working, empty→working. The stale window is `TOOL_USE_STALE_MS` (3s) by default, extended by `input.timeout` when the tool declares one, and the window is bypassed entirely when the tool sets `input.run_in_background: true`. The optional `fileMtimeMs` argument is treated as last-observed activity and keeps the classifier on `working` while the JSONL is still being written.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
-- Codex hook-based state: hook state is returned directly; defaults to `working` when no hook state exists.
+- Codex hook-based state: hook state is used only for state classification (not for submit ack); returned directly, defaults to `working` when no hook state exists.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
 - State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
 - Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest, are read-only (mode 444), and are not writable by the test process.
-- Claude JSONL fixture classification covers waiting reasons from real history (end_turn, stop_sequence, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh tool_use), and needs_input (stale tool_use).
+- Claude JSONL fixture classification covers waiting reasons from real history (end_turn, stop_sequence, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh tool_use), needs_input (stale tool_use), declared-timeout Bash on real tails (spur-052a 900s budget, spur-0190 60s budget) both inside and past the budget, `run_in_background: true` Bash staying working regardless of age, `AskUserQuestion` flipping to `needs_input` past the 3s default, and the `fileMtimeMs` anchor keeping `working` when the JSONL is still being touched past the declared budget.
 - Codex hook state fixture classification covers real captured hook events: Stop→waiting, PreToolUse and PostToolUse→working, including `readAgentHookState` parsing from disk.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
@@ -127,8 +130,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
-- TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session/worktree live, and relaunches the agent without native resume state.
-- Codex restore falls back to a fresh launch when the native resume submit acknowledgment times out, deletes stale hook state, and completes the restore successfully.
+- TTY `list` rejects restore when the agent's native resume state is missing, showing an error message instead of falling back to a fresh launch.
+- Codex restore throws on ack timeout instead of falling back to a fresh launch.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
 - `send`, `pause`, `complete`, and `kill` reject an unknown session id through the built CLI.

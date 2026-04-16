@@ -224,7 +224,7 @@ export async function mockSessions(
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ available: false }),
+      body: JSON.stringify({ available: false, daemonAlive: true }),
     });
   });
 }

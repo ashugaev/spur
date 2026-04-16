@@ -756,6 +756,7 @@ describe("Spur web API routes", () => {
 
   it("GET /api/runtime/resources returns metrics on linux after the first CPU baseline request", async () => {
     Object.defineProperty(process, "platform", { value: "linux" });
+    mockedSpurRequestJson.mockResolvedValue([]);
     let cpuReads = 0;
     mockedReadFile.mockImplementation(async (path: string) => {
       if (path === "/proc/stat") {
@@ -776,7 +777,7 @@ describe("Spur web API routes", () => {
 
     const firstResponse = await runtimeResources();
     expect(firstResponse.status).toBe(200);
-    expect(await firstResponse.json()).toEqual({ available: false });
+    expect(await firstResponse.json()).toEqual({ available: false, daemonAlive: true });
 
     const secondResponse = await runtimeResources();
     const secondPayload = (await secondResponse.json()) as {
@@ -789,6 +790,7 @@ describe("Spur web API routes", () => {
     expect(secondResponse.status).toBe(200);
     expect(secondPayload).toEqual({
       available: true,
+      daemonAlive: true,
       cpuPercent: 33,
       memoryPercent: 75,
       diskPercent: 75,
@@ -798,15 +800,16 @@ describe("Spur web API routes", () => {
 
   it("GET /api/runtime/resources returns available:false on unsupported platforms and read errors", async () => {
     Object.defineProperty(process, "platform", { value: "darwin" });
+    mockedSpurRequestJson.mockRejectedValue(new Error("daemon unavailable"));
     const unsupported = await runtimeResources();
     expect(unsupported.status).toBe(200);
-    expect(await unsupported.json()).toEqual({ available: false });
+    expect(await unsupported.json()).toEqual({ available: false, daemonAlive: false });
 
     Object.defineProperty(process, "platform", { value: "linux" });
     mockedReadFile.mockRejectedValue(new Error("read failed"));
     const errored = await runtimeResources();
     expect(errored.status).toBe(200);
-    expect(await errored.json()).toEqual({ available: false });
+    expect(await errored.json()).toEqual({ available: false, daemonAlive: false });
   });
 
   it("POST /api/runtime/voice/transcribe returns 400 when audio field is absent", async () => {

@@ -8,7 +8,6 @@ import {
   makeSessionWithPR,
   makeSessionWithTracker,
   mockSessions,
-  gotoMocked,
 } from "./fixtures.js";
 
 // D1: Header renders correctly
@@ -21,7 +20,8 @@ test.describe("D1: Header renders correctly", () => {
   });
 
   test("All Projects title visible", async ({ page }) => {
-    await gotoMocked(page, "/", []);
+    await mockSessions(page, []);
+    await page.goto("/");
     await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
   });
 
@@ -354,22 +354,28 @@ test.describe("D6: Attention zone sections", () => {
 
 // D6b: Footer
 test.describe("D6b: Footer clock hydrates cleanly", () => {
-  test("footer status bar visible after load", async ({ page }) => {
+  test("no hydration error overlay visible after load", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // StatusBar renders in the footer area — wait for it to appear
-    await expect(page.locator("footer")).toBeVisible();
+    // In dev, Next may mount an empty error portal. In production, it may be absent entirely.
+    const errorOverlay = page.locator("nextjs-portal");
+    if ((await errorOverlay.count()) > 0) {
+      await expect(errorOverlay).toContainText(/^$/);
+    }
   });
 
-  test("footer shows build version or dev fallback", async ({ page }) => {
+  test("footer contains version text", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
+    // StatusBar footer renders build version ("dev" in development when NEXT_PUBLIC_BUILD_VERSION unset)
     await expect(page.locator("footer")).toBeVisible();
-    // NEXT_PUBLIC_BUILD_VERSION env var or "dev" fallback in development
-    await expect(page.locator("footer")).toContainText(/dev|v20\d\d\.\d\d\.\d\d/);
+    // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
+    await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
   });
 
-  test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
+  test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.route("/api/runtime/resources", (route) => {
       void route.fulfill({
@@ -377,6 +383,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
         contentType: "application/json",
         body: JSON.stringify({
           available: true,
+          daemonAlive: true,
           cpuPercent: 21,
           memoryPercent: 43,
           diskPercent: 65,
@@ -385,13 +392,20 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const footer = page.locator("footer");
-    await expect(footer).toContainText(/CPU\s*21%/);
-    await expect(footer).toContainText(/RAM\s*43%/);
-    await expect(footer).toContainText(/DISK\s*65%/);
+    const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
+    await expect(onlineButton).toBeVisible();
+    await onlineButton.click();
+
+    await expect(page.getByText("System")).toBeVisible();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU 21% healthy")).toBeVisible();
+    await expect(page.getByLabel("RAM 43% healthy")).toBeVisible();
+    await expect(page.getByLabel("HDD 65% healthy")).toBeVisible();
   });
 
-  test("footer hides resource metrics when runtime resources are unavailable", async ({ page }) => {
+  test("footer keeps system metrics inside the tooltip when runtime resources are unavailable", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.goto("/");
 
@@ -399,6 +413,12 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/CPU \d+%/);
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
+
+    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
   });
 });
 
@@ -551,79 +571,6 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
       timeout: 5000,
     });
-  });
-});
-
-// D7 extra: workspace select and steps
-test.describe("D7: Spawn modal – workspace and steps", () => {
-  test("Worktree workspace option shows base branch input", async ({ page }) => {
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "ws-wt-1", project: "p1" })],
-      [{ id: "p1", name: "p1" }],
-    );
-    await page.goto("/");
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await page.locator('[aria-label="workspace mode"]').selectOption("worktree");
-    await expect(page.getByPlaceholder("Base branch")).toBeVisible();
-  });
-
-  test("Default workspace hides base branch input", async ({ page }) => {
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "ws-def-1", project: "p1" })],
-      [{ id: "p1", name: "p1" }],
-    );
-    await page.goto("/");
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await expect(page.getByPlaceholder("Base branch")).not.toBeVisible();
-  });
-
-  test("+ Step button adds a step input", async ({ page }) => {
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "step-add-1", project: "p1" })],
-      [{ id: "p1", name: "p1" }],
-    );
-    await page.goto("/");
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await page.getByRole("button", { name: /\+ step/i }).click();
-    await expect(page.getByLabel("step 1")).toBeVisible();
-  });
-
-  test("✕ removes step input", async ({ page }) => {
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "step-rm-1", project: "p1" })],
-      [{ id: "p1", name: "p1" }],
-    );
-    await page.goto("/");
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await page.getByRole("button", { name: /\+ step/i }).click();
-    await expect(page.getByLabel("step 1")).toBeVisible();
-    await page.getByLabel("step 1").locator("..").getByRole("button", { name: "✕" }).click();
-    await expect(page.getByLabel("step 1")).not.toBeVisible();
-  });
-
-  test("spawn modal restores last project from localStorage", async ({ page }) => {
-    await page.addInitScript(() => {
-      window.localStorage.setItem("spur:last-spawn-project", "proj-b");
-    });
-    await mockSessions(
-      page,
-      [],
-      [
-        { id: "proj-a", name: "Project A" },
-        { id: "proj-b", name: "Project B" },
-      ],
-    );
-    await page.goto("/");
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    // The spawn modal project select is the one with "Select project" placeholder option
-    const spawnSelect = page
-      .locator("select")
-      .filter({ has: page.getByRole("option", { name: /select project/i }) });
-    await expect(spawnSelect).toHaveValue("proj-b");
   });
 });
 

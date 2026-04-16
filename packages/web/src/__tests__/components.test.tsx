@@ -642,6 +642,7 @@ describe("StatusBar", () => {
       new Response(
         JSON.stringify({
           available: true,
+          daemonAlive: true,
           cpuPercent: 12,
           memoryPercent: 34,
           diskPercent: 56,
@@ -652,15 +653,24 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      const footerText = screen.getByRole("contentinfo").textContent ?? "";
-      expect(footerText).toContain("CPU12%");
-      expect(footerText).toContain("RAM34%");
-      expect(footerText).toContain("DISK56%");
+      expect(
+        screen.getByRole("button", { name: "Show aggregated healthy status" }),
+      ).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+
+    expect(screen.getByText("System")).toBeInTheDocument();
+    expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM 34% healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 56% healthy")).toBeInTheDocument();
   });
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(new Response(JSON.stringify({ available: false })));
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ available: false, daemonAlive: true })),
+    );
 
     render(<StatusBar sessions={[]} />);
 
@@ -669,5 +679,41 @@ describe("StatusBar", () => {
       expect(screen.queryByText(/RAM \d+%/)).not.toBeInTheDocument();
       expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+
+    expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM unavailable unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD unavailable unavailable")).toBeInTheDocument();
+  });
+
+  it("shows warning and error states in the online tooltip", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 86,
+          diskPercent: 91,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Show aggregated healthy status" }),
+      ).toHaveAttribute("aria-expanded", "false");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+
+    expect(screen.getByText("critical")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
   });
 });
