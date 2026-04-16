@@ -11,6 +11,12 @@ import {
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
+  codexHookHomePath,
+  captureCodexRolloutBaseline,
+  scanCodexRolloutForMessage,
+  type RolloutBaseline,
+} from "./agents/codex.js";
+import {
   readClaudeConversation,
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
@@ -118,7 +124,7 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
-const CODEX_SUBMIT_ACK_TIMEOUT_MS = 5_000;
+const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -230,59 +236,6 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
-}
-
-function hookStateTimestampMs(updatedAt: string | undefined): number | null {
-  if (!updatedAt) {
-    return null;
-  }
-  const parsed = Date.parse(updatedAt);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function hookStateFileAdvanced(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!baseline || !current) {
-    return false;
-  }
-  return (
-    typeof baseline.fileMtimeMs === "number" &&
-    typeof current.fileMtimeMs === "number" &&
-    current.fileMtimeMs > baseline.fileMtimeMs
-  );
-}
-
-function isCodexSubmitAcknowledged(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!current) {
-    return false;
-  }
-  if (!baseline) {
-    return current.hookEvent === "UserPromptSubmit";
-  }
-  if (current.turnId && baseline.turnId && current.turnId !== baseline.turnId) {
-    return true;
-  }
-  if (hookStateFileAdvanced(baseline, current)) {
-    return true;
-  }
-  const baselineMs = hookStateTimestampMs(baseline.updatedAt);
-  const currentMs = hookStateTimestampMs(current.updatedAt);
-  const advanced =
-    baselineMs === null || currentMs === null
-      ? current.updatedAt !== baseline.updatedAt
-      : currentMs > baselineMs;
-  if (!advanced) {
-    return false;
-  }
-  // Codex can emit UserPromptSubmit and then quickly overwrite the hook state with
-  // a follow-up event (for example Stop) before the daemon polls. Any newer hook
-  // record after the pre-send baseline means Codex observed and processed the submit.
-  return true;
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
@@ -1678,21 +1631,27 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
-    const codexBaseline =
-      session.agent === "codex"
-        ? (readAgentHookState(this.config.dataDir, session.id) ??
-          (await this.waitForCodexHookBaseline(session.id)) ??
-          null)
-        : null;
+    const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
+    const codexSessionsDir =
+      session.agent === "codex" ? join(codexHookHomePath(sessionToolDir), "sessions") : null;
+    const baseline: RolloutBaseline | null = codexSessionsDir
+      ? await captureCodexRolloutBaseline(codexSessionsDir)
+      : null;
+    const startedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (session.agent !== "codex") {
+    if (session.agent !== "codex" || !codexSessionsDir || !baseline) {
       return;
     }
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
-      if (await this.waitForCodexSubmitAck(session.id, codexBaseline)) {
+      lastResult = await this.waitForCodexRolloutAck(codexSessionsDir, message, baseline);
+      if (lastResult.found) {
         return;
       }
       if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
@@ -1700,59 +1659,38 @@ export class SessionService {
       }
     }
     const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-    const currentHook = readAgentHookState(this.config.dataDir, session.id);
     this.logEvent("session.codex.submit.timeout", {
       level: "warn",
       sessionId: session.id,
       message: `Codex submit ack timed out for ${session.id}`,
       details: {
-        baseline: codexBaseline
-          ? {
-              turnId: codexBaseline.turnId ?? null,
-              updatedAt: codexBaseline.updatedAt,
-              hookEvent: codexBaseline.hookEvent ?? null,
-            }
-          : null,
-        current: currentHook
-          ? {
-              turnId: currentHook.turnId ?? null,
-              updatedAt: currentHook.updatedAt,
-              hookEvent: currentHook.hookEvent ?? null,
-            }
-          : null,
+        lastScannedFile: lastResult.lastScannedFile,
+        messageLength: message.length,
+        elapsedMs: Date.now() - startedAt,
         processAlive,
       },
     });
     throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
   }
 
-  private async waitForCodexSubmitAck(
-    sessionId: string,
-    baseline: ReturnType<typeof readAgentHookState>,
-  ): Promise<boolean> {
+  private async waitForCodexRolloutAck(
+    sessionsDir: string,
+    messageText: string,
+    baseline: RolloutBaseline,
+  ): Promise<{ found: boolean; lastScannedFile: string | null }> {
     const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (isCodexSubmitAcknowledged(baseline, current)) {
-        return true;
+      lastResult = await scanCodexRolloutForMessage(sessionsDir, messageText, baseline);
+      if (lastResult.found) {
+        return lastResult;
       }
       await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
     }
-    return false;
-  }
-
-  private async waitForCodexHookBaseline(
-    sessionId: string,
-  ): Promise<ReturnType<typeof readAgentHookState>> {
-    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (current) {
-        return current;
-      }
-      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
-    }
-    return null;
+    return lastResult;
   }
 
   async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
@@ -2265,20 +2203,14 @@ export class SessionService {
         restorePrompt,
         planOptions,
       );
-      const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
-        this.logEvent("session.restore.started", {
-          level: "info",
-          sessionId,
-          projectId: current.project,
-          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
-          details: { agent: current.agent, worktreePath: current.worktreePath },
-        });
+        throw new Error(
+          `Session is not restorable (no ${current.agent} resume state): ${sessionId}`,
+        );
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = effectivePlan.launchCommand;
-      let restoreReadyMarkers = effectivePlan.readyMarkers;
+      let restoreLaunchCommand = launchPlan.launchCommand;
+      let restoreReadyMarkers = launchPlan.readyMarkers;
       if (current.agent === "claude") {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
@@ -2288,7 +2220,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            effectivePlan.launchCommand,
+            launchPlan.launchCommand,
             planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -2321,47 +2253,10 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
+        launchPlan.initialMessage,
         restoreSidecarNames,
       );
-      try {
-        await this.sendAgentMessage(current, restoreInitialMessage);
-      } catch (sendError) {
-        // Codex resume doesn't reliably fire hooks, so submit acknowledgment
-        // can time out. When a native resume plan was used, fall back to a
-        // fresh launch instead of failing the entire restore.
-        if (!launchPlan || current.agent !== "codex") {
-          throw sendError;
-        }
-        const failure = sendError instanceof Error ? sendError.message : String(sendError);
-        this.logEvent("session.restore.resume_fallback", {
-          level: "warn",
-          sessionId,
-          projectId: current.project,
-          message: `Codex resume submit failed for ${sessionId}; retrying with fresh launch`,
-          details: { failure },
-        });
-        await killTmuxSession(current.tmuxSession);
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        const freshPlan = buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
-        restoredLaunchCommand = freshPlan.launchCommand;
-        await createTmuxSession({
-          sessionName: current.tmuxSession,
-          cwd: current.worktreePath,
-          launchCommand: freshPlan.launchCommand,
-          agent: current.agent,
-          env,
-        });
-        await syncTmuxStatus(current.tmuxSession, current.slots);
-        await waitForTmuxReady(current.tmuxSession, freshPlan.readyMarkers);
-        if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
-          throw new Error(`Agent ${current.agent} exited before restore became ready`, {
-            cause: sendError,
-          });
-        }
-        const freshMessage = buildInitialMessage(freshPlan.initialMessage, restoreSidecarNames);
-        await this.sendAgentMessage(current, freshMessage);
-      }
+      await this.sendAgentMessage(current, restoreInitialMessage);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);

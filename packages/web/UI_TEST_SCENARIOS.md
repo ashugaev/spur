@@ -92,8 +92,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6c: Footer resource metrics
 
-- On Linux hosts with available runtime metrics, footer left side shows `CPU <n>%`, `RAM <n>%`, `DISK <n>%` in uppercase compact format
-- On unsupported hosts (macOS/Windows) or when runtime metrics source is unavailable, footer resource metrics are hidden with no red/error UI
+- Footer left side shows an aggregated `HEALTHY` status trigger that is both hoverable and clickable
+- Opening the `HEALTHY` tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
+- `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
+- When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
+- Git / PR aggregate stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
