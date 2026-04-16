@@ -660,9 +660,9 @@ describe("StatusBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
 
-    expect(screen.getByRole("button", { name: "Show aggregated healthy status" })).toHaveTextContent(
-      "healthy",
-    );
+    expect(
+      screen.getByRole("button", { name: "Show aggregated healthy status" }),
+    ).toHaveTextContent("healthy");
     expect(screen.getByText("System")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
@@ -717,9 +717,9 @@ describe("StatusBar", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated critical status" }));
 
-    expect(screen.getByRole("button", { name: "Show aggregated critical status" })).toHaveTextContent(
-      "critical",
-    );
+    expect(
+      screen.getByRole("button", { name: "Show aggregated critical status" }),
+    ).toHaveTextContent("critical");
     expect(screen.getAllByText("critical")).toHaveLength(2);
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
