@@ -653,9 +653,9 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
-        "Healthy",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Healthy");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
@@ -704,9 +704,9 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
-        "Critical",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Critical");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
@@ -733,9 +733,9 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
-        "Warning",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Warning");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
