@@ -77,7 +77,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
@@ -194,7 +194,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "API" })).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
     });
 
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
@@ -281,13 +281,12 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox");
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
     expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
     expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    const spawnSelects = screen.getAllByRole("combobox");
-    const spawnProjectSelect = spawnSelects[1];
+    const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "spur-local" }),
     ).toBeInTheDocument();
@@ -322,7 +321,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], {
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },
     });
 
@@ -382,7 +381,9 @@ describe("Dashboard", () => {
       });
 
       fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-      fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
       const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
       fireEvent.change(prompt, { target: { value } });
       fireEvent.keyDown(prompt, keydown);
@@ -425,7 +426,9 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
     const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
     fireEvent.change(prompt, { target: { value: "Do not submit" } });
     fireEvent.keyDown(prompt, { key: "Enter" });
@@ -458,10 +461,14 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
+      target: { value: "sp" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    const spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("sp");
   });
 
@@ -490,13 +497,19 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
+      target: { value: "sp" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    const spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     fireEvent.change(spawnProjectSelect, { target: { value: "api" } });
 
-    expect((screen.getAllByRole("combobox")[1] as HTMLSelectElement).value).toBe("api");
+    expect(
+      (screen.getByRole("combobox", { name: "Spawn project" }) as HTMLSelectElement).value,
+    ).toBe("api");
   });
 
   it("uses stored spawn project for all-projects filter and ignores stale values", async () => {
@@ -524,10 +537,12 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    let spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    let spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("sp");
 
     unmount();
@@ -539,7 +554,9 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("api");
   });
 
@@ -574,7 +591,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1];
+    const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
 

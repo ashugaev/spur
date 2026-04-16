@@ -510,11 +510,39 @@ export function Dashboard() {
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex shrink-0 flex-wrap items-center gap-3">
-            <div className="flex shrink-0 items-center gap-3">
+          <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
+            <div className="flex min-w-0 shrink items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                {activeProjectName}
+              <h1 className="relative min-w-0 max-w-full text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
+                  <select
+                    aria-label="Project filter"
+                    className="min-w-0 max-w-full appearance-none truncate bg-transparent pr-5 uppercase outline-none"
+                    onChange={(event) => syncProjectFilter(event.target.value)}
+                    style={{
+                      color: "inherit",
+                      font: "inherit",
+                      letterSpacing: "inherit",
+                      textTransform: "inherit",
+                    }}
+                    value={projectId}
+                  >
+                    <option value="">All Projects</option>
+                    {filterProjectOptions.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                  <svg
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-0 h-3 w-3 text-[var(--color-text-tertiary)]"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
               </h1>
             </div>
             <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
@@ -544,7 +572,7 @@ export function Dashboard() {
               />
             </div>
           </div>
-          <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
+          <div className="flex min-w-0 grow basis-full items-center gap-2 sm:basis-[360px]">
             <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
               <svg
                 className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
@@ -563,27 +591,13 @@ export function Dashboard() {
                 value={searchQuery}
               />
             </div>
-            <div className="flex min-w-[280px] flex-1 items-center gap-2">
-              <select
-                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                onChange={(event) => syncProjectFilter(event.target.value)}
-                value={projectId}
-              >
-                <option value="">All projects</option>
-                {filterProjectOptions.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={openSpawnModal}
-                type="button"
-              >
-                Spawn Session
-              </button>
-            </div>
+            <button
+              className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              onClick={openSpawnModal}
+              type="button"
+            >
+              Spawn Session
+            </button>
           </div>
         </header>
 
@@ -610,6 +624,7 @@ export function Dashboard() {
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                 <div className="flex gap-2">
                   <select
+                    aria-label="Spawn project"
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}

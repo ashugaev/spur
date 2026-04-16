@@ -19,10 +19,12 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
   });
 
-  test("All Projects title visible", async ({ page }) => {
+  test("project title select visible", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    await expect(projectFilter).toBeVisible();
+    await expect(projectFilter).toHaveValue("");
   });
 
   test("Spawn Session button visible", async ({ page }) => {
@@ -31,10 +33,10 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Filter select with All projects option", async ({ page }) => {
+  test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.locator("select").first();
+    const select = page.getByRole("combobox", { name: "Project filter" });
     await expect(select).toBeVisible();
     await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
   });
