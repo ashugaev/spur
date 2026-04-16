@@ -404,6 +404,31 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByLabel("HDD 65% healthy")).toBeVisible();
   });
 
+  test("footer health tooltip opens on hover and closes on mouse leave", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
+    await onlineButton.hover();
+    await expect(page.getByText("System")).toBeVisible();
+
+    await page.locator("footer").hover({ position: { x: 200, y: 4 } });
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
   test("footer keeps system metrics inside the tooltip when runtime resources are unavailable", async ({
     page,
   }) => {
@@ -462,6 +487,54 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByLabel("HDD 91% critical")).toBeVisible();
   });
 
+  test("footer status text syncs to warning before reaching critical", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated warning status" });
+    await expect(onlineButton).toContainText("warning");
+    await onlineButton.click();
+
+    await expect(page.getByText("System").locator("..").getByText("warning")).toBeVisible();
+    await expect(page.getByLabel("CPU 88% warning")).toBeVisible();
+    await expect(page.getByLabel("HDD 56% healthy")).toBeVisible();
+  });
+
+  test("footer shows critical daemon status when runtime daemon is offline", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: false,
+          daemonAlive: false,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated critical status" });
+    await expect(onlineButton).toContainText("critical");
+    await onlineButton.click();
+
+    await expect(page.getByLabel("Daemon offline critical")).toBeVisible();
+    await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
+  });
+
   test("clicking inside the healthy tooltip closes it", async ({ page }) => {
     await mockSessions(page, []);
     await page.route("/api/runtime/resources", (route) => {
@@ -484,6 +557,42 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(systemLabel).toBeVisible();
     await systemLabel.click();
     await expect(systemLabel).not.toBeVisible();
+  });
+
+  test("pr aggregate stays outside the health tooltip", async ({ page }) => {
+    const session = makeSessionWithPR({ id: "footer-pr-1" });
+    await mockSessions(page, [session]);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          ciStatus: "success",
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    const healthTooltip = page.getByText("System").locator("..").locator("..");
+    await expect(healthTooltip).toBeVisible();
+    await expect(healthTooltip).not.toContainText("test/repo#42");
   });
 });
 

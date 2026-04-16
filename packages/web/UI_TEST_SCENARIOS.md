@@ -90,7 +90,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6c: Footer resource metrics
 
-- Footer left side shows an aggregated health status trigger (`HEALTHY`, `WARNING`, or `CRITICAL`) that is both hoverable and clickable
+- Footer left side shows an aggregated health status trigger (`HEALTHY`, `WARNING`, `CRITICAL`, or `UNAVAILABLE`) that is both hoverable and clickable
 - Opening the health tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
 - Clicking inside the health tooltip content closes it
 - `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold

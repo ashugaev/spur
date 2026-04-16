@@ -726,6 +726,32 @@ describe("StatusBar", () => {
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
   });
 
+  it("shows warning status when cpu or memory crosses the attention threshold", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated warning status",
+    });
+    expect(onlineButton).toHaveTextContent("warning");
+
+    fireEvent.click(onlineButton);
+    expect(screen.getAllByText("warning")).toHaveLength(2);
+    expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 56% healthy")).toBeInTheDocument();
+  });
+
   it("closes the online tooltip when clicking inside popup content", async () => {
     vi.spyOn(global, "fetch").mockResolvedValue(
       new Response(
@@ -749,5 +775,72 @@ describe("StatusBar", () => {
 
     fireEvent.click(screen.getByText("System"));
     expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("opens on hover and closes on mouse leave", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated healthy status",
+    });
+    fireEvent.mouseEnter(onlineButton);
+    expect(screen.getByText("System")).toBeInTheDocument();
+
+    fireEvent.mouseLeave(onlineButton);
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("closes the online tooltip on blur after opening", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 12,
+          memoryPercent: 34,
+          diskPercent: 56,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated healthy status",
+    });
+    fireEvent.click(onlineButton);
+    expect(screen.getByText("System")).toBeInTheDocument();
+
+    fireEvent.blur(onlineButton, { relatedTarget: null });
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("shows critical status when the daemon is offline", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ available: false, daemonAlive: false })),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    const onlineButton = await screen.findByRole("button", {
+      name: "Show aggregated critical status",
+    });
+    expect(onlineButton).toHaveTextContent("critical");
+
+    fireEvent.click(onlineButton);
+    expect(screen.getByLabelText("Daemon offline critical")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
   });
 });
