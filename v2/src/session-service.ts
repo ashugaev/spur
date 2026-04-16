@@ -1532,7 +1532,9 @@ export class SessionService {
     }
     const finalMessage = this.prepareSendMessage(session, request);
     if (request.queue === false) {
-      return this.deliverPrepared(sessionId, finalMessage, { interrupt: request.interrupt === true });
+      return this.deliverPrepared(sessionId, finalMessage, {
+        interrupt: request.interrupt === true,
+      });
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
