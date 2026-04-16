@@ -1967,7 +1967,10 @@ export class SessionService {
 
     const codexSessionRootDir =
       session.agent === "codex"
-        ? join(codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)), "sessions")
+        ? join(
+            codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+            "sessions",
+          )
         : undefined;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     while (Date.now() <= deadline) {
