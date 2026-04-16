@@ -704,10 +704,9 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Show aggregated healthy status" })).toHaveAttribute(
-        "aria-expanded",
-        "false",
-      );
+      expect(
+        screen.getByRole("button", { name: "Show aggregated healthy status" }),
+      ).toHaveAttribute("aria-expanded", "false");
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
