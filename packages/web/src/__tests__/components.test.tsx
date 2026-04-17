@@ -349,7 +349,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("No current sessions are visible. Toggle Completed to review finished work."),
+        screen.getByText(
+          "No current sessions are visible. Toggle Completed to review finished work.",
+        ),
       ).toBeInTheDocument();
     });
 
