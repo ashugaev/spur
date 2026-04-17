@@ -483,6 +483,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     asOptionalString(raw["sessionPrefix"], `${label}.sessionPrefix`) ?? derivePrefix(projectId);
   const worktree = asOptionalBoolean(raw["worktree"], `${label}.worktree`) ?? true;
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
+  const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
   const devServer = parseDevServer(projectId, raw["devServer"]);
@@ -519,6 +520,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     sessionPrefix,
     worktree,
     symlinks,
+    ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
     sidecars,

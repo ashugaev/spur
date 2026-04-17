@@ -685,6 +685,37 @@ describe("SessionService", () => {
     expect(result.planMode).toBe(true);
   });
 
+  it("passes project codex args into codex launch planning", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexHookBaseline").mockResolvedValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:05:00.000Z",
+      hookEvent: "Stop",
+    });
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexSubmitAck").mockResolvedValue(true);
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
+  });
+
   it("starts a pipelined session by sending only the first step immediately", async () => {
     const sessions = createSessionStore();
     const { SessionService } = await loadSessionServiceModule();

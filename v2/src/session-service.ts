@@ -195,10 +195,17 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 }
 
 function withPlanMode(
-  options: { claudeSettingsPath?: string; codexHomePath?: string },
+  options: { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[] },
   planMode: boolean,
-): { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean } {
+): { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[]; planMode?: boolean } {
   return planMode ? { ...options, planMode: true } : options;
+}
+
+function withProjectAgentOptions(
+  project: Pick<ProjectConfig, "codexArgs">,
+  options: { claudeSettingsPath?: string; codexHomePath?: string },
+): { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[] } {
+  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -462,7 +469,12 @@ async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
   restoreMessage: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean },
+  options?: {
+    claudeSettingsPath?: string;
+    codexHomePath?: string;
+    codexArgs?: string[];
+    planMode?: boolean;
+  },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
   let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage, options);
@@ -1326,10 +1338,11 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
       });
+      const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
       const launchPlan = buildAgentLaunchPlan(
         agent,
         initialMessage,
-        withPlanMode(hookSetup, planMode),
+        planOptions,
       );
       const pipeline = steps
         ? {
@@ -2103,10 +2116,12 @@ export class SessionService {
       sessionToolDir,
     });
     const planMode = resolvePlanMode(session);
+    const project = this.getProject(session.project);
+    const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
     const baseLaunchPlan = buildAgentLaunchPlan(
       session.agent,
       session.prompt,
-      withPlanMode(hookSetup, planMode),
+      planOptions,
     );
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
@@ -2114,7 +2129,7 @@ export class SessionService {
           sessionWithAgentId.agent,
           sessionWithAgentId.agentSessionId,
           baseLaunchCommand,
-          withPlanMode(hookSetup, planMode),
+          planOptions,
         )
       : null;
     this.logEvent("session.recover.started", {
@@ -2258,7 +2273,11 @@ export class SessionService {
       });
       const planMode = resolvePlanMode(current);
       const restorePrompt = buildRestorePrompt(current.prompt);
-      const planOptions = withPlanMode(hookSetup, planMode);
+      const restoreProjectConfig = this.getProject(current.project);
+      const planOptions = withPlanMode(
+        withProjectAgentOptions(restoreProjectConfig, hookSetup),
+        planMode,
+      );
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,

@@ -18,6 +18,7 @@ export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
   codexHomePath?: string;
+  codexArgs?: string[];
   planMode?: boolean;
 }
 
@@ -31,8 +32,14 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function codexPlanOptions(options?: AgentPlanOptions): { codexHomePath?: string } {
-  return options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {};
+function codexPlanOptions(options?: AgentPlanOptions): {
+  codexHomePath?: string;
+  codexArgs?: string[];
+} {
+  return {
+    ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
+    ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
+  };
 }
 
 export function parseAgentName(agent: string): AgentName {

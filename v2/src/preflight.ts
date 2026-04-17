@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { codexCommand } from "./agents/codex.js";
+import { shellEscape } from "./agents/shell-escape.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -88,16 +89,24 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<string> 
   return stdout;
 }
 
-async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
+async function runCodexPreflight(
+  prompt: string,
+  cwd: string,
+  codexArgs: string[] | undefined,
+): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
+  const extraArgs =
+    codexArgs && codexArgs.length > 0
+      ? ` ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`
+      : "";
 
   try {
     const { stdout } = await execFileAsync(
       "/bin/sh",
       [
         "-lc",
-        'printf "%s" "$SPUR_PREFLIGHT_PROMPT" | "$SPUR_CODEX_BIN" exec --ephemeral --disable codex_hooks --disable apps --disable plugins --dangerously-bypass-approvals-and-sandbox --output-last-message "$SPUR_PREFLIGHT_OUTPUT" -',
+        `printf "%s" "$SPUR_PREFLIGHT_PROMPT" | "$SPUR_CODEX_BIN" exec --ephemeral --disable codex_hooks --disable apps --disable plugins --dangerously-bypass-approvals-and-sandbox${extraArgs} --output-last-message "$SPUR_PREFLIGHT_OUTPUT" -`,
       ],
       {
         cwd,
@@ -135,6 +144,6 @@ export async function runSpawnPreflight(
   const raw =
     input.agent === "claude"
       ? await runClaudePreflight(prompt, input.project.path)
-      : await runCodexPreflight(prompt, input.project.path);
+      : await runCodexPreflight(prompt, input.project.path, input.project.codexArgs);
   return parseSpawnPreflightResult(raw);
 }

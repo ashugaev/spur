@@ -341,13 +341,23 @@ function withCodexHome(command: string, codexHomePath: string | undefined): stri
   return `CODEX_HOME=${shellEscape(codexHomePath)} ${command}`;
 }
 
+function appendCodexArgs(command: string, codexArgs: string[] | undefined): string {
+  if (!codexArgs || codexArgs.length === 0) {
+    return command;
+  }
+  return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentLaunchPlan {
   return {
     launchCommand: withCodexHome(
-      `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+      appendCodexArgs(
+        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     initialMessage: prompt,
@@ -358,11 +368,14 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+      appendCodexArgs(
+        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     readyMarkers: ["›"],
@@ -372,7 +385,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
