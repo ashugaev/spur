@@ -172,6 +172,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
+### S2c: Queued messages
+
+- Visible when `queuedMessages.messages.length > 0` or `queuedMessages.awaitingPrompt=true`
+- Section header is `QUEUED MESSAGES`
+- Messages render the full send stack in FIFO order
+- Manual queued sends appear before future auto-step messages in the same stack
+- Each queued message is shown as its own stacked row with full wrapped text
+- When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
+- Hidden when queue is empty and not awaiting prompt
+
 ### S3: Message section
 
 - Textarea for sending messages when session accepts input
@@ -182,13 +192,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
-- Send button disabled when empty (no text and no attachments) or action in progress
+- `Queue` button adds the message to the queued stack and is the default composer action
+- `Send now` button bypasses the queue and sends immediately
+- Ctrl/Cmd+Enter triggers the queued send path
+- `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
 - Cmd+V paste with image on clipboard adds thumbnail preview below textarea
 - Drag-and-drop image file onto textarea adds thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
-- Send button enabled when attachments are present even with empty text
+- Both `Queue` and `Send now` are enabled when attachments are present even with empty text
 - Attachments and text cleared after successful send
 
 ### S4: Links section
