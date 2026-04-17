@@ -562,7 +562,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Select the project
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
@@ -599,7 +599,7 @@ test.describe("D7b: Silent branch preflight", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Set project and prompt
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();

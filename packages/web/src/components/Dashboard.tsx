@@ -513,17 +513,12 @@ export function Dashboard() {
           <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
             <div className="flex min-w-0 shrink items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
+              <h1 className="relative inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
+                <span className="min-w-0 truncate">{activeProjectName}</span>
                 <select
                   aria-label="Project filter"
-                  className="min-w-0 max-w-full appearance-none truncate bg-transparent uppercase outline-none"
+                  className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
                   onChange={(event) => syncProjectFilter(event.target.value)}
-                  style={{
-                    color: "inherit",
-                    font: "inherit",
-                    letterSpacing: "inherit",
-                    textTransform: "inherit",
-                  }}
                   value={projectId}
                 >
                   <option value="">All Projects</option>
@@ -535,7 +530,7 @@ export function Dashboard() {
                 </select>
                 <svg
                   aria-hidden="true"
-                  className="pointer-events-none shrink-0 text-[var(--color-text-tertiary)]"
+                  className="pointer-events-none h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
