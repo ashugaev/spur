@@ -179,7 +179,9 @@ describe("runSpawnPreflight", () => {
     });
 
     const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
-    expect((args as string[]).at(-1)).toContain(`'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`);
+    expect((args as string[]).at(-1)).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
   });
 
   it("keeps a successful codex preflight result when temp cleanup races", async () => {

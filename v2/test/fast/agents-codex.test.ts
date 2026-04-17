@@ -111,7 +111,9 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("prompt", {
       codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
     });
-    expect(plan.launchCommand).toContain(`'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`);
+    expect(plan.launchCommand).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
   });
 });
 

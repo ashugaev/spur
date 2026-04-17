@@ -197,7 +197,12 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 function withPlanMode(
   options: { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[] },
   planMode: boolean,
-): { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[]; planMode?: boolean } {
+): {
+  claudeSettingsPath?: string;
+  codexHomePath?: string;
+  codexArgs?: string[];
+  planMode?: boolean;
+} {
   return planMode ? { ...options, planMode: true } : options;
 }
 
@@ -1339,11 +1344,7 @@ export class SessionService {
         sessionToolDir,
       });
       const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
-      const launchPlan = buildAgentLaunchPlan(
-        agent,
-        initialMessage,
-        planOptions,
-      );
+      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, planOptions);
       const pipeline = steps
         ? {
             steps,
@@ -2118,11 +2119,7 @@ export class SessionService {
     const planMode = resolvePlanMode(session);
     const project = this.getProject(session.project);
     const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
-    const baseLaunchPlan = buildAgentLaunchPlan(
-      session.agent,
-      session.prompt,
-      planOptions,
-    );
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
