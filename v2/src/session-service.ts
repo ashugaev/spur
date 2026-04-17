@@ -80,6 +80,7 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
   type SessionState,
@@ -123,6 +124,13 @@ const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const PR_CHECK_WAITING_LIMIT = 5;
+
+export function formatRecursiveSidecarStartError(
+  sidecarName: string,
+  callerSidecarName: string,
+): string {
+  return `Cannot start sidecar "${sidecarName}" from inside sidecar "${callerSidecarName}". Start sidecars only from the main session shell.`;
+}
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -1787,7 +1795,15 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async startSidecar(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest = {},
+  ): Promise<SessionView> {
+    const callerSidecarName = request.callerSidecarName?.trim();
+    if (callerSidecarName) {
+      throw new Error(formatRecursiveSidecarStartError(sidecarName, callerSidecarName));
+    }
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);

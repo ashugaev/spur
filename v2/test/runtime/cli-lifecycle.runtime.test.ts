@@ -2861,6 +2861,200 @@ projects:
     expect(devSessionAlive).toBe(true);
   });
 
+  it("hidden sidecar start command creates the configured sidecar tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-cli-start-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-cli-start.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar cli start test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--dev`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(devSessionAlive).toBe(true);
+  });
+
+  it("hidden sidecar start command rejects recursive sidecar callers", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-cli-recursive-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-cli-recursive.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+      preview:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar cli recursive test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.execCli(
+        [
+          "--config",
+          configPath,
+          "sidecar",
+          "start",
+          "--session",
+          spawned.id,
+          "--name",
+          "preview",
+          "--json",
+        ],
+        { env: { SPUR_SIDECAR_NAME: "dev" } },
+      ),
+    ).rejects.toThrow("Start sidecars only from the main session shell.");
+
+    expect(await tmuxSessionExists(`${spawned.id}--preview`)).toBe(false);
+  });
+
+  it("POST /sessions/:id/dev-server/start rejects recursive sidecar callers", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-recursive-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-recursive.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+      preview:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "recursive sidecar test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/preview/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ callerSidecarName: "dev" }),
+      }),
+    ).rejects.toThrow("Start sidecars only from the main session shell.");
+    expect(await tmuxSessionExists(`${spawned.id}--preview`)).toBe(false);
+  });
+
   it("spawn with autoStart: true creates the --dev tmux session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

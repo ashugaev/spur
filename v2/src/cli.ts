@@ -43,7 +43,11 @@ import {
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
-import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import {
+  formatRecursiveSidecarStartError,
+  isKillConfirmationRequiredMessage,
+  isRestorableSession,
+} from "./session-service.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
@@ -52,6 +56,7 @@ import type {
   RuntimeInfo,
   RunServiceRequest,
   SendMessageRequest,
+  StartSidecarRequest,
   SessionLink,
   ServiceInstanceView,
   SessionView,
@@ -578,12 +583,22 @@ function runningSessionId(): string | undefined {
   return sessionId ? sessionId : undefined;
 }
 
+function currentSidecarName(): string | undefined {
+  const sidecarName = process.env["SPUR_SIDECAR_NAME"]?.trim();
+  return sidecarName ? sidecarName : undefined;
+}
+
+function startSidecarRequest(): StartSidecarRequest {
+  const callerSidecarName = currentSidecarName();
+  return callerSidecarName ? { callerSidecarName } : {};
+}
+
 function respawnParentSessionId(): string | undefined {
   const sessionId = runningSessionId();
   if (!sessionId) {
     return undefined;
   }
-  if (process.env["SPUR_SIDECAR_NAME"]?.trim()) {
+  if (currentSidecarName()) {
     return undefined;
   }
   const sessionToolDir = process.env["SPUR_SESSION_TOOL_DIR"]?.trim();
@@ -966,7 +981,7 @@ async function runInteractiveSessionList(
         await postJson<SessionView>(
           cliEntrypoint,
           `/sessions/${session.id}/sidecars/${scName}/start`,
-          {},
+          startSidecarRequest(),
           configPath,
         );
       }
@@ -1715,10 +1730,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      if (process.env["SPUR_SIDECAR_NAME"]) {
-        throw new Error(
-          `Cannot start sidecar "${options.name as string}" from inside sidecar "${process.env["SPUR_SIDECAR_NAME"]}". Start sidecars only from the main session shell.`,
-        );
+      const payload = startSidecarRequest();
+      const callerSidecarName = payload.callerSidecarName;
+      if (callerSidecarName) {
+        throw new Error(formatRecursiveSidecarStartError(options.name as string, callerSidecarName));
       }
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
@@ -1730,7 +1745,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            {},
+            payload,
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,

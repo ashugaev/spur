@@ -3336,6 +3336,19 @@ describe("SessionService", () => {
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });
 
+  it("startSidecar rejects recursive sidecar callers before touching session state", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.startSidecar("api-1", "preview", { callerSidecarName: "dev" }),
+    ).rejects.toThrow(
+      'Cannot start sidecar "preview" from inside sidecar "dev". Start sidecars only from the main session shell.',
+    );
+    expect(readSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+  });
+
   it("startSidecar rejects for an inactive (killed) session", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

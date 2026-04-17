@@ -286,6 +286,10 @@ export interface RunServiceRequest {
   port?: number;
 }
 
+export interface StartSidecarRequest {
+  callerSidecarName?: string;
+}
+
 export interface KillSessionRequest {
   force?: boolean;
 }
