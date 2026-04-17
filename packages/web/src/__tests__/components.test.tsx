@@ -144,7 +144,11 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Show completed tasks only" }));
 
     await waitFor(() => {
-      expect(screen.getByText("No completed sessions are visible. Turn off the completed filter or finish a task.")).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "No completed sessions are visible. Turn off the completed filter or finish a task.",
+        ),
+      ).toBeInTheDocument();
     });
   });
 
