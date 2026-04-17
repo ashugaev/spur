@@ -565,7 +565,10 @@ export function Dashboard() {
             </div>
             <div className="flex min-w-[280px] flex-1 items-center gap-2">
               <div className="relative min-w-0 flex-1">
-                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]" data-testid="project-filter-chevron">
+                <span
+                  className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--color-text-tertiary)]"
+                  data-testid="project-filter-chevron"
+                >
                   <svg
                     aria-hidden="true"
                     className="h-3 w-3"
