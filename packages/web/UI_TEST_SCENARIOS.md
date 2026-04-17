@@ -38,11 +38,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting stat buttons in header after title, before search input
+- Needs Input, Working, Waiting, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention)
+- Non-zero values show colored (error/working/attention/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Done` zone remains
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
+- When only completed sessions exist, the default empty placeholder explains that `Completed` reveals finished work
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
@@ -79,9 +81,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- 5 sections: RESPOND, REVIEW, PENDING, WORKING, DONE
+- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
+- `Completed` toggle reveals the DONE section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
-- Empty sections show count "0", no "No sessions" message
+- Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 
 ### D6b: Footer

@@ -121,6 +121,21 @@ function IconBolt() {
     </svg>
   );
 }
+function IconCheck() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -304,6 +319,7 @@ export function Dashboard() {
       respond: grouped.respond.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
+      done: grouped.done.length,
     }),
     [grouped],
   );
@@ -312,7 +328,8 @@ export function Dashboard() {
     () =>
       LANE_ORDER.filter(
         (level) =>
-          grouped[level].length > 0 && (activeStatFilter === null || level === activeStatFilter),
+          grouped[level].length > 0 &&
+          (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
       ),
     [activeStatFilter, grouped],
   );
@@ -320,10 +337,14 @@ export function Dashboard() {
   const hasActiveFilters =
     projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
-
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
+  const emptyStateMessage = hasActiveFilters
+    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    : grouped.done.length > 0
+      ? "No current sessions are visible. Toggle Completed to review finished work."
+      : undefined;
 
   const isValidSpawnProject = (candidateProjectId: string) =>
     filterProjectOptions.some((project) => project.id === candidateProjectId);
@@ -555,6 +576,14 @@ export function Dashboard() {
                 active={activeStatFilter === "pending"}
                 onClick={() => toggleStatFilter("pending")}
               />
+              <StatItem
+                icon={<IconCheck />}
+                label="Completed"
+                value={stats.done}
+                color={stats.done > 0 ? "var(--color-status-ready)" : undefined}
+                active={activeStatFilter === "done"}
+                onClick={() => toggleStatFilter("done")}
+              />
             </div>
           </div>
           <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
@@ -768,13 +797,7 @@ export function Dashboard() {
 
         {!loading && !hasVisibleSessions ? (
           <section className="mt-5">
-            <EmptyState
-              message={
-                hasActiveFilters
-                  ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
-                  : undefined
-              }
-            />
+            <EmptyState message={emptyStateMessage} />
             {hasActiveFilters ? (
               <div className="mt-3 flex justify-center">
                 <button

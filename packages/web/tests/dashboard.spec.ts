@@ -76,6 +76,13 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(header.getByText("1")).toBeVisible();
   });
 
+  test("Completed shows 1 with one completed session", async ({ page }) => {
+    const session = makeCompletedSession({ prompt: "Completed session" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+  });
+
   test("clicking Needs Input stat filters to only that session", async ({ page }) => {
     const needsInput = makeNeedsInputSession({ id: "ni-1", prompt: "Needs input session" });
     const working = makeWorkingSession({ id: "wk-1", prompt: "Working session" });
@@ -114,6 +121,44 @@ test.describe("D2: Header stats show correct counts", () => {
     // Click again to unfilter
     await statButtons.first().click();
     await expect(page.getByText("Working session two")).toBeVisible();
+  });
+
+  test("clicking Completed filters to only completed sessions", async ({ page }) => {
+    const working = makeWorkingSession({ id: "wk-done-1", prompt: "Working still active" });
+    const completed = makeCompletedSession({
+      id: "done-only-1",
+      prompt: "Completed and archived",
+    });
+    await mockSessions(page, [working, completed]);
+    await page.goto("/");
+
+    await expect(page.getByText("Working still active")).toBeVisible();
+    await expect(page.getByText("Completed and archived")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /Completed/i }).click();
+
+    await expect(page.getByText("Completed and archived")).toBeVisible();
+    await expect(page.getByText("Working still active")).not.toBeVisible();
+    await expect(page.getByText("Done").first()).toBeVisible();
+  });
+
+  test("clicking Completed again returns to current sessions", async ({ page }) => {
+    const working = makeWorkingSession({ id: "wk-done-2", prompt: "Working returns" });
+    const completed = makeCompletedSession({
+      id: "done-only-2",
+      prompt: "Completed hides again",
+    });
+    await mockSessions(page, [working, completed]);
+    await page.goto("/");
+
+    const completedToggle = page.getByRole("button", { name: /Completed/i });
+    await completedToggle.click();
+    await expect(page.getByText("Completed hides again")).toBeVisible();
+
+    await completedToggle.click();
+
+    await expect(page.getByText("Working returns")).toBeVisible();
+    await expect(page.getByText("Completed hides again")).not.toBeVisible();
   });
 
   test("shows placeholder with reset filters when a stat filter hides all sessions", async ({
@@ -348,14 +393,9 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, [working, completed]);
     await page.goto("/");
 
-    // Completed sessions go into "done" zone which IS shown (but hidden by default if it had
-    // a "done" filter). The done zone label is "Done" per zoneConfig.
-    // The test scenario says "completed/killed sessions NOT visible by default" — meaning
-    // the done zone is hidden. But per the code, done zone IS shown (LANE_ORDER includes "done").
-    // The code shows done zone when grouped.done.length > 0.
-    // So completed session IS shown in done zone. Let's verify the done zone label IS shown.
-    await expect(page.getByText("Done").first()).toBeVisible();
-    await expect(page.getByText("Done zone session")).toBeVisible();
+    await expect(page.getByText("Visible session")).toBeVisible();
+    await expect(page.getByText("Done zone session")).not.toBeVisible();
+    await expect(page.getByText("Done").first()).not.toBeVisible();
   });
 
   test("zone count is shown", async ({ page }) => {

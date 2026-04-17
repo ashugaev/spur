@@ -261,6 +261,105 @@ describe("Dashboard", () => {
     });
   });
 
+  it("hides completed sessions by default and toggles them into view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              sessionsPayload().sessions[0],
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-1",
+                prompt: "Ship auth",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Ship auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Fix auth" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
+  });
+
+  it("explains how to reveal finished work when only completed sessions exist", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-only",
+                prompt: "Already finished",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No current sessions are visible. Toggle Completed to review finished work."),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Already finished" })).toBeInTheDocument();
+    });
+  });
+
   it("resets search and project filters from the empty state action", async () => {
     window.history.replaceState(null, "", "/?project=api");
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
