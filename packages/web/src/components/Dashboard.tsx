@@ -513,10 +513,10 @@ export function Dashboard() {
           <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
             <div className="flex min-w-0 shrink items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="relative min-w-0 max-w-full text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
+              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
                 <select
                   aria-label="Project filter"
-                  className="min-w-0 max-w-full appearance-none truncate bg-transparent pr-5 uppercase outline-none"
+                  className="min-w-0 max-w-full appearance-none truncate bg-transparent uppercase outline-none"
                   onChange={(event) => syncProjectFilter(event.target.value)}
                   style={{
                     color: "inherit",
@@ -535,7 +535,7 @@ export function Dashboard() {
                 </select>
                 <svg
                   aria-hidden="true"
-                  className="pointer-events-none absolute right-0 h-3 w-3 text-[var(--color-text-tertiary)]"
+                  className="pointer-events-none shrink-0 text-[var(--color-text-tertiary)]"
                   fill="none"
                   viewBox="0 0 24 24"
                   stroke="currentColor"
