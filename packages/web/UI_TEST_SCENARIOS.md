@@ -97,6 +97,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
 - Clicking inside the system health tooltip closes it
 - On touch devices, tapping anywhere outside the open system health tooltip closes it
+- On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
 - Git / PR aggregate stays outside the `HEALTHY` tooltip
 

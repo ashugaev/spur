@@ -244,11 +244,10 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const touchDevice = window.matchMedia("(hover: none), (pointer: coarse)").matches;
-    if (!touchDevice) return;
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !onlineOpen) return;
 
     const onPointerDown = (event: PointerEvent) => {
-      if (!onlineOpen) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (onlineContainerRef.current?.contains(target)) return;
