@@ -471,6 +471,43 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   });
 });
 
+test.describe("D6c: Footer touch tooltip dismissal", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test.beforeEach(async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+  });
+
+  test("touch tap on tooltip content closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).click();
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.click();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap outside tooltip closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).click();
+    await expect(page.getByText("System")).toBeVisible();
+    await page.getByRole("heading", { name: "All Projects" }).click();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+});
+
 // D7: Spawn modal
 test.describe("D7: Spawn modal", () => {
   test("clicking Spawn Session button opens modal", async ({ page }) => {

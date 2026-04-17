@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CiStatusDot,
   fetchPrInfo,
@@ -228,6 +228,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
   const [onlineDismissed, setOnlineDismissed] = useState(false);
+  const onlineContainerRef = useRef<HTMLDivElement | null>(null);
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
   const onlineLabel =
@@ -239,10 +240,34 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
           ? "Healthy"
           : "Unavailable";
   const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none), (pointer: coarse)").matches;
+    if (!touchDevice) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!onlineOpen) return;
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (onlineContainerRef.current?.contains(target)) return;
+      setOnlineDismissed(true);
+      setOnlinePinned(false);
+      setOnlineHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [onlineOpen]);
+
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
+          ref={onlineContainerRef}
           className="group/status relative"
           onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
