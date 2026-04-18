@@ -463,6 +463,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.queryByText(/^History$/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "History" }));
 
     expect(screen.getByText("2026-04-17 12:34 UTC")).toBeInTheDocument();

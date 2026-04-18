@@ -537,6 +537,7 @@ test.describe("D7: Spawn modal", () => {
     await page.goto("/");
 
     await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByText(/^History$/)).toHaveCount(0);
     await page.getByRole("button", { name: /^history$/i }).click();
 
     await expect(page.getByText("2026-04-17 12:34 UTC")).toBeVisible();
