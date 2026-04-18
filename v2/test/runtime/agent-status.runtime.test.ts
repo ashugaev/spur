@@ -123,11 +123,23 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     await waitForState(port, session.id, "waiting");
 
     // show-waiting-menu makes fake agent write tool_use JSONL without later ack.
-    // After the 3s stale window + debounce, daemon classifies as needs_input.
+    // After the stale window + debounce, daemon classifies as needs_input.
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
     const view = await waitForState(port, session.id, "needs_input");
     expect(view.state).toBe("needs_input");
+  });
+
+  it("Claude: slow tool_result stays working until the tool completes", async () => {
+    const { context, configPath, port } = await setup("claude-slow-tool");
+    const session = await spawnSession(context, configPath, "claude");
+    await waitForState(port, session.id, "waiting");
+
+    await context.execCli(["--config", configPath, "send", session.id, "slow-tool-result"]);
+
+    const view = await waitForState(port, session.id, "waiting");
+    const states = view.stateHistory?.map((entry) => entry.state) ?? [];
+    expect(states).not.toContain("needs_input");
   });
 
   it("Claude: pause → stopped, resume → waiting, kill → killed", async () => {
