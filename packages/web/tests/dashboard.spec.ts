@@ -531,7 +531,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
   test("touch tap outside tooltip closes it", async ({ page }) => {
     await page.getByRole("button", { name: "Show aggregated system status" }).tap();
     await expect(page.getByText("System")).toBeVisible();
-    await page.getByRole("heading", { name: "All Projects" }).tap();
+    await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
   });
 });
