@@ -210,11 +210,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "working";
   }
 
-  if (
-    session.status === "paused" ||
-    session.state === "waiting" ||
-    session.state === "stopped"
-  ) {
+  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
     return "pending";
   }
 

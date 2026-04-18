@@ -1717,7 +1717,9 @@ export class SessionService {
           branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
           ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
           worktree,
-          worktreePath: worktree ? join(this.config.worktreeDir, request.project, sessionId) : project.path,
+          worktreePath: worktree
+            ? join(this.config.worktreeDir, request.project, sessionId)
+            : project.path,
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",

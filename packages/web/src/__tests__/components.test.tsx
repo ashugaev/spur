@@ -957,7 +957,9 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify(spawned), { status: 201 });
       }
       if (url === "/api/sessions?project=api") {
-        return new Response(JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }));
+        return new Response(
+          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
+        );
       }
       if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
