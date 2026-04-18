@@ -239,11 +239,7 @@ describe("Codex hook state fixture classification", () => {
     expect(hookState.state).toBe("working");
     expect(hookState.turnId).toBeTruthy();
     expect(lines).toHaveLength(20);
-    const turnId = hookState.turnId;
-    if (!turnId) {
-      throw new Error("expected spur-436f fixture to include turnId");
-    }
-    expect(lines.some((line) => line.includes(turnId))).toBe(true);
+    expect(lines.some((line) => line.includes(hookState.turnId!))).toBe(true);
     expect(lines.some((line) => line.includes("Process running with session ID"))).toBe(true);
   });
 

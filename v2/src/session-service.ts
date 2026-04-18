@@ -86,8 +86,10 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
+  type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
   type SessionStateTransition,
@@ -96,6 +98,15 @@ import {
   type StateSource,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
+import {
+  formatNestedSidecarStartError,
+  MAX_SIDECAR_DEPTH,
+  nextSidecarDepth,
+  ROOT_SIDECAR_DEPTH,
+  sidecarCallerContextFromRequest,
+  SPUR_SIDECAR_DEPTH_ENV,
+  SPUR_SIDECAR_NAME_ENV,
+} from "./sidecar-runtime.js";
 import {
   createWorktree,
   findWorktreePathForBranch,
@@ -111,7 +122,7 @@ import { gh } from "./gh.js";
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
-const PIPELINE_READY_GRACE_MS = 2_000;
+const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -242,7 +253,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -262,6 +273,32 @@ function queuedMessages(session: SessionRecord): string[] {
 
 function hasQueuedMessages(session: SessionRecord): boolean {
   return queuedMessages(session).length > 0;
+}
+
+function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipeline">): string[] {
+  const pipeline = session.pipeline;
+  if (!pipeline || pipeline.status !== "running") {
+    return [];
+  }
+  return pipeline.steps
+    .slice(pipeline.nextStepIndex)
+    .map((step, offset) =>
+      formatPipelineStepMessage(
+        session.prompt,
+        step,
+        pipeline.nextStepIndex + offset,
+        pipeline.steps.length,
+      ),
+    );
+}
+
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
+  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
+  if (messages.length === 0 && !awaitingPrompt) {
+    return undefined;
+  }
+  return { messages, awaitingPrompt };
 }
 
 function withQueuedMessages(
@@ -402,6 +439,22 @@ function sidecarPortEnv(
 ): Record<string, string> {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function buildSidecarRuntimeEnv(
+  sessionEnv: Record<string, string>,
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+  sidecarEnv: Record<string, string> | undefined,
+  sidecarDepth: number,
+): Record<string, string> {
+  return {
+    ...sessionEnv,
+    ...(sidecarEnv ?? {}),
+    [SPUR_SIDECAR_NAME_ENV]: sidecarName,
+    [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
+    ...sidecarPortEnv(session, sidecarName),
+  };
 }
 
 function sessionSidecarNames(
@@ -1365,18 +1418,14 @@ export class SessionService {
       const projectSidecars = project.sidecars;
       for (const [name, sidecar] of Object.entries(projectSidecars)) {
         if (!sidecar.autoStart) continue;
+        const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
           await createTmuxSidecarSession({
             sessionId,
             sidecarName: name,
             cwd: workspacePath,
             command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
+            env: buildSidecarRuntimeEnv(sessionEnv, runningRecord, name, sidecar.env, sidecarDepth),
           });
           this.logEvent("session.sidecar.started", {
             level: "info",
@@ -1386,6 +1435,8 @@ export class SessionService {
             details: {
               sidecarName: name,
               command: sidecar.command,
+              manualOnly: false,
+              sidecarDepth,
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
@@ -1497,45 +1548,17 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!message && !hasAttachments) {
+    if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
-
-    let finalMessage = message;
-    if (hasAttachments) {
-      const attachments = request.attachments ?? [];
-      if (attachments.length > MAX_ATTACHMENTS) {
-        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
-      }
-      const attachDir = join(session.worktreePath, ".spur", "attachments");
-      mkdirSync(attachDir, { recursive: true });
-      const prefixLines: string[] = [];
-      for (const att of attachments) {
-        if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
-          throw new Error(`Invalid attachment name: ${String(att.name)}`);
-        }
-        const ext = extname(att.name).toLowerCase();
-        if (!ALLOWED_EXT.has(ext)) {
-          throw new Error(`Unsupported attachment extension: ${ext}`);
-        }
-        if (typeof att.data !== "string" || !att.data) {
-          throw new Error("Attachment data must be a non-empty base64 string");
-        }
-        const buf = Buffer.from(att.data, "base64");
-        if (buf.length > MAX_DECODED_SIZE) {
-          throw new Error(`Attachment ${att.name} exceeds 5MB`);
-        }
-        const filename = `${Date.now()}-${att.name}`;
-        const filePath = join(attachDir, filename);
-        writeFileSync(filePath, buf, { mode: 0o644 });
-        prefixLines.push(`[Attached file: ${filePath}]`);
-      }
-      finalMessage = prefixLines.join("\n") + (message ? `\n${message}` : "");
+    const finalMessage = this.prepareSendMessage(session, request);
+    if (request.queue === false) {
+      return this.deliverPrepared(sessionId, finalMessage, {
+        interrupt: request.interrupt === true,
+      });
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -1558,7 +1581,9 @@ export class SessionService {
         messageLength: finalMessage.length,
       },
     });
-    await this.tryDeliverQueuedMessage(sessionId);
+    if (updated.queuedMessages?.awaitingPrompt !== true) {
+      await this.tryDeliverQueuedMessage(sessionId);
+    }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
   }
@@ -1579,8 +1604,20 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
+    return this.deliverPrepared(sessionId, message, options);
+  }
+
+  private async deliverPrepared(
+    sessionId: string,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<SessionView> {
+    const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      const readySession = await this.ensureSessionReadyForSend(session);
+      if (!initialSession) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
@@ -1598,7 +1635,7 @@ export class SessionService {
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
-        projectId: session.project,
+        projectId: initialSession.project,
         message: `Delivered message to ${sessionId}`,
         details: {
           interrupt,
@@ -1612,7 +1649,7 @@ export class SessionService {
       this.logEvent("session.message.failed", {
         level: "error",
         sessionId,
-        projectId: session.project,
+        ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
           interrupt: options?.interrupt === true,
@@ -1620,6 +1657,46 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "worktreePath">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const attachments = request.attachments ?? [];
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+    }
+    const attachDir = join(session.worktreePath, ".spur", "attachments");
+    mkdirSync(attachDir, { recursive: true });
+    const prefixLines: string[] = [];
+    for (const att of attachments) {
+      if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
+        throw new Error(`Invalid attachment name: ${String(att.name)}`);
+      }
+      const ext = extname(att.name).toLowerCase();
+      if (!ALLOWED_EXT.has(ext)) {
+        throw new Error(`Unsupported attachment extension: ${ext}`);
+      }
+      if (typeof att.data !== "string" || !att.data) {
+        throw new Error("Attachment data must be a non-empty base64 string");
+      }
+      const buf = Buffer.from(att.data, "base64");
+      if (buf.length > MAX_DECODED_SIZE) {
+        throw new Error(`Attachment ${att.name} exceeds 5MB`);
+      }
+      const filename = `${Date.now()}-${att.name}`;
+      const filePath = join(attachDir, filename);
+      writeFileSync(filePath, buf, { mode: 0o644 });
+      prefixLines.push(`[Attached file: ${filePath}]`);
+    }
+    return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
   async pause(sessionId: string): Promise<SessionView> {
@@ -1725,7 +1802,29 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async startSidecar(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest = {},
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
+    if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
+      const message = formatNestedSidecarStartError(sidecarName, caller.name);
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId,
+        message,
+        details: {
+          callerSidecarDepth: caller.depth,
+          callerSidecarName: caller.name,
+          maxSidecarDepth: MAX_SIDECAR_DEPTH,
+          reason: "max_depth_exceeded",
+          sidecarName,
+        },
+      });
+      throw new Error(message);
+    }
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1765,12 +1864,7 @@ export class SessionService {
       sidecarName,
       cwd: session.worktreePath,
       command: sidecar.command,
-      env: {
-        ...sessionEnv,
-        SPUR_SIDECAR_NAME: sidecarName,
-        ...(sidecar.env ?? {}),
-        ...sidecarPortEnv(session, sidecarName),
-      },
+      env: buildSidecarRuntimeEnv(sessionEnv, session, sidecarName, sidecar.env, sidecarDepth),
     });
 
     const sidecarNames = sessionSidecarNames(session, project);
@@ -1788,8 +1882,11 @@ export class SessionService {
       projectId: session.project,
       message: `Started sidecar ${sidecarName} for ${sessionId}`,
       details: {
+        callerSidecarName: caller.name ?? null,
         sidecarName,
+        sidecarDepth,
         command: sidecar.command,
+        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
@@ -2691,7 +2788,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2726,7 +2823,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2923,6 +3020,7 @@ export class SessionService {
     for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
+    const queuedMessagesView = displayQueuedMessages(session);
 
     return {
       ...session,
@@ -2934,6 +3032,7 @@ export class SessionService {
       lastActivityAt,
       services,
       sidecars,
+      ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }
 
@@ -2956,4 +3055,11 @@ export class SessionService {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     return hookState?.state ?? "waiting";
   }
+}
+
+function hasMessageContent(request: SendMessageRequest): boolean {
+  return (
+    (typeof request.message === "string" && request.message.trim().length > 0) ||
+    (Array.isArray(request.attachments) && request.attachments.length > 0)
+  );
 }

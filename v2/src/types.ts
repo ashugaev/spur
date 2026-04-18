@@ -278,12 +278,19 @@ export interface SendMessageAttachment {
 export interface SendMessageRequest {
   message: string;
   attachments?: SendMessageAttachment[];
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export interface RunServiceRequest {
   command: string;
   cwd: string;
   port?: number;
+}
+
+export interface StartSidecarRequest {
+  callerSidecarName?: string;
+  callerSidecarDepth?: number;
 }
 
 export interface KillSessionRequest {

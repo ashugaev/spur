@@ -31,6 +31,45 @@ services_are_active() {
   systemctl_cmd is-active --quiet spur-web.service
 }
 
+# Install systemd service files from deploy/templates, filling {{SPUR_ROOT}}
+# with the deploy clone path.  Extracts existing secrets from installed units
+# so the templates never contain real credentials.
+# Sets SERVICES_CHANGED=true when any file was updated.
+SERVICES_CHANGED=false
+
+install_service_files() {
+  local root="$1"
+  local template_dir="$root/deploy"
+
+  # Extract AZURE_OPENAI_API_KEY from the currently-installed daemon unit
+  local azure_key=""
+  if [[ -f /etc/systemd/system/spur-daemon.service ]]; then
+    azure_key=$(sed -n 's/^Environment=AZURE_OPENAI_API_KEY=//p' /etc/systemd/system/spur-daemon.service || true)
+  fi
+
+  for template in "$template_dir"/*.service; do
+    [[ -f "$template" ]] || continue
+    local name
+    name=$(basename "$template")
+    local target="/etc/systemd/system/$name"
+    local content
+    content=$(<"$template")
+    content="${content//\{\{SPUR_ROOT\}\}/$root}"
+    content="${content//\{\{AZURE_OPENAI_API_KEY\}\}/$azure_key}"
+
+    if [[ -f "$target" ]] && diff <(printf '%s\n' "$content") "$target" >/dev/null 2>&1; then
+      continue
+    fi
+
+    printf '%s\n' "$content" | sudo tee "$target" > /dev/null
+    SERVICES_CHANGED=true
+  done
+
+  if [[ "$SERVICES_CHANGED" == true ]]; then
+    systemctl_cmd daemon-reload
+  fi
+}
+
 ensure_deploy_clone
 
 git -C "$deploy_root" fetch origin main
@@ -43,6 +82,13 @@ if [[ -f "$deployed_sha_file" ]]; then
 fi
 
 if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
+  # Code is up to date, but service files may be stale (e.g. wrong paths).
+  install_service_files "$deploy_root"
+  if [[ "$SERVICES_CHANGED" == true ]]; then
+    echo "Service files updated — restarting"
+    systemctl_cmd restart spur-daemon.service spur-web.service
+    services_are_active
+  fi
   echo "Already deployed origin/main $remote_head"
   exit 0
 fi
@@ -52,6 +98,7 @@ git -C "$deploy_root" reset --hard "$remote_head"
 git -C "$deploy_root" clean -fd
 pnpm -C "$deploy_root" install --frozen-lockfile
 pnpm -C "$deploy_root" build
+install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.
 # The daemon re-discovers living sessions on startup.

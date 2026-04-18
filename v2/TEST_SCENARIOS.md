@@ -76,6 +76,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.
 - Busy GitHub updates queue, dedupe, drop entries that vanished from the latest source snapshot, and flush once the session returns to `waiting`.
+- Manual queued sends flush one message at a time and enforce a minimum 15 second gap before the next queued delivery after `awaitingPrompt=true`.
+- Manual send requests with `queue=false` bypass the queued stack and can still interrupt immediately when `interrupt=true`.
 - `send.interrupt: true` interrupts immediately while working but does not repeatedly interrupt the same busy interval.
 - `github:ci_failed` send triggers retry every 10 minutes while the failure signal persists, stop after 3 deliveries, wait for `waiting` when `send.interrupt=false`, and send immediately when `send.interrupt=true`.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
@@ -124,6 +126,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
 - `service logs` reads collected runtime log lines for the live session, works inside a session workspace via the injected `spur` wrapper, filters sidecar output with `--sidecar`, and rejects missing session context outside a Spur session.
+- The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
+- `POST /sessions/:id/sidecars/:name/start` follows the same depth rule as the hidden CLI command: root session and first-level sidecar callers may start a sidecar, while nested sidecars are rejected.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, shows the `Ctrl+G detach` hint, and returns to the selector after detach.
 - TTY `list` can pause, complete, and kill the selected live session in place; `completed` or `killed` sessions disappear from the live list without silently retargeting another row, and a killed session is not restorable on `Enter` or `r`, with terminal metadata showing `runtimeAlive: false` and `workspaceExists: false`.
@@ -157,10 +161,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), and normal message exchange cycles waiting→working→waiting.
 - Session-level states for both Claude and Codex: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
 - State history records transitions during a Claude session lifecycle.
-- Sidecar auto-starts on spawn when `autoStart: true`.
+- Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete.
-- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`.
+- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`, and `start` also allows one nested hop through the injected `spur-sidecar` helper.
 - Sidecar status reported in session view.
 
 ## Real-Agent Smoke
@@ -204,18 +208,19 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Invalid sidecar reserved port ranges fail config validation
 - Sidecar tmux session naming: `{sessionId}--{sidecarName}`
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
-- Sidecar env merges session env with sidecar config env
+- Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 
 **Tier: runtime integration**
 
-- Sidecar auto-starts on spawn when `autoStart: true`
+- Sidecar auto-starts only on session spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
 - Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
 - Sidecar cleanup on kill/complete
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
+- Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
 
 ## Regression Rule
