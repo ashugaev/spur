@@ -672,7 +672,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <div className="flex items-center gap-2">
-                        <InputHistoryButton entries={messageHistory.entries} onSelect={setMessage} />
+                        <InputHistoryButton
+                          entries={messageHistory.entries}
+                          onSelect={setMessage}
+                        />
                         <button
                           type="button"
                           disabled={

@@ -41,7 +41,14 @@ describe("useInputHistory", () => {
   it("keeps only the last five entries and moves duplicates to the front", () => {
     render(<HistoryHarness />);
 
-    for (const name of ["Save one", "Save two", "Save three", "Save four", "Save five", "Save six"]) {
+    for (const name of [
+      "Save one",
+      "Save two",
+      "Save three",
+      "Save four",
+      "Save five",
+      "Save six",
+    ]) {
       act(() => {
         screen.getByRole("button", { name }).click();
       });

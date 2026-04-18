@@ -41,11 +41,7 @@ interface InputHistoryButtonProps {
 const DEFAULT_BUTTON_CLASS =
   "inline-flex items-center justify-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5";
 
-export function InputHistoryButton({
-  entries,
-  onSelect,
-  className,
-}: InputHistoryButtonProps) {
+export function InputHistoryButton({ entries, onSelect, className }: InputHistoryButtonProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
