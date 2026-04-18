@@ -1,6 +1,8 @@
 "use client";
 
+import { InputHistoryButton } from "@/components/InputHistory";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
+import type { InputHistoryEntry } from "@/hooks/useInputHistory";
 
 const MicIcon = () => (
   <svg
@@ -70,9 +72,11 @@ export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
 export function VoiceConfirmModal({
   voice,
   onInsert,
+  historyEntries = [],
 }: {
   voice: UseVoiceInput;
   onInsert: (text: string) => void;
+  historyEntries?: InputHistoryEntry[];
 }) {
   if (!voice.voiceModalOpen) return null;
   return (
@@ -118,6 +122,7 @@ export function VoiceConfirmModal({
             </p>
           )}
           <div className="flex items-center justify-end gap-2">
+            <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
               type="button"
               className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"

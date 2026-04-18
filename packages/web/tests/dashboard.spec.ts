@@ -579,6 +579,36 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("button", { name: /^spawn$/i })).toBeVisible();
   });
 
+  test("modal restores a saved prompt from history", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "spur:input-history:spawn-prompt",
+        JSON.stringify([
+          {
+            value: "Re-run the flaky deploy",
+            savedAt: "2026-04-17T12:34:56.000Z",
+          },
+        ]),
+      );
+    });
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-history-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByText(/^History$/)).toHaveCount(0);
+    await page.getByRole("button", { name: /^history$/i }).click();
+
+    await expect(page.getByText("2026-04-17 12:34 UTC")).toBeVisible();
+    await page.getByRole("button", { name: /re-run the flaky deploy/i }).click();
+    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
+      "Re-run the flaky deploy",
+    );
+  });
+
   test("Spawn button disabled when project field is empty", async ({ page }) => {
     await mockSessions(page, [], []);
     await page.goto("/");
