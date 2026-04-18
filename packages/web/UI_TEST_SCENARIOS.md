@@ -38,11 +38,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting stat buttons in header after title, before search input
+- Needs Input, Working, Waiting, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention)
+- Non-zero values show colored (error/working/attention/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
+- `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
+- When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
@@ -79,9 +82,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- 5 sections: RESPOND, REVIEW, PENDING, WORKING, DONE
+- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
+- `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
-- Empty sections show count "0", no "No sessions" message
+- Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 
 ### D6b: Footer
@@ -252,10 +256,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### R1: Mobile (<640px)
 
-- Header is split into 3 rows in order:
-- Row 1: logo + project title select
-- Row 2: Needs Input / Working / Waiting stats
-- Row 3: search input + Spawn Session button
+- Header items wrap independently instead of moving as one grouped block
+- The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -264,6 +266,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R2: Tablet (640-1024px)
 
 - Header horizontal
+- Header controls wrap independently instead of moving as a single block
+- Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
+- Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)

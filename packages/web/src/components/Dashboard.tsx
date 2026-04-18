@@ -124,6 +124,21 @@ function IconBolt() {
     </svg>
   );
 }
+function IconCheck() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -308,6 +323,7 @@ export function Dashboard() {
       respond: grouped.respond.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
+      done: grouped.done.length,
     }),
     [grouped],
   );
@@ -316,7 +332,8 @@ export function Dashboard() {
     () =>
       LANE_ORDER.filter(
         (level) =>
-          grouped[level].length > 0 && (activeStatFilter === null || level === activeStatFilter),
+          grouped[level].length > 0 &&
+          (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
       ),
     [activeStatFilter, grouped],
   );
@@ -324,10 +341,14 @@ export function Dashboard() {
   const hasActiveFilters =
     projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
-
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
+  const emptyStateMessage = hasActiveFilters
+    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    : grouped.done.length > 0
+      ? "No current sessions are visible."
+      : undefined;
 
   const isValidSpawnProject = (candidateProjectId: string) =>
     filterProjectOptions.some((project) => project.id === candidateProjectId);
@@ -527,91 +548,97 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
-            <div className="flex min-w-0 shrink items-center gap-3">
+        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
+            <div className="flex min-w-0 items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
-                <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                  <span className="block min-w-0 truncate">{activeProjectName}</span>
-                  <svg
-                    aria-hidden="true"
-                    className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
-                    fill="currentColor"
-                    viewBox="0 0 16 16"
-                  >
-                    <path d="M4 6.5 8 10.5 12 6.5Z" />
-                  </svg>
-                </h1>
-                <select
-                  aria-label="Project filter"
-                  className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
-                  onChange={(event) => syncProjectFilter(event.target.value)}
-                  value={projectId}
+              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+                <span className="block min-w-0 truncate">{activeProjectName}</span>
+                <svg
+                  aria-hidden="true"
+                  className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
                 >
-                  <option value="">All Projects</option>
-                  {filterProjectOptions.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <path d="M4 6.5 8 10.5 12 6.5Z" />
+                </svg>
+              </h1>
             </div>
-            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
-              <StatItem
-                icon={<IconChat />}
-                label="Needs Input"
-                value={stats.respond}
-                color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-                active={activeStatFilter === "respond"}
-                onClick={() => toggleStatFilter("respond")}
-              />
-              <StatItem
-                icon={<IconBolt />}
-                label="Working"
-                value={stats.working}
-                color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-                active={activeStatFilter === "working"}
-                onClick={() => toggleStatFilter("working")}
-              />
-              <StatItem
-                icon={<IconClock />}
-                label="Waiting"
-                value={stats.pending}
-                color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-                active={activeStatFilter === "pending"}
-                onClick={() => toggleStatFilter("pending")}
-              />
-            </div>
-          </div>
-          <div className="flex min-w-0 grow basis-full items-center gap-2 sm:basis-[360px]">
-            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-              <svg
-                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Filter sessions..."
-                value={searchQuery}
-              />
-            </div>
-            <button
-              className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openSpawnModal}
-              type="button"
+            <select
+              aria-label="Project filter"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
             >
-              Spawn Session
-            </button>
+              <option value="">All Projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
           </div>
+          <StatItem
+            icon={<IconChat />}
+            label="Needs Input"
+            value={stats.respond}
+            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+            active={activeStatFilter === "respond"}
+            onClick={() => toggleStatFilter("respond")}
+          />
+          <StatItem
+            icon={<IconBolt />}
+            label="Working"
+            value={stats.working}
+            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+            active={activeStatFilter === "working"}
+            onClick={() => toggleStatFilter("working")}
+          />
+          <StatItem
+            icon={<IconClock />}
+            label="Waiting"
+            value={stats.pending}
+            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+            active={activeStatFilter === "pending"}
+            onClick={() => toggleStatFilter("pending")}
+          />
+          <StatItem
+            icon={<IconCheck />}
+            label="Completed"
+            value={stats.done}
+            color={
+              activeStatFilter === "done" && stats.done > 0
+                ? "var(--color-status-ready)"
+                : undefined
+            }
+            active={activeStatFilter === "done"}
+            onClick={() => toggleStatFilter("done")}
+          />
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter sessions..."
+              value={searchQuery}
+            />
+          </div>
+          <button
+            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
+            onClick={openSpawnModal}
+            type="button"
+          >
+            Spawn Session
+          </button>
         </header>
 
         {spawnOpen ? (
@@ -786,13 +813,7 @@ export function Dashboard() {
 
         {!loading && !hasVisibleSessions ? (
           <section className="mt-5">
-            <EmptyState
-              message={
-                hasActiveFilters
-                  ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
-                  : undefined
-              }
-            />
+            <EmptyState message={emptyStateMessage} />
             {hasActiveFilters ? (
               <div className="mt-3 flex justify-center">
                 <button
