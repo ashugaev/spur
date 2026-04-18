@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
@@ -68,6 +69,35 @@ projects:
       - .env
 ${extraProjectYaml}
 `;
+}
+
+async function writeSidecarDepthRecorder(
+  context: RuntimeTestContext,
+  scriptName: string,
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_SIDECAR_DEPTH:-}" > ".sidecar-depth-\${SPUR_SIDECAR_NAME:?}-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function sidecarDepthPath(worktreePath: string, sessionId: string, sidecarName: string): string {
+  return join(worktreePath, `.sidecar-depth-${sidecarName}-${sessionId}`);
+}
+
+function sessionSidecarHelperPath(context: RuntimeTestContext, sessionId: string): string {
+  return join(context.dataDir, "session-tools", sessionId, "spur-sidecar");
 }
 
 async function installFakeDesktopNotifier(context: RuntimeTestContext): Promise<string> {
@@ -306,7 +336,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       const firstNotification = await pollUntil(
         async () => (existsSync(logPath) ? readFile(logPath, "utf8") : ""),
         {
-          timeoutMs: 15_000,
+          timeoutMs: TOOL_USE_STALE_MS + 10_000,
           accept: (value) => value.includes(`Spur needs input [${spawned.id}]`),
         },
       );
@@ -2866,7 +2896,7 @@ projects:
     ).toBe(true);
   });
 
-  it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
+  it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-devserver-start-${port}`;
@@ -2922,6 +2952,406 @@ projects:
       accept: (v) => v === true,
     });
     expect(devSessionAlive).toBe(true);
+  });
+
+  it("hidden sidecar start command creates the configured sidecar tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-cli-start-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-cli-start.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar cli start test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--dev`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(devSessionAlive).toBe(true);
+  });
+
+  it("spur-sidecar helper lets a first-level sidecar manually start one nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-helper-nested-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-nested-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-helper-nested.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar helper test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--dev`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(devAlive).toBe(true);
+
+    const helperPath = sessionSidecarHelperPath(context, spawned.id);
+    await execFileAsync(helperPath, ["--name", "preview", "--json"], {
+      cwd: spawned.worktreePath,
+      env: {
+        ...context.env,
+        SPUR_SESSION: spawned.id,
+        SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+        SPUR_SIDECAR_DEPTH: "1",
+        SPUR_SIDECAR_NAME: "dev",
+      },
+    });
+
+    const previewAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--preview`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(previewAlive).toBe(true);
+
+    const nestedDepth = await pollUntil(
+      async () =>
+        (
+          await readFile(
+            sidecarDepthPath(spawned.worktreePath, spawned.id, "preview"),
+            "utf8",
+          ).catch(() => "")
+        ).trim(),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => value === "2",
+      },
+    );
+    expect(nestedDepth).toBe("2");
+  });
+
+  it("spur-sidecar helper rejects callers already inside a nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-helper-reject-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-nested-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-helper-reject.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+      worker:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar reject test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = sessionSidecarHelperPath(context, spawned.id);
+    await execFileAsync(helperPath, ["--name", "preview", "--json"], {
+      cwd: spawned.worktreePath,
+      env: {
+        ...context.env,
+        SPUR_SESSION: spawned.id,
+        SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+        SPUR_SIDECAR_DEPTH: "1",
+        SPUR_SIDECAR_NAME: "dev",
+      },
+    });
+
+    await expect(
+      execFileAsync(helperPath, ["--name", "worker", "--json"], {
+        cwd: spawned.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: spawned.id,
+          SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+          SPUR_SIDECAR_DEPTH: "2",
+          SPUR_SIDECAR_NAME: "preview",
+        },
+      }),
+    ).rejects.toThrow("Sidecars can nest only one level deep");
+    expect(await tmuxSessionExists(`${spawned.id}--worker`)).toBe(false);
+
+    const rejectedEvent = await pollUntil(
+      async () =>
+        readEventLog(context.dataDir).find(
+          (entry) =>
+            entry.event === "session.sidecar.start_rejected" &&
+            entry.sessionId === spawned.id &&
+            entry.details?.["sidecarName"] === "worker",
+        ),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => Boolean(value),
+      },
+    );
+    expect(rejectedEvent).toMatchObject({
+      details: expect.objectContaining({
+        callerSidecarDepth: 2,
+        callerSidecarName: "preview",
+        reason: "max_depth_exceeded",
+        sidecarName: "worker",
+      }),
+      event: "session.sidecar.start_rejected",
+    });
+  });
+
+  it("POST /sessions/:id/sidecars/:name/start allows one nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-api-nested-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-api-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-api-nested.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar api test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/preview/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callerSidecarDepth: 1, callerSidecarName: "dev" }),
+    });
+
+    const previewAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--preview`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(previewAlive).toBe(true);
+
+    const nestedDepth = await pollUntil(
+      async () =>
+        (
+          await readFile(
+            sidecarDepthPath(spawned.worktreePath, spawned.id, "preview"),
+            "utf8",
+          ).catch(() => "")
+        ).trim(),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => value === "2",
+      },
+    );
+    expect(nestedDepth).toBe("2");
+  });
+
+  it("POST /sessions/:id/sidecars/:name/start rejects callers already inside a nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-api-reject-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-api-reject.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+      preview:
+        command: "tail -f /dev/null"
+      worker:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar api reject test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/worker/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ callerSidecarDepth: 2, callerSidecarName: "preview" }),
+      }),
+    ).rejects.toThrow("Sidecars can nest only one level deep");
+    expect(await tmuxSessionExists(`${spawned.id}--worker`)).toBe(false);
   });
 
   it("spawn with autoStart: true creates the --dev tmux session", async () => {

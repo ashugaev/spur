@@ -16,6 +16,7 @@ const DAEMON_STOP_ATTEMPTS = 20;
 const DAEMON_STOP_RETRY_DELAY_MS = 100;
 const DAEMON_START_ATTEMPTS = 160;
 const DAEMON_START_RETRY_DELAY_MS = 250;
+const EXTERNAL_DAEMON_RESTART_ATTEMPTS = 20;
 
 export function createBaseUrl(configPath?: string): { baseUrl: string; configPath: string } {
   const config = loadConfig(configPath);
@@ -201,8 +202,11 @@ function spawnDaemon(cliEntrypoint: string, configPath: string): void {
   child.unref();
 }
 
-async function waitForReadyDaemon(baseUrl: string): Promise<RuntimeInfo | undefined> {
-  for (let attempt = 0; attempt < DAEMON_START_ATTEMPTS; attempt += 1) {
+async function waitForReadyDaemon(
+  baseUrl: string,
+  attempts = DAEMON_START_ATTEMPTS,
+): Promise<RuntimeInfo | undefined> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     await sleep(DAEMON_START_RETRY_DELAY_MS);
     const probe = await probeDaemon(baseUrl);
     if (probe.state === "ready") {
@@ -251,9 +255,11 @@ export async function restartDaemonIfRunning(
     return { baseUrl, restarted: false };
   }
 
-  // Wait for an external service manager (e.g. systemd) to restart the daemon.
-  // Only spawn a new process as fallback if nothing comes up.
-  let runtime = await waitForReadyDaemon(baseUrl).catch(() => null);
+  // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
+  // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
+  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS).catch(
+    () => null,
+  );
   if (!runtime) {
     spawnDaemon(cliEntrypoint, resolvedConfigPath);
     runtime = await waitForReadyDaemon(baseUrl);

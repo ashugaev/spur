@@ -150,6 +150,40 @@ describe("runSpawnPreflight", () => {
     );
   });
 
+  it("appends configured codex args to codex preflight", async () => {
+    mockExecFileAsync.mockImplementationOnce(
+      async (
+        _command: string,
+        _args: string[],
+        options?: { env?: Record<string, string | undefined> },
+      ) => {
+        const outputPath = options?.env?.["SPUR_PREFLIGHT_OUTPUT"];
+        if (!outputPath) {
+          throw new Error("Expected codex preflight to receive --output-last-message <path>");
+        }
+        writeFileSync(outputPath, "feature/runtime-preflight\n", "utf8");
+        return { stdout: "", stderr: "" };
+      },
+    );
+
+    await runSpawnPreflight({
+      agent: "codex",
+      projectId: "api",
+      project: {
+        ...PROJECT,
+        codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix runtime regression from INT-42",
+    });
+
+    const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect((args as string[]).at(-1)).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
+  });
+
   it("keeps a successful codex preflight result when temp cleanup races", async () => {
     mockExecFileAsync.mockImplementationOnce(
       async (

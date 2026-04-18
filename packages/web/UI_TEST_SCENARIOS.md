@@ -32,17 +32,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D1: Header renders correctly
 
-- 𖤓 icon + project title visible
-- Project filter dropdown with "All projects" default
+- 𖤓 icon + large project title visible at the same size as before
+- Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting stat buttons in header after title, before search input
+- Needs Input, Working, Waiting, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention)
+- Non-zero values show colored (error/working/attention/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
+- `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
+- When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
@@ -79,9 +82,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- 5 sections: RESPOND, REVIEW, PENDING, WORKING, DONE
+- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
+- `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
-- Empty sections show count "0", no "No sessions" message
+- Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 
 ### D6b: Footer
@@ -96,6 +100,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Opening the `HEALTHY` tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
 - `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
 - Clicking inside the system health tooltip closes it
+- On touch devices, tapping anywhere outside the open system health tooltip closes it
+- On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
 - Git / PR aggregate stays outside the `HEALTHY` tooltip
 
@@ -113,7 +119,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
+- History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
@@ -189,7 +197,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
+- History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
+- Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
 - `Queue` button adds the message to the queued stack and is the default composer action
@@ -230,6 +240,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
@@ -245,10 +256,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### R1: Mobile (<640px)
 
-- Header is split into 3 rows in order:
-- Row 1: logo + project title
-- Row 2: Needs Input / Working / Waiting stats
-- Row 3: search input + project filter + Spawn Session button
+- Header items wrap independently instead of moving as one grouped block
+- The project title select, each stat filter, search input, and Spawn Session can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -257,6 +266,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R2: Tablet (640-1024px)
 
 - Header horizontal
+- Header controls wrap independently instead of moving as a single block
+- Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
+- Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search first on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)
 - Tracker/PR links appear at sm (640px)

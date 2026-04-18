@@ -116,6 +116,15 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/path with spaces/codex" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/path with spaces/codex'");
   });
+
+  it("appends configured codex args", () => {
+    const plan = buildCodexPlan("prompt", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
+  });
 });
 
 describe("buildCodexResumePlan", () => {
@@ -147,6 +156,13 @@ describe("buildCodexResumePlan", () => {
       codexHomePath: "/home/codex-dir",
     });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/codex-dir'");
+  });
+
+  it("appends configured codex args to resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", {
+      codexArgs: ["-c", 'service_tier="fast"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(`'-c' 'service_tier="fast"' '--enable' 'fast_mode'`);
   });
 
   it("does not include initialMessage", () => {
@@ -463,6 +479,43 @@ describe("findCodexSessionId", () => {
     // readdir should have been called at most MAX_SESSION_SCAN_DEPTH+2 times
     // (root + depth 1 + depth 2 + depth 3 + depth 4 = 5 calls max)
     expect(mockReaddir.mock.calls.length).toBeLessThanOrEqual(6);
+  });
+
+  it("prefers the first matching session root over a newer global match", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockImplementation(async (dir: unknown) => {
+      if (dir === "/session-root") return ["session.jsonl"];
+      if (dir === "/global-root") return ["global.jsonl"];
+      return [];
+    });
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/session-root/session.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/global-root/global.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/session-root/session.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "session-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDirs: ["/session-root", "/global-root"],
+    });
+
+    expect(result).toBe("session-thread");
+    expect(mockCreateInterface).toHaveBeenCalledTimes(1);
   });
 });
 

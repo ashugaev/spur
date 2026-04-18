@@ -519,6 +519,10 @@ describe("SessionService", () => {
       'Sidecars: use Sidecar for testing by default. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start one.',
     );
     expect(sent).toContain("Do not start app, dev server, or test helper processes directly");
+    expect(sent).toContain("Auto-start applies only when the main session spawns.");
+    expect(sent).toContain(
+      "From inside a sidecar, nested sidecars are manual-only and stop after one more level.",
+    );
     expect(sent).toContain("See `v2/README.md` for sidecar usage.");
     expect(sent).toContain("Available: `dev`.");
   });
@@ -563,6 +567,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         sidecarName: "dev",
         env: expect.objectContaining({
+          SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
           SPUR_RESERVED_PORT_DEV: "3000",
         }),
@@ -680,6 +685,36 @@ describe("SessionService", () => {
       }),
     );
     expect(result.planMode).toBe(true);
+  });
+
+  it("passes project codex args into codex launch planning", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: null,
+    });
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
   });
 
   it("starts a pipelined session by sending only the first step immediately", async () => {
@@ -2435,6 +2470,48 @@ describe("SessionService", () => {
     );
   });
 
+  it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "paused",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    buildAgentResumePlanMock.mockReturnValue({
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      readyMarkers: ["›"],
+    });
+    setupAgentHooksMock.mockResolvedValue({
+      codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
+    });
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    findAgentSessionIdMock.mockResolvedValue("thread-123");
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: "/tmp/rollout.jsonl",
+    });
+
+    await service.send("api-1", { message: "resume work" });
+
+    expect(findAgentSessionIdMock).toHaveBeenCalledWith("codex", "/tmp/spur-worktrees/api/api-1", {
+      codexSessionRootDir: "/tmp/spur-data/session-tools/api-1/codex-home/sessions",
+    });
+  });
+
   it("respects a per-spawn worktree override without changing the project default", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -3277,7 +3354,6 @@ describe("SessionService", () => {
     // This test uses real timers because waitForRestorePlan polls with
     // node:timers/promises setTimeout which fake timers do not intercept.
     vi.useRealTimers();
-
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -3576,6 +3652,89 @@ describe("SessionService", () => {
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
   });
 
+  it("startSidecar allows a first-level sidecar caller and launches the nested sidecar at depth 2", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            preview: {
+              command: "pnpm preview",
+              autoStart: false,
+              env: {
+                CHILD_MODE: "1",
+                SPUR_SIDECAR_DEPTH: "99",
+                SPUR_SIDECAR_NAME: "override-me",
+              },
+            },
+          },
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "preview", { callerSidecarName: "dev" });
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sidecarName: "preview",
+        env: expect.objectContaining({
+          CHILD_MODE: "1",
+          SPUR_SIDECAR_DEPTH: "2",
+          SPUR_SIDECAR_NAME: "preview",
+        }),
+      }),
+    );
+  });
+
+  it("startSidecar rejects callers already inside a nested sidecar before touching session state", async () => {
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(
+      service.startSidecar("api-1", "worker", {
+        callerSidecarDepth: 2,
+        callerSidecarName: "preview",
+      }),
+    ).rejects.toThrow(
+      'Cannot start sidecar "worker" from nested sidecar "preview". Sidecars can nest only one level deep, and nested sidecars must always be started manually.',
+    );
+    expect(readSessionMock).not.toHaveBeenCalled();
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.sidecar.start_rejected",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          callerSidecarDepth: 2,
+          callerSidecarName: "preview",
+          maxSidecarDepth: 2,
+          reason: "max_depth_exceeded",
+          sidecarName: "worker",
+        }),
+      }),
+    );
+  });
+
   it("startSidecar rejects for an inactive (killed) session", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -3732,6 +3891,7 @@ describe("SessionService", () => {
         cwd: "/tmp/spur-worktrees/api/api-1",
         command: "./scripts/dev.sh",
         env: expect.objectContaining({
+          SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
           SPUR_RESERVED_PORT_DEV: "3000",
         }),

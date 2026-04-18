@@ -172,6 +172,16 @@ fi`;
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
       : ":";
+  const signalSlowToolResult =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
+      sleep 5
+      jsonl_append '{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}'
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}`
+      : `printf '%s\\n' "ack: slow tool"
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}`;
   // Claude signals working per-line; codex buffers pasted multi-line input and
   // writes a single rollout event_msg with the full message (matching real codex).
   const signalWorking =
@@ -197,6 +207,9 @@ fi`;
       printf '%s\\n' "2. runtime"
       printf '%s\\n' "Enter to select"
       printf '%s\\n' "Esc to cancel"
+      ;;
+    slow-tool-result)
+      ${signalSlowToolResult}
       ;;
     simulate-work)
       printf '%s\\n' "• Working (simulated)"
