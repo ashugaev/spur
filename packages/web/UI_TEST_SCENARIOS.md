@@ -251,7 +251,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Header is split into 3 rows in order:
 - Row 1: logo + project title
 - Row 2: Needs Input / Working / Waiting stats
-- Row 3: search input + project filter + Spawn Session button
+- Header controls wrap independently instead of moving as a single block
+- As the viewport narrows, `Spawn Session` drops below the search and project controls before the project filter drops below search
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn

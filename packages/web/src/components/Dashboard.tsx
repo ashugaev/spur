@@ -587,7 +587,7 @@ export function Dashboard() {
             </div>
           </div>
           <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
-            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+            <div className="flex min-w-[120px] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
               <svg
                 className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
                 viewBox="0 0 24 24"
@@ -605,27 +605,25 @@ export function Dashboard() {
                 value={searchQuery}
               />
             </div>
-            <div className="flex min-w-[280px] flex-1 items-center gap-2">
-              <select
-                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                onChange={(event) => syncProjectFilter(event.target.value)}
-                value={projectId}
-              >
-                <option value="">All projects</option>
-                {filterProjectOptions.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={openSpawnModal}
-                type="button"
-              >
-                Spawn Session
-              </button>
-            </div>
+            <select
+              className="min-w-[11rem] flex-[1_1_12rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
+            >
+              <option value="">All projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto"
+              onClick={openSpawnModal}
+              type="button"
+            >
+              Spawn Session
+            </button>
           </div>
         </header>
 
