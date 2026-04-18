@@ -180,4 +180,36 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(openLink).toBeVisible();
     await expect(openLink).toHaveAttribute("href", "http://example.com:5601");
   });
+
+  test("start or stop sidecar action stays rightmost in the sidecar action cluster", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "sc-order-1",
+      sidecars: [{ name: "isolated-ui", alive: true }],
+      slots: {
+        title: "Session with ordered sidecar actions",
+        links: [{ label: "sidecar-ui", url: "http://example.com:5601" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const actionNames = await page
+      .locator("section")
+      .filter({ hasText: "Sidecars" })
+      .evaluate((section) => {
+        const row = Array.from(section.querySelectorAll("div")).find(
+          (node) =>
+            node.textContent?.includes("isolated-ui") && node.textContent?.includes("alive"),
+        );
+        return row
+          ? Array.from(row.querySelectorAll("a,button")).map(
+              (node) => node.getAttribute("aria-label") || node.textContent?.trim() || "",
+            )
+          : [];
+      });
+
+    expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
+  });
 });

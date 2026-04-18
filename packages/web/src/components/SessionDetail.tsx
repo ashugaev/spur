@@ -799,17 +799,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <button
-                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={busyAction !== null}
-                          onClick={() =>
-                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                          }
-                          type="button"
-                        >
-                          {sc.alive ? <StopIcon /> : <PlayIcon />}
-                        </button>
                         {sc.alive && canAttach ? (
                           <button
                             type="button"
@@ -829,6 +818,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             Open
                           </a>
                         ) : null}
+                        <button
+                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={busyAction !== null}
+                          onClick={() =>
+                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                          }
+                          type="button"
+                        >
+                          {sc.alive ? <StopIcon /> : <PlayIcon />}
+                        </button>
                       </div>
                     </div>
                   ))}

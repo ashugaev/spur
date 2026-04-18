@@ -517,6 +517,39 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the start or stop sidecar action at the far right of the sidecar actions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-ui", alive: true }],
+            slots: {
+              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const sidecarName = await screen.findByText("isolated-ui");
+    const sidecarRow = sidecarName.closest("div")?.parentElement;
+    expect(sidecarRow).not.toBeNull();
+
+    const actionNames = Array.from(sidecarRow?.querySelectorAll("a,button") ?? []).map(
+      (node) => node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "",
+    );
+    expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
+  });
+
   it("starts an offline sidecar from the icon button", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
