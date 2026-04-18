@@ -32,8 +32,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D1: Header renders correctly
 
-- 𖤓 icon + project title visible
-- Project filter dropdown with "All projects" default
+- 𖤓 icon + large project title visible at the same size as before
+- Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
 ### D2: Header stats show correct counts
@@ -253,9 +253,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### R1: Mobile (<640px)
 
 - Header is split into 3 rows in order:
-- Row 1: logo + project title
+- Row 1: logo + project title select
 - Row 2: Needs Input / Working / Waiting stats
-- Row 3: search input + project filter + Spawn Session button
+- Row 3: search input + Spawn Session button
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn

@@ -19,10 +19,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
   });
 
-  test("All Projects title visible", async ({ page }) => {
+  test("project title select visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    await expect(projectFilter).toBeVisible();
+    await expect(projectFilter).toHaveValue("");
+    await expect(page.locator("header h1 svg")).toBeVisible();
   });
 
   test("Spawn Session button visible", async ({ page }) => {
@@ -31,10 +34,10 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Filter select with All projects option", async ({ page }) => {
+  test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.locator("select").first();
+    const select = page.getByRole("combobox", { name: "Project filter" });
     await expect(select).toBeVisible();
     await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
   });
@@ -528,7 +531,7 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
   test("touch tap outside tooltip closes it", async ({ page }) => {
     await page.getByRole("button", { name: "Show aggregated system status" }).tap();
     await expect(page.getByText("System")).toBeVisible();
-    await page.getByRole("heading", { name: "All Projects" }).tap();
+    await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
   });
 });
@@ -701,7 +704,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Select the project
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
@@ -738,7 +741,7 @@ test.describe("D7b: Silent branch preflight", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Set project and prompt
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
