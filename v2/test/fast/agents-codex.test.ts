@@ -116,6 +116,15 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/path with spaces/codex" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/path with spaces/codex'");
   });
+
+  it("appends configured codex args", () => {
+    const plan = buildCodexPlan("prompt", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
+  });
 });
 
 describe("buildCodexResumePlan", () => {
@@ -147,6 +156,13 @@ describe("buildCodexResumePlan", () => {
       codexHomePath: "/home/codex-dir",
     });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/codex-dir'");
+  });
+
+  it("appends configured codex args to resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", {
+      codexArgs: ["-c", 'service_tier="fast"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(`'-c' 'service_tier="fast"' '--enable' 'fast_mode'`);
   });
 
   it("does not include initialMessage", () => {

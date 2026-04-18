@@ -146,6 +146,7 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;

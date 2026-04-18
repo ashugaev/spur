@@ -10,6 +10,13 @@ projects:
     path: ~/backend-api
     defaultBranch: main
     sessionPrefix: api
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="fast"'
+      - --enable
+      - fast_mode
     worktree: true
     spawn:
       steps:

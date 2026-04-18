@@ -254,6 +254,43 @@ projects:
     });
   });
 
+  it("parses project codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - --enable
+      - fast_mode
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+      "--enable",
+      "fast_mode",
+    ]);
+  });
+
+  it("rejects non-string project codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.codexArgs[1] must be a non-empty string",
+    );
+  });
+
   it("parses a custom voice model path from the instance config", async () => {
     const configPath = await writeConfig(`
 voice:
