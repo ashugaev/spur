@@ -304,7 +304,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       .catch(() => {});
   };
 
-  const doSend = async () => {
+  const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
     const encoded = attachments.map((att) => ({
@@ -313,6 +313,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }));
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
+    if (options?.queue !== undefined) body.queue = options.queue;
+    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
     await handleAction("send", body);
   };
 
@@ -565,6 +567,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
+              {/* Queued messages */}
+              {session.queuedMessages.messages.length > 0 ||
+              session.queuedMessages.awaitingPrompt ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Queued messages
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  {session.queuedMessages.messages.length > 0 ? (
+                    <ol aria-label="Queued messages list" className="space-y-2">
+                      {session.queuedMessages.messages.map((queuedMessage, index) => (
+                        <li
+                          key={`${session.id}:queued:${index}:${queuedMessage}`}
+                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
+                        >
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                            #{index + 1}
+                          </div>
+                          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--color-text-secondary)]">
+                            {queuedMessage}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : null}
+                  {session.queuedMessages.awaitingPrompt ? (
+                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                      Awaiting agent prompt. Queued messages will send automatically when the agent
+                      is ready.
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+
               {/* Message */}
               <section>
                 <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -579,7 +615,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend();
+                            void doSend({ queue: true });
                           }
                         }}
                         onPaste={(e) => {
@@ -631,10 +667,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         disabled={
                           busyAction !== null || (!message.trim() && attachments.length === 0)
                         }
-                        onClick={() => void doSend()}
+                        onClick={() => void doSend({ queue: true })}
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                      >
+                        {busyAction === "send" ? "Queueing..." : "Queue"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          busyAction !== null || (!message.trim() && attachments.length === 0)
+                        }
+                        onClick={() => void doSend({ queue: false, interrupt: true })}
                         className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                       >
-                        {busyAction === "send" ? "Sending..." : "Send"}
+                        {busyAction === "send" ? "Sending..." : "Send now"}
                       </button>
                     </div>
                   </div>

@@ -86,7 +86,22 @@ const MockWebSocket = vi.fn(() => {
   const ws: Record<string, unknown> = {
     readyState: 0,
     binaryType: "arraybuffer",
-    send: wsSend,
+    send: vi.fn((payload: unknown) => {
+      wsSend(payload);
+      if (typeof payload !== "string" || !payload.startsWith("{")) return;
+      try {
+        const parsed = JSON.parse(payload) as { type?: string; id?: string };
+        if (parsed.type === "input" && typeof parsed.id === "string") {
+          queueMicrotask(() => {
+            (ws.onmessage as ((event: { data: string }) => void) | null)?.({
+              data: JSON.stringify({ type: "ack", id: parsed.id }),
+            });
+          });
+        }
+      } catch {
+        // Ignore malformed payloads in tests.
+      }
+    }),
     close: vi.fn(() => {
       ws.readyState = 3;
       (ws.onclose as (ev: { code: number; reason: string }) => void)?.({
@@ -114,6 +129,18 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function sentInputPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
+    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
+    .filter(
+      (payload): payload is { type: "input"; data: string } =>
+        payload.type === "input" && typeof payload.data === "string",
+    )
+    .map((payload) => payload.data);
+}
+
 beforeEach(() => {
   onBinaryCallback = null;
   onDataCallback = null;
@@ -123,9 +150,16 @@ beforeEach(() => {
   mockTerminal.onBinary.mockClear();
   mockTerminal.onData.mockClear();
   mockTerminal.open.mockClear();
-  vi.spyOn(global, "fetch").mockResolvedValue(
-    new Response(JSON.stringify({ directTerminalPort: 14801 })),
-  );
+  vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url === "/api/runtime/terminal") {
+      return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+    }
+    if (url === "/api/runtime/voice") {
+      return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
+    }
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
   vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
@@ -158,6 +192,17 @@ async function mountTerminal(sessionId = "test-session", agent: "claude" | "code
 }
 
 describe("DirectTerminal scroll integration", () => {
+  it("uses the runtime terminal port when opening the websocket", async () => {
+    await mountTerminal("port-test");
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(MockWebSocket).toHaveBeenCalledWith("ws://localhost:14801/ws?session=port-test");
+    expect(fetch).toHaveBeenCalledWith("/api/runtime/terminal", { cache: "no-store" });
+  });
+
   it("registers onBinary to forward mouse/scroll sequences to WebSocket", async () => {
     await mountTerminal();
 
@@ -245,6 +290,30 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Start file picker/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+  });
+
+  it("submits codex slash hotkeys as bracketed paste plus enter", async () => {
+    await mountTerminal("test-codex-hotkey-submit", "codex");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
+
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~/permissions\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("/permissions\r");
+    });
+  });
+
+  it("shows a visible error when codex slash hotkey submit fails", async () => {
+    await mountTerminal("test-codex-hotkey-submit-error", "codex");
+
+    wsInstances[0].readyState = 3;
+    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+    });
   });
 
   it("does not render a standalone esc button in the control bar", async () => {

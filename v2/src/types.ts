@@ -13,6 +13,8 @@ export interface SessionStateTransition {
 export type BranchSource = "explicit" | "preflight" | "shared_workspace";
 export type ServiceInstanceStatus = "running" | "stopped" | "errored";
 export type ServiceInstanceState = "running" | "problem" | "stopped" | "error";
+export type RuntimeLogKind = "service" | "sidecar";
+export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
 export interface SessionLink {
   label: string;
   url: string;
@@ -208,6 +210,7 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
@@ -275,6 +278,8 @@ export interface SendMessageAttachment {
 export interface SendMessageRequest {
   message: string;
   attachments?: SendMessageAttachment[];
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export interface RunServiceRequest {
@@ -341,6 +346,10 @@ export interface ServiceSourceState {
   serviceId: string;
   lastTailLines: string[];
   rules: Record<string, ServiceSourceRuleState>;
+}
+
+export interface RuntimeLogCursorState {
+  lastTailLines: string[];
 }
 
 export interface ConversationMessage {

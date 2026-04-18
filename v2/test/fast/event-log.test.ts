@@ -43,7 +43,10 @@ describe("appendEventLog", () => {
     const entries = readEventLog(dataDir);
     const ts = entries[0]?.timestamp;
     expect(ts).toBeTruthy();
-    expect(new Date(ts!).getTime()).not.toBeNaN();
+    if (!ts) {
+      throw new Error("expected timestamp to be present");
+    }
+    expect(new Date(ts).getTime()).not.toBeNaN();
   });
 
   it("preserves an explicit timestamp", () => {
@@ -109,5 +112,36 @@ describe("readSessionEventLog", () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]?.event).toBe("e3");
     expect(entries[1]?.event).toBe("e4");
+  });
+
+  it("filters runtime entries by scope and name", () => {
+    const dataDir = makeTempDir();
+    appendEventLog(dataDir, {
+      event: "session.spawn.completed",
+      level: "info",
+      sessionId: "api-1",
+    });
+    appendEventLog(dataDir, {
+      event: "service.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "SERVICE_BOOT",
+      details: { serviceId: "web" },
+    });
+    appendEventLog(dataDir, {
+      event: "sidecar.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "BROWSER_READY",
+      details: { sidecarName: "isolated-ui" },
+    });
+
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "runtime" })).toHaveLength(2);
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "service" })).toEqual([
+      expect.objectContaining({ event: "service.output", message: "SERVICE_BOOT" }),
+    ]);
+    expect(
+      readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" }),
+    ).toEqual([expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" })]);
   });
 });

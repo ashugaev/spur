@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { SessionLogScope } from "./types.js";
 
 export type SpurLogLevel = "info" | "warn" | "error";
 
@@ -19,6 +20,12 @@ export interface SpurLogEntry {
 
 const EVENT_LOG_FILE = "events.jsonl";
 type SpurLogEntryInput = Omit<SpurLogEntry, "timestamp"> & { timestamp?: string };
+
+interface SessionLogQuery {
+  limit?: number;
+  scope?: SessionLogScope;
+  name?: string;
+}
 
 export function eventLogPath(dataDir: string): string {
   return join(dataDir, EVENT_LOG_FILE);
@@ -64,8 +71,35 @@ export function readEventLog(dataDir: string): SpurLogEntry[] {
 export function readSessionEventLog(
   dataDir: string,
   sessionId: string,
-  limit?: number,
+  limitOrQuery?: number | SessionLogQuery,
 ): SpurLogEntry[] {
-  const entries = readEventLog(dataDir).filter((entry) => entry.sessionId === sessionId);
-  return limit === undefined ? entries : entries.slice(-limit);
+  const query = typeof limitOrQuery === "number" ? { limit: limitOrQuery } : (limitOrQuery ?? {});
+  const entries = readEventLog(dataDir).filter(
+    (entry) => entry.sessionId === sessionId && matchesSessionLogQuery(entry, query),
+  );
+  return query.limit === undefined ? entries : entries.slice(-query.limit);
+}
+
+function matchesSessionLogQuery(entry: SpurLogEntry, query: SessionLogQuery): boolean {
+  if (!query.scope || query.scope === "all") {
+    return query.name ? matchesRuntimeName(entry, query.name) : true;
+  }
+  if (query.scope === "runtime") {
+    if (entry.event !== "service.output" && entry.event !== "sidecar.output") {
+      return false;
+    }
+    return query.name ? matchesRuntimeName(entry, query.name) : true;
+  }
+  if (entry.event !== `${query.scope}.output`) {
+    return false;
+  }
+  return query.name ? matchesRuntimeName(entry, query.name) : true;
+}
+
+function matchesRuntimeName(entry: SpurLogEntry, name: string): boolean {
+  const details = entry.details;
+  if (!details) {
+    return false;
+  }
+  return details["serviceId"] === name || details["sidecarName"] === name;
 }

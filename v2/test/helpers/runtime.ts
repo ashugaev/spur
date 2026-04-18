@@ -143,71 +143,131 @@ jsonl_append() {
   fi
   exit 0
 fi
+codex_base="\${CODEX_HOME:-$HOME/.codex}"
+session_rollout=""
 mode="launch"
 resume_id=""
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
+  # Discover the existing rollout file so resumed sessions can still write event_msg entries.
+  existing_rollout="$(find "$codex_base/sessions" -name "rollout-\${SPUR_SESSION:-no-session}.jsonl" 2>/dev/null | head -n 1)"
+  if [[ -n "$existing_rollout" ]]; then
+    session_rollout="$existing_rollout"
+  fi
 else
-  session_dir="$HOME/.codex/sessions/2026/03/18"
+  session_dir="$codex_base/sessions/2026/03/18"
   thread_id="thread-\${SPUR_SESSION:-no-session}"
   mkdir -p "$session_dir"
-  printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
-  printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+  printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
+  printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state files.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
-      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"waiting","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"Stop"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : `{ mkdir -p "$(dirname "$SPUR_AGENT_STATE_FILE")" && printf '%s\\n' '{"state":"working","updatedAt":"2020-01-01T00:00:00.000Z","hookEvent":"UserPromptSubmit"}' > "$SPUR_AGENT_STATE_FILE"; } 2>/dev/null || true`;
+      : `emit_hook_event "Stop"`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
       : ":";
-  return `#!/usr/bin/env bash
-set -euo pipefail
-log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
-mkdir -p "$log_dir"
-log_file="$log_dir/\${SPUR_SESSION:-no-session}.log"
-${startup}
-printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
-if [[ "$mode" == "launch" ]]; then
-  printf '%s\n' "${header}"
-fi
-printf '%s\n' "${prompt}"
-${signalWaiting}
-while IFS= read -r line; do
-  printf '%s\n' "$line" >> "$log_file"
+  // Claude signals working per-line; codex buffers pasted multi-line input and
+  // writes a single rollout event_msg with the full message (matching real codex).
+  const signalWorking =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
+      : "";
+  // Codex uses a buffering read loop that drains pasted lines before emitting
+  // one event_msg entry, so scanCodexRolloutForMessage sees the full message.
+  const codexEmitBuffered = `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
+    printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")" >> "$session_rollout"
+  fi
+  emit_hook_event "UserPromptSubmit"`;
+  const readLoop =
+    agentName === "claude"
+      ? `while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$log_file"
   ${signalWorking}
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}
-      printf '%s\n' "Entered plan mode"
-      printf '%s\n' "1. fast"
-      printf '%s\n' "2. runtime"
-      printf '%s\n' "Enter to select"
-      printf '%s\n' "Esc to cancel"
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
       ;;
     simulate-work)
-      printf '%s\n' "• Working (simulated)"
+      printf '%s\\n' "• Working (simulated)"
       sleep 1
-      printf '%s\n' "${prompt}"
+      printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;
     exit-now)
       exit 0
       ;;
     *)
-      printf '%s\n' "ack: $line"
-      printf '%s\n' "${prompt}"
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;
   esac
-done
+done`
+      : `while IFS= read -r line; do
+  full_msg="$line"
+  printf '%s\\n' "$line" >> "$log_file"
+  # Drain remaining lines from the same paste (arrive within 0.1s).
+  while IFS= read -r -t 0.1 extra; do
+    full_msg="$full_msg
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  ${codexEmitBuffered}
+  case "$line" in
+    show-waiting-menu)
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
+      ;;
+    simulate-work)
+      printf '%s\\n' "• Working (simulated)"
+      sleep 1
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+    exit-now)
+      exit 0
+      ;;
+    *)
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}
+      ;;
+  esac
+done`;
+  return `#!/usr/bin/env bash
+set -euo pipefail
+log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
+mkdir -p "$log_dir"
+log_file="$log_dir/\${SPUR_SESSION:-no-session}.log"
+${startup}
+hook_seq=0
+emit_hook_event() {
+  local event_name="$1"
+  hook_seq=$((hook_seq + 1))
+  printf '{"hook_event_name":"%s","turn_id":"%s-%s"}' "$event_name" "\${SPUR_SESSION:-no-session}" "$hook_seq" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
+}
+printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
+if [[ "$mode" == "launch" ]]; then
+  printf '%s\n' "${header}"
+fi
+printf '%s\n' "${prompt}"
+${signalWaiting}
+${readLoop}
 `;
 }
 
@@ -455,6 +515,7 @@ export async function createRuntimeTestContext(
   const useFakeTools = options?.useFakeTools ?? true;
   await mkdir(fakeBinDir, { recursive: true });
   await mkdir(agentLogDir, { recursive: true });
+  await writeFile(join(rootDir, ".zshrc"), "# runtime test shell init\n", "utf8");
   if (useFakeTools) {
     await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
     await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));

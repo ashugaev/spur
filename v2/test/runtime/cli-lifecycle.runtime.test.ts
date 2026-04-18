@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readEventLog } from "../../src/event-log.js";
+import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
@@ -83,6 +83,18 @@ printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
   );
   await chmod(join(context.fakeBinDir, binary), 0o755);
   return logPath;
+}
+
+async function processExists(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .includes(String(pid));
+  } catch {
+    return false;
+  }
 }
 
 async function runRestoreScenario(args: {
@@ -430,6 +442,7 @@ projects:
         body: JSON.stringify({
           project: "api",
           prompt: "registry survived restart",
+          agent: "claude",
         }),
       });
       expect(apiSpawn.project).toBe("api");
@@ -691,6 +704,118 @@ projects:
     expect(killed.status).toBe("killed");
     expect(killed.workspaceExists).toBe(false);
     expect(listed).toEqual([]);
+  });
+
+  it("complete after a project rename still tears down sidecar tmux and processes", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-sidecar-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const sidecarPath = join(context.repoDir, "record-dev-sidecar.sh");
+    await writeFile(
+      sidecarPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$$" > ".sidecar-pid-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+      "utf8",
+    );
+    await chmod(sidecarPath, 0o755);
+    const configPath = await context.writeConfig(
+      "rename-sidecar.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "${sidecarPath}"
+        autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "rename sidecar complete",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const devSessionName = `${spawned.id}--dev`;
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    const sidecarPid = Number.parseInt(
+      await pollUntil(
+        async () =>
+          readFile(join(spawned.worktreePath, `.sidecar-pid-${spawned.id}`), "utf8").catch(
+            () => "",
+          ),
+        { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+      ),
+      10,
+    );
+    expect(Number.isInteger(sidecarPid)).toBe(true);
+    expect(await processExists(sidecarPid)).toBe(true);
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(completed.status).toBe("completed");
+    expect(completed.workspaceExists).toBe(false);
+
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
+    expect(devSessionGone).toBe(true);
+    await pollUntil(() => processExists(sidecarPid), {
+      timeoutMs: 15_000,
+      accept: (value) => value === false,
+    });
   });
 
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
@@ -1522,6 +1647,29 @@ projects:
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
 
+    const helperLogs = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await execFileAsync(helperPath, ["service", "logs", "--json"], {
+              cwd: spawned.worktreePath,
+              env: {
+                ...context.env,
+                SPUR_SESSION: spawned.id,
+              },
+            })
+          ).stdout,
+        ) as SpurLogEntry[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value.some(
+            (entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT",
+          ),
+      },
+    );
+    expect(helperLogs.some((entry) => entry.event === "service.output")).toBe(true);
+
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
     await createTmuxSession({
@@ -1544,7 +1692,7 @@ projects:
 
     await sendKeysToTmux(controllerSessionName, "l");
 
-    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+    const logPane = await pollUntil(async () => captureTmuxPane(controllerSessionName, 1000), {
       timeoutMs: 15_000,
       accept: (value) =>
         value.includes(`Logs ${spawned.id}`) &&
@@ -1562,6 +1710,92 @@ projects:
       accept: (value) => value.includes("l logs"),
     });
     expect(detachedPane).toContain("l logs");
+  });
+
+  it("collects sidecar output into the session log and exposes it through service logs", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-logs-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const sidecarPath = join(context.repoDir, "record-browser-sidecar.sh");
+    await writeFile(
+      sidecarPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf 'BROWSER_READY\n'
+sleep 30
+`,
+      "utf8",
+    );
+    await chmod(sidecarPath, 0o755);
+    const configPath = await context.writeConfig(
+      "sidecar-logs.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      browser:
+        command: "./record-browser-sidecar.sh"
+        autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "browser logs", "--json"]))
+        .stdout,
+    ) as SessionView;
+
+    const sidecarLogs = await pollUntil(
+      async () =>
+        JSON.parse(
+          (
+            await context.execCli([
+              "--config",
+              configPath,
+              "service",
+              "logs",
+              spawned.id,
+              "browser",
+              "--sidecar",
+              "--json",
+            ])
+          ).stdout,
+        ) as SpurLogEntry[],
+      {
+        timeoutMs: 15_000,
+        accept: (value) =>
+          value.some(
+            (entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY",
+          ),
+      },
+    );
+    expect(sidecarLogs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: "sidecar.output",
+          message: "BROWSER_READY",
+        }),
+      ]),
+    );
   });
 
   it("surfaces service command errors through the built CLI", async () => {
@@ -1653,6 +1887,31 @@ projects:
       },
     );
     expect(["stopped", "error"]).toContain(stopped.state);
+  });
+
+  it("rejects service logs without a session id outside a Spur session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-service-logs-errors-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "service-logs-errors.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli(["--config", configPath, "service", "logs", "--json"], {
+        env: { SPUR_SESSION: "" },
+      }),
+    ).rejects.toThrow("service logs requires a session id or SPUR_SESSION");
   });
 
   it("rejects invalid or missing slot targets through the built CLI", async () => {
@@ -2135,8 +2394,13 @@ projects:
       "--json",
     ]);
 
+    await sleep(10_000);
+    const earlyQueuedLog = await context.readAgentLog(spawned.id);
+    expect(earlyQueuedLog).toContain("simulate-work");
+    expect(earlyQueuedLog).not.toContain("queued follow up");
+
     const queuedLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
+      timeoutMs: 30_000,
       accept: (value) => value.includes("queued follow up"),
     });
     expect(queuedLog).toContain("simulate-work");
@@ -2439,7 +2703,7 @@ projects:
     expect(respawned.status).toBe("running");
 
     const completedCaller = await pollUntil(
-      () => context.fetchJson<SessionView>(`/sessions/${caller.id}`),
+      async () => context.fetchJson<SessionView>(`/sessions/${encodeURIComponent(caller.id)}`),
       {
         timeoutMs: 15_000,
         accept: (session) =>
@@ -2505,7 +2769,7 @@ projects:
     expect(liveCaller?.workspaceExists).toBe(true);
   });
 
-  it("falls back to a fresh launch from the TTY list when native resume state is missing", async () => {
+  it("falls back to a fresh launch in the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-restore-missing-${port}`;
@@ -2571,35 +2835,35 @@ projects:
     });
 
     await sendKeysToTmux(controllerSessionName, "r");
-
-    const controllerPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes(`Restored ${spawned.id}.`),
-    });
-
-    await sendKeysToTmux(controllerSessionName, "q");
-
-    const restoreLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("startup:launch::"),
-    });
-
-    const listedSessions = await pollUntil(
+    const restored = await pollUntil(
       async () =>
         JSON.parse(
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
         timeoutMs: 30_000,
-        accept: (sessions) =>
-          sessions[0]?.runtimeAlive === true && sessions[0]?.state !== "stopped",
+        accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
       },
     );
-    expect(listedSessions[0]?.id).toBe(spawned.id);
-    expect(listedSessions[0]?.runtimeAlive).toBe(true);
-    expect(listedSessions[0]?.workspaceExists).toBe(true);
-    expect(controllerPane).toContain(`Restored ${spawned.id}.`);
-    expect(restoreLog).toContain("startup:launch::");
+    const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 30_000,
+      accept: (value) => value.includes("This session was restored after the agent exited."),
+    });
+
+    await sendKeysToTmux(controllerSessionName, "q");
+
+    expect(restored[0]?.id).toBe(spawned.id);
+    expect(restored[0]?.runtimeAlive).toBe(true);
+    expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
+    expect(restoredPane).toContain("Original task:");
+    expect(
+      readEventLog(context.dataDir).some(
+        (entry) =>
+          entry.event === "session.restore.started" &&
+          typeof entry.message === "string" &&
+          entry.message.includes("falling back to fresh launch"),
+      ),
+    ).toBe(true);
   });
 
   it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {

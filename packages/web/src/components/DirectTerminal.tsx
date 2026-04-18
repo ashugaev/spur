@@ -23,6 +23,10 @@ interface TerminalLocation {
   port: string;
 }
 
+interface DirectTerminalConfig {
+  directTerminalPort?: string | number;
+}
+
 const terminalTheme: ITheme = {
   background: "#0a0a0f",
   foreground: "#d4d4d8",
@@ -55,14 +59,39 @@ const VISIBILITY_REFRESH_AFTER_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
 }
 
-export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: string): string {
+function normalizeTerminalPort(value: string | number | undefined, fallback: string): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 && value <= 65535 ? String(value) : fallback;
+  }
+  const trimmed = value?.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
+}
+
+function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
+  if (agent !== "codex") {
+    return [`${text}\r`];
+  }
+
+  return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
+}
+
+export function buildDirectTerminalWsUrl(
+  location: TerminalLocation,
+  sessionId: string,
+  portOverride?: string | number,
+): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const portSuffix = location.port ? `:${location.port}` : "";
+  const port = normalizeTerminalPort(portOverride, location.port);
+  const portSuffix = port ? `:${port}` : "";
   return `${protocol}//${location.hostname}${portSuffix}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
@@ -109,6 +138,7 @@ export function DirectTerminal({
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -192,7 +222,7 @@ export function DirectTerminal({
   );
 
   const submitVoiceDraft = useCallback(
-    (text: string) => {
+    async (text: string) => {
       const socket = websocketRef.current;
       if (
         !socket ||
@@ -202,9 +232,32 @@ export function DirectTerminal({
         throw new Error("Failed to insert transcription");
       }
       setError(null);
-      return sendWithAck(`${text}\r`);
+      setSubmitError(null);
+      for (const payload of buildSubmittedTextPayloads(agent, text)) {
+        await sendWithAck(payload);
+      }
     },
-    [sendWithAck],
+    [agent, sendWithAck],
+  );
+
+  const sendHotkey = useCallback(
+    async (hotkey: (typeof hotkeys)[number]) => {
+      try {
+        if (hotkey.submit) {
+          setSubmitError(null);
+          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
+            await sendWithAck(payload);
+          }
+          return;
+        }
+        sendTerminalInput(hotkey.sequence);
+      } catch (hotkeyError) {
+        setSubmitError(
+          hotkeyError instanceof Error ? hotkeyError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [agent, sendTerminalInput, sendWithAck],
   );
 
   const voice = useVoiceInput();
@@ -332,7 +385,8 @@ export function DirectTerminal({
           touchTarget.removeEventListener("touchmove", onTouchMove);
         };
 
-        const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
+        let directTerminalPort: string | number | undefined;
+
         const sendResize = () => {
           if (!terminal || !fit || websocket?.readyState !== WebSocket.OPEN) return;
           fit.fit();
@@ -361,7 +415,7 @@ export function DirectTerminal({
           }, RECONNECT_DELAY_MS);
         };
 
-        const connect = (force = false) => {
+        const connect = async (force = false) => {
           if (!mounted || !terminal) return;
           const readyState = websocket?.readyState;
           if (!force && (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)) {
@@ -379,7 +433,22 @@ export function DirectTerminal({
           setStatus((current) =>
             current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
           );
-          const nextSocket = new WebSocket(wsUrl);
+
+          if (directTerminalPort === undefined) {
+            try {
+              const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
+              if (response.ok) {
+                const payload = (await response.json()) as DirectTerminalConfig;
+                directTerminalPort = payload.directTerminalPort;
+              }
+            } catch {
+              // Fall back to the current page port when the terminal config request fails.
+            }
+          }
+
+          const nextSocket = new WebSocket(
+            buildDirectTerminalWsUrl(window.location, sessionId, directTerminalPort),
+          );
           websocket = nextSocket;
           websocketRef.current = nextSocket;
           nextSocket.binaryType = "arraybuffer";
@@ -581,9 +650,9 @@ export function DirectTerminal({
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
-      {voice.voiceError ? (
+      {(voice.voiceError ?? submitError) ? (
         <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
-          {voice.voiceError}
+          {voice.voiceError ?? submitError}
         </div>
       ) : null}
 
@@ -614,7 +683,7 @@ export function DirectTerminal({
                     className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-white/5"
                     key={hotkey.id}
                     onClick={() => {
-                      sendTerminalInput(hotkey.sequence);
+                      void sendHotkey(hotkey);
                       setHotkeysOpen(false);
                     }}
                     role="menuitem"

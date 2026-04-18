@@ -6,6 +6,7 @@ export interface AgentHotkey {
   id: string;
   label: string;
   sequence: string;
+  submit?: boolean;
   shortcut?: string;
   detail: string;
 }
@@ -29,7 +30,8 @@ function command(id: string, label: string, detail: string): AgentHotkey {
     id,
     label,
     detail,
-    sequence: `${label}\r`,
+    sequence: label,
+    submit: true,
   };
 }
 

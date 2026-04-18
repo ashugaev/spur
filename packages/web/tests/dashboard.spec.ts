@@ -115,6 +115,25 @@ test.describe("D2: Header stats show correct counts", () => {
     await statButtons.first().click();
     await expect(page.getByText("Working session two")).toBeVisible();
   });
+
+  test("shows placeholder with reset filters when a stat filter hides all sessions", async ({
+    page,
+  }) => {
+    const working = makeWorkingSession({ id: "wk-empty-1", prompt: "Only working session" });
+    await mockSessions(page, [working]);
+    await page.goto("/");
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+
+    await page.locator("header button").first().click();
+
+    await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Reset Filters" }).click();
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+  });
 });
 
 // D3: Session rows render with correct columns
@@ -357,9 +376,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
   test("no hydration error overlay visible after load", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    // Check no Next.js hydration error overlay
+    // In dev, Next may mount an empty error portal. In production, it may be absent entirely.
     const errorOverlay = page.locator("nextjs-portal");
-    await expect(errorOverlay).toHaveCount(0);
+    if ((await errorOverlay.count()) > 0) {
+      await expect(errorOverlay).toContainText(/^$/);
+    }
   });
 
   test("footer contains version text", async ({ page }) => {
@@ -371,7 +392,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
   });
 
-  test("footer shows resource metrics when runtime resources are available", async ({ page }) => {
+  test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.route("/api/runtime/resources", (route) => {
       void route.fulfill({
@@ -379,6 +402,7 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
         contentType: "application/json",
         body: JSON.stringify({
           available: true,
+          daemonAlive: true,
           cpuPercent: 21,
           memoryPercent: 43,
           diskPercent: 65,
@@ -387,13 +411,21 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const footer = page.locator("footer");
-    await expect(footer).toContainText("CPU 21%");
-    await expect(footer).toContainText("RAM 43%");
-    await expect(footer).toContainText("DISK 65%");
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await expect(onlineButton).toBeVisible();
+    await expect(onlineButton).toContainText("Healthy");
+    await onlineButton.click();
+
+    await expect(page.getByText("System")).toBeVisible();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU 21% healthy")).toBeVisible();
+    await expect(page.getByLabel("RAM 43% healthy")).toBeVisible();
+    await expect(page.getByLabel("HDD 65% healthy")).toBeVisible();
   });
 
-  test("footer hides resource metrics when runtime resources are unavailable", async ({ page }) => {
+  test("footer keeps system metrics inside the tooltip when runtime resources are unavailable", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.goto("/");
 
@@ -401,6 +433,41 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/CPU \d+%/);
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
+
+    await page.getByRole("button", { name: "Show aggregated system status" }).click();
+    await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
+    await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
+    await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
+  });
+
+  test("footer syncs warning status text and closes the tooltip after clicking its content", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await expect(onlineButton).toContainText("Warning");
+    await onlineButton.click();
+
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.click();
+    await expect(page.getByText("System")).not.toBeVisible();
   });
 });
 

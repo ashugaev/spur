@@ -69,6 +69,10 @@ describe("session slots", () => {
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
+    expect(prompt).toContain(
+      "Update the session title and related links as soon as you know them.",
+    );
+    expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
 
