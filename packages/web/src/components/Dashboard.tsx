@@ -4,8 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
@@ -26,6 +28,7 @@ const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -178,6 +181,7 @@ export function Dashboard() {
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
@@ -483,6 +487,7 @@ export function Dashboard() {
         body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
+      spawnHistory.saveEntry(nextPrompt);
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -544,11 +549,34 @@ export function Dashboard() {
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-            <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-              {activeProjectName}
-            </h1>
+          <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="text-xl text-[var(--color-accent)]">𖤓</span>
+              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+                <span className="block min-w-0 truncate">{activeProjectName}</span>
+                <svg
+                  aria-hidden="true"
+                  className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
+                >
+                  <path d="M4 6.5 8 10.5 12 6.5Z" />
+                </svg>
+              </h1>
+            </div>
+            <select
+              aria-label="Project filter"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
+            >
+              <option value="">All Projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
           </div>
           <StatItem
             icon={<IconChat />}
@@ -604,18 +632,6 @@ export function Dashboard() {
               value={searchQuery}
             />
           </div>
-          <select
-            className="min-w-[11rem] flex-[1_1_12rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-            onChange={(event) => syncProjectFilter(event.target.value)}
-            value={projectId}
-          >
-            <option value="">All projects</option>
-            {filterProjectOptions.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
           <button
             className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
             onClick={openSpawnModal}
@@ -648,6 +664,7 @@ export function Dashboard() {
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                 <div className="flex gap-2">
                   <select
+                    aria-label="Spawn project"
                     className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
                     onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
@@ -759,22 +776,25 @@ export function Dashboard() {
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
                     <VoiceStatusHint voice={voice} />
                   </span>
-                  <button
-                    className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim()}
-                    onClick={() => void handleSpawn()}
-                    type="button"
-                  >
-                    <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                    {!spawning ? (
-                      <span
-                        aria-hidden="true"
-                        className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
-                      >
-                        CMD + ⏎
-                      </span>
-                    ) : null}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
+                    <button
+                      className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={spawning || !spawnProjectId.trim()}
+                      onClick={() => void handleSpawn()}
+                      type="button"
+                    >
+                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
+                      {!spawning ? (
+                        <span
+                          aria-hidden="true"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                        >
+                          CMD + ⏎
+                        </span>
+                      ) : null}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

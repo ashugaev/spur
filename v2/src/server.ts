@@ -17,6 +17,7 @@ import type {
   RespawnSessionRequest,
   RunServiceRequest,
   SendMessageRequest,
+  StartSidecarRequest,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -364,7 +365,8 @@ export async function startServer(
 
       const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
+        const body = await readJsonBody<StartSidecarRequest>(request);
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2], body));
         return;
       }
 

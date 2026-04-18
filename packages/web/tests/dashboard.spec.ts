@@ -19,10 +19,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
   });
 
-  test("All Projects title visible", async ({ page }) => {
+  test("project title select visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
+    await expect(projectFilter).toBeVisible();
+    await expect(projectFilter).toHaveValue("");
+    await expect(page.locator("header h1 svg")).toBeVisible();
   });
 
   test("Spawn Session button visible", async ({ page }) => {
@@ -31,10 +34,10 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Filter select with All projects option", async ({ page }) => {
+  test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
-    const select = page.locator("select").first();
+    const select = page.getByRole("combobox", { name: "Project filter" });
     await expect(select).toBeVisible();
     await expect(select.locator("option[value='']")).toHaveText(/all projects/i);
   });
@@ -509,6 +512,68 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await tooltip.click();
     await expect(page.getByText("System")).not.toBeVisible();
   });
+
+  test("footer health tooltip still opens on hover and closes on mouse leave", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await onlineButton.hover();
+    await expect(page.getByText("System")).toBeVisible();
+
+    await page.mouse.move(0, 0);
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+});
+
+test.describe("D6c: Footer touch tooltip dismissal", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test.beforeEach(async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+  });
+
+  test("touch tap on tooltip content closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.tap();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap outside tooltip closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    await expect(page.getByText("System")).toBeVisible();
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
 });
 
 // D7: Spawn modal
@@ -555,6 +620,36 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await expect(page.getByRole("button", { name: /^spawn$/i })).toBeVisible();
+  });
+
+  test("modal restores a saved prompt from history", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "spur:input-history:spawn-prompt",
+        JSON.stringify([
+          {
+            value: "Re-run the flaky deploy",
+            savedAt: "2026-04-17T12:34:56.000Z",
+          },
+        ]),
+      );
+    });
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-history-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByText(/^History$/)).toHaveCount(0);
+    await page.getByRole("button", { name: /^history$/i }).click();
+
+    await expect(page.getByText("2026-04-17 12:34 UTC")).toBeVisible();
+    await page.getByRole("button", { name: /re-run the flaky deploy/i }).click();
+    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
+      "Re-run the flaky deploy",
+    );
   });
 
   test("Spawn button disabled when project field is empty", async ({ page }) => {
@@ -649,7 +744,7 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Select the project
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
@@ -686,7 +781,7 @@ test.describe("D7b: Silent branch preflight", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
 
     // Set project and prompt
-    const projectSelect = page.locator("select").nth(0);
+    const projectSelect = page.getByRole("combobox", { name: "Spawn project" });
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();

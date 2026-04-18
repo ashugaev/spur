@@ -20,6 +20,8 @@ jobs:
     name: Test Fresh Onboarding
     runs-on: self-hosted
     timeout-minutes: 15
+    env:
+      COMPOSE_PROJECT_NAME: onboarding-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Checkout repository
@@ -40,14 +42,15 @@ jobs:
 
       - name: Extract metrics
         if: always()
+        working-directory: tests/integration
         run: |
           # Extract onboarding time from container logs
-          docker logs spur-onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
+          docker compose logs onboarding-test 2>&1 | grep "Total onboarding time" || echo "Metrics not available"
 
       - name: Cleanup
         if: always()
         working-directory: tests/integration
-        run: docker compose down -v
+        run: docker compose down -v --remove-orphans
 
       - name: Upload test logs
         if: failure()

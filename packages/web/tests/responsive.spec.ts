@@ -85,40 +85,41 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("Completed:").first()).toBeVisible();
 
     const searchInput = page.getByPlaceholder("Filter sessions...");
-    const projectFilter = page.getByRole("combobox").first();
+    const projectFilter = page.getByRole("combobox", { name: "Project filter" });
     const spawnButton = page.getByRole("button", { name: /spawn session/i });
 
-    const [searchWide, filterWide, buttonWide] = await Promise.all([
-      searchInput.boundingBox(),
+    const [projectWide, searchWide, buttonWide] = await Promise.all([
       projectFilter.boundingBox(),
+      searchInput.boundingBox(),
       spawnButton.boundingBox(),
     ]);
 
+    expect(projectWide).not.toBeNull();
     expect(searchWide).not.toBeNull();
-    expect(filterWide).not.toBeNull();
     expect(buttonWide).not.toBeNull();
-    if (!searchWide || !filterWide || !buttonWide) {
+    if (!projectWide || !searchWide || !buttonWide) {
       throw new Error("Expected header controls to have bounding boxes");
     }
-    expect(new Set([searchWide.y, filterWide.y, buttonWide.y]).size).toBeGreaterThan(1);
+    expect(new Set([projectWide.y, searchWide.y, buttonWide.y]).size).toBeGreaterThan(1);
+    expect(searchWide.y).toBeGreaterThan(projectWide.y + 8);
 
     await page.setViewportSize({ width: 430, height: 844 });
     await page.reload();
 
-    const [searchNarrow, filterNarrow, buttonNarrow] = await Promise.all([
-      searchInput.boundingBox(),
+    const [projectNarrow, searchNarrow, buttonNarrow] = await Promise.all([
       projectFilter.boundingBox(),
+      searchInput.boundingBox(),
       spawnButton.boundingBox(),
     ]);
 
+    expect(projectNarrow).not.toBeNull();
     expect(searchNarrow).not.toBeNull();
-    expect(filterNarrow).not.toBeNull();
     expect(buttonNarrow).not.toBeNull();
-    if (!searchNarrow || !filterNarrow || !buttonNarrow) {
+    if (!projectNarrow || !searchNarrow || !buttonNarrow) {
       throw new Error("Expected wrapped header controls to have bounding boxes");
     }
-    expect(filterNarrow.y).toBeGreaterThan(searchNarrow.y + 8);
-    expect(buttonNarrow.y).toBeGreaterThan(filterNarrow.y + 8);
+    expect(searchNarrow.y).toBeGreaterThan(projectNarrow.y + 8);
+    expect(buttonNarrow.y).toBeGreaterThan(searchNarrow.y + 8);
   });
 
   test("stat filters wrap individually before labels collapse", async ({ page }) => {
@@ -158,7 +159,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
