@@ -80,6 +80,8 @@ For an explicit production update on a host that runs `spur-daemon.service` and 
 pnpm main:deploy
 ```
 
+That command deploys the latest `origin/main` from a dedicated release clone. It does not rely on the current checkout being clean or on `main`.
+
 ## Local Validation
 
 Run the cheapest complete set that crosses your change boundary:

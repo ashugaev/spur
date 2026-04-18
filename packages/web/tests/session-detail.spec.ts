@@ -142,13 +142,13 @@ test.describe("S3: Message section", () => {
     await expect(page.locator("textarea")).toBeVisible();
   });
 
-  test("Send button disabled when textarea empty", async ({ page }) => {
+  test("Queue and Send now buttons are disabled when textarea is empty", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s3-2", runtimeAlive: true });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    const sendBtn = page.getByRole("button", { name: /^send$/i });
-    await expect(sendBtn).toBeDisabled();
+    await expect(page.getByRole("button", { name: /^queue$/i })).toBeDisabled();
+    await expect(page.getByRole("button", { name: /^send now$/i })).toBeDisabled();
   });
 
   test("Not accepting input message when session is completed", async ({ page }) => {
@@ -201,13 +201,15 @@ test.describe("S3: Message section", () => {
     await expect(page.locator('img[alt="paste.png"]')).toBeVisible({ timeout: 5000 });
   });
 
-  test("Send enabled when attachment present with empty text", async ({ page }) => {
+  test("Queue and Send now enable when attachment is present with empty text", async ({ page }) => {
     const session = makeWorkingSession({ id: "attach-send-1", runtimeAlive: true });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    const sendBtn = page.getByRole("button", { name: /^send$/i });
-    await expect(sendBtn).toBeDisabled();
+    const queueBtn = page.getByRole("button", { name: /^queue$/i });
+    const sendNowBtn = page.getByRole("button", { name: /^send now$/i });
+    await expect(queueBtn).toBeDisabled();
+    await expect(sendNowBtn).toBeDisabled();
 
     const dataTransfer = await page.evaluateHandle(() => {
       const dt = new DataTransfer();
@@ -216,7 +218,122 @@ test.describe("S3: Message section", () => {
     });
     await page.locator("textarea").dispatchEvent("drop", { dataTransfer });
 
-    await expect(sendBtn).not.toBeDisabled({ timeout: 5000 });
+    await expect(queueBtn).not.toBeDisabled({ timeout: 5000 });
+    await expect(sendNowBtn).not.toBeDisabled({ timeout: 5000 });
+  });
+
+  test("Queue posts a queued send payload", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-7", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("textbox").fill("Queued follow up");
+    await page.getByRole("button", { name: /^queue$/i }).click();
+
+    await expect.poll(() => body).not.toBeNull();
+    expect(body).toEqual({ message: "Queued follow up", queue: true });
+  });
+
+  test("Send now posts a direct-send payload", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-8", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("textbox").fill("Send immediately");
+    await page.getByRole("button", { name: /^send now$/i }).click();
+
+    await expect.poll(() => body).not.toBeNull();
+    expect(body).toEqual({
+      message: "Send immediately",
+      queue: false,
+      interrupt: true,
+    });
+  });
+
+  test("history restores a saved message with its timestamp", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "spur:input-history:session-message",
+        JSON.stringify([
+          {
+            value: "Saved follow up",
+            savedAt: "2026-04-17T08:15:00.000Z",
+          },
+        ]),
+      );
+    });
+    const session = makeWorkingSession({ id: "detail-s3-history-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^history$/i }).click();
+    await expect(page.getByText("2026-04-17 08:15 UTC")).toBeVisible();
+    await page.getByRole("button", { name: /saved follow up/i }).click();
+    await expect(page.getByRole("textbox")).toHaveValue("Saved follow up");
+  });
+});
+
+// S3b: Queued messages section
+test.describe("S3b: Queued messages section", () => {
+  test("shows the full queued stack in FIFO order", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s3b-1",
+      queuedMessages: {
+        messages: [
+          "Manual queued follow-up",
+          "[Spur step 2/3: implement]\nDo only this step for the task below. When it is done, stop and wait for the next Spur message.\n\nTask:\nImplement the feature",
+          "[Spur step 3/3: test]\nThis is the final step for the task below.\n\nTask:\nImplement the feature",
+        ],
+        awaitingPrompt: false,
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+    const items = page.getByRole("list", { name: /queued messages list/i }).getByRole("listitem");
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText("Manual queued follow-up");
+    await expect(items.nth(1)).toContainText("[Spur step 2/3: implement]");
+    await expect(items.nth(2)).toContainText("[Spur step 3/3: test]");
+  });
+
+  test("shows awaiting prompt hint when queue is blocked", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s3b-2",
+      queuedMessages: {
+        messages: [],
+        awaitingPrompt: true,
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+    await expect(
+      page.getByText(/queued messages will send automatically when the agent is ready/i),
+    ).toBeVisible();
+    await expect(page.getByRole("list", { name: /queued messages list/i })).toHaveCount(0);
   });
 });
 

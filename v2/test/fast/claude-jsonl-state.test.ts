@@ -4,7 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  TOOL_USE_STALE_MS,
   classifyClaudeJsonlState,
   parseConversationLines,
   readClaudeJsonlState,
@@ -61,16 +60,12 @@ describe("classifyClaudeJsonlState", () => {
   });
 
   it("returns working for tool_use within stale window", () => {
-    const records = [
-      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - (TOOL_USE_STALE_MS - 1_000) }),
-    ];
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 2_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
   it("returns needs_input for tool_use past stale window with no progress", () => {
-    const records = [
-      rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - (TOOL_USE_STALE_MS + 1_000) }),
-    ];
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
@@ -246,7 +241,7 @@ describe("parseConversationLines", () => {
     expect(state).toBe("waiting");
   });
 
-  it("classifies unchanged spur-0190 tail fixture as needs_input", async () => {
+  it("keeps the same spur-0190 tail fixture working inside the stale window", async () => {
     const fixturePath = join(
       __dirname,
       "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
@@ -255,7 +250,7 @@ describe("parseConversationLines", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
     const tempFile = join(tempDir, "spur-0190-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:44:52.500Z"));
+    vi.setSystemTime(new Date("2026-04-11T16:44:38.000Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
@@ -269,22 +264,24 @@ describe("parseConversationLines", () => {
       if (!result) {
         throw new Error("expected fixture result");
       }
-      expect(result.state).toBe("needs_input");
+      expect(result.state).toBe("working");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
 
-  it("keeps the same spur-0190 tail fixture working inside the stale window", async () => {
+  it("classifies the spur-052a tail as working inside the declared timeout budget", async () => {
     const fixturePath = join(
       __dirname,
-      "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
+      "../fixtures/agent-history/claude/working-spur-052a-tail.jsonl",
     );
     const fixture = await readFile(fixturePath, "utf8");
-    const tempDir = await mkdtemp(join(tmpdir(), "spur-0190-tail-"));
-    const tempFile = join(tempDir, "spur-0190-tail.jsonl");
+    const tempDir = await mkdtemp(join(tmpdir(), "spur-052a-tail-"));
+    const tempFile = join(tempDir, "spur-052a-tail.jsonl");
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-04-11T16:44:38.000Z"));
+    // Last tool_use timestamp is 2026-04-15T12:47:58.984Z with timeout=900000ms.
+    // At now+60s we are well inside the 903s budget → working.
+    vi.setSystemTime(new Date("2026-04-15T12:48:58.000Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");

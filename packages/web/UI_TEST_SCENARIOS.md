@@ -42,6 +42,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Labels use secondary text color, values use primary
 - Non-zero values show colored (error/working/attention)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
+- Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
 
@@ -90,8 +92,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6c: Footer resource metrics
 
-- On Linux hosts with available runtime metrics, footer left side shows `CPU <n>%`, `RAM <n>%`, `DISK <n>%` in uppercase compact format
-- On unsupported hosts (macOS/Windows) or when runtime metrics source is unavailable, footer resource metrics are hidden with no red/error UI
+- Footer left side shows an aggregated system health trigger that is both hoverable and clickable, with the label synced to the current health state (`HEALTHY`, `WARNING`, `CRITICAL`, `UNAVAILABLE`)
+- Opening the `HEALTHY` tooltip shows `Daemon`, `CPU`, `RAM`, and `HDD` rows with dot indicators
+- `CPU` and `RAM` rows turn attention/yellow at or above the threshold; `HDD` turns error/red at or above the threshold
+- Clicking inside the system health tooltip closes it
+- On touch devices, tapping anywhere outside the open system health tooltip closes it
+- On desktop, hover opens the system health tooltip and mouse leave closes it
+- When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
+- Git / PR aggregate stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
@@ -107,7 +115,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
+- History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
@@ -166,6 +176,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
+### S2c: Queued messages
+
+- Visible when `queuedMessages.messages.length > 0` or `queuedMessages.awaitingPrompt=true`
+- Section header is `QUEUED MESSAGES`
+- Messages render the full send stack in FIFO order
+- Manual queued sends appear before future auto-step messages in the same stack
+- Each queued message is shown as its own stacked row with full wrapped text
+- When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
+- Hidden when queue is empty and not awaiting prompt
+
 ### S3: Message section
 
 - Textarea for sending messages when session accepts input
@@ -173,16 +193,21 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
+- History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
+- Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
-- Send button disabled when empty (no text and no attachments) or action in progress
+- `Queue` button adds the message to the queued stack and is the default composer action
+- `Send now` button bypasses the queue and sends immediately
+- Ctrl/Cmd+Enter triggers the queued send path
+- `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
 - Cmd+V paste with image on clipboard adds thumbnail preview below textarea
 - Drag-and-drop image file onto textarea adds thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
-- Send button enabled when attachments are present even with empty text
+- Both `Queue` and `Send now` are enabled when attachments are present even with empty text
 - Attachments and text cleared after successful send
 
 ### S4: Links section
@@ -209,8 +234,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- Confirming terminal voice input types the reviewed text and sends `Enter`, so the command is submitted immediately without an extra manual keypress
+- Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly

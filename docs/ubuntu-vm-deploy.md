@@ -242,6 +242,21 @@ curl http://127.0.0.1:4310/sessions
 curl http://127.0.0.1:5555/api/runtime/terminal
 ```
 
+`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set and otherwise keeps its managed release clone under `~/.spur/main-deploy/repo`. It fetches the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
+
+## Automated Main Releases
+
+To auto-release `main` every hour from an isolated release clone:
+
+```bash
+crontab -l > /tmp/spur.cron
+printf '%s\n' '0 * * * * MAIN_DEPLOY_ROOT=$HOME/.spur/main-deploy/repo /usr/bin/pnpm -C $HOME/projects/spur run main:deploy >> $HOME/.spur/main-cron-deploy.log 2>&1' >> /tmp/spur.cron
+crontab /tmp/spur.cron
+rm /tmp/spur.cron
+```
+
+Keep the hourly cron pointed at a normal repo checkout only as the command entrypoint. The actual deploy work happens inside `MAIN_DEPLOY_ROOT`, which should stay reserved for automation and not for day-to-day editing.
+
 ## Operational Notes
 
 - `spur-daemon.service` and `spur-web.service` should be `enabled`, not just started
