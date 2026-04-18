@@ -118,6 +118,25 @@ test.describe("D2: Header stats show correct counts", () => {
     await statButtons.first().click();
     await expect(page.getByText("Working session two")).toBeVisible();
   });
+
+  test("shows placeholder with reset filters when a stat filter hides all sessions", async ({
+    page,
+  }) => {
+    const working = makeWorkingSession({ id: "wk-empty-1", prompt: "Only working session" });
+    await mockSessions(page, [working]);
+    await page.goto("/");
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+
+    await page.locator("header button").first().click();
+
+    await expect(page.getByText("No sessions match the current filters.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reset Filters" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Reset Filters" }).click();
+
+    await expect(page.getByText("Only working session")).toBeVisible();
+  });
 });
 
 // D3: Session rows render with correct columns
@@ -395,8 +414,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
-    const onlineButton = page.getByRole("button", { name: "Show aggregated healthy status" });
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
     await expect(onlineButton).toBeVisible();
+    await expect(onlineButton).toContainText("Healthy");
     await onlineButton.click();
 
     await expect(page.getByText("System")).toBeVisible();
@@ -417,11 +437,102 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(footer).not.toContainText(/RAM \d+%/);
     await expect(footer).not.toContainText(/DISK \d+%/);
 
-    await page.getByRole("button", { name: "Show aggregated healthy status" }).click();
+    await page.getByRole("button", { name: "Show aggregated system status" }).click();
     await expect(page.getByLabel("Daemon online healthy")).toBeVisible();
     await expect(page.getByLabel("CPU unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("RAM unavailable unavailable")).toBeVisible();
     await expect(page.getByLabel("HDD unavailable unavailable")).toBeVisible();
+  });
+
+  test("footer syncs warning status text and closes the tooltip after clicking its content", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await expect(onlineButton).toContainText("Warning");
+    await onlineButton.click();
+
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.click();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("footer health tooltip still opens on hover and closes on mouse leave", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await onlineButton.hover();
+    await expect(page.getByText("System")).toBeVisible();
+
+    await page.mouse.move(0, 0);
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+});
+
+test.describe("D6c: Footer touch tooltip dismissal", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test.beforeEach(async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+  });
+
+  test("touch tap on tooltip content closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.tap();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap outside tooltip closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    await expect(page.getByText("System")).toBeVisible();
+    await page.getByRole("heading", { name: "All Projects" }).tap();
+    await expect(page.getByText("System")).not.toBeVisible();
   });
 });
 

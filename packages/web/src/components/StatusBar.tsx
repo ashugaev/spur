@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CiStatusDot,
   fetchPrInfo,
@@ -227,39 +227,88 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const resourceMetrics = useResourceMetrics();
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
+  const [onlineDismissed, setOnlineDismissed] = useState(false);
+  const onlineContainerRef = useRef<HTMLDivElement | null>(null);
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
-  const onlineOpen = onlineHovered || onlinePinned;
+  const onlineLabel =
+    onlineLevel === "error"
+      ? "Critical"
+      : onlineLevel === "attention"
+        ? "Warning"
+        : onlineLevel === "ready"
+          ? "Healthy"
+          : "Unavailable";
+  const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !onlineOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (onlineContainerRef.current?.contains(target)) return;
+      setOnlineDismissed(true);
+      setOnlinePinned(false);
+      setOnlineHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [onlineOpen]);
+
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
+          ref={onlineContainerRef}
           className="group/status relative"
           onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
               setOnlinePinned(false);
+              setOnlineDismissed(false);
             }
           }}
-          onMouseEnter={() => setOnlineHovered(true)}
-          onMouseLeave={() => setOnlineHovered(false)}
+          onMouseEnter={() => {
+            setOnlineDismissed(false);
+            setOnlineHovered(true);
+          }}
+          onMouseLeave={() => {
+            setOnlineDismissed(false);
+            setOnlineHovered(false);
+          }}
         >
           <button
             aria-expanded={onlineOpen}
-            aria-label="Show aggregated healthy status"
-            className="flex items-center gap-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+            aria-label="Show aggregated system status"
+            className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
             type="button"
-            onClick={() => setOnlinePinned((current) => !current)}
+            onClick={() => {
+              setOnlineDismissed(false);
+              setOnlinePinned((current) => !current);
+            }}
           >
             <StatusDot level={onlineLevel} />
-            <span>Healthy</span>
+            <span>{onlineLabel}</span>
           </button>
 
           {onlineOpen ? (
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]">
+            <div
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
+              onClick={() => {
+                setOnlineDismissed(true);
+                setOnlinePinned(false);
+              }}
+            >
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
                 <span className="text-[var(--color-text-secondary)]">System</span>
                 <span className="font-bold" style={{ color: healthColor(onlineLevel) }}>
-                  {statusText(onlineLevel)}
+                  {onlineLabel}
                 </span>
               </div>
               <div className="flex flex-col gap-2">

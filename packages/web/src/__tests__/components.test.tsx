@@ -221,6 +221,94 @@ describe("Dashboard", () => {
     expect(sessionLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
   });
 
+  it("shows a reset-filters empty state when stat filters hide all sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Needs Input: 0" }));
+
+    expect(
+      screen.getByText("No sessions match the current filters.", { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+  });
+
+  it("resets search and project filters from the empty state action", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(
+          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+      ).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    fireEvent.change(searchInput, { target: { value: "zzz" } });
+    expect(searchInput).toHaveValue("zzz");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions", { cache: "no-store" });
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(searchInput).toHaveValue("");
+    expect(window.location.search).toBe("");
+  });
+
   it("does not open terminal from query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -671,11 +759,11 @@ describe("StatusBar", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show aggregated healthy status" }),
-      ).toBeInTheDocument();
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Healthy");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getByText("System")).toBeInTheDocument();
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
@@ -697,7 +785,7 @@ describe("StatusBar", () => {
       expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
     expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
     expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
@@ -722,15 +810,47 @@ describe("StatusBar", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Show aggregated healthy status" }),
-      ).toHaveAttribute("aria-expanded", "false");
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Critical");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Show aggregated healthy status" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
 
-    expect(screen.getByText("critical")).toBeInTheDocument();
+    expect(screen.getAllByText("Critical")).toHaveLength(2);
     expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
     expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
+  });
+
+  it("syncs warning status text in the footer and closes the tooltip when its content is clicked", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 48,
+          diskPercent: 41,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Warning");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+
+    const tooltipHeader = screen.getByText("System").closest("div");
+    expect(tooltipHeader).not.toBeNull();
+    expect(within(tooltipHeader!).getByText("Warning")).toBeInTheDocument();
+
+    fireEvent.click(tooltipHeader!);
+
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
   });
 });
