@@ -97,7 +97,10 @@ test.describe("R2: Tablet viewport (768px)", () => {
     expect(searchWide).not.toBeNull();
     expect(filterWide).not.toBeNull();
     expect(buttonWide).not.toBeNull();
-    expect(new Set([searchWide!.y, filterWide!.y, buttonWide!.y]).size).toBeGreaterThan(1);
+    if (!searchWide || !filterWide || !buttonWide) {
+      throw new Error("Expected header controls to have bounding boxes");
+    }
+    expect(new Set([searchWide.y, filterWide.y, buttonWide.y]).size).toBeGreaterThan(1);
 
     await page.setViewportSize({ width: 430, height: 844 });
     await page.reload();
@@ -111,8 +114,39 @@ test.describe("R2: Tablet viewport (768px)", () => {
     expect(searchNarrow).not.toBeNull();
     expect(filterNarrow).not.toBeNull();
     expect(buttonNarrow).not.toBeNull();
-    expect(filterNarrow!.y).toBeGreaterThan(searchNarrow!.y + 8);
-    expect(buttonNarrow!.y).toBeGreaterThan(filterNarrow!.y + 8);
+    if (!searchNarrow || !filterNarrow || !buttonNarrow) {
+      throw new Error("Expected wrapped header controls to have bounding boxes");
+    }
+    expect(filterNarrow.y).toBeGreaterThan(searchNarrow.y + 8);
+    expect(buttonNarrow.y).toBeGreaterThan(filterNarrow.y + 8);
+  });
+
+  test("stat filters wrap individually before labels collapse", async ({ page }) => {
+    await mockSessions(page, []);
+
+    await page.setViewportSize({ width: 645, height: 844 });
+    await page.goto("/");
+    await expect(page.getByText("Completed:").first()).toBeVisible();
+
+    const statButtons = [
+      page.getByRole("button", { name: /Needs Input/i }),
+      page.getByRole("button", { name: /Working/i }),
+      page.getByRole("button", { name: /Waiting/i }),
+      page.getByRole("button", { name: /Completed/i }),
+    ];
+
+    const boxes = await Promise.all(statButtons.map((button) => button.boundingBox()));
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+    }
+
+    const presentBoxes = boxes.filter((box) => box !== null);
+    if (presentBoxes.length !== boxes.length) {
+      throw new Error("Expected every stat filter to have a bounding box");
+    }
+    const rows = presentBoxes.map((box) => Math.round(box.y));
+    expect(new Set(rows).size).toBeGreaterThan(1);
+    expect(Math.min(...rows)).toBeLessThan(Math.max(...rows));
   });
 });
 

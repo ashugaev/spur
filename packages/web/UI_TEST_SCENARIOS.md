@@ -249,9 +249,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### R1: Mobile (<640px)
 
-- Header is split into 3 rows in order:
-- Row 1: logo + project title
-- Row 2: Needs Input / Working / Waiting stats
+- Header items wrap independently instead of moving as one grouped block
+- Project title, each stat filter, search, project filter, and Spawn Session can all jump to the next line on their own when space runs out
 - Focusing any text input, textarea, or select does not trigger iPhone Safari auto-zoom
 - No horizontal page scroll (`document.documentElement.scrollWidth <= window.innerWidth`)
 - Session rows: project column hidden, only dot + title + time + terminal btn
@@ -261,6 +260,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Header horizontal
 - Header controls wrap independently instead of moving as a single block
+- Stat filters (`Needs Input`, `Working`, `Waiting`, `Completed`) are separate layout items and can wrap one by one before labels collapse into the compact icon-only state
 - Before stat labels collapse into the compact icon-only state, `Spawn Session` drops below search/project first, and the project filter can drop below search on narrower widths
 - Agent column appears at md (768px)
 - Branch column appears at lg (1024px)

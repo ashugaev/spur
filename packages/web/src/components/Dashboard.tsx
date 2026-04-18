@@ -544,51 +544,49 @@ export function Dashboard() {
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
         <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
-          <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-auto sm:shrink-0">
+          <div className="flex min-w-0 items-center gap-3">
             <span className="text-xl text-[var(--color-accent)]">𖤓</span>
             <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
               {activeProjectName}
             </h1>
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-2 uppercase tracking-[0.06em] sm:mr-auto">
-            <StatItem
-              icon={<IconChat />}
-              label="Needs Input"
-              value={stats.respond}
-              color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-              active={activeStatFilter === "respond"}
-              onClick={() => toggleStatFilter("respond")}
-            />
-            <StatItem
-              icon={<IconBolt />}
-              label="Working"
-              value={stats.working}
-              color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-              active={activeStatFilter === "working"}
-              onClick={() => toggleStatFilter("working")}
-            />
-            <StatItem
-              icon={<IconClock />}
-              label="Waiting"
-              value={stats.pending}
-              color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-              active={activeStatFilter === "pending"}
-              onClick={() => toggleStatFilter("pending")}
-            />
-            <StatItem
-              icon={<IconCheck />}
-              label="Completed"
-              value={stats.done}
-              color={
-                activeStatFilter === "done" && stats.done > 0
-                  ? "var(--color-status-ready)"
-                  : undefined
-              }
-              active={activeStatFilter === "done"}
-              onClick={() => toggleStatFilter("done")}
-            />
-          </div>
-          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+          <StatItem
+            icon={<IconChat />}
+            label="Needs Input"
+            value={stats.respond}
+            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+            active={activeStatFilter === "respond"}
+            onClick={() => toggleStatFilter("respond")}
+          />
+          <StatItem
+            icon={<IconBolt />}
+            label="Working"
+            value={stats.working}
+            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+            active={activeStatFilter === "working"}
+            onClick={() => toggleStatFilter("working")}
+          />
+          <StatItem
+            icon={<IconClock />}
+            label="Waiting"
+            value={stats.pending}
+            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+            active={activeStatFilter === "pending"}
+            onClick={() => toggleStatFilter("pending")}
+          />
+          <StatItem
+            icon={<IconCheck />}
+            label="Completed"
+            value={stats.done}
+            color={
+              activeStatFilter === "done" && stats.done > 0
+                ? "var(--color-status-ready)"
+                : undefined
+            }
+            active={activeStatFilter === "done"}
+            onClick={() => toggleStatFilter("done")}
+          />
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
             <svg
               className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
               viewBox="0 0 24 24"
