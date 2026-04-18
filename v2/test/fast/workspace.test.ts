@@ -87,6 +87,61 @@ describe("createWorktree", () => {
     );
   });
 
+  it("uses origin/defaultBranch as base when checked-out default branch is dirty and behind", async () => {
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("remote not behind local");
+    mockGitSuccess("main");
+    mockGitSuccess(" M DIRTY.txt");
+    mockGitFailure("missing local branch");
+    mockGitFailure("missing remote branch");
+    mockGitSuccess();
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      "git",
+      ["merge", "--ff-only", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+  });
+
+  it("fast-forwards a clean checked-out default branch before creating the worktree", async () => {
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("remote not behind local");
+    mockGitSuccess("main");
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("missing local branch");
+    mockGitFailure("missing remote branch");
+    mockGitSuccess();
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["merge", "--ff-only", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
+      { cwd: "/repo/api" },
+    );
+  });
+
   it("creates an explicit branch from origin/<branch> when it only exists remotely", async () => {
     mockGitSuccess();
     mockGitSuccess();
