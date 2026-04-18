@@ -86,6 +86,7 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
   type SessionQueuedMessagesState,
@@ -97,6 +98,15 @@ import {
   type StateSource,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
+import {
+  formatNestedSidecarStartError,
+  MAX_SIDECAR_DEPTH,
+  nextSidecarDepth,
+  ROOT_SIDECAR_DEPTH,
+  sidecarCallerContextFromRequest,
+  SPUR_SIDECAR_DEPTH_ENV,
+  SPUR_SIDECAR_NAME_ENV,
+} from "./sidecar-runtime.js";
 import {
   createWorktree,
   findWorktreePathForBranch,
@@ -243,7 +253,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -429,6 +439,22 @@ function sidecarPortEnv(
 ): Record<string, string> {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function buildSidecarRuntimeEnv(
+  sessionEnv: Record<string, string>,
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+  sidecarEnv: Record<string, string> | undefined,
+  sidecarDepth: number,
+): Record<string, string> {
+  return {
+    ...sessionEnv,
+    ...(sidecarEnv ?? {}),
+    [SPUR_SIDECAR_NAME_ENV]: sidecarName,
+    [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
+    ...sidecarPortEnv(session, sidecarName),
+  };
 }
 
 function sessionSidecarNames(
@@ -1392,18 +1418,14 @@ export class SessionService {
       const projectSidecars = project.sidecars;
       for (const [name, sidecar] of Object.entries(projectSidecars)) {
         if (!sidecar.autoStart) continue;
+        const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
           await createTmuxSidecarSession({
             sessionId,
             sidecarName: name,
             cwd: workspacePath,
             command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
+            env: buildSidecarRuntimeEnv(sessionEnv, runningRecord, name, sidecar.env, sidecarDepth),
           });
           this.logEvent("session.sidecar.started", {
             level: "info",
@@ -1413,6 +1435,8 @@ export class SessionService {
             details: {
               sidecarName: name,
               command: sidecar.command,
+              manualOnly: false,
+              sidecarDepth,
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
@@ -1778,7 +1802,29 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async startSidecar(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest = {},
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
+    if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
+      const message = formatNestedSidecarStartError(sidecarName, caller.name);
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId,
+        message,
+        details: {
+          callerSidecarDepth: caller.depth,
+          callerSidecarName: caller.name,
+          maxSidecarDepth: MAX_SIDECAR_DEPTH,
+          reason: "max_depth_exceeded",
+          sidecarName,
+        },
+      });
+      throw new Error(message);
+    }
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1818,12 +1864,7 @@ export class SessionService {
       sidecarName,
       cwd: session.worktreePath,
       command: sidecar.command,
-      env: {
-        ...sessionEnv,
-        SPUR_SIDECAR_NAME: sidecarName,
-        ...(sidecar.env ?? {}),
-        ...sidecarPortEnv(session, sidecarName),
-      },
+      env: buildSidecarRuntimeEnv(sessionEnv, session, sidecarName, sidecar.env, sidecarDepth),
     });
 
     const sidecarNames = sessionSidecarNames(session, project);
@@ -1841,8 +1882,11 @@ export class SessionService {
       projectId: session.project,
       message: `Started sidecar ${sidecarName} for ${sessionId}`,
       details: {
+        callerSidecarName: caller.name ?? null,
         sidecarName,
+        sidecarDepth,
         command: sidecar.command,
+        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
