@@ -43,11 +43,8 @@ import {
 } from "./cli-view.js";
 import { writeStderr, writeStdout } from "./io.js";
 import { sortSessionsForList } from "./session-display.js";
-import {
-  formatRecursiveSidecarStartError,
-  isKillConfirmationRequiredMessage,
-  isRestorableSession,
-} from "./session-service.js";
+import { isKillConfirmationRequiredMessage, isRestorableSession } from "./session-service.js";
+import { sidecarCallerContextFromEnv, startSidecarRequestFromEnv } from "./sidecar-runtime.js";
 import { sidecarTmuxSession, setTmuxSocketName, withTmuxSocketArgs } from "./runtime-tmux.js";
 import { startServer } from "./server.js";
 import type {
@@ -584,13 +581,11 @@ function runningSessionId(): string | undefined {
 }
 
 function currentSidecarName(): string | undefined {
-  const sidecarName = process.env["SPUR_SIDECAR_NAME"]?.trim();
-  return sidecarName ? sidecarName : undefined;
+  return sidecarCallerContextFromEnv(process.env).name;
 }
 
 function startSidecarRequest(): StartSidecarRequest {
-  const callerSidecarName = currentSidecarName();
-  return callerSidecarName ? { callerSidecarName } : {};
+  return startSidecarRequestFromEnv(process.env);
 }
 
 function respawnParentSessionId(): string | undefined {
@@ -1730,13 +1725,6 @@ export function createProgram(cliEntrypoint: string): Command {
     .requiredOption("--name <name>", "Sidecar name")
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
-      const payload = startSidecarRequest();
-      const callerSidecarName = payload.callerSidecarName;
-      if (callerSidecarName) {
-        throw new Error(
-          formatRecursiveSidecarStartError(options.name as string, callerSidecarName),
-        );
-      }
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
       ).configPath;
@@ -1747,7 +1735,7 @@ export function createProgram(cliEntrypoint: string): Command {
           postJson<SessionView>(
             cliEntrypoint,
             `/sessions/${options.session as string}/sidecars/${options.name as string}/start`,
-            payload,
+            startSidecarRequest(),
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,

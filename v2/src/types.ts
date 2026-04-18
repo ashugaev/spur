@@ -288,6 +288,7 @@ export interface RunServiceRequest {
 
 export interface StartSidecarRequest {
   callerSidecarName?: string;
+  callerSidecarDepth?: number;
 }
 
 export interface KillSessionRequest {
