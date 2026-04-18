@@ -1733,7 +1733,9 @@ export function createProgram(cliEntrypoint: string): Command {
       const payload = startSidecarRequest();
       const callerSidecarName = payload.callerSidecarName;
       if (callerSidecarName) {
-        throw new Error(formatRecursiveSidecarStartError(options.name as string, callerSidecarName));
+        throw new Error(
+          formatRecursiveSidecarStartError(options.name as string, callerSidecarName),
+        );
       }
       const configPath = prepareInstanceConfig(
         (command.parent as Command).parent as Command,
