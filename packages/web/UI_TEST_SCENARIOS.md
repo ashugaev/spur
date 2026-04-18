@@ -32,8 +32,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D1: Header renders correctly
 
-- 𖤓 icon + large project title select visible
-- Project selection happens in the title select with "All Projects" default and chevron indicator
+- 𖤓 icon + large project title visible at the same size as before
+- Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
 ### D2: Header stats show correct counts

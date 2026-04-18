@@ -513,8 +513,18 @@ export function Dashboard() {
           <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
             <div className="flex min-w-0 shrink items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="relative inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2 sm:text-2xl">
-                <span className="min-w-0 truncate">{activeProjectName}</span>
+              <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
+                <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+                  <span className="block min-w-0 truncate">{activeProjectName}</span>
+                  <svg
+                    aria-hidden="true"
+                    className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
+                    fill="currentColor"
+                    viewBox="0 0 16 16"
+                  >
+                    <path d="M4 6.5 8 10.5 12 6.5Z" />
+                  </svg>
+                </h1>
                 <select
                   aria-label="Project filter"
                   className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
@@ -528,17 +538,7 @@ export function Dashboard() {
                     </option>
                   ))}
                 </select>
-                <svg
-                  aria-hidden="true"
-                  className="pointer-events-none h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                >
-                  <path d="m6 9 6 6 6-6" />
-                </svg>
-              </h1>
+              </div>
             </div>
             <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
               <StatItem

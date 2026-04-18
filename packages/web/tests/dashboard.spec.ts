@@ -19,12 +19,13 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
   });
 
-  test("project title select visible", async ({ page }) => {
+  test("project title select visible with chevron indicator", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
     const projectFilter = page.getByRole("combobox", { name: "Project filter" });
     await expect(projectFilter).toBeVisible();
     await expect(projectFilter).toHaveValue("");
+    await expect(page.locator("header h1 svg")).toBeVisible();
   });
 
   test("Spawn Session button visible", async ({ page }) => {
