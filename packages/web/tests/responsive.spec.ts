@@ -84,7 +84,7 @@ test.describe("R3: Desktop viewport (1280px)", () => {
     await gotoMocked(page, "/", [makeWorkingSession({ id: "desktop-1" })]);
 
     await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "All Projects" })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toBeVisible();
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
