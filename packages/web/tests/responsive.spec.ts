@@ -58,7 +58,6 @@ test.describe("R1: Mobile viewport", () => {
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).toBeVisible();
   });
-
 });
 
 // R2: Tablet
@@ -76,7 +75,9 @@ test.describe("R2: Tablet viewport (768px)", () => {
     await expect(page.getByText("claude").first()).toBeVisible();
   });
 
-  test("header controls wrap one element at a time before compact stat labels", async ({ page }) => {
+  test("header controls wrap one element at a time before compact stat labels", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
 
     await page.setViewportSize({ width: 700, height: 844 });

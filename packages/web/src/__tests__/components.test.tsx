@@ -398,9 +398,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        within(screen.getByRole("button", { name: /Completed/i })).getByText("1").getAttribute(
-          "style",
-        ),
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("1")
+          .getAttribute("style"),
       ).toContain("var(--color-status-ready)");
     });
 
@@ -408,9 +408,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        within(screen.getByRole("button", { name: /Completed/i })).getByText("1").getAttribute(
-          "style",
-        ),
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("1")
+          .getAttribute("style"),
       ).toBeFalsy();
     });
   });
@@ -441,9 +441,9 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(
-        within(screen.getByRole("button", { name: /Completed/i })).getByText("0").getAttribute(
-          "style",
-        ),
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("0")
+          .getAttribute("style"),
       ).toBeFalsy();
     });
   });
