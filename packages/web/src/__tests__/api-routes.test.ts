@@ -219,7 +219,7 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions",
+      "/sessions/background",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ project: "api", prompt: "", agent: "claude" }),
@@ -270,7 +270,7 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/sessions",
+      "/sessions/background",
       expect.objectContaining({
         body: JSON.stringify({
           project: "api",

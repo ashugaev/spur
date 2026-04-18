@@ -887,7 +887,22 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      if (url === "/api/spawn") return new Response("ok", { status: 200 });
+      if (url === "/api/spawn")
+        return new Response(
+          JSON.stringify({
+            ...sessionsData.sessions[0],
+            id: "sp-spawn-1",
+            project: "sp",
+            prompt: "Ship it",
+            status: "spawning",
+            state: "working",
+            runtimeAlive: false,
+            workspaceExists: false,
+            tmuxSession: "sp-spawn-1",
+            worktreePath: "/tmp/worktrees/sp-spawn-1",
+          }),
+          { status: 201 },
+        );
       if (url === "/api/sessions?project=sp")
         return new Response(JSON.stringify({ ...sessionsData, sessions: [] }), { status: 200 });
       if (url === "/api/sessions")
@@ -916,6 +931,90 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+    });
+  });
+
+  it("closes spawn modal on early ack and shows the spawning session immediately", async () => {
+    const spawned = {
+      ...sessionsPayload().sessions[0],
+      id: "api-spawn-1",
+      prompt: "Spawn in background",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "api-spawn-1",
+      worktreePath: "/tmp/worktrees/api-spawn-1",
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify(spawned), { status: 201 });
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Spawn in background" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Spawn in background" })).toBeInTheDocument();
+    });
+  });
+
+  it("keeps spawn modal open and preserves fields when spawn ack fails", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/spawn")
+        return new Response(JSON.stringify({ error: "Daemon down" }), { status: 502 });
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Keep this prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+      expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
     });
   });
 

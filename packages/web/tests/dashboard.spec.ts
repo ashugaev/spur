@@ -728,7 +728,18 @@ test.describe("D7: Spawn modal", () => {
       void route.fulfill({
         status: 201,
         contentType: "application/json",
-        body: JSON.stringify({ id: "new-session-id" }),
+        body: JSON.stringify(
+          makeWorkingSession({
+            id: "new-session-id",
+            project: "my-project",
+            prompt: "Test prompt for ctrl enter",
+            status: "spawning",
+            state: "working",
+            runtimeAlive: false,
+            workspaceExists: false,
+            worktreePath: "/tmp/worktrees/new-session-id",
+          }),
+        ),
       });
     });
     // Mock preflight
@@ -755,6 +766,34 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
       timeout: 5000,
     });
+  });
+
+  test("spawn ack failure keeps modal open and preserves prompt", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-fail-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+
+    await page.route("**/api/spawn", (route) => {
+      void route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Daemon down" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.locator("select").nth(0).selectOption("my-project");
+
+    const textarea = page.locator("textarea").last();
+    await textarea.fill("Keep me");
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(textarea).toHaveValue("Keep me");
+    await expect(page.getByText(/Daemon down/i)).toBeVisible();
   });
 });
 

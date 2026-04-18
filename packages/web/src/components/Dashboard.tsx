@@ -157,6 +157,18 @@ function buildSpawnOverrides(
   return undefined;
 }
 
+function upsertSession(
+  sessions: SpurSessionView[],
+  nextSession: SpurSessionView,
+  activeProjectId: string,
+): SpurSessionView[] {
+  const filtered = sessions.filter((session) => session.id !== nextSession.id);
+  if (activeProjectId && nextSession.project !== activeProjectId) {
+    return filtered;
+  }
+  return [nextSession, ...filtered];
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -488,6 +500,8 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
+      const session = (await response.json()) as SpurSessionView;
+      setRawSessions((current) => upsertSession(current, session, nextProjectId));
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -497,7 +511,6 @@ export function Dashboard() {
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
-      await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");

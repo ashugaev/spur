@@ -206,9 +206,12 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "respond";
   }
 
+  if (session.status === "spawning") {
+    return "working";
+  }
+
   if (
     session.status === "paused" ||
-    session.status === "spawning" ||
     session.state === "waiting" ||
     session.state === "stopped"
   ) {
