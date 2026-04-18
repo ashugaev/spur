@@ -10,9 +10,15 @@ echo ""
 
 # Build and run
 docker compose up --build -d onboarding-test
-docker logs -f spur-onboarding-test &
+CONTAINER_ID="$(docker compose ps -q onboarding-test)"
+if [ -z "$CONTAINER_ID" ]; then
+    echo "Failed to resolve onboarding-test container ID" >&2
+    docker compose ps
+    exit 1
+fi
+docker logs -f "$CONTAINER_ID" &
 LOGS_PID=$!
-EXIT_CODE="$(docker wait spur-onboarding-test)"
+EXIT_CODE="$(docker wait "$CONTAINER_ID")"
 wait "$LOGS_PID" || true
 
 # Capture exit code

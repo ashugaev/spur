@@ -11,6 +11,12 @@ import {
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
+  codexHookHomePath,
+  captureCodexRolloutBaseline,
+  scanCodexRolloutForMessage,
+  type RolloutBaseline,
+} from "./agents/codex.js";
+import {
   readClaudeConversation,
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
@@ -82,6 +88,7 @@ import {
   type SendMessageRequest,
   type SessionRecord,
   type SessionStatus,
+  type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
   type SessionStateTransition,
@@ -105,7 +112,7 @@ import { gh } from "./gh.js";
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
-const PIPELINE_READY_GRACE_MS = 2_000;
+const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -118,7 +125,7 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
-const CODEX_SUBMIT_ACK_TIMEOUT_MS = 5_000;
+const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -244,59 +251,6 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function hookStateTimestampMs(updatedAt: string | undefined): number | null {
-  if (!updatedAt) {
-    return null;
-  }
-  const parsed = Date.parse(updatedAt);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function hookStateFileAdvanced(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!baseline || !current) {
-    return false;
-  }
-  return (
-    typeof baseline.fileMtimeMs === "number" &&
-    typeof current.fileMtimeMs === "number" &&
-    current.fileMtimeMs > baseline.fileMtimeMs
-  );
-}
-
-function isCodexSubmitAcknowledged(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!current) {
-    return false;
-  }
-  if (!baseline) {
-    return current.hookEvent === "UserPromptSubmit";
-  }
-  if (current.turnId && baseline.turnId && current.turnId !== baseline.turnId) {
-    return true;
-  }
-  if (hookStateFileAdvanced(baseline, current)) {
-    return true;
-  }
-  const baselineMs = hookStateTimestampMs(baseline.updatedAt);
-  const currentMs = hookStateTimestampMs(current.updatedAt);
-  const advanced =
-    baselineMs === null || currentMs === null
-      ? current.updatedAt !== baseline.updatedAt
-      : currentMs > baselineMs;
-  if (!advanced) {
-    return false;
-  }
-  // Codex can emit UserPromptSubmit and then quickly overwrite the hook state with
-  // a follow-up event (for example Stop) before the daemon polls. Any newer hook
-  // record after the pre-send baseline means Codex observed and processed the submit.
-  return true;
-}
-
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
@@ -321,6 +275,32 @@ function queuedMessages(session: SessionRecord): string[] {
 
 function hasQueuedMessages(session: SessionRecord): boolean {
   return queuedMessages(session).length > 0;
+}
+
+function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipeline">): string[] {
+  const pipeline = session.pipeline;
+  if (!pipeline || pipeline.status !== "running") {
+    return [];
+  }
+  return pipeline.steps
+    .slice(pipeline.nextStepIndex)
+    .map((step, offset) =>
+      formatPipelineStepMessage(
+        session.prompt,
+        step,
+        pipeline.nextStepIndex + offset,
+        pipeline.steps.length,
+      ),
+    );
+}
+
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
+  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
+  if (messages.length === 0 && !awaitingPrompt) {
+    return undefined;
+  }
+  return { messages, awaitingPrompt };
 }
 
 function withQueuedMessages(
@@ -1558,45 +1538,17 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!message && !hasAttachments) {
+    if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
-
-    let finalMessage = message;
-    if (hasAttachments) {
-      const attachments = request.attachments ?? [];
-      if (attachments.length > MAX_ATTACHMENTS) {
-        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
-      }
-      const attachDir = join(session.worktreePath, ".spur", "attachments");
-      mkdirSync(attachDir, { recursive: true });
-      const prefixLines: string[] = [];
-      for (const att of attachments) {
-        if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
-          throw new Error(`Invalid attachment name: ${String(att.name)}`);
-        }
-        const ext = extname(att.name).toLowerCase();
-        if (!ALLOWED_EXT.has(ext)) {
-          throw new Error(`Unsupported attachment extension: ${ext}`);
-        }
-        if (typeof att.data !== "string" || !att.data) {
-          throw new Error("Attachment data must be a non-empty base64 string");
-        }
-        const buf = Buffer.from(att.data, "base64");
-        if (buf.length > MAX_DECODED_SIZE) {
-          throw new Error(`Attachment ${att.name} exceeds 5MB`);
-        }
-        const filename = `${Date.now()}-${att.name}`;
-        const filePath = join(attachDir, filename);
-        writeFileSync(filePath, buf, { mode: 0o644 });
-        prefixLines.push(`[Attached file: ${filePath}]`);
-      }
-      finalMessage = prefixLines.join("\n") + (message ? `\n${message}` : "");
+    const finalMessage = this.prepareSendMessage(session, request);
+    if (request.queue === false) {
+      return this.deliverPrepared(sessionId, finalMessage, {
+        interrupt: request.interrupt === true,
+      });
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -1619,7 +1571,9 @@ export class SessionService {
         messageLength: finalMessage.length,
       },
     });
-    await this.tryDeliverQueuedMessage(sessionId);
+    if (updated.queuedMessages?.awaitingPrompt !== true) {
+      await this.tryDeliverQueuedMessage(sessionId);
+    }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
   }
@@ -1640,8 +1594,20 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
+    return this.deliverPrepared(sessionId, message, options);
+  }
+
+  private async deliverPrepared(
+    sessionId: string,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<SessionView> {
+    const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      const readySession = await this.ensureSessionReadyForSend(session);
+      if (!initialSession) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
@@ -1659,7 +1625,7 @@ export class SessionService {
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
-        projectId: session.project,
+        projectId: initialSession.project,
         message: `Delivered message to ${sessionId}`,
         details: {
           interrupt,
@@ -1673,7 +1639,7 @@ export class SessionService {
       this.logEvent("session.message.failed", {
         level: "error",
         sessionId,
-        projectId: session.project,
+        ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
           interrupt: options?.interrupt === true,
@@ -1681,6 +1647,46 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "worktreePath">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const attachments = request.attachments ?? [];
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+    }
+    const attachDir = join(session.worktreePath, ".spur", "attachments");
+    mkdirSync(attachDir, { recursive: true });
+    const prefixLines: string[] = [];
+    for (const att of attachments) {
+      if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
+        throw new Error(`Invalid attachment name: ${String(att.name)}`);
+      }
+      const ext = extname(att.name).toLowerCase();
+      if (!ALLOWED_EXT.has(ext)) {
+        throw new Error(`Unsupported attachment extension: ${ext}`);
+      }
+      if (typeof att.data !== "string" || !att.data) {
+        throw new Error("Attachment data must be a non-empty base64 string");
+      }
+      const buf = Buffer.from(att.data, "base64");
+      if (buf.length > MAX_DECODED_SIZE) {
+        throw new Error(`Attachment ${att.name} exceeds 5MB`);
+      }
+      const filename = `${Date.now()}-${att.name}`;
+      const filePath = join(attachDir, filename);
+      writeFileSync(filePath, buf, { mode: 0o644 });
+      prefixLines.push(`[Attached file: ${filePath}]`);
+    }
+    return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
   async pause(sessionId: string): Promise<SessionView> {
@@ -1692,21 +1698,27 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
-    const codexBaseline =
-      session.agent === "codex"
-        ? (readAgentHookState(this.config.dataDir, session.id) ??
-          (await this.waitForCodexHookBaseline(session.id)) ??
-          null)
-        : null;
+    const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
+    const codexSessionsDir =
+      session.agent === "codex" ? join(codexHookHomePath(sessionToolDir), "sessions") : null;
+    const baseline: RolloutBaseline | null = codexSessionsDir
+      ? await captureCodexRolloutBaseline(codexSessionsDir)
+      : null;
+    const startedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (session.agent !== "codex") {
+    if (session.agent !== "codex" || !codexSessionsDir || !baseline) {
       return;
     }
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
-      if (await this.waitForCodexSubmitAck(session.id, codexBaseline)) {
+      lastResult = await this.waitForCodexRolloutAck(codexSessionsDir, message, baseline);
+      if (lastResult.found) {
         return;
       }
       if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
@@ -1714,59 +1726,38 @@ export class SessionService {
       }
     }
     const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-    const currentHook = readAgentHookState(this.config.dataDir, session.id);
     this.logEvent("session.codex.submit.timeout", {
       level: "warn",
       sessionId: session.id,
       message: `Codex submit ack timed out for ${session.id}`,
       details: {
-        baseline: codexBaseline
-          ? {
-              turnId: codexBaseline.turnId ?? null,
-              updatedAt: codexBaseline.updatedAt,
-              hookEvent: codexBaseline.hookEvent ?? null,
-            }
-          : null,
-        current: currentHook
-          ? {
-              turnId: currentHook.turnId ?? null,
-              updatedAt: currentHook.updatedAt,
-              hookEvent: currentHook.hookEvent ?? null,
-            }
-          : null,
+        lastScannedFile: lastResult.lastScannedFile,
+        messageLength: message.length,
+        elapsedMs: Date.now() - startedAt,
         processAlive,
       },
     });
     throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
   }
 
-  private async waitForCodexSubmitAck(
-    sessionId: string,
-    baseline: ReturnType<typeof readAgentHookState>,
-  ): Promise<boolean> {
+  private async waitForCodexRolloutAck(
+    sessionsDir: string,
+    messageText: string,
+    baseline: RolloutBaseline,
+  ): Promise<{ found: boolean; lastScannedFile: string | null }> {
     const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (isCodexSubmitAcknowledged(baseline, current)) {
-        return true;
+      lastResult = await scanCodexRolloutForMessage(sessionsDir, messageText, baseline);
+      if (lastResult.found) {
+        return lastResult;
       }
       await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
     }
-    return false;
-  }
-
-  private async waitForCodexHookBaseline(
-    sessionId: string,
-  ): Promise<ReturnType<typeof readAgentHookState>> {
-    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (current) {
-        return current;
-      }
-      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
-    }
-    return null;
+    return lastResult;
   }
 
   async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
@@ -2281,20 +2272,14 @@ export class SessionService {
         restorePrompt,
         planOptions,
       );
-      const effectivePlan =
-        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
-        this.logEvent("session.restore.started", {
-          level: "info",
-          sessionId,
-          projectId: current.project,
-          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
-          details: { agent: current.agent, worktreePath: current.worktreePath },
-        });
+        throw new Error(
+          `Session is not restorable (no ${current.agent} resume state): ${sessionId}`,
+        );
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = effectivePlan.launchCommand;
-      let restoreReadyMarkers = effectivePlan.readyMarkers;
+      let restoreLaunchCommand = launchPlan.launchCommand;
+      let restoreReadyMarkers = launchPlan.readyMarkers;
       if (current.agent === "claude") {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
@@ -2304,7 +2289,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            effectivePlan.launchCommand,
+            launchPlan.launchCommand,
             planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -2337,47 +2322,10 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
+        launchPlan.initialMessage,
         restoreSidecarNames,
       );
-      try {
-        await this.sendAgentMessage(current, restoreInitialMessage);
-      } catch (sendError) {
-        // Codex resume doesn't reliably fire hooks, so submit acknowledgment
-        // can time out. When a native resume plan was used, fall back to a
-        // fresh launch instead of failing the entire restore.
-        if (!launchPlan || current.agent !== "codex") {
-          throw sendError;
-        }
-        const failure = sendError instanceof Error ? sendError.message : String(sendError);
-        this.logEvent("session.restore.resume_fallback", {
-          level: "warn",
-          sessionId,
-          projectId: current.project,
-          message: `Codex resume submit failed for ${sessionId}; retrying with fresh launch`,
-          details: { failure },
-        });
-        await killTmuxSession(current.tmuxSession);
-        deleteAgentHookState(this.config.dataDir, sessionId);
-        const freshPlan = buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
-        restoredLaunchCommand = freshPlan.launchCommand;
-        await createTmuxSession({
-          sessionName: current.tmuxSession,
-          cwd: current.worktreePath,
-          launchCommand: freshPlan.launchCommand,
-          agent: current.agent,
-          env,
-        });
-        await syncTmuxStatus(current.tmuxSession, current.slots);
-        await waitForTmuxReady(current.tmuxSession, freshPlan.readyMarkers);
-        if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
-          throw new Error(`Agent ${current.agent} exited before restore became ready`, {
-            cause: sendError,
-          });
-        }
-        const freshMessage = buildInitialMessage(freshPlan.initialMessage, restoreSidecarNames);
-        await this.sendAgentMessage(current, freshMessage);
-      }
+      await this.sendAgentMessage(current, restoreInitialMessage);
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -2774,7 +2722,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2809,7 +2757,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -3006,6 +2954,7 @@ export class SessionService {
     for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
+    const queuedMessagesView = displayQueuedMessages(session);
 
     return {
       ...session,
@@ -3017,6 +2966,7 @@ export class SessionService {
       lastActivityAt,
       services,
       sidecars,
+      ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }
 
@@ -3039,4 +2989,11 @@ export class SessionService {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     return hookState?.state ?? "waiting";
   }
+}
+
+function hasMessageContent(request: SendMessageRequest): boolean {
+  return (
+    (typeof request.message === "string" && request.message.trim().length > 0) ||
+    (Array.isArray(request.attachments) && request.attachments.length > 0)
+  );
 }
