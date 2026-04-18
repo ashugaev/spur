@@ -15,8 +15,7 @@ test.describe("D1: Header renders correctly", () => {
   test("𖤓 icon visible", async ({ page }) => {
     await mockSessions(page, [makeWorkingSession({ id: "d1-icon" })]);
     await page.goto("/");
-    // Use the span in the header specifically — EmptyState also has 𖤓 when no sessions
-    await expect(page.locator("header span").filter({ hasText: "𖤓" })).toBeVisible();
+    await expect(page.locator("main > header").first()).toContainText("𖤓");
   });
 
   test("project title select visible with chevron indicator", async ({ page }) => {
