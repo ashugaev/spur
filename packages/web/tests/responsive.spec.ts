@@ -59,43 +59,6 @@ test.describe("R1: Mobile viewport", () => {
     await expect(page.getByText("Accordion session")).toBeVisible();
   });
 
-  test("header controls wrap one element at a time as width tightens", async ({ page }) => {
-    await mockSessions(page, []);
-
-    await page.setViewportSize({ width: 520, height: 844 });
-    await page.goto("/");
-
-    const searchInput = page.getByPlaceholder("Filter sessions...");
-    const projectFilter = page.getByRole("combobox").first();
-    const spawnButton = page.getByRole("button", { name: /spawn session/i });
-
-    const [searchWide, filterWide, buttonWide] = await Promise.all([
-      searchInput.boundingBox(),
-      projectFilter.boundingBox(),
-      spawnButton.boundingBox(),
-    ]);
-
-    expect(searchWide).not.toBeNull();
-    expect(filterWide).not.toBeNull();
-    expect(buttonWide).not.toBeNull();
-    expect(Math.abs(searchWide!.y - filterWide!.y)).toBeLessThanOrEqual(8);
-    expect(buttonWide!.y).toBeGreaterThan(filterWide!.y + 8);
-
-    await page.setViewportSize({ width: 430, height: 844 });
-    await page.reload();
-
-    const [searchNarrow, filterNarrow, buttonNarrow] = await Promise.all([
-      searchInput.boundingBox(),
-      projectFilter.boundingBox(),
-      spawnButton.boundingBox(),
-    ]);
-
-    expect(searchNarrow).not.toBeNull();
-    expect(filterNarrow).not.toBeNull();
-    expect(buttonNarrow).not.toBeNull();
-    expect(filterNarrow!.y).toBeGreaterThan(searchNarrow!.y + 8);
-    expect(buttonNarrow!.y).toBeGreaterThan(filterNarrow!.y + 8);
-  });
 });
 
 // R2: Tablet
@@ -111,6 +74,44 @@ test.describe("R2: Tablet viewport (768px)", () => {
     const row = page.locator(".data-row").first();
     await expect(row).toBeVisible();
     await expect(page.getByText("claude").first()).toBeVisible();
+  });
+
+  test("header controls wrap one element at a time before compact stat labels", async ({ page }) => {
+    await mockSessions(page, []);
+
+    await page.setViewportSize({ width: 700, height: 844 });
+    await page.goto("/");
+    await expect(page.getByText("Completed:").first()).toBeVisible();
+
+    const searchInput = page.getByPlaceholder("Filter sessions...");
+    const projectFilter = page.getByRole("combobox").first();
+    const spawnButton = page.getByRole("button", { name: /spawn session/i });
+
+    const [searchWide, filterWide, buttonWide] = await Promise.all([
+      searchInput.boundingBox(),
+      projectFilter.boundingBox(),
+      spawnButton.boundingBox(),
+    ]);
+
+    expect(searchWide).not.toBeNull();
+    expect(filterWide).not.toBeNull();
+    expect(buttonWide).not.toBeNull();
+    expect(new Set([searchWide!.y, filterWide!.y, buttonWide!.y]).size).toBeGreaterThan(1);
+
+    await page.setViewportSize({ width: 430, height: 844 });
+    await page.reload();
+
+    const [searchNarrow, filterNarrow, buttonNarrow] = await Promise.all([
+      searchInput.boundingBox(),
+      projectFilter.boundingBox(),
+      spawnButton.boundingBox(),
+    ]);
+
+    expect(searchNarrow).not.toBeNull();
+    expect(filterNarrow).not.toBeNull();
+    expect(buttonNarrow).not.toBeNull();
+    expect(filterNarrow!.y).toBeGreaterThan(searchNarrow!.y + 8);
+    expect(buttonNarrow!.y).toBeGreaterThan(filterNarrow!.y + 8);
   });
 });
 

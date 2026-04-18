@@ -343,7 +343,7 @@ export function Dashboard() {
   const emptyStateMessage = hasActiveFilters
     ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
     : grouped.done.length > 0
-      ? "No current sessions are visible. Toggle Completed to review finished work."
+      ? "No current sessions are visible."
       : undefined;
 
   const isValidSpawnProject = (candidateProjectId: string) =>
@@ -543,88 +543,88 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex shrink-0 flex-wrap items-center gap-3">
-            <div className="flex shrink-0 items-center gap-3">
-              <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                {activeProjectName}
-              </h1>
-            </div>
-            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
-              <StatItem
-                icon={<IconChat />}
-                label="Needs Input"
-                value={stats.respond}
-                color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-                active={activeStatFilter === "respond"}
-                onClick={() => toggleStatFilter("respond")}
-              />
-              <StatItem
-                icon={<IconBolt />}
-                label="Working"
-                value={stats.working}
-                color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-                active={activeStatFilter === "working"}
-                onClick={() => toggleStatFilter("working")}
-              />
-              <StatItem
-                icon={<IconClock />}
-                label="Waiting"
-                value={stats.pending}
-                color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-                active={activeStatFilter === "pending"}
-                onClick={() => toggleStatFilter("pending")}
-              />
-              <StatItem
-                icon={<IconCheck />}
-                label="Completed"
-                value={stats.done}
-                color={stats.done > 0 ? "var(--color-status-ready)" : undefined}
-                active={activeStatFilter === "done"}
-                onClick={() => toggleStatFilter("done")}
-              />
-            </div>
+        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="flex min-w-0 basis-full items-center gap-3 sm:basis-auto sm:shrink-0">
+            <span className="text-xl text-[var(--color-accent)]">𖤓</span>
+            <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+              {activeProjectName}
+            </h1>
           </div>
-          <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
-            <div className="flex min-w-[120px] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-              <svg
-                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Filter sessions..."
-                value={searchQuery}
-              />
-            </div>
-            <select
-              className="min-w-[11rem] flex-[1_1_12rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-              onChange={(event) => syncProjectFilter(event.target.value)}
-              value={projectId}
-            >
-              <option value="">All projects</option>
-              {filterProjectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-            <button
-              className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto"
-              onClick={openSpawnModal}
-              type="button"
-            >
-              Spawn Session
-            </button>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 uppercase tracking-[0.06em] sm:mr-auto">
+            <StatItem
+              icon={<IconChat />}
+              label="Needs Input"
+              value={stats.respond}
+              color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+              active={activeStatFilter === "respond"}
+              onClick={() => toggleStatFilter("respond")}
+            />
+            <StatItem
+              icon={<IconBolt />}
+              label="Working"
+              value={stats.working}
+              color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+              active={activeStatFilter === "working"}
+              onClick={() => toggleStatFilter("working")}
+            />
+            <StatItem
+              icon={<IconClock />}
+              label="Waiting"
+              value={stats.pending}
+              color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+              active={activeStatFilter === "pending"}
+              onClick={() => toggleStatFilter("pending")}
+            />
+            <StatItem
+              icon={<IconCheck />}
+              label="Completed"
+              value={stats.done}
+              color={
+                activeStatFilter === "done" && stats.done > 0
+                  ? "var(--color-status-ready)"
+                  : undefined
+              }
+              active={activeStatFilter === "done"}
+              onClick={() => toggleStatFilter("done")}
+            />
           </div>
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter sessions..."
+              value={searchQuery}
+            />
+          </div>
+          <select
+            className="min-w-[11rem] flex-[1_1_12rem] border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+            onChange={(event) => syncProjectFilter(event.target.value)}
+            value={projectId}
+          >
+            <option value="">All projects</option>
+            {filterProjectOptions.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
+            onClick={openSpawnModal}
+            type="button"
+          >
+            Spawn Session
+          </button>
         </header>
 
         {spawnOpen ? (

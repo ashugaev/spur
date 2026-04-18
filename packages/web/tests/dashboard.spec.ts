@@ -139,7 +139,7 @@ test.describe("D2: Header stats show correct counts", () => {
 
     await expect(page.getByText("Completed and archived")).toBeVisible();
     await expect(page.getByText("Working still active")).not.toBeVisible();
-    await expect(page.getByText("Done").first()).toBeVisible();
+    await expect(page.locator("section").getByText("Completed").first()).toBeVisible();
   });
 
   test("clicking Completed again returns to current sessions", async ({ page }) => {
@@ -354,7 +354,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Done"
+    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Completed"
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Waiting").first()).toBeVisible();
@@ -395,7 +395,7 @@ test.describe("D6: Attention zone sections", () => {
 
     await expect(page.getByText("Visible session")).toBeVisible();
     await expect(page.getByText("Done zone session")).not.toBeVisible();
-    await expect(page.getByText("Done").first()).not.toBeVisible();
+    await expect(page.locator("section").getByText("Completed").first()).not.toBeVisible();
   });
 
   test("zone count is shown", async ({ page }) => {

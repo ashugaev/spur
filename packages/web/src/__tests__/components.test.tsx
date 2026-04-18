@@ -315,7 +315,7 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
   });
 
-  it("explains how to reveal finished work when only completed sessions exist", async () => {
+  it("keeps completed-only dashboards neutral until Completed is selected", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
@@ -348,17 +348,103 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(
-        screen.getByText(
-          "No current sessions are visible. Toggle Completed to review finished work.",
-        ),
-      ).toBeInTheDocument();
+      expect(screen.getByText("No current sessions are visible.")).toBeInTheDocument();
     });
+    expect(screen.queryByText(/Toggle Completed/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
 
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Already finished" })).toBeInTheDocument();
+    });
+  });
+
+  it("colors Completed stats only when the completed filter is active with results", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              sessionsPayload().sessions[0],
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-2",
+                prompt: "Ship stats",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const completedButton = await screen.findByRole("button", { name: /Completed/i });
+    expect(within(completedButton).getByText("1").getAttribute("style")).toBeFalsy();
+
+    fireEvent.click(completedButton);
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i })).getByText("1").getAttribute(
+          "style",
+        ),
+      ).toContain("var(--color-status-ready)");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i })).getByText("1").getAttribute(
+          "style",
+        ),
+      ).toBeFalsy();
+    });
+  });
+
+  it("keeps Completed stats neutral when active but empty", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const completedButton = await screen.findByRole("button", { name: /Completed/i });
+    fireEvent.click(completedButton);
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i })).getByText("0").getAttribute(
+          "style",
+        ),
+      ).toBeFalsy();
     });
   });
 
