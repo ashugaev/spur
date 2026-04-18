@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
@@ -61,6 +62,7 @@ const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
@@ -221,6 +223,9 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
+  const voice = useVoiceInput();
+  const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
+
   const submitVoiceDraft = useCallback(
     async (text: string) => {
       const socket = websocketRef.current;
@@ -236,8 +241,9 @@ export function DirectTerminal({
       for (const payload of buildSubmittedTextPayloads(agent, text)) {
         await sendWithAck(payload);
       }
+      draftHistory.saveEntry(text);
     },
-    [agent, sendWithAck],
+    [agent, draftHistory, sendWithAck],
   );
 
   const sendHotkey = useCallback(
@@ -259,8 +265,6 @@ export function DirectTerminal({
     },
     [agent, sendTerminalInput, sendWithAck],
   );
-
-  const voice = useVoiceInput();
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
@@ -783,7 +787,11 @@ export function DirectTerminal({
           <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
         </div>
       </div>
-      <VoiceConfirmModal voice={voice} onInsert={submitVoiceDraft} />
+      <VoiceConfirmModal
+        historyEntries={draftHistory.entries}
+        onInsert={submitVoiceDraft}
+        voice={voice}
+      />
     </div>
   );
 }

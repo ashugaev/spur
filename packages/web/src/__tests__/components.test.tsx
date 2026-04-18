@@ -434,6 +434,43 @@ describe("Dashboard", () => {
     });
   });
 
+  it("restores a saved spawn prompt from history with its timestamp", async () => {
+    window.localStorage.setItem(
+      "spur:input-history:spawn-prompt",
+      JSON.stringify([
+        {
+          value: "Re-run the flaky deploy",
+          savedAt: "2026-04-17T12:34:56.000Z",
+        },
+      ]),
+    );
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+
+    expect(screen.getByText("2026-04-17 12:34 UTC")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Re-run the flaky deploy/i }));
+
+    expect(screen.getByDisplayValue("Re-run the flaky deploy")).toBeInTheDocument();
+  });
+
   it.each([
     {
       label: "Ctrl+Enter",

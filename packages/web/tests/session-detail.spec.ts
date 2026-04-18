@@ -269,6 +269,28 @@ test.describe("S3: Message section", () => {
       interrupt: true,
     });
   });
+
+  test("history restores a saved message with its timestamp", async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem(
+        "spur:input-history:session-message",
+        JSON.stringify([
+          {
+            value: "Saved follow up",
+            savedAt: "2026-04-17T08:15:00.000Z",
+          },
+        ]),
+      );
+    });
+    const session = makeWorkingSession({ id: "detail-s3-history-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^history$/i }).click();
+    await expect(page.getByText("2026-04-17 08:15 UTC")).toBeVisible();
+    await page.getByRole("button", { name: /saved follow up/i }).click();
+    await expect(page.getByRole("textbox")).toHaveValue("Saved follow up");
+  });
 });
 
 // S3b: Queued messages section

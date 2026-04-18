@@ -118,6 +118,7 @@ function sentInputPayloads(): string[] {
 
 describe("DirectTerminal voice confirm", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     wsSend.mockClear();
     mockVoiceState.confirmDraft.mockClear();
     MockWebSocket.mockClear();
@@ -159,6 +160,26 @@ describe("DirectTerminal voice confirm", () => {
     await waitFor(() => {
       expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
       expect(sentInputPayloads()).not.toContain("git status\r");
+    });
+  });
+
+  it("stores confirmed terminal voice input in history", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem("spur:input-history:terminal-draft")).toContain(
+        "git status",
+      );
     });
   });
 });

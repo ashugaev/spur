@@ -113,7 +113,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
+- `History` button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
@@ -189,7 +191,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - During transcription the mic button shows a red spinning loader
+- `History` button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
+- Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - Ctrl/Cmd+Enter submits
 - `Queue` button adds the message to the queued stack and is the default composer action
@@ -230,6 +234,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup actions include a `History` button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
