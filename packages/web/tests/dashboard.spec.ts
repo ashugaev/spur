@@ -469,6 +469,68 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await tooltip.click();
     await expect(page.getByText("System")).not.toBeVisible();
   });
+
+  test("footer health tooltip still opens on hover and closes on mouse leave", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 21,
+          memoryPercent: 43,
+          diskPercent: 65,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const onlineButton = page.getByRole("button", { name: "Show aggregated system status" });
+    await onlineButton.hover();
+    await expect(page.getByText("System")).toBeVisible();
+
+    await page.mouse.move(0, 0);
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+});
+
+test.describe("D6c: Footer touch tooltip dismissal", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test.beforeEach(async ({ page }) => {
+    await mockSessions(page, []);
+    await page.route("/api/runtime/resources", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 43,
+          diskPercent: 22,
+        }),
+      });
+    });
+    await page.goto("/");
+  });
+
+  test("touch tap on tooltip content closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    const tooltip = page.getByText("System").locator("..");
+    await expect(tooltip).toContainText("Warning");
+    await tooltip.tap();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap outside tooltip closes it", async ({ page }) => {
+    await page.getByRole("button", { name: "Show aggregated system status" }).tap();
+    await expect(page.getByText("System")).toBeVisible();
+    await page.getByRole("heading", { name: "All Projects" }).tap();
+    await expect(page.getByText("System")).not.toBeVisible();
+  });
 });
 
 // D7: Spawn modal
