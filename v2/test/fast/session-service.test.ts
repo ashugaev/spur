@@ -2349,6 +2349,48 @@ describe("SessionService", () => {
     );
   });
 
+  it("re-discovers codex session ids from the session-scoped codex home during send recovery", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "paused",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    buildAgentResumePlanMock.mockReturnValue({
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      readyMarkers: ["›"],
+    });
+    setupAgentHooksMock.mockResolvedValue({
+      codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
+    });
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    findAgentSessionIdMock.mockResolvedValue("thread-123");
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: "/tmp/rollout.jsonl",
+    });
+
+    await service.send("api-1", { message: "resume work" });
+
+    expect(findAgentSessionIdMock).toHaveBeenCalledWith("codex", "/tmp/spur-worktrees/api/api-1", {
+      codexSessionRootDir: "/tmp/spur-data/session-tools/api-1/codex-home/sessions",
+    });
+  });
+
   it("respects a per-spawn worktree override without changing the project default", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -3188,10 +3230,6 @@ describe("SessionService", () => {
   });
 
   it("throws when native resume state is unavailable instead of falling back", async () => {
-    // This test uses real timers because waitForRestorePlan polls with
-    // node:timers/promises setTimeout which fake timers do not intercept.
-    vi.useRealTimers();
-
     findAgentSessionIdMock.mockResolvedValue(null);
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
@@ -3215,7 +3253,10 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     service.dispose();
 
-    await expect(service.restore("api-1")).rejects.toThrow(
+    const restorePromise = service.restore("api-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(restorePromise).rejects.toThrow(
       "Session is not restorable (no claude resume state): api-1",
     );
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
@@ -3312,7 +3353,6 @@ describe("SessionService", () => {
   });
 
   it("restore throws when codex buildAgentRestorePlan returns null", async () => {
-    vi.useRealTimers();
     buildAgentRestorePlanMock.mockResolvedValue(null);
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -3334,7 +3374,10 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-    await expect(service.restore("api-1")).rejects.toThrow(
+    const restorePromise = service.restore("api-1");
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(restorePromise).rejects.toThrow(
       "Session is not restorable (no codex resume state): api-1",
     );
     expect(createTmuxSessionMock).not.toHaveBeenCalled();
