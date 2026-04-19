@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const ghMock = vi.fn();
 vi.mock("../../src/gh.js", () => ({
@@ -13,8 +14,6 @@ const {
   hasMergeConflict,
   resolvePrSummary,
 } = await import("../../src/event-sources/github.js");
-type GitHubCheck = import("../../src/event-sources/github.js").GitHubCheck;
-type GitHubPrSummary = import("../../src/event-sources/github.js").GitHubPrSummary;
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
