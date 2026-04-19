@@ -130,11 +130,9 @@ describe("createWorktree", () => {
 
     await createWorktree(baseInput);
 
-    expect(mockExecFileAsync).toHaveBeenCalledWith(
-      "git",
-      ["merge", "--ff-only", "origin/main"],
-      { cwd: "/repo/api" },
-    );
+    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["merge", "--ff-only", "origin/main"], {
+      cwd: "/repo/api",
+    });
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
