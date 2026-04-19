@@ -1,6 +1,7 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import type * as FsPromises from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CodexModule from "../../src/agents/codex.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "../../src/preflight-contract.js";
 import type { ProjectConfig } from "../../src/types.js";
 
@@ -9,6 +10,9 @@ const { mockExecFileAsync } = vi.hoisted(() => ({
 }));
 const { mockRm } = vi.hoisted(() => ({
   mockRm: vi.fn<typeof FsPromises.rm>(),
+}));
+const { mockReadFile } = vi.hoisted(() => ({
+  mockReadFile: vi.fn<typeof FsPromises.readFile>(),
 }));
 
 vi.mock("node:child_process", () => {
@@ -20,9 +24,19 @@ vi.mock("node:child_process", () => {
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof FsPromises>();
+  const readFileImpl = (async (
+    path: Parameters<typeof FsPromises.readFile>[0],
+    options?: Parameters<typeof FsPromises.readFile>[1],
+  ) => {
+    if (typeof path === "string" && path.endsWith("/.codex/config.toml")) {
+      return mockReadFile(path, options);
+    }
+    return actual.readFile(path, options);
+  }) as typeof FsPromises.readFile;
   return {
     ...actual,
     rm: mockRm,
+    readFile: readFileImpl,
   };
 });
 
@@ -30,9 +44,13 @@ vi.mock("../../src/agents/claude.js", () => ({
   claudeCommand: () => "/mock/bin/claude",
 }));
 
-vi.mock("../../src/agents/codex.js", () => ({
-  codexCommand: () => "/mock/bin/codex",
-}));
+vi.mock("../../src/agents/codex.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof CodexModule>();
+  return {
+    ...actual,
+    codexCommand: () => "/mock/bin/codex",
+  };
+});
 
 import { runSpawnPreflight } from "../../src/preflight.js";
 
@@ -65,6 +83,8 @@ describe("runSpawnPreflight", () => {
     mockExecFileAsync.mockReset();
     mockRm.mockReset();
     mockRm.mockResolvedValue(undefined);
+    mockReadFile.mockReset();
+    mockReadFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   });
 
   afterEach(() => {
@@ -153,7 +173,7 @@ describe("runSpawnPreflight", () => {
     expect(args).not.toContain("plan");
     expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
     expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
-    expect(options?.env?.["CODEX_HOME"]).toBeUndefined();
+    expect(options?.env?.["CODEX_HOME"]).toMatch(/spur-preflight-[^/]+\/codex-home$/);
     expect(options).toEqual(
       expect.objectContaining({
         cwd: PROJECT.path,
@@ -190,6 +210,37 @@ describe("runSpawnPreflight", () => {
     expect(args).toEqual(
       expect.arrayContaining(["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"]),
     );
+  });
+
+  it("writes ephemeral codex config with trusted project for cwd", async () => {
+    let observedConfig: string | null = null;
+    mockExecFileAsync.mockImplementationOnce(
+      async (
+        _command: string,
+        args: string[],
+        options?: { env?: Record<string, string | undefined> },
+      ) => {
+        const codexHome = options?.env?.["CODEX_HOME"];
+        if (codexHome) {
+          observedConfig = readFileSync(`${codexHome}/config.toml`, "utf8");
+        }
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
+        return { stdout: "", stderr: "" };
+      },
+    );
+
+    await runSpawnPreflight({
+      agent: "codex",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix runtime regression from INT-42",
+    });
+
+    expect(observedConfig).not.toBeNull();
+    expect(observedConfig).toContain('[projects."/repo/api"]');
+    expect(observedConfig).toContain('trust_level = "trusted"');
   });
 
   it("keeps a successful codex preflight result when temp cleanup races", async () => {

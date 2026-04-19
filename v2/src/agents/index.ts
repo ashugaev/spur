@@ -132,8 +132,6 @@ export async function setupAgentHooks(args: {
     return {};
   }
   return {
-    codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir, {
-      trustedProjects: [args.worktreePath],
-    }),
+    codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir, [args.worktreePath]),
   };
 }

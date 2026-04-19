@@ -409,27 +409,50 @@ export function codexHookHomePath(sessionToolDir: string): string {
   return join(sessionToolDir, CODEX_HOME_DIR);
 }
 
+// JSON.stringify yields a valid TOML basic-string for filesystem paths.
+export function appendCodexTrustedProjects(
+  configText: string,
+  trustedProjects: readonly string[],
+): string {
+  if (trustedProjects.length === 0) {
+    return configText;
+  }
+  let result = configText;
+  for (const projectPath of trustedProjects) {
+    const header = `[projects.${JSON.stringify(projectPath)}]`;
+    if (result.includes(header)) {
+      continue;
+    }
+    const trimmed = result.trimEnd();
+    const separator = trimmed ? "\n\n" : "";
+    result = `${trimmed}${separator}${header}\ntrust_level = "trusted"\n`;
+  }
+  return result;
+}
+
+export async function buildEphemeralCodexConfig(
+  trustedProjects: readonly string[],
+): Promise<string> {
+  const userConfigPath = join(homedir(), ".codex", "config.toml");
+  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
+  return appendCodexTrustedProjects(baseConfig, trustedProjects);
+}
+
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
-  options?: { trustedProjects?: string[] },
+  trustedProjects: readonly string[] = [],
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
-  const userConfigPath = join(homedir(), ".codex", "config.toml");
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
-  const trustedProjects = [...new Set((options?.trustedProjects ?? []).filter(Boolean))];
-  const trustBlocks = trustedProjects
-    .map((projectPath) => `\n[projects.${JSON.stringify(projectPath)}]\ntrust_level = "trusted"\n`)
-    .filter((block) => !baseConfig.includes(block.trim()))
-    .join("");
-  const configWithWarnings = baseConfig.includes("suppress_unstable_features_warning")
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
+  const trimmed = baseConfig.trimEnd();
+  const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
     ? baseConfig
-    : `${baseConfig.trimEnd()}\n${baseConfig.trimEnd() ? "\n" : ""}suppress_unstable_features_warning = true\n`;
-  const finalConfig = `${configWithWarnings.trimEnd()}${trustBlocks}\n`;
+    : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
   await writeFile(sessionConfigPath, finalConfig, "utf8");
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {

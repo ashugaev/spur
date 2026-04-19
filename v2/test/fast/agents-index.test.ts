@@ -39,9 +39,9 @@ describe("setupAgentHooks", () => {
       sessionToolDir: "/tmp/spur-data/session-tools/api-1",
     });
 
-    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", {
-      trustedProjects: ["/tmp/spur-worktrees/api/api-1"],
-    });
+    expect(ensureCodexHooksConfigMock).toHaveBeenCalledWith("/tmp/spur-data/session-tools/api-1", [
+      "/tmp/spur-worktrees/api/api-1",
+    ]);
     expect(result).toEqual({
       codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
     });
