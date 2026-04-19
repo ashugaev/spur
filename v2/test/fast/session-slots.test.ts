@@ -108,7 +108,7 @@ describe("session slots", () => {
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
     expect(sidecar).toContain('exec "$SCRIPT_DIR/spur" sidecar "$action" --session \'api-2\' "$@"');
     expect(sidecar).toContain('action="start"');
-    expect(sidecar).toMatch(/if \[\[ "\$\{1-\}" == "start" \|\| "\$\{1-\}" == "stop" \]\]/);
+    expect(sidecar).toContain('if [[ "$' + '{1-}" == "start" || "$' + '{1-}" == "stop" ]]');
   });
 
   it("lets spur-sidecar follow an overwritten local spur wrapper", async () => {

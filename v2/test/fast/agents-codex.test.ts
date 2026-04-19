@@ -431,44 +431,41 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(count).toBe(1);
   });
 
-  it("adds trusted project entries to the session config", async () => {
-    mockReadFile.mockImplementation(async (filePath: unknown) => {
-      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return '[model]\nname = "test"\n';
-      }
-      return "";
-    });
+  it("adds trusted worktree projects to the session-local config", async () => {
+    const worktreePath = "/home/testuser/.spur/worktrees/sp/spur-1234";
+    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
 
     await ensureCodexHooksConfig("/session/tool", {
-      trustedProjects: ["/repo/project"],
+      trustedProjects: [worktreePath, worktreePath],
     });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    expect(writeCall?.[1]).toContain('[projects."/repo/project"]');
-    expect(writeCall?.[1]).toContain('trust_level = "trusted"');
+    const content = requireValue(writeCall, "expected config.toml write")[1] as string;
+    expect(content).toContain(trustBlock);
+    expect(content.split(trustBlock).length - 1).toBe(1);
   });
 
-  it("does not duplicate trusted project entries already present in user config", async () => {
-    const config = '[model]\nname = "test"\n[projects."/repo/project"]\ntrust_level = "trusted"\n';
+  it("does not duplicate an existing trusted worktree block from user config", async () => {
+    const worktreePath = "/home/testuser/.spur/worktrees/sp/spur-1234";
+    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
     mockReadFile.mockImplementation(async (filePath: unknown) => {
       if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return config;
+        return `${trustBlock}\n`;
       }
       return "";
     });
 
     await ensureCodexHooksConfig("/session/tool", {
-      trustedProjects: ["/repo/project", "/repo/project"],
+      trustedProjects: [worktreePath],
     });
 
     const writeCall = mockWriteFile.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
     );
-    const content = writeCall?.[1] as string;
-    const count = (content.match(/\[projects\."\/repo\/project"\]/g) ?? []).length;
-    expect(count).toBe(1);
+    const content = requireValue(writeCall, "expected config.toml write")[1] as string;
+    expect(content.split(trustBlock).length - 1).toBe(1);
   });
 
   it("returns the codex dir path", async () => {
