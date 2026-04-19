@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
@@ -166,6 +167,13 @@ function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
 
+function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
+  if (!agent) {
+    return true;
+  }
+  return agentStateStrategy(agent) === "hook";
+}
+
 export function ensureSessionSlotTool(args: {
   dataDir: string;
   sessionId: string;
@@ -192,7 +200,7 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     { encoding: "utf8", mode: 0o755 },
   );
   // Claude uses JSONL-based state classification — no hook state scripts needed.
-  if (args.agent !== "claude") {
+  if (shouldWriteAgentStateTools(args.agent)) {
     writeFileSync(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node

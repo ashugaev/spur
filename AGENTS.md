@@ -47,10 +47,11 @@
 - `Spur list` hides `completed` and `killed` sessions by default.
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent` and `--branch`. Empty prompt opens a blank session and skips default pipeline steps / initial message injection.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
-- Supported agents in `Spur` are only `claude` and `codex`.
-- Both `Spur` agents must launch with full access by default:
+- Supported agents in `Spur` are only `claude`, `codex`, and `cursor`.
+- Supported `Spur` agents must launch with full access by default:
   `claude --dangerously-skip-permissions` and
-  `codex --dangerously-bypass-approvals-and-sandbox`.
+  `codex --dangerously-bypass-approvals-and-sandbox`, and
+  `agent --force --sandbox disabled`.
 
 ## Agent Isolation
 
@@ -66,16 +67,16 @@
 - Always run `pnpm --dir v2 build` after changing Spur code.
 - Spur has three test tiers:
   `fast` = `pnpm --dir v2 test` for mocked and in-process coverage. This is the default root `pnpm test` path and must stay fast.
-  `runtime integration` = `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
-  `real-agent smoke` = `pnpm --dir v2 test:smoke` for narrow real `claude` and `codex` spawn/send checks on the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
+  `runtime integration` = `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, `cursor`, and `gh`.
+  `real-agent smoke` = `pnpm --dir v2 test:smoke` for narrow real `claude`, `codex`, and `cursor` spawn/send checks on the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
 - Run `fast` for every Spur code change.
 - Run `runtime integration` when the change touches CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, or automation runtime boundaries.
-- Run `real-agent smoke` when the change touches agent launch or prompt delivery. Cover both `claude` and `codex`.
+- Run `real-agent smoke` when the change touches agent launch or prompt delivery. Cover `claude`, `codex`, and `cursor`.
 - Keep queueing, dedupe, and validation logic in `fast`; keep source, process, and `tmux` boundaries in `runtime integration`.
 - Minimum Spur validation is: positive path for every touched command, negative or error path for every touched command, and cleanup verification at the cheapest tier that still crosses the changed boundary.
 - If the change touches daemon startup or client transport, `runtime integration` must cover both direct daemon start and CLI auto-start.
 - If the change touches workspace or runtime behavior, `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, and teardown.
-- If only `v2/` changed, `$tester` must run the required tiers, exercise the touched `spur` CLI commands through positive and negative paths, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`, and run impacted `real-agent smoke` scenarios through `pnpm --dir v2 test:smoke` on the real `ao` repo with real `claude` and `codex`.
+- If only `v2/` changed, `$tester` must run the required tiers, exercise the touched `spur` CLI commands through positive and negative paths, rerun the impacted scenarios from `v2/TEST_SCENARIOS.md`, and run impacted `real-agent smoke` scenarios through `pnpm --dir v2 test:smoke` on the real `ao` repo with real `claude`, `codex`, and `cursor`.
 - For touched `v2/` code, `$tester` also checks for hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes.
 - Spur test scenarios live in `v2/TEST_SCENARIOS.md`. Each scenario belongs to exactly one tier. When a new Spur feature is added, extend that file in the same change.
 - `$tester` must cover both: potentially affected existing Spur scenarios and the new scenarios introduced by the feature.

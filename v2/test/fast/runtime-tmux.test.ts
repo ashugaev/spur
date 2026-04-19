@@ -129,6 +129,21 @@ describe("runtime-tmux", () => {
     ]);
   });
 
+  it("uses the default send path for cursor sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "cursor" });
+
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
   it("uses bracketed paste plus a real Enter for codex sends", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 

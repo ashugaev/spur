@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { agentSendMode } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
@@ -127,7 +128,7 @@ export async function getTmuxSessionActivity(sessionName: string): Promise<Date 
 
 export async function isProcessRunningInTmux(
   sessionName: string,
-  processName: AgentName,
+  processMatchers: string[],
 ): Promise<boolean> {
   const target = exactSessionTarget(sessionName);
   try {
@@ -145,14 +146,24 @@ export async function isProcessRunningInTmux(
       timeout: 5_000,
     });
     const ttySet = new Set(ttys.map((tty) => tty.replace(/^\/dev\//, "")));
-    const processRe = new RegExp(`(?:^|/)${processName}(?:\\s|$)`);
+    const processRes = processMatchers
+      .filter((matcher) => matcher.trim().length > 0)
+      .map(
+        (matcher) =>
+          new RegExp(
+            `(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`,
+          ),
+      );
+    if (processRes.length === 0) {
+      return false;
+    }
     for (const line of psOut.split("\n")) {
       const cols = line.trimStart().split(/\s+/);
       if (cols.length < 3 || !ttySet.has(cols[1] ?? "")) {
         continue;
       }
       const args = cols.slice(2).join(" ");
-      if (processRe.test(args)) {
+      if (processRes.some((processRe) => processRe.test(args))) {
         return true;
       }
     }
@@ -304,7 +315,7 @@ export async function sendMessageToTmux(
     await sleep(500);
   }
   await tmux("send-keys", "-t", target, "C-u");
-  if (options?.agent === "codex") {
+  if (options?.agent && agentSendMode(options.agent) === "bracketed_paste") {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.
     // Submit with a real Enter key so delivery does not depend on newline characters
     // inside the pasted payload or on Codex's paste-burst heuristics.

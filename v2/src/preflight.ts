@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
 import { codexCommand } from "./agents/codex.js";
+import { cursorCommand } from "./agents/cursor.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -128,6 +129,45 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
   }
 }
 
+async function runCursorPreflight(prompt: string, cwd: string): Promise<string> {
+  const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-cursor-"));
+
+  try {
+    const { stdout } = await execFileAsync(
+      cursorCommand(),
+      [
+        "-p",
+        "--output-format",
+        "text",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--workspace",
+        cwd,
+        prompt,
+      ],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          CURSOR_CONFIG_DIR: tempDir,
+        },
+        timeout: PREFLIGHT_TIMEOUT_MS,
+        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+      },
+    );
+    return stdout;
+  } finally {
+    await rm(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: PREFLIGHT_RM_RETRIES,
+      retryDelay: PREFLIGHT_RM_RETRY_DELAY_MS,
+    }).catch(() => {});
+  }
+}
+
 export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
@@ -135,6 +175,8 @@ export async function runSpawnPreflight(
   const raw =
     input.agent === "claude"
       ? await runClaudePreflight(prompt, input.project.path)
-      : await runCodexPreflight(prompt, input.project.path);
+      : input.agent === "codex"
+        ? await runCodexPreflight(prompt, input.project.path)
+        : await runCursorPreflight(prompt, input.project.path);
   return parseSpawnPreflightResult(raw);
 }

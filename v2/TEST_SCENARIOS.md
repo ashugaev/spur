@@ -8,9 +8,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `fast` = `pnpm --dir v2 test`
   Default mocked and in-process coverage. This is the `v2` part of the normal root `pnpm test` path.
 - `runtime integration` = `pnpm --dir v2 test:runtime`
-  Uses the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
+  Uses the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, `cursor`, and `gh`.
 - `real-agent smoke` = `pnpm --dir v2 test:smoke`
-  Uses real `claude` and `codex` in Spur worktrees created from the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
+  Uses real `claude`, `codex`, and `cursor` in Spur worktrees created from the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
 - Put each scenario in one tier only. If the boundary changes, move the scenario instead of duplicating it.
 
 ## Fast
@@ -42,7 +42,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Spawn creates compact session ids in the form `<prefix>-<hash4>` and retries on collisions before failing.
 - Session lifecycle and trigger handling append structured key events to `dataDir/events.jsonl` for spawn, send, slot updates, kill, restore, and trigger match/deliver/drop paths.
 - Successful worktree spawn preflight emits a session-scoped event so the selected session log view shows whether preflight chose a branch or deferred.
-- Spawn captures Claude/Codex native session ids when the agent writes them to disk.
+- Spawn captures Claude/Codex/Cursor native session ids when the agent writes them to disk.
 - Paused and crashed worktree-backed sessions can resume on later `send` by reusing stored native resume state when available, re-discovering it from agent state on disk when missing, and falling back to a fresh launch when native resume is stale.
 - `list`, `send`, `pause`, `complete`, and `kill` target the exact tmux session name, so `spur-a1b2` never resolves to another same-prefix session.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
@@ -63,7 +63,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
 - Codex restore throws when no native resume state (thread id) is found, without falling back to fresh launch.
 - Claude restore throws when no native resume state (session id) is found, without falling back to fresh launch.
-- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook-based classification for Codex.
+- Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude, hook-based classification for Codex, and pane/activity classification for Cursor.
 - Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within the stale window→working, assistant+tool_use past the stale window→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, user→working, progress→working, empty→working. The stale window is `TOOL_USE_STALE_MS` (3s) by default, extended by `input.timeout` when the tool declares one, and the window is bypassed entirely when the tool sets `input.run_in_background: true`. The optional `fileMtimeMs` argument is treated as last-observed activity and keeps the classifier on `working` while the JSONL is still being written.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
 - Codex hook-based state: hook state is used only for state classification (not for submit ack); returned directly, defaults to `working` when no hook state exists.
@@ -98,7 +98,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `formatSessionLinkDisplay` extracts compact PR ids from GitHub URLs, Jira keys from tracker URLs, and falls back to the last path segment or label for unknown URL shapes.
 - `appendEventLog` creates the data directory, writes JSONL entries, and auto-fills timestamps; `readEventLog` skips malformed lines; `readSessionEventLog` filters by session and respects a limit parameter.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
-- `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
+- `parseAgentName` accepts `claude`, `codex`, and `cursor` and throws for unsupported agent names.
 
 ## Runtime Integration
 
@@ -111,7 +111,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
-- `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
+- `spawn --json` can use an opt-in project spawn preflight through built `claude`, `codex`, and `cursor` one-shot paths, and the returned branch becomes the live worktree branch.
 - `spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
 - Interactive spawn with preflight-enabled project calls `/projects/:id/preflight`, shows branch confirmation, and passes the confirmed branch in the spawn request.
 - Non-TTY and `--json` spawn skip the preflight endpoint call.
@@ -123,7 +123,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `respawn --json` rejects running sessions, respawns a terminal session into a new running session, and keeps lifecycle cleanup available through normal `kill --json`.
 - `respawn --json` preserves shared-workspace mode for shared sessions, preserves explicit branch targets, and falls back to a fresh session id branch when respawn preflight picks an occupied worktree branch.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
-- `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
+- `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex/Cursor conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
 - `service logs` reads collected runtime log lines for the live session, works inside a session workspace via the injected `spur` wrapper, filters sidecar output with `--sidecar`, and rejects missing session context outside a Spur session.
@@ -158,7 +158,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` after 3s stale window, and normal message exchange cycles waiting→working→waiting.
 - Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), and normal message exchange cycles waiting→working→waiting.
-- Session-level states for both Claude and Codex: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
+- Cursor agent status detection: spawn produces `waiting` when the pane goes idle, `send` produces `working` while pane activity is fresh, and known trust/login prompts produce `needs_input`.
+- Session-level states for Claude, Codex, and Cursor: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
 - State history records transitions during a Claude session lifecycle.
 - Sidecar auto-starts on spawn when `autoStart: true`.
 - Multiple sidecars per session get separate tmux panes.
@@ -170,9 +171,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - `claude` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - `codex` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
-- Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
-- Real `claude` and `codex` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
-- Real `claude` and `codex` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
+- `cursor` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- Real `claude`, `codex`, and `cursor` can also complete a staged task session in one worktree after returning to a prompt between phases.
+- Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
+- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
 - When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
 

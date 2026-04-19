@@ -98,7 +98,7 @@ async function processExists(pid: number): Promise<boolean> {
 }
 
 async function runRestoreScenario(args: {
-  agent?: "claude" | "codex";
+  agent?: "claude" | "codex" | "cursor";
   configName: string;
 }): Promise<{
   context: RuntimeTestContext;
@@ -128,7 +128,11 @@ async function runRestoreScenario(args: {
 
   const spawned = JSON.parse((await context.execCli(spawnArgs)).stdout) as SessionView;
   const expectedResumeId =
-    (args.agent ?? "claude") === "codex" ? `thread-${spawned.id}` : `fake-claude-${spawned.id}`;
+    (args.agent ?? "claude") === "codex"
+      ? `thread-${spawned.id}`
+      : (args.agent ?? "claude") === "cursor"
+        ? `chat-${spawned.id}`
+        : `fake-claude-${spawned.id}`;
 
   await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
 
@@ -863,7 +867,7 @@ projects:
     expect(stdout.trim()).toBe("release branch");
   });
 
-  it.each(["claude", "codex"] as const)(
+  it.each(["claude", "codex", "cursor"] as const)(
     "uses %s spawn preflight to derive the worktree branch through the built CLI",
     async (agent) => {
       const port = await findFreePort();
@@ -2239,6 +2243,7 @@ projects:
   it.each([
     { agent: "claude", expectPlanFlag: true },
     { agent: "codex", expectPlanFlag: false },
+    { agent: "cursor", expectPlanFlag: true },
   ] as const)(
     "accepts --plan for $agent and applies startup behavior only where supported",
     async (row) => {
@@ -2280,8 +2285,12 @@ projects:
         accept: (value) => value.includes("startup:launch::"),
       });
       if (row.expectPlanFlag) {
-        expect(log).toContain("--permission-mode");
         expect(log).toContain("plan");
+        if (row.agent === "claude") {
+          expect(log).toContain("--permission-mode");
+        } else {
+          expect(log).toContain("--plan");
+        }
       } else {
         expect(log).not.toContain("--permission-mode");
       }
@@ -2649,6 +2658,14 @@ projects:
   it("restores a codex session through the native resume command", async () => {
     const result = await runRestoreScenario({ agent: "codex", configName: "restore-codex.yaml" });
     expect(result.spawned.agent).toBe("codex");
+  });
+
+  it("restores a cursor session through the native resume command", async () => {
+    const result = await runRestoreScenario({
+      agent: "cursor",
+      configName: "restore-cursor.yaml",
+    });
+    expect(result.spawned.agent).toBe("cursor");
   });
 
   it("completes the calling live session after a session-bound respawn succeeds", async () => {
@@ -3245,6 +3262,7 @@ projects:
     path: ${context.repoDir}
     defaultBranch: main
     sessionPrefix: ${sessionPrefix}
+    worktree: false
     symlinks:
       - .env
     sidecars:

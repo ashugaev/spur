@@ -19,11 +19,12 @@ description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Cover
 - Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
   `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
 - `spawn` has one form only:
-  `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]`
-- Supported agents are only `claude` and `codex`.
-- Both agents start with full access by default:
+  `spur spawn <project> <prompt...> [--agent claude|codex|cursor] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]`
+- Supported agents are only `claude`, `codex`, and `cursor`.
+- Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
   `codex --dangerously-bypass-approvals-and-sandbox`
+  `agent --force --sandbox disabled`
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
 - `list` hides `completed` and `killed` sessions by default.
@@ -157,12 +158,12 @@ Port map:
 
 - Spur uses three test tiers:
   `fast` -> `pnpm --dir v2 test` for mocked and in-process coverage. This is the default root `pnpm test` path and must stay fast.
-  `runtime integration` -> `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
+  `runtime integration` -> `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, `cursor`, and `gh`.
   `real-agent smoke` -> `pnpm --dir v2 test:smoke` for narrow real-agent spawn and send checks. It auto-skips when `tmux`, binaries, or API keys are missing.
 - Always run `pnpm --dir v2 build` after changing Spur code.
 - Run `fast` for every Spur code change.
 - Run `runtime integration` when touching CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, or automation runtime boundaries.
-- Run `real-agent smoke` when touching agent launch or prompt delivery. Cover both `claude` and `codex`.
+- Run `real-agent smoke` when touching agent launch or prompt delivery. Cover `claude`, `codex`, and `cursor`.
 - Exercise the touched `spur` CLI commands through positive and negative paths at the cheapest tier that still crosses the changed boundary.
 - Keep queueing, dedupe, and validation logic in `fast`; keep source, process, and `tmux` boundaries in `runtime integration`.
 - `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change and rerun the impacted ones.

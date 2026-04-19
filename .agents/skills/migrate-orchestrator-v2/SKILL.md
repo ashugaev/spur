@@ -1,6 +1,6 @@
 ---
 name: migrate-orchestrator-v2
-description: "Use when planning or implementing the lean migration to Spur in `v2/`. Covers the simplified shape: separate daemon plus CLI, prompt-first spawn, tmux plus worktree plus symlinks, claude/codex launch, flat metadata, and the minimal source->event->trigger loop."
+description: "Use when planning or implementing the lean migration to Spur in `v2/`. Covers the simplified shape: separate daemon plus CLI, prompt-first spawn, tmux plus worktree plus symlinks, claude/codex/cursor launch, flat metadata, and the minimal source->event->trigger loop."
 ---
 
 # Migrate Spur
@@ -25,10 +25,11 @@ description: "Use when planning or implementing the lean migration to Spur in `v
   On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores a restorable exited session in place, `k` kills, and `Esc` quits.
   Non-TTY `list` stays a one-shot runtime summary plus session cards.
 - Workspace bootstrap is only: `git worktree` plus configured `symlinks`.
-- Supported agents for now: `claude` and `codex`.
-- Both supported agents start with full access by default:
+- Supported agents for now: `claude`, `codex`, and `cursor`.
+- Supported agents start with full access by default:
   `claude --dangerously-skip-permissions` and
-  `codex --dangerously-bypass-approvals-and-sandbox`.
+  `codex --dangerously-bypass-approvals-and-sandbox`, and
+  `agent --force --sandbox disabled`.
 - Minimal automation is allowed only as project-local `sources -> events -> triggers -> spawn|send`.
 - Current built-in sources are `cron` and `github`.
 - A lean sequential startup pipeline is allowed:
@@ -57,6 +58,7 @@ v2/
     agents/
       claude.ts
       codex.ts
+      cursor.ts
     event-bus.ts
     event-sources/
       cron.ts
@@ -186,13 +188,13 @@ Port behavior, not architecture.
   `real-agent smoke` -> `pnpm --dir v2 test:smoke`
 - Run `fast` for every Spur code change.
 - Run `runtime integration` for CLI, daemon, worktree, `tmux`, transport, and automation runtime boundaries.
-- Run `real-agent smoke` for agent launch or prompt delivery changes. Cover both `claude` and `codex`.
+- Run `real-agent smoke` for agent launch or prompt delivery changes. Cover `claude`, `codex`, and `cursor`.
 - `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Extend it in the same change.
 
 ## Acceptance checklist for milestone 1
 
 - `Spur` can start or auto-start a local daemon.
-- `spur spawn` creates a worktree, applies symlinks, starts `tmux`, and launches `claude` or `codex`.
+- `spur spawn` creates a worktree, applies symlinks, starts `tmux`, and launches `claude`, `codex`, or `cursor`.
 - `spur list` shows persisted sessions, runtime summary, and selected-session details, hides `completed` and `killed` by default, and TTY `list` can attach, pause, complete, restore, or kill in place.
 - `spur send` reaches the running agent through `tmux`.
 - `cron` and `github` sources can emit events and reach normal Spur `spawn` or `send` triggers.

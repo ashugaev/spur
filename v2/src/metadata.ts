@@ -137,6 +137,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: session.id,
     project: session.project,
     agent: session.agent,
+    ...(session.planMode !== undefined ? { planMode: session.planMode } : {}),
     ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
     prompt: session.prompt,
     branch: session.branch,

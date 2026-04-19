@@ -114,10 +114,10 @@ function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
 
 function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   if (value === undefined) return undefined;
-  if (value === "claude" || value === "codex") {
+  if (value === "claude" || value === "codex" || value === "cursor") {
     return value;
   }
-  throw new Error(`${label} must be "claude" or "codex"`);
+  throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
 function defaultTmuxSocketName(port: number): string {

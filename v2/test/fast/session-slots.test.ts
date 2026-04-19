@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
   SLOT_TOOL_NAME,
+  AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
@@ -108,5 +109,19 @@ describe("session slots", () => {
     expect(sidecar).toContain("sidecar start");
     expect(sidecar).toContain("--session 'api-2'");
     expect(sidecar).toContain("--config '/tmp/spur.yaml'");
+  });
+
+  it("skips hook-state helper scripts for cursor sessions", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+      agent: "cursor",
+    });
+
+    expect(() => readFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), "utf8")).toThrow();
   });
 });

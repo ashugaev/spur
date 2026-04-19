@@ -34,6 +34,10 @@ vi.mock("../../src/agents/codex.js", () => ({
   codexCommand: () => "/mock/bin/codex",
 }));
 
+vi.mock("../../src/agents/cursor.js", () => ({
+  cursorCommand: () => "/mock/bin/cursor-agent",
+}));
+
 import { runSpawnPreflight } from "../../src/preflight.js";
 
 const PROJECT: ProjectConfig = {
@@ -181,6 +185,60 @@ describe("runSpawnPreflight", () => {
     ).resolves.toEqual({ branch: "feature/runtime-preflight" });
     expect(mockRm).toHaveBeenCalledWith(
       expect.stringContaining("spur-preflight-"),
+      expect.objectContaining({
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      }),
+    );
+  });
+
+  it("runs cursor in print mode with trust and workspace flags", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "feature/cursor-preflight\n",
+      stderr: "",
+    });
+
+    const result = await runSpawnPreflight({
+      agent: "cursor",
+      projectId: "api",
+      project: PROJECT,
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix Cursor runtime integration",
+    });
+
+    expect(result).toEqual({ branch: "feature/cursor-preflight" });
+    expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
+    const [command, args, options] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect(command).toBe("/mock/bin/cursor-agent");
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "-p",
+        "--output-format",
+        "text",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--workspace",
+        PROJECT.path,
+      ]),
+    );
+    expect((args as string[]).at(-1)).toContain("Fix Cursor runtime integration");
+    expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
+    expect(options).toEqual(
+      expect.objectContaining({
+        cwd: PROJECT.path,
+        env: expect.objectContaining({
+          CURSOR_CONFIG_DIR: expect.stringContaining("spur-preflight-cursor-"),
+        }),
+        timeout: 60_000,
+      }),
+    );
+    expect(mockRm).toHaveBeenCalledWith(
+      expect.stringContaining("spur-preflight-cursor-"),
       expect.objectContaining({
         recursive: true,
         force: true,
