@@ -1020,6 +1020,66 @@ describe("Dashboard", () => {
     });
   });
 
+  it("ignores a second spawn click while the first request is still in flight", async () => {
+    const spawned = {
+      ...sessionsPayload().sessions[0],
+      id: "api-spawn-guard-1",
+      prompt: "Only one submit",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "api-spawn-guard-1",
+      worktreePath: "/tmp/worktrees/api-spawn-guard-1",
+    };
+    let spawnCalls = 0;
+    let resolveSpawn: ((response: Response) => void) | undefined;
+    const pendingSpawn = new Promise<Response>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/spawn") {
+        spawnCalls += 1;
+        return pendingSpawn;
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Only one submit" },
+    });
+
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    fireEvent.click(spawnButton);
+    fireEvent.click(spawnButton);
+
+    expect(spawnCalls).toBe(1);
+    expect(spawnButton).toBeDisabled();
+
+    resolveSpawn?.(new Response(JSON.stringify(spawned), { status: 201 }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Only one submit" })).toBeInTheDocument();
+    });
+  });
+
   it("exposes install metadata for PWA installability", async () => {
     const metadata = await generateMetadata();
     const appManifest = manifest();

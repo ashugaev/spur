@@ -1,6 +1,7 @@
-import { test, expect } from "playwright/test";
+import { test, expect, type Page } from "playwright/test";
 import {
   makeWorkingSession,
+  makeSpawningSession,
   makeStoppedSession,
   makeCompletedSession,
   makeNeedsInputSession,
@@ -8,7 +9,76 @@ import {
   makeSessionWithPR,
   makeSessionWithTracker,
   mockSessions,
+  type ProjectInfo,
+  type SpurSessionView,
 } from "./fixtures.js";
+
+const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
+const DASHBOARD_POLL_WAIT_MS = 5_200;
+
+async function openSpawnModal(
+  page: Page,
+  sessions: SpurSessionView[] | (() => SpurSessionView[]) = [],
+  projects: ProjectInfo[] | (() => ProjectInfo[]) = DEFAULT_PROJECTS,
+) {
+  await mockSessions(page, sessions, projects);
+  await page.goto("/");
+  await page.getByRole("button", { name: /spawn session/i }).click();
+  await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+}
+
+async function fillSpawnForm(
+  page: Page,
+  {
+    project = "my-project",
+    prompt,
+    branch,
+    workspaceMode,
+    baseBranch,
+    planMode,
+    steps,
+  }: {
+    project?: string;
+    prompt?: string;
+    branch?: string;
+    workspaceMode?: "default" | "worktree" | "shared";
+    baseBranch?: string;
+    planMode?: boolean;
+    steps?: string[];
+  },
+) {
+  await page.getByRole("combobox", { name: "Spawn project" }).selectOption(project);
+
+  if (workspaceMode) {
+    await page.getByRole("combobox", { name: "workspace mode" }).selectOption(workspaceMode);
+  }
+
+  if (baseBranch !== undefined) {
+    await page.getByPlaceholder("Base branch").fill(baseBranch);
+  }
+
+  if (planMode !== undefined) {
+    const checkbox = page.getByRole("checkbox");
+    if ((await checkbox.isChecked()) !== planMode) {
+      await checkbox.click();
+    }
+  }
+
+  if (steps) {
+    for (let index = 0; index < steps.length; index += 1) {
+      await page.getByRole("button", { name: /\+ step/i }).click();
+      await page.getByLabel(`step ${index + 1}`).fill(steps[index] ?? "");
+    }
+  }
+
+  if (branch !== undefined) {
+    await page.getByLabel("branch name").fill(branch);
+  }
+
+  if (prompt !== undefined) {
+    await page.getByPlaceholder("Prompt for the new session...").fill(prompt);
+  }
+}
 
 // D1: Header renders correctly
 test.describe("D1: Header renders correctly", () => {
@@ -831,5 +901,418 @@ test.describe("D7b: Silent branch preflight", () => {
     expect(preflightCalled).toBe(true);
     const branchInput = page.getByLabel("branch name");
     await expect(branchInput).toHaveValue("feature/auto-branch");
+  });
+});
+
+test.describe("D7c: Background spawn lifecycle", () => {
+  test("successful spawn ack closes the modal and shows the placeholder session immediately", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-ack-1",
+      project: "my-project",
+      prompt: "Background placeholder session",
+      branch: "feature/background-placeholder",
+      tmuxSession: "spawn-bg-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-ack-1",
+    });
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
+      }),
+    ).toBeDisabled();
+  });
+
+  test("successful spawn sends the full form payload and resets non-project fields on reopen", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-payload-1",
+      project: "my-project",
+      prompt: "Carry the selected options into the background shell",
+      branch: "feature/spawn-payload",
+      tmuxSession: "spawn-bg-payload-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-payload-1",
+    });
+    const requests: unknown[] = [];
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      requests.push(route.request().postDataJSON());
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {
+      prompt: placeholder.prompt,
+      branch: "feature/spawn-payload",
+      workspaceMode: "worktree",
+      baseBranch: "main",
+      planMode: true,
+      steps: ["Audit the repository", "Implement the retry flow"],
+    });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    expect(requests).toEqual([
+      {
+        projectId: "my-project",
+        prompt: placeholder.prompt,
+        agent: "claude",
+        branch: "feature/spawn-payload",
+        planMode: true,
+        steps: ["Audit the repository", "Implement the retry flow"],
+        overrides: {
+          worktree: true,
+          defaultBranch: "main",
+        },
+      },
+    ]);
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("");
+    await expect(page.getByLabel("branch name")).toHaveValue("");
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
+    await expect(page.getByRole("checkbox")).not.toBeChecked();
+    await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+  });
+
+  test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-single-shot-1",
+      project: "my-project",
+      prompt: "Single request only",
+      branch: "feature/single-shot",
+      tmuxSession: "spawn-bg-single-shot-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-single-shot-1",
+    });
+    const sessions: SpurSessionView[] = [];
+    let spawnCalls = 0;
+    let releaseResponse!: () => void;
+    const responseGate = new Promise<void>((resolve) => {
+      releaseResponse = resolve;
+    });
+
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalls += 1;
+      await responseGate;
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, { prompt: placeholder.prompt });
+
+    const spawnButton = page.getByRole("button", { name: /^spawn$/i });
+    await spawnButton.dblclick();
+
+    await expect.poll(() => spawnCalls).toBe(1);
+
+    releaseResponse();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+  });
+
+  test("spawn without a prompt skips preflight, closes early, and creates the session shell", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-no-prompt-1",
+      project: "my-project",
+      prompt: "",
+      branch: "feature/no-prompt-shell",
+      tmuxSession: "spawn-bg-no-prompt-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-no-prompt-1",
+    });
+    const sessions: SpurSessionView[] = [];
+    let preflightCalls = 0;
+
+    await page.route("**/api/preflight", async (route) => {
+      preflightCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ branch: "feature/unexpected-preflight" }),
+      });
+    });
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {});
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: "No Prompt Shell" })).toBeVisible();
+    expect(preflightCalls).toBe(0);
+  });
+
+  test("placeholder survives a reload and becomes attachable after the background poll observes success", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-poll-1",
+      project: "my-project",
+      prompt: "Poll me into running",
+      branch: "feature/poll-me",
+      tmuxSession: "spawn-bg-poll-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-poll-1",
+    });
+    const running = makeWorkingSession({
+      ...placeholder,
+      runtimeAlive: true,
+      workspaceExists: true,
+      status: "running",
+      state: "working",
+    });
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+
+    sessions.splice(0, sessions.length, running);
+    await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Open web terminal for ${running.id}`, "i") }),
+    ).not.toBeDisabled();
+  });
+
+  test("background retries do not create duplicate session cards when the same shell eventually succeeds", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-retry-1",
+      project: "my-project",
+      prompt: "Retry this shell without duplicates",
+      branch: "feature/retry-shell",
+      tmuxSession: "spawn-bg-retry-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-retry-1",
+    });
+    const running = makeWorkingSession({
+      ...placeholder,
+      runtimeAlive: true,
+      workspaceExists: true,
+      status: "running",
+      state: "working",
+    });
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
+    sessions.splice(0, sessions.length, running);
+    await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Open web terminal for ${running.id}`, "i") }),
+    ).not.toBeDisabled();
+  });
+
+  test("a fully failed background spawn leaves one errored session card and no duplicate shell", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-error-1",
+      project: "my-project",
+      prompt: "Fail this shell after retries",
+      branch: "feature/fail-after-retries",
+      tmuxSession: "spawn-bg-error-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-error-1",
+    });
+    const errored = {
+      ...placeholder,
+      status: "errored" as const,
+      state: "error" as const,
+      error: "tmux boom after retries",
+    };
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    sessions.splice(0, sessions.length, errored);
+    await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
+      }),
+    ).toBeDisabled();
+  });
+
+  test("an explicit occupied branch fails in place without creating a duplicate session card", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-branch-conflict-1",
+      project: "my-project",
+      prompt: "Use the occupied branch",
+      branch: "feature/already-checked-out",
+      tmuxSession: "spawn-bg-branch-conflict-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-branch-conflict-1",
+    });
+    const errored = {
+      ...placeholder,
+      status: "errored" as const,
+      state: "error" as const,
+      error: 'branch "feature/already-checked-out" is already checked out',
+    };
+    const sessions: SpurSessionView[] = [];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {
+      prompt: placeholder.prompt,
+      workspaceMode: "worktree",
+      baseBranch: "main",
+      branch: placeholder.branch,
+    });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    sessions.splice(0, sessions.length, errored);
+    await page.waitForTimeout(DASHBOARD_POLL_WAIT_MS);
+
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
+    await expect(page.locator(".data-row").filter({ hasText: placeholder.branch })).toHaveCount(1);
+  });
+
+  test("the user can retry manually after an ack failure without losing content or creating duplicate cards", async ({
+    page,
+  }) => {
+    const placeholder = makeSpawningSession({
+      id: "spawn-bg-manual-retry-1",
+      project: "my-project",
+      prompt: "Keep this content through a manual retry",
+      branch: "feature/manual-retry",
+      tmuxSession: "spawn-bg-manual-retry-1",
+      worktreePath: "/tmp/worktrees/spawn-bg-manual-retry-1",
+    });
+    const sessions: SpurSessionView[] = [];
+    let spawnCalls = 0;
+
+    await page.route("**/api/spawn", async (route) => {
+      spawnCalls += 1;
+      if (spawnCalls === 1) {
+        await route.fulfill({
+          status: 502,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Daemon down" }),
+        });
+        return;
+      }
+      sessions.splice(0, sessions.length, placeholder);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await openSpawnModal(page, () => sessions);
+    await fillSpawnForm(page, {
+      prompt: placeholder.prompt,
+      branch: placeholder.branch,
+      workspaceMode: "shared",
+      planMode: true,
+    });
+
+    const spawnButton = page.getByRole("button", { name: /^spawn$/i });
+    const promptField = page.getByPlaceholder("Prompt for the new session...");
+
+    await spawnButton.click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+    await expect(promptField).toHaveValue(placeholder.prompt);
+    await expect(page.getByLabel("branch name")).toHaveValue(placeholder.branch);
+    await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("shared");
+    await expect(page.getByRole("checkbox")).toBeChecked();
+    await expect(page.getByText(/daemon down/i)).toBeVisible();
+
+    await spawnButton.click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
+    expect(spawnCalls).toBe(2);
   });
 });
