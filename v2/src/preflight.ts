@@ -88,25 +88,37 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<string> 
   return stdout;
 }
 
-async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
+async function runCodexPreflight(
+  prompt: string,
+  cwd: string,
+  codexArgs: string[] | undefined,
+): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
 
   try {
     const { stdout } = await execFileAsync(
-      "/bin/sh",
+      codexCommand(),
       [
-        "-lc",
-        'printf "%s" "$SPUR_PREFLIGHT_PROMPT" | "$SPUR_CODEX_BIN" exec --ephemeral --disable codex_hooks --disable apps --disable plugins --dangerously-bypass-approvals-and-sandbox --output-last-message "$SPUR_PREFLIGHT_OUTPUT" -',
+        "exec",
+        "--ephemeral",
+        "--disable",
+        "codex_hooks",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
+        "--dangerously-bypass-approvals-and-sandbox",
+        ...(codexArgs ?? []),
+        "--output-last-message",
+        outputPath,
+        prompt,
       ],
       {
         cwd,
         env: {
           ...process.env,
           CODEX_HOME: undefined,
-          SPUR_CODEX_BIN: codexCommand(),
-          SPUR_PREFLIGHT_OUTPUT: outputPath,
-          SPUR_PREFLIGHT_PROMPT: prompt,
         },
         timeout: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
@@ -135,6 +147,6 @@ export async function runSpawnPreflight(
   const raw =
     input.agent === "claude"
       ? await runClaudePreflight(prompt, input.project.path)
-      : await runCodexPreflight(prompt, input.project.path);
+      : await runCodexPreflight(prompt, input.project.path, input.project.codexArgs);
   return parseSpawnPreflightResult(raw);
 }

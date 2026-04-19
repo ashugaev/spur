@@ -51,6 +51,15 @@ const PROJECT: ProjectConfig = {
 };
 const PROJECT_PREFLIGHT_PROMPT = PROJECT.preflight?.prompt ?? "";
 
+function getCodexOutputPath(args: string[]): string {
+  const outputFlagIndex = args.indexOf("--output-last-message");
+  const outputPath = outputFlagIndex === -1 ? undefined : args[outputFlagIndex + 1];
+  if (!outputPath) {
+    throw new Error("Expected codex preflight to receive --output-last-message <path>");
+  }
+  return outputPath;
+}
+
 describe("runSpawnPreflight", () => {
   beforeEach(() => {
     mockExecFileAsync.mockReset();
@@ -105,14 +114,10 @@ describe("runSpawnPreflight", () => {
     mockExecFileAsync.mockImplementationOnce(
       async (
         _command: string,
-        _args: string[],
-        options?: { env?: Record<string, string | undefined> },
+        args: string[],
+        _options?: { env?: Record<string, string | undefined> },
       ) => {
-        const outputPath = options?.env?.["SPUR_PREFLIGHT_OUTPUT"];
-        if (!outputPath) {
-          throw new Error("Expected codex preflight to receive --output-last-message <path>");
-        }
-        writeFileSync(outputPath, "feature/runtime-preflight\n", "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );
@@ -129,18 +134,25 @@ describe("runSpawnPreflight", () => {
     expect(result).toEqual({ branch: "feature/runtime-preflight" });
     expect(mockExecFileAsync).toHaveBeenCalledTimes(1);
     const [command, args, options] = mockExecFileAsync.mock.calls[0] ?? [];
-    expect(command).toBe("/bin/sh");
-    expect(args).toEqual(expect.arrayContaining(["-lc"]));
-    expect((args as string[]).at(-1)).toContain('"$SPUR_CODEX_BIN" exec');
-    expect((args as string[]).at(-1)).toContain("--disable apps");
-    expect((args as string[]).at(-1)).toContain("--disable plugins");
-    expect((args as string[]).at(-1)).toContain("--output-last-message");
-    expect((args as string[]).at(-1)).toContain(" -");
+    expect(command).toBe("/mock/bin/codex");
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "exec",
+        "--ephemeral",
+        "--disable",
+        "codex_hooks",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--output-last-message",
+      ]),
+    );
     expect(args).not.toContain("--permission-mode");
     expect(args).not.toContain("plan");
-    expect(options?.env?.["SPUR_CODEX_BIN"]).toBe("/mock/bin/codex");
-    expect(options?.env?.["SPUR_PREFLIGHT_PROMPT"]).toContain("Fix runtime regression from INT-42");
-    expect(options?.env?.["SPUR_PREFLIGHT_PROMPT"]).toContain(PROJECT_PREFLIGHT_PROMPT);
+    expect((args as string[]).at(-1)).toContain("Fix runtime regression from INT-42");
+    expect((args as string[]).at(-1)).toContain(PROJECT_PREFLIGHT_PROMPT);
     expect(options?.env?.["CODEX_HOME"]).toBeUndefined();
     expect(options).toEqual(
       expect.objectContaining({
@@ -150,18 +162,44 @@ describe("runSpawnPreflight", () => {
     );
   });
 
+  it("appends configured codex args to codex preflight", async () => {
+    mockExecFileAsync.mockImplementationOnce(
+      async (
+        _command: string,
+        args: string[],
+        _options?: { env?: Record<string, string | undefined> },
+      ) => {
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
+        return { stdout: "", stderr: "" };
+      },
+    );
+
+    await runSpawnPreflight({
+      agent: "codex",
+      projectId: "api",
+      project: {
+        ...PROJECT,
+        codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+      },
+      baseBranch: "main",
+      worktree: true,
+      prompt: "Fix runtime regression from INT-42",
+    });
+
+    const [, args] = mockExecFileAsync.mock.calls[0] ?? [];
+    expect(args).toEqual(
+      expect.arrayContaining(["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"]),
+    );
+  });
+
   it("keeps a successful codex preflight result when temp cleanup races", async () => {
     mockExecFileAsync.mockImplementationOnce(
       async (
         _command: string,
-        _args: string[],
-        options?: { env?: Record<string, string | undefined> },
+        args: string[],
+        _options?: { env?: Record<string, string | undefined> },
       ) => {
-        const outputPath = options?.env?.["SPUR_PREFLIGHT_OUTPUT"];
-        if (!outputPath) {
-          throw new Error("Expected codex preflight to receive --output-last-message <path>");
-        }
-        writeFileSync(outputPath, "feature/runtime-preflight\n", "utf8");
+        writeFileSync(getCodexOutputPath(args), "feature/runtime-preflight\n", "utf8");
         return { stdout: "", stderr: "" };
       },
     );

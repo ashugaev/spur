@@ -42,6 +42,8 @@ import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route"
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
 import { POST as restoreSession } from "@/app/api/sessions/[id]/restore/route";
 import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
+import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
+import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
@@ -509,6 +511,71 @@ describe("Spur web API routes", () => {
     const response = await respawnSession(
       new Request("http://localhost:3000/api/sessions/api-a1/respawn", { method: "POST" }),
       { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(502);
+  });
+
+  // ── POST /api/sessions/:id/sidecars/:name/{start,stop} ────────────────
+
+  it("POST /api/sessions/:id/sidecars/:name/start proxies to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await startSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/start", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/sidecars/dev/start",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/stop proxies to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await stopSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/stop", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api-a1/sidecars/dev/stop",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/start URL-encodes ids", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api/a 1" }));
+
+    await startSidecar(
+      new Request("http://localhost:3000/api/sessions/api%2Fa%201/sidecars/dev%2Fui/start", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "api/a 1", name: "dev/ui" }) },
+    );
+
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/api%2Fa%201/sidecars/dev%2Fui/start",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("POST /api/sessions/:id/sidecars/:name/stop returns 502 on daemon error", async () => {
+    mockedSpurRequestJson.mockRejectedValue(new Error("Cannot stop sidecar"));
+
+    const response = await stopSidecar(
+      new Request("http://localhost:3000/api/sessions/api-a1/sidecars/dev/stop", {
+        method: "POST",
+      }),
+      { params: Promise.resolve({ id: "api-a1", name: "dev" }) },
     );
 
     expect(response.status).toBe(502);

@@ -4,6 +4,13 @@ projects:
     defaultBranch: main
     sessionPrefix: spur
     symlinks: [.env]
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - -c
+      - 'service_tier="fast"'
+      - --enable
+      - fast_mode
     preflight: {}
     sidecars:
       isolated-daemon:
