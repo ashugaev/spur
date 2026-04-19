@@ -60,7 +60,7 @@ Agents run with full access:
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
 
-Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent must return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming.
+Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
 If that preflight-suggested branch is already checked out in another worktree, Spur falls back to the fresh session id branch instead of failing the spawn.
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
@@ -387,7 +387,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES`, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 
