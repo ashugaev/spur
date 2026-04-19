@@ -282,6 +282,7 @@ Coverage means scenario coverage, not numeric line coverage. `tests/scenario-cov
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
 - Sidecar reserved-port allocation skips TCP ports already bound outside Spur while preserving existing session metadata reservations
+- Background spawn auto-start uses the same reserved-port assignment and env injection path as foreground spawn
 - `sidecar start --clear-port <port>` clears a daemon-validated occupied sidecar port before retrying launch
 
 **Tier: runtime integration**
