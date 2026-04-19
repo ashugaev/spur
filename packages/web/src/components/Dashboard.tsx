@@ -556,6 +556,7 @@ export function Dashboard() {
                 <span className="block min-w-0 truncate">{activeProjectName}</span>
                 <svg
                   aria-hidden="true"
+                  data-testid="project-filter-chevron"
                   className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
                   fill="currentColor"
                   viewBox="0 0 16 16"

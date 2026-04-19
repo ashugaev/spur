@@ -165,7 +165,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete.
-- Manual sidecar start via `spur sidecar start --session <id> --name <name>`, including one nested hop through the injected `spur-sidecar` helper.
+- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`, and `start` also allows one nested hop through the injected `spur-sidecar` helper.
 - Sidecar status reported in session view.
 
 ## Real-Agent Smoke
@@ -220,8 +220,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
 - Sidecar cleanup on kill/complete
-- Manual sidecar start via `spur sidecar start --session <id> --name <name>`
-- Nested sidecars are manual-only through `spur-sidecar`, stop after one extra level, and rejected depth overruns are logged
+- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
+- Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
 
 ## Regression Rule

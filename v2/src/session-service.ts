@@ -265,7 +265,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -1901,6 +1901,44 @@ export class SessionService {
         sidecarDepth,
         command: sidecar.command,
         manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    const project = this.resolveProjectForSession(session);
+    const sidecarNames = sessionSidecarNames(session, project);
+    if (!sidecarNames.includes(sidecarName)) {
+      throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
+    }
+
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+      return this.enrich(session);
+    }
+
+    await killSidecarTmux(sessionId, sidecarName);
+
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.stopped", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+      details: {
+        sidecarName,
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });

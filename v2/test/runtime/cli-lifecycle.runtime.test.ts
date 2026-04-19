@@ -2878,6 +2878,94 @@ projects:
     expect(devSessionAlive).toBe(true);
   });
 
+  it("manual sidecar start and stop toggles the --dev tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-cli-stop-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-cli-stop.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dev server cli stop test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${spawned.id}--dev`;
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === true,
+    });
+    expect(devSessionAlive).toBe(true);
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "stop",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+    const devSessionStopped = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === false,
+    });
+    expect(devSessionStopped).toBe(false);
+
+    const sidecarEvents = readEventLog(context.dataDir)
+      .map((e) => e.event)
+      .filter((ev) => typeof ev === "string" && ev.startsWith("session.sidecar"));
+    expect(sidecarEvents).toContain("session.sidecar.started");
+    expect(sidecarEvents).toContain("session.sidecar.stopped");
+  });
+
   it("hidden sidecar start command creates the configured sidecar tmux session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
