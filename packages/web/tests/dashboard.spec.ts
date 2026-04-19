@@ -155,6 +155,37 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
   });
 
+  test("Completed count updates after polling when a session finishes", async ({ page }) => {
+    const working = makeWorkingSession({
+      id: "wk-complete-1",
+      prompt: "Completes after poll",
+    });
+    let sessions = [working];
+    await mockSessions(page, () => sessions);
+    await page.goto("/");
+
+    await expect(page.getByText("Completes after poll")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("0");
+
+    sessions = [
+      {
+        ...working,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+      },
+    ];
+
+    await page.waitForTimeout(5500);
+
+    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expect(page.getByText("Completes after poll")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /Completed/i }).click();
+    await expect(page.getByText("Completes after poll")).toBeVisible();
+  });
+
   test("clicking Needs Input stat filters to only that session", async ({ page }) => {
     const needsInput = makeNeedsInputSession({ id: "ni-1", prompt: "Needs input session" });
     const working = makeWorkingSession({ id: "wk-1", prompt: "Working session" });

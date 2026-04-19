@@ -99,7 +99,14 @@ describe("Spur web API routes", () => {
     mockedSpurRequestJson
       .mockResolvedValueOnce([
         sessionFixture(),
-        sessionFixture({ id: "b1", project: "web", tmuxSession: "b1", worktreePath: "/tmp/b1" }),
+        sessionFixture({
+          id: "done-1",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+          tmuxSession: null,
+          worktreePath: "/tmp/done-1",
+        }),
       ])
       .mockResolvedValueOnce([
         { id: "api", name: "API" },
@@ -111,6 +118,8 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
+    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
   });
 
   it("GET /api/sessions filters by project", async () => {
@@ -137,6 +146,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(1);
     expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
