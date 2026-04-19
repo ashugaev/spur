@@ -20,7 +20,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
-- `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Cursor startup adds `--plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Cursor startup adds `--plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -89,6 +89,8 @@ If the agent already knows the devserver port, pass it with `--port` so `list` c
 Spur also collects sidecar and service output into the session event log, so `spur service logs` and `/sessions/:id/logs` can inspect those runtime lines alongside the normal session log stream.
 
 For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
+
+`autoStart` applies only when the main session spawns. From inside a sidecar, starting another sidecar is always manual through the same helper, and nesting stops after one more level: `session -> sidecar -> nested sidecar`. Nested sidecars never auto-start.
 
 If a sidecar defines `ports`, Spur allocates those ports when that sidecar starts and injects them into the sidecar env. Auto-start keeps the session alive when allocation fails, and manual retry succeeds after the conflicting port is released.
 
@@ -364,7 +366,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. Claude startup enters plan mode, Cursor passes `--plan`, and Codex currently accepts this flag but startup behavior is unchanged.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, makes Claude startup enter plan mode, passes `--plan` to Cursor, and leaves Codex launch behavior unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.

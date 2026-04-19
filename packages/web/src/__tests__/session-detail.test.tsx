@@ -1,6 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionDetail } from "@/components/SessionDetail";
+import type { SpurSessionView } from "@/lib/types";
 
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
@@ -67,7 +68,32 @@ class EmptyAudioMediaRecorder extends MockMediaRecorder {
   }
 }
 
-function sessionFixture() {
+class MobilePwaMediaRecorder extends MockMediaRecorder {
+  private requestedFlush = false;
+
+  requestData() {
+    this.requestedFlush = true;
+  }
+
+  override stop() {
+    this.state = "inactive";
+    if (this.requestedFlush) {
+      this.emit("stop");
+      queueMicrotask(() => {
+        this.emit(
+          "dataavailable",
+          new Blob(["voice-audio"], {
+            type: this.mimeType,
+          }),
+        );
+      });
+      return;
+    }
+    super.stop();
+  }
+}
+
+function sessionFixture(overrides?: Partial<SpurSessionView>) {
   return {
     id: "api-a1",
     project: "api",
@@ -92,6 +118,7 @@ function sessionFixture() {
     slots: {
       links: [],
     },
+    ...overrides,
   };
 }
 
@@ -225,6 +252,59 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalledWith("/api/runtime/voice/transcribe", expect.anything());
+  });
+
+  it("records audio on mobile-style recorders that misorder the final chunk after requestData", async () => {
+    vi.stubGlobal("MediaRecorder", MobilePwaMediaRecorder as unknown as typeof MediaRecorder);
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Mobile PWA voice still works" }), {
+          status: 200,
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Mobile PWA voice still works")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runtime/voice/transcribe",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("shows the final transcribe retry error instead of a raw JSON blob", async () => {
@@ -659,6 +739,119 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("keeps the start or stop sidecar action at the far right of the sidecar actions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-ui", alive: true }],
+            slots: {
+              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const sidecarName = await screen.findByText("isolated-ui");
+    const sidecarRow = sidecarName.closest("div")?.parentElement;
+    expect(sidecarRow).not.toBeNull();
+
+    const actionNames = Array.from(sidecarRow?.querySelectorAll("a,button") ?? []).map(
+      (node) => node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "",
+    );
+    expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
+  });
+
+  it("starts an offline sidecar from the icon button", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/start" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true }],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const button = await screen.findByRole("button", { name: "Start sidecar dev" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop sidecar dev" })).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/start", {
+      method: "POST",
+    });
+  });
+
+  it("stops a live sidecar from the icon button", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: true }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/sidecars/dev/stop" && init?.method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "dev", alive: false }],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const button = await screen.findByRole("button", { name: "Stop sidecar dev" });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start sidecar dev" })).toBeInTheDocument();
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/sidecars/dev/stop", {
+      method: "POST",
+    });
+  });
+
   it("shows a pending assistant bubble and promotes the header state to working", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -950,5 +1143,75 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail display state", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  function stubFetch(
+    sessionOverrides: Parameters<typeof sessionFixture>[0],
+    conversationState: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed",
+  ) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture(sessionOverrides)), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ state: conversationState })), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  async function expectStateBadge(label: string): Promise<void> {
+    const heading = await screen.findByRole("heading", { level: 1 });
+    const container = heading.parentElement;
+    if (!container) throw new Error("header container not found");
+    await within(container).findByText(label);
+  }
+
+  it("shows error state when session is errored (does not override to working)", async () => {
+    stubFetch({ status: "errored", state: "error" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("error");
+  });
+
+  it("shows killed state when session is killed (does not override to working)", async () => {
+    stubFetch({ status: "killed", state: "killed" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("killed");
+  });
+
+  it("shows stopped state when session is stopped (does not override to working)", async () => {
+    stubFetch({ status: "paused", state: "stopped" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    // ActivityDot renders the "stopped" state as the "paused" label.
+    await expectStateBadge("paused");
+  });
+
+  it("overrides to working when session state is waiting and claude conversation reports working", async () => {
+    stubFetch({ status: "running", state: "waiting" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("working");
+  });
+
+  it("shows working when session state is working and claude conversation reports working", async () => {
+    stubFetch({ status: "running", state: "working" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("working");
   });
 });

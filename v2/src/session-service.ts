@@ -91,6 +91,7 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
   type SessionQueuedMessagesState,
@@ -103,6 +104,15 @@ import {
   type UpdateSessionSlotsRequest,
 } from "./types.js";
 import { classifyCursorPaneState } from "./cursor-state.js";
+import {
+  formatNestedSidecarStartError,
+  MAX_SIDECAR_DEPTH,
+  nextSidecarDepth,
+  ROOT_SIDECAR_DEPTH,
+  sidecarCallerContextFromRequest,
+  SPUR_SIDECAR_DEPTH_ENV,
+  SPUR_SIDECAR_NAME_ENV,
+} from "./sidecar-runtime.js";
 import {
   createWorktree,
   findWorktreePathForBranch,
@@ -131,6 +141,7 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+const SPAWN_RETRY_ATTEMPTS = 3;
 const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
@@ -148,6 +159,7 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
 type AttentionState = "needs_input" | "error";
+type BackgroundSpawnAttemptResult = "completed" | "retry";
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -169,6 +181,13 @@ function isTerminalSessionStatus(status: SessionStatus): status is "completed" |
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "paused";
+}
+
+function statusFallbackState(status: SessionStatus): SessionState {
+  if (status === "killed") return "killed";
+  if (status === "errored") return "error";
+  if (status === "paused" || status === "completed") return "stopped";
+  return "working"; // running, spawning
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -207,7 +226,7 @@ function normalizeSpawnRequest(
   if (!prompt) {
     return normalized;
   }
-  if (!steps || steps.length === 0) {
+  if (normalized.planMode || !steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
@@ -222,12 +241,14 @@ function withPlanMode(
     claudeSettingsPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
+    codexArgs?: string[];
   },
   planMode: boolean,
 ): {
   claudeSettingsPath?: string;
   codexHomePath?: string;
   cursorConfigDir?: string;
+  codexArgs?: string[];
   planMode?: boolean;
 } {
   return planMode ? { ...options, planMode: true } : options;
@@ -237,6 +258,22 @@ function sessionProcessMatchers(
   session: Pick<SessionRecord, "agent" | "launchCommand">,
 ): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
+}
+
+function withProjectAgentOptions(
+  project: Pick<ProjectConfig, "codexArgs">,
+  options: {
+    claudeSettingsPath?: string;
+    codexHomePath?: string;
+    cursorConfigDir?: string;
+  },
+): {
+  claudeSettingsPath?: string;
+  codexHomePath?: string;
+  cursorConfigDir?: string;
+  codexArgs?: string[];
+} {
+  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -274,7 +311,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -466,9 +503,28 @@ function reserveSidecarPorts(
   };
 }
 
-function sidecarPortEnv(ports: Record<string, number> | undefined): Record<string, string> {
-  const entries = Object.entries(ports ?? {});
+function sidecarPortEnv(
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+): Record<string, string> {
+  const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function buildSidecarRuntimeEnv(
+  sessionEnv: Record<string, string>,
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+  sidecarEnv: Record<string, string> | undefined,
+  sidecarDepth: number,
+): Record<string, string> {
+  return {
+    ...sessionEnv,
+    ...(sidecarEnv ?? {}),
+    [SPUR_SIDECAR_NAME_ENV]: sidecarName,
+    [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
+    ...sidecarPortEnv(session, sidecarName),
+  };
 }
 
 function sessionSidecarNames(
@@ -476,6 +532,12 @@ function sessionSidecarNames(
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
   return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
+  const updated: SessionRecord = { ...session };
+  delete updated.sidecarPorts;
+  return updated;
 }
 
 async function waitForRestorePlan(
@@ -486,6 +548,7 @@ async function waitForRestorePlan(
     claudeSettingsPath?: string;
     codexHomePath?: string;
     cursorConfigDir?: string;
+    codexArgs?: string[];
     planMode?: boolean;
   },
 ) {
@@ -519,6 +582,21 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+interface PreparedSpawn {
+  request: SpawnSessionRequest;
+  project: ProjectConfig;
+  agent: SessionRecord["agent"];
+  prompt: string;
+  steps?: string[];
+  planMode: boolean;
+  worktree: boolean;
+  defaultBranch: string;
+  sessionId: string;
+  resolvedBranch?: ResolvedSpawnBranch;
+  placeholder: SessionRecord;
+  sessionToolDir: string;
 }
 
 function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
@@ -718,73 +796,6 @@ export class SessionService {
     } finally {
       release();
     }
-  }
-
-  private async startConfiguredSidecar(
-    session: SessionRecord,
-    project: ProjectConfig,
-    sidecarName: string,
-    sidecar: ProjectConfig["sidecars"][string],
-  ): Promise<SessionRecord> {
-    return this.withSidecarPortLock(async () => {
-      const agentConfig = this.sessionAgentConfig(session);
-      const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
-      const sessionEnv = buildSessionEnv({
-        agent: session.agent,
-        projectId: session.project,
-        sessionId: session.id,
-        sessionToolDir,
-        dataDir: this.config.dataDir,
-        repoPath: project.path,
-        symlinks: project.symlinks,
-        ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
-      });
-      const nextSidecarPorts = reserveSidecarPorts(
-        this.config.dataDir,
-        session,
-        sidecarName,
-        sidecar,
-      );
-
-      await createTmuxSidecarSession({
-        sessionId: session.id,
-        sidecarName,
-        cwd: session.worktreePath,
-        command: sidecar.command,
-        env: {
-          ...sessionEnv,
-          SPUR_SIDECAR_NAME: sidecarName,
-          ...(sidecar.env ?? {}),
-          ...sidecarPortEnv(nextSidecarPorts?.[sidecarName]),
-        },
-      });
-
-      const sidecarNames = sessionSidecarNames(session, project);
-      const updated: SessionRecord = {
-        ...session,
-        updatedAt: nowIso(),
-        ...(sidecarNames.includes(sidecarName)
-          ? {}
-          : { sidecarNames: [...sidecarNames, sidecarName] }),
-        ...(nextSidecarPorts ? { sidecarPorts: nextSidecarPorts } : {}),
-      };
-      if (!nextSidecarPorts) {
-        delete updated.sidecarPorts;
-      }
-      writeSession(this.config.dataDir, updated);
-      this.logEvent("session.sidecar.started", {
-        level: "info",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Started sidecar ${sidecarName} for ${session.id}`,
-        details: {
-          sidecarName,
-          command: sidecar.command,
-          tmuxSession: sidecarTmuxSession(session.id, sidecarName),
-        },
-      });
-      return updated;
-    });
   }
 
   private scheduleDeliveryRunner(sessionId: string): void {
@@ -1016,6 +1027,72 @@ export class SessionService {
     );
   }
 
+  private async startSidecarInternal(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+  }): Promise<SessionRecord> {
+    return this.withSidecarPortLock(async () => {
+      if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+        return args.session;
+      }
+
+      const agentConfig = this.sessionAgentConfig(args.session);
+      const nextSidecarPorts = reserveSidecarPorts(
+        this.config.dataDir,
+        args.session,
+        args.sidecarName,
+        args.sidecar,
+      );
+      const reservedSession =
+        nextSidecarPorts && nextSidecarPorts !== args.session.sidecarPorts
+          ? {
+              ...args.session,
+              sidecarPorts: nextSidecarPorts,
+            }
+          : args.session;
+
+      const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
+      const sessionEnv = buildSessionEnv({
+        agent: reservedSession.agent,
+        projectId: reservedSession.project,
+        sessionId: reservedSession.id,
+        sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: args.project.path,
+        symlinks: args.project.symlinks,
+        ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
+      });
+
+      await createTmuxSidecarSession({
+        sessionId: reservedSession.id,
+        sidecarName: args.sidecarName,
+        cwd: reservedSession.worktreePath,
+        command: args.sidecar.command,
+        env: buildSidecarRuntimeEnv(
+          sessionEnv,
+          reservedSession,
+          args.sidecarName,
+          args.sidecar.env,
+          args.sidecarDepth,
+        ),
+      });
+
+      const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+      const updated: SessionRecord = {
+        ...reservedSession,
+        updatedAt: nowIso(),
+        ...(sidecarNames.includes(args.sidecarName)
+          ? {}
+          : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+      };
+      writeSession(this.config.dataDir, updated);
+      return updated;
+    });
+  }
+
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
     const currentProject = this.config.projects[session.project];
     if (currentProject) {
@@ -1062,7 +1139,11 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    const fallback: ConversationResponse = {
+      messages: [],
+      durationMs,
+      state: statusFallbackState(session.status),
+    };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
@@ -1445,17 +1526,13 @@ export class SessionService {
         id: sessionId,
       });
       const planOptions = withPlanMode(
-        {
+        withProjectAgentOptions(project, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
-        },
+        }),
         planMode,
       );
-      const launchPlan = buildAgentLaunchPlan(
-        agent,
-        initialMessage,
-        planOptions,
-      );
+      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, planOptions);
       const pipeline = steps
         ? {
             steps,
@@ -1530,22 +1607,35 @@ export class SessionService {
       }
 
       stage = "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let updatedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
-
-      let updatedRecord = persistedRecord;
       const projectSidecars = project.sidecars;
       for (const [name, sidecar] of Object.entries(projectSidecars)) {
         if (!sidecar.autoStart) continue;
+        const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
-          updatedRecord = await this.startConfiguredSidecar(
-            updatedRecord,
+          updatedRecord = await this.startSidecarInternal({
+            session: updatedRecord,
             project,
-            name,
+            sidecarName: name,
             sidecar,
-          );
+            sidecarDepth,
+          });
+          this.logEvent("session.sidecar.started", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-started sidecar ${name} for ${sessionId}`,
+            details: {
+              sidecarName: name,
+              command: sidecar.command,
+              manualOnly: false,
+              sidecarDepth,
+              tmuxSession: sidecarTmuxSession(sessionId, name),
+            },
+          });
         } catch (sidecarError) {
           const sidecarMessage =
             sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
@@ -1647,6 +1737,528 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private resetSpawnAttemptArtifacts(sessionId: string): void {
+    deleteAgentHookState(this.config.dataDir, sessionId);
+    deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+  }
+
+  private async cleanupBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    workspacePath: string,
+    finalFailure: boolean,
+  ): Promise<void> {
+    await killTmuxSession(prepared.sessionId);
+    for (const sidecarName of Object.keys(prepared.project.sidecars)) {
+      await killSidecarTmux(prepared.sessionId, sidecarName).catch(() => {});
+    }
+    if (finalFailure) {
+      this.removeSessionArtifacts(prepared.sessionId);
+    } else {
+      this.resetSpawnAttemptArtifacts(prepared.sessionId);
+    }
+    if (prepared.worktree && workspacePath) {
+      await removeWorktree(prepared.project.path, workspacePath);
+    }
+  }
+
+  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+    let stage = "validating";
+    let sessionId: string | undefined;
+    let project: ProjectConfig | undefined;
+    let agent: SessionRecord["agent"] | undefined;
+    let worktree = false;
+    let createdAt: string | undefined;
+    let placeholderWritten = false;
+    let prompt = "";
+    let steps: string[] | undefined;
+    let planMode: boolean;
+    let resolvedBranch: ResolvedSpawnBranch | undefined;
+    let explicitBranch: string | undefined;
+    try {
+      project = this.getProject(request.project);
+      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
+      if (
+        request.branch !== undefined &&
+        (typeof request.branch !== "string" || !request.branch.trim())
+      ) {
+        throw new Error("branch must be a non-empty string when provided");
+      }
+      explicitBranch = request.branch?.trim() || undefined;
+
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      worktree = resolveSpawnWorktree(project, overrides);
+      const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      sessionId = await reserveNextSessionId(
+        this.config.dataDir,
+        request.project,
+        project.sessionPrefix,
+      );
+      if (!worktree) {
+        stage = "branch.resolve";
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          ...(request.branch ? { requestBranchSource: "explicit" as const } : {}),
+          worktree,
+          fallbackBranch: sessionId,
+        });
+      }
+      createdAt = nowIso();
+      const placeholderBranch = resolvedBranch?.branch ?? explicitBranch ?? sessionId;
+      const placeholderBranchSource =
+        resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+      const placeholderWorktreePath = worktree
+        ? join(this.config.worktreeDir, request.project, sessionId)
+        : project.path;
+      const placeholder: SessionRecord = {
+        id: sessionId,
+        project: request.project,
+        agent,
+        planMode,
+        prompt,
+        branch: placeholderBranch,
+        ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
+        worktree,
+        worktreePath: placeholderWorktreePath,
+        tmuxSession: sessionId,
+        launchCommand: "",
+        status: "spawning",
+        createdAt,
+        updatedAt: createdAt,
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
+      };
+      writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
+
+      this.logEvent("session.spawn.started", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawning ${sessionId}`,
+        details: {
+          agent,
+          branch: placeholderBranch,
+          worktree,
+          defaultBranch,
+          branchSource: placeholderBranchSource ?? null,
+          mode: "background",
+        },
+      });
+
+      return {
+        request,
+        project,
+        agent,
+        prompt,
+        ...(steps ? { steps } : {}),
+        planMode,
+        worktree,
+        defaultBranch,
+        sessionId,
+        ...(resolvedBranch ? { resolvedBranch } : {}),
+        placeholder,
+        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (sessionId && project && placeholderWritten) {
+        this.removeSessionArtifacts(sessionId);
+        const erroredBranchSource =
+          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+        writeSession(this.config.dataDir, {
+          id: sessionId,
+          project: request.project,
+          agent:
+            agent ??
+            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          prompt,
+          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+          worktree,
+          worktreePath: worktree
+            ? join(this.config.worktreeDir, request.project, sessionId)
+            : project.path,
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "errored",
+          createdAt: createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          error: message,
+        });
+      }
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        ...(sessionId ? { sessionId } : {}),
+        projectId: request.project,
+        message: sessionId
+          ? `Failed to spawn ${sessionId}: ${message}`
+          : `Failed to spawn session: ${message}`,
+        details: {
+          stage,
+          requestedAgent: request.agent ?? null,
+        },
+      });
+      throw error;
+    }
+  }
+
+  private async runBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    attempt: number,
+  ): Promise<BackgroundSpawnAttemptResult> {
+    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
+    let workspacePath = prepared.worktree ? "" : project.path;
+    let initialPromptSent = false;
+    try {
+      let resolvedBranch = prepared.resolvedBranch;
+      let preflightOutcome: "branch" | "defer" | undefined;
+      let preflightBranch: string | undefined;
+      if (!resolvedBranch) {
+        let effectiveBranch = request.branch;
+        let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
+          request.branch ? "explicit" : undefined;
+        if (!effectiveBranch && prepared.worktree && project.preflight && prompt) {
+          const preflight = await runSpawnPreflight({
+            agent,
+            projectId: request.project,
+            project,
+            baseBranch: prepared.defaultBranch,
+            worktree: prepared.worktree,
+            prompt,
+          });
+          if (preflight.branch) {
+            preflightOutcome = "branch";
+            preflightBranch = preflight.branch;
+            effectiveBranch = preflight.branch;
+            effectiveBranchSource = "preflight";
+          } else {
+            preflightOutcome = "defer";
+          }
+        }
+        if (preflightOutcome) {
+          this.logEvent("session.preflight.completed", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message:
+              preflightOutcome === "branch"
+                ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
+                : `Spawn preflight deferred branch selection for ${sessionId}`,
+            details: {
+              outcome: preflightOutcome,
+              branch: preflightBranch ?? null,
+              baseBranch: prepared.defaultBranch,
+              attempt,
+            },
+          });
+        }
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: effectiveBranch,
+          ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
+          worktree: prepared.worktree,
+          fallbackBranch: sessionId,
+        });
+        if (prepared.worktree && resolvedBranch.branch !== sessionId) {
+          const branchConflictPath = await findWorktreePathForBranch(
+            project.path,
+            resolvedBranch.branch,
+          );
+          if (branchConflictPath) {
+            if (resolvedBranch.branchSource === "explicit") {
+              throw new Error(
+                `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+              );
+            }
+            this.logEvent("session.spawn.branch_conflict", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+              details: {
+                occupiedBranch: resolvedBranch.branch,
+                conflictingWorktreePath: branchConflictPath,
+                fallbackBranch: sessionId,
+                branchSource: resolvedBranch.branchSource ?? null,
+                attempt,
+              },
+            });
+            resolvedBranch = { branch: sessionId };
+          }
+        }
+        prepared.resolvedBranch = resolvedBranch;
+      }
+
+      const spawnPlaceholder: SessionRecord = {
+        ...prepared.placeholder,
+        branch: resolvedBranch.branch,
+        ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, spawnPlaceholder);
+      prepared.placeholder = spawnPlaceholder;
+
+      stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
+      if (prepared.worktree) {
+        workspacePath = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: request.project,
+          sessionId,
+          defaultBranch: prepared.defaultBranch,
+          branch: resolvedBranch.branch,
+          symlinks: project.symlinks,
+        });
+        this.logEvent("session.spawn.worktree_created", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Created worktree for ${sessionId}`,
+          details: {
+            worktreePath: workspacePath,
+            symlinkCount: project.symlinks.length,
+            attempt,
+          },
+        });
+      } else {
+        this.logEvent("session.spawn.shared_workspace", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Using shared workspace for ${sessionId}`,
+          details: {
+            workspacePath,
+            branch: resolvedBranch.branch,
+            attempt,
+          },
+        });
+      }
+
+      const firstStage = prepared.steps?.[0];
+      const initialMessage =
+        prepared.steps && firstStage
+          ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
+          : prompt;
+      const hookSetup = await setupAgentHooks({
+        agent,
+        worktreePath: workspacePath,
+        sessionToolDir: prepared.sessionToolDir,
+      });
+      const launchPlan = buildAgentLaunchPlan(
+        agent,
+        initialMessage,
+        withPlanMode(hookSetup, planMode),
+      );
+      const pipeline = prepared.steps
+        ? {
+            steps: prepared.steps,
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running" as const,
+          }
+        : undefined;
+      const runningRecord: SessionRecord = {
+        ...spawnPlaceholder,
+        planMode,
+        worktreePath: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+        ...(pipeline ? { pipeline } : {}),
+      };
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+      const sessionEnv = buildSessionEnv({
+        agent,
+        projectId: request.project,
+        sessionId,
+        sessionToolDir: prepared.sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: project.path,
+        symlinks: project.symlinks,
+      });
+      await createTmuxSession({
+        sessionName: sessionId,
+        cwd: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        agent,
+        env: sessionEnv,
+      });
+      this.logEvent("session.spawn.tmux_created", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Created tmux session for ${sessionId}`,
+        details: {
+          tmuxSession: sessionId,
+          attempt,
+        },
+      });
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
+      await syncTmuxStatus(sessionId, runningRecord.slots);
+      stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
+      await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
+      this.logEvent("session.spawn.ready", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Agent prompt is ready for ${sessionId}`,
+        details: { attempt },
+      });
+
+      if (launchPlan.initialMessage.trim()) {
+        stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
+        const sidecarNames = Object.keys(project.sidecars);
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
+        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        initialPromptSent = true;
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            messageLength: launchPlan.initialMessage.length,
+            attempt,
+          },
+        });
+      }
+
+      stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
+      const persistedRecord = await this.captureAgentSessionId(
+        runningRecord,
+        AGENT_SESSION_ID_INITIAL_WAIT_MS,
+      );
+
+      for (const [name, sidecar] of Object.entries(project.sidecars)) {
+        if (!sidecar.autoStart) continue;
+        try {
+          await createTmuxSidecarSession({
+            sessionId,
+            sidecarName: name,
+            cwd: workspacePath,
+            command: sidecar.command,
+            env: {
+              ...sessionEnv,
+              SPUR_SIDECAR_NAME: name,
+              ...(sidecar.env ?? {}),
+              ...sidecarPortEnv(runningRecord, name),
+            },
+          });
+          this.logEvent("session.sidecar.started", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-started sidecar ${name} for ${sessionId}`,
+            details: {
+              sidecarName: name,
+              command: sidecar.command,
+              tmuxSession: sidecarTmuxSession(sessionId, name),
+              attempt,
+            },
+          });
+        } catch (sidecarError) {
+          const sidecarMessage =
+            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+          this.logEvent("session.sidecar.autostart.failed", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
+          });
+        }
+      }
+
+      writeSession(this.config.dataDir, persistedRecord);
+      this.logEvent("session.spawn.completed", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawned ${sessionId}`,
+        details: {
+          worktreePath: workspacePath,
+          tmuxSession: sessionId,
+          agent,
+          agentSessionId: persistedRecord.agentSessionId ?? null,
+          attempt,
+        },
+      });
+      if (this.shouldRunDelivery(persistedRecord)) {
+        this.scheduleDeliveryRunner(persistedRecord.id);
+      }
+      return "completed";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finalFailure = attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      if (!finalFailure) {
+        writeSession(this.config.dataDir, {
+          ...prepared.placeholder,
+          launchCommand: "",
+          status: "spawning",
+          updatedAt: nowIso(),
+        });
+        this.logEvent("session.spawn.retrying", {
+          level: "warn",
+          sessionId,
+          projectId: request.project,
+          message: `Spawn attempt ${attempt} failed for ${sessionId}; retrying`,
+          details: {
+            stage,
+            attempt,
+            nextAttempt: attempt + 1,
+            error: message,
+          },
+        });
+        return "retry";
+      }
+      writeSession(this.config.dataDir, {
+        ...prepared.placeholder,
+        worktreePath: workspacePath || prepared.placeholder.worktreePath,
+        launchCommand: "",
+        status: "errored",
+        updatedAt: nowIso(),
+        error: message,
+      });
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        sessionId,
+        projectId: request.project,
+        message: `Failed to spawn ${sessionId}: ${message}`,
+        details: {
+          stage,
+          attempt,
+          worktree: prepared.worktree,
+          worktreePath: workspacePath || prepared.placeholder.worktreePath || null,
+          agent,
+          branch: prepared.placeholder.branch,
+        },
+      });
+      return "completed";
+    }
+  }
+
+  async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
+    const prepared = await this.prepareBackgroundSpawn(request);
+    const placeholder = await this.enrich(prepared.placeholder);
+    queueMicrotask(() => {
+      void (async () => {
+        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+          if (result === "completed") {
+            return;
+          }
+        }
+      })();
+    });
+    return placeholder;
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
@@ -1913,7 +2525,29 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async startSidecar(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest = {},
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
+    if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
+      const message = formatNestedSidecarStartError(sidecarName, caller.name);
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId,
+        message,
+        details: {
+          callerSidecarDepth: caller.depth,
+          callerSidecarName: caller.name,
+          maxSidecarDepth: MAX_SIDECAR_DEPTH,
+          reason: "max_depth_exceeded",
+          sidecarName,
+        },
+      });
+      throw new Error(message);
+    }
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1937,7 +2571,65 @@ export class SessionService {
       return this.enrich(session);
     }
 
-    const updated = await this.startConfiguredSidecar(session, project, sidecarName, sidecar);
+    const updated = await this.startSidecarInternal({
+      session,
+      project,
+      sidecarName,
+      sidecar,
+      sidecarDepth,
+    });
+    this.logEvent("session.sidecar.started", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Started sidecar ${sidecarName} for ${sessionId}`,
+      details: {
+        callerSidecarName: caller.name ?? null,
+        sidecarName,
+        sidecarDepth,
+        command: sidecar.command,
+        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    const project = this.resolveProjectForSession(session);
+    const sidecarNames = sessionSidecarNames(session, project);
+    if (!sidecarNames.includes(sidecarName)) {
+      throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
+    }
+
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+      return this.enrich(session);
+    }
+
+    await killSidecarTmux(sessionId, sidecarName);
+
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.stopped", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+      details: {
+        sidecarName,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      },
+    });
     return this.enrich(updated);
   }
 
@@ -2008,7 +2700,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
     const record: SessionRecord = {
-      ...session,
+      ...copySessionWithoutSidecarPorts(session),
       status: targetStatus,
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
@@ -2085,7 +2777,7 @@ export class SessionService {
     }
 
     const record: SessionRecord = {
-      ...session,
+      ...copySessionWithoutSidecarPorts(session),
       status: "killed",
       updatedAt: nowIso(),
     };
@@ -2112,14 +2804,22 @@ export class SessionService {
       return session;
     }
 
+    const codexSessionRootDir =
+      session.agent === "codex"
+        ? join(
+            codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+            "sessions",
+          )
+        : undefined;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     const sessionAgentConfig = this.sessionAgentConfig(session);
     while (Date.now() <= deadline) {
-      const agentSessionId = await findAgentSessionId(
-        session.agent,
-        session.worktreePath,
-        sessionAgentConfig.planOptions,
-      );
+      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath, {
+        ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
+        ...(sessionAgentConfig.planOptions?.cursorConfigDir
+          ? { cursorConfigDir: sessionAgentConfig.planOptions.cursorConfigDir }
+          : {}),
+      });
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
           return session;
@@ -2197,18 +2897,15 @@ export class SessionService {
     });
     const sessionAgentConfig = this.sessionAgentConfig(session);
     const planMode = resolvePlanMode(session);
+    const project = this.getProject(session.project);
     const planOptions = withPlanMode(
-      {
+      withProjectAgentOptions(project, {
         ...hookSetup,
         ...(sessionAgentConfig.planOptions ?? {}),
-      },
+      }),
       planMode,
     );
-    const baseLaunchPlan = buildAgentLaunchPlan(
-      session.agent,
-      session.prompt,
-      planOptions,
-    );
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
@@ -2374,11 +3071,12 @@ export class SessionService {
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
       const restorePrompt = buildRestorePrompt(current.prompt);
+      const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
-        {
+        withProjectAgentOptions(restoreProjectConfig, {
           ...hookSetup,
           ...(sessionAgentConfig.planOptions ?? {}),
-        },
+        }),
         planMode,
       );
       const launchPlan = await waitForRestorePlan(
@@ -2387,28 +3085,48 @@ export class SessionService {
         restorePrompt,
         planOptions,
       );
+      const effectivePlan =
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
-        throw new Error(
-          `Session is not restorable (no ${current.agent} resume state): ${sessionId}`,
-        );
+        this.logEvent("session.restore.started", {
+          level: "info",
+          sessionId,
+          projectId: current.project,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
+        });
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
-      const restoredAgentSessionId = await findAgentSessionId(
-        current.agent,
-        current.worktreePath,
-        sessionAgentConfig.planOptions,
-      );
-      if (restoredAgentSessionId) {
-        const resumePlan = buildAgentResumePlan(
+      let restoreLaunchCommand = effectivePlan.launchCommand;
+      let restoreReadyMarkers = effectivePlan.readyMarkers;
+      if (launchPlan) {
+        const codexSessionRootDir =
+          current.agent === "codex"
+            ? join(
+                codexHookHomePath(join(this.config.dataDir, "session-tools", current.id)),
+                "sessions",
+              )
+            : undefined;
+        const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
-          restoredAgentSessionId,
-          launchPlan.launchCommand,
-          planOptions,
+          current.worktreePath,
+          {
+            ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
+            ...(sessionAgentConfig.planOptions?.cursorConfigDir
+              ? { cursorConfigDir: sessionAgentConfig.planOptions.cursorConfigDir }
+              : {}),
+          },
         );
-        restoreLaunchCommand = resumePlan.launchCommand;
-        restoreReadyMarkers = resumePlan.readyMarkers;
+        if (restoredAgentSessionId) {
+          const resumePlan = buildAgentResumePlan(
+            current.agent,
+            restoredAgentSessionId,
+            effectivePlan.launchCommand,
+            planOptions,
+          );
+          restoreLaunchCommand = resumePlan.launchCommand;
+          restoreReadyMarkers = resumePlan.readyMarkers;
+        }
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
@@ -2442,7 +3160,7 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
+        effectivePlan.initialMessage,
         restoreSidecarNames,
       );
       await this.sendAgentMessage(current, restoreInitialMessage);

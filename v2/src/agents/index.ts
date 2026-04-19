@@ -25,13 +25,20 @@ import {
 } from "./cursor.js";
 import type { AgentName } from "../types.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
+
 export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
   codexHomePath?: string;
+  codexArgs?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
+}
+
+interface AgentSessionLookupOptions {
+  codexSessionRootDir?: string;
+  cursorConfigDir?: string;
 }
 
 interface AgentSessionConfig {
@@ -55,7 +62,10 @@ interface AgentAdapter {
     binary: string,
     options?: AgentPlanOptions,
   ): AgentResumePlan;
-  findSessionId(worktreePath: string, options?: AgentPlanOptions): Promise<string | null>;
+  findSessionId(
+    worktreePath: string,
+    options?: AgentSessionLookupOptions,
+  ): Promise<string | null>;
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
@@ -77,8 +87,14 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function codexPlanOptions(options?: AgentPlanOptions): { codexHomePath?: string } {
-  return options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {};
+function codexPlanOptions(options?: AgentPlanOptions): {
+  codexHomePath?: string;
+  codexArgs?: string[];
+} {
+  return {
+    ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
+    ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
+  };
 }
 
 function cursorPlanOptions(options?: AgentPlanOptions): {
@@ -118,9 +134,14 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildCodexRestorePlan(worktreePath, prompt, codexPlanOptions(options)),
     buildResumePlan: (agentSessionId, binary, options) =>
       buildCodexResumePlan(agentSessionId, binary, codexPlanOptions(options)),
-    findSessionId: (worktreePath) => findCodexSessionId(worktreePath),
-    setup: async ({ sessionToolDir }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir),
+    findSessionId: (worktreePath, options) =>
+      findCodexSessionId(worktreePath, {
+        ...(options?.codexSessionRootDir
+          ? { sessionRootDir: options.codexSessionRootDir }
+          : {}),
+      }),
+    setup: async ({ sessionToolDir, worktreePath }) => ({
+      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
@@ -129,7 +150,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
   },
   cursor: {
     command: cursorCommand,
-    buildLaunchPlan: (prompt, options) => buildCursorPlan(prompt, options),
+    buildLaunchPlan: (prompt, options) => buildCursorPlan(prompt, cursorPlanOptions(options)),
     buildRestorePlan: (worktreePath, prompt, options) =>
       buildCursorRestorePlan(worktreePath, prompt, cursorPlanOptions(options)),
     buildResumePlan: (agentSessionId, binary, options) =>
@@ -229,7 +250,7 @@ export function buildAgentResumePlan(
 export async function findAgentSessionId(
   agent: AgentName,
   worktreePath: string,
-  options?: AgentPlanOptions,
+  options?: AgentSessionLookupOptions,
 ): Promise<string | null> {
   return agentAdapter(agent).findSessionId(worktreePath, options);
 }

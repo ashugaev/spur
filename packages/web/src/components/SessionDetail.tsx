@@ -70,6 +70,22 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
   );
 }
 
+function PlayIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 
@@ -288,6 +304,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+    setBusyAction(`sidecar:${action}:${sidecarName}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(payload));
+      setError(null);
+    } catch (sidecarError) {
+      setError(
+        sidecarError instanceof Error
+          ? sidecarError.message
+          : `Failed to ${action} sidecar ${sidecarName}`,
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
   const openLogs = async () => {
     setLogsOpen(true);
     try {
@@ -332,11 +370,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const displayState = useMemo(
-    () =>
-      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
-    [conversation?.state, session?.agent, session?.state],
-  );
+  const displayState = useMemo(() => {
+    if (!session) return undefined;
+    if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
+      return session.state;
+    }
+    if (session.agent === "claude" && conversation?.state === "working") return "working";
+    return session.state;
+  }, [conversation?.state, session]);
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -841,6 +882,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             Open
                           </a>
                         ) : null}
+                        <button
+                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={busyAction !== null}
+                          onClick={() =>
+                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                          }
+                          type="button"
+                        >
+                          {sc.alive ? <StopIcon /> : <PlayIcon />}
+                        </button>
                       </div>
                     </div>
                   ))}

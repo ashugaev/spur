@@ -23,7 +23,9 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+// Default grace window for silent tool_use before we surface needs_input.
+// Per-tool timeouts and run_in_background hints can extend or bypass it.
+export const TOOL_USE_STALE_MS = 3_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 

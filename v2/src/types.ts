@@ -146,6 +146,7 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
@@ -286,6 +287,11 @@ export interface RunServiceRequest {
   command: string;
   cwd: string;
   port?: number;
+}
+
+export interface StartSidecarRequest {
+  callerSidecarName?: string;
+  callerSidecarDepth?: number;
 }
 
 export interface KillSessionRequest {
