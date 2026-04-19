@@ -85,7 +85,7 @@ describe("startServer", () => {
 
     const originalList = SessionService.prototype.list;
     const calls: Array<{ includeCompleted?: boolean }> = [];
-    SessionService.prototype.list = async function mockList(options) {
+    SessionService.prototype.list = async function mockList(options = {}) {
       calls.push(options);
       return [
         {
@@ -96,7 +96,7 @@ describe("startServer", () => {
           branch: "demo-done",
           worktree: true,
           worktreePath: join(worktreeDir, "demo", "demo-done"),
-          tmuxSession: null,
+          tmuxSession: "demo-done",
           launchCommand: "",
           status: "completed",
           state: "stopped",
@@ -121,9 +121,7 @@ describe("startServer", () => {
       expect(defaultResponse.status).toBe(200);
       await expect(defaultResponse.json()).resolves.toMatchObject([{ id: "demo-done" }]);
 
-      const completedResponse = await fetch(
-        `http://127.0.0.1:${port}/sessions?includeCompleted=1`,
-      );
+      const completedResponse = await fetch(`http://127.0.0.1:${port}/sessions?includeCompleted=1`);
       expect(completedResponse.status).toBe(200);
       await expect(completedResponse.json()).resolves.toMatchObject([
         { id: "demo-done", status: "completed" },
