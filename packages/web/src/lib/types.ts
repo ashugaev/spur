@@ -30,6 +30,26 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export type SpurTodoStatus = "running" | "completed" | "failed";
+export type SpurTodoItemStatus = "pending" | "done" | "skipped" | "failed";
+
+export interface SpurTodoItem {
+  id: number;
+  text: string;
+  status: SpurTodoItemStatus;
+  summary?: string;
+}
+
+export interface SpurTodoState {
+  status: SpurTodoStatus;
+  total: number;
+  done: number;
+  skipped: number;
+  failed: number;
+  items: SpurTodoItem[];
+  lastNudgeAt?: string;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -47,6 +67,7 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  todo?: SpurTodoState;
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
@@ -90,6 +111,7 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  todo?: SpurTodoState;
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
@@ -129,6 +151,7 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    ...(session.todo ? { todo: session.todo } : {}),
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,

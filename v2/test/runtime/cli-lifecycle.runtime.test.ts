@@ -2251,6 +2251,9 @@ projects:
       status: "running",
       total: 0,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
     });
 
     const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
@@ -2258,6 +2261,8 @@ projects:
       accept: (value) =>
         value.includes("[Spur todo]") &&
         value.includes(".spur/todo.md") &&
+        value.includes("[s]") &&
+        value.includes("[f]") &&
         value.includes("ship the task"),
     });
     const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
@@ -2265,6 +2270,8 @@ projects:
       accept: (value) =>
         value.includes("[Spur todo]") &&
         value.includes(".spur/todo.md") &&
+        value.includes("[s]") &&
+        value.includes("[f]") &&
         value.includes("ship the task"),
     });
 

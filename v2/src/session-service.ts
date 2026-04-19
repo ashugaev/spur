@@ -1504,7 +1504,9 @@ export class SessionService {
           }
         : undefined;
       const todoState: SessionTodoState | undefined =
-        todo && !steps ? { status: "running", total: 0, done: 0 } : undefined;
+        todo && !steps
+          ? { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] }
+          : undefined;
       const runningRecord: SessionRecord = {
         ...placeholder,
         planMode,
@@ -3570,8 +3572,15 @@ export class SessionService {
     }
     const snapshot = readTodoSnapshot(session.worktreePath);
     const newState = todoStateFromSnapshot(snapshot);
+    const todoChanged =
+      newState.status !== session.todo.status ||
+      newState.total !== session.todo.total ||
+      newState.done !== session.todo.done ||
+      newState.skipped !== session.todo.skipped ||
+      newState.failed !== session.todo.failed ||
+      JSON.stringify(newState.items) !== JSON.stringify(session.todo.items);
 
-    if (newState.total !== session.todo.total || newState.done !== session.todo.done) {
+    if (todoChanged) {
       writeSession(this.config.dataDir, {
         ...session,
         updatedAt: nowIso(),
@@ -3579,18 +3588,25 @@ export class SessionService {
       });
     }
 
-    if (snapshot?.allDone) {
+    if (snapshot?.allResolved) {
+      const terminalStatus = newState.status;
       writeSession(this.config.dataDir, {
         ...(readSession(this.config.dataDir, sessionId) ?? session),
         updatedAt: nowIso(),
-        todo: { ...session.todo, ...newState, status: "completed" },
+        todo: { ...session.todo, ...newState, status: terminalStatus },
       });
-      this.logEvent("session.todo.completed", {
-        level: "info",
-        sessionId,
-        projectId: session.project,
-        message: `Todo list completed for ${sessionId} (${newState.done}/${newState.total})`,
-      });
+      this.logEvent(
+        terminalStatus === "failed" ? "session.todo.failed" : "session.todo.completed",
+        {
+          level: "info",
+          sessionId,
+          projectId: session.project,
+          message:
+            terminalStatus === "failed"
+              ? `Todo list finished with failures for ${sessionId} (${newState.done} done, ${newState.skipped} skipped, ${newState.failed} failed)`
+              : `Todo list completed for ${sessionId} (${newState.done} done, ${newState.skipped} skipped)`,
+        },
+      );
       return;
     }
 
@@ -3618,7 +3634,7 @@ export class SessionService {
         level: "info",
         sessionId,
         projectId: session.project,
-        message: `Nudged ${sessionId}: ${newState.done}/${newState.total} tasks done`,
+        message: `Nudged ${sessionId}: ${newState.done} done, ${newState.skipped} skipped, ${newState.failed} failed, ${snapshot.pending} pending`,
       });
     }
   }

@@ -41,6 +41,8 @@ import {
   toDashboardSession,
   type ConversationResponse,
   type DashboardSession,
+  type SpurTodoItemStatus,
+  type SpurTodoStatus,
   type SpurSessionView,
 } from "@/lib/types";
 
@@ -84,6 +86,32 @@ function StopIcon() {
       <path d="M4 4h8v8H4z" />
     </svg>
   );
+}
+
+function formatTodoStatusLabel(status: SpurTodoItemStatus | SpurTodoStatus): string {
+  if (status === "running") return "running";
+  if (status === "done") return "done";
+  if (status === "skipped") return "skipped";
+  if (status === "failed") return "failed";
+  if (status === "completed") return "completed";
+  return "pending";
+}
+
+function todoStatusClassName(status: SpurTodoItemStatus | SpurTodoStatus): string {
+  if (status === "done" || status === "completed") {
+    return "border-[var(--color-status-ready)] text-[var(--color-status-ready)]";
+  }
+  if (status === "skipped") {
+    return "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
+  }
+  if (status === "failed") {
+    return "border-[var(--color-status-error)] text-[var(--color-status-error)]";
+  }
+  return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
+}
+
+function todoSummaryLabel(status: SpurTodoItemStatus): string {
+  return status === "done" ? "Summary" : "Reason";
 }
 
 const POLL_INTERVAL_MS = 4_000;
@@ -419,6 +447,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
+  const todoResolvedCount = session ? (session.todo?.done ?? 0) : 0;
+  const todoSkippedCount = session ? (session.todo?.skipped ?? 0) : 0;
+  const todoFailedCount = session ? (session.todo?.failed ?? 0) : 0;
+  const todoTerminalCount = todoResolvedCount + todoSkippedCount + todoFailedCount;
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -496,6 +528,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {hasServiceProblems(session) ? (
                 <span className="border border-orange-400/30 px-2 py-0.5 text-orange-200">
                   service issue
+                </span>
+              ) : null}
+              {session.todo ? (
+                <span
+                  className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
+                >
+                  {`todo ${todoTerminalCount}/${session.todo.total} ${formatTodoStatusLabel(session.todo.status)}`}
                 </span>
               ) : null}
             </div>
@@ -648,6 +687,85 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       is ready.
                     </p>
                   ) : null}
+                </section>
+              ) : null}
+
+              {session.todo ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Todo
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
+                      >
+                        {formatTodoStatusLabel(session.todo.status)}
+                      </span>
+                      <span className="text-[var(--color-text-secondary)]">
+                        {`${todoTerminalCount}/${session.todo.total} resolved`}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid gap-2 text-[var(--color-text-secondary)] sm:grid-cols-2">
+                      {[
+                        ["Done", String(session.todo.done)],
+                        ["Skipped", String(session.todo.skipped)],
+                        ["Failed", String(session.todo.failed)],
+                        ["Pending", String(session.todo.total - todoTerminalCount)],
+                      ].map(([label, value]) => (
+                        <div
+                          key={label}
+                          className="flex items-center justify-between border-b border-[var(--color-border-subtle)] py-1"
+                        >
+                          <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                            {label}
+                          </span>
+                          <span className="text-[var(--color-text-primary)]">{value}</span>
+                        </div>
+                      ))}
+                    </div>
+                    {session.todo.items.length > 0 ? (
+                      <ol aria-label="Todo list" className="mt-3 space-y-2">
+                        {session.todo.items.map((item) => (
+                          <li
+                            key={`${session.id}:todo:${item.id}`}
+                            className="border border-[var(--color-border-default)] px-3 py-2"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                                  #{item.id}
+                                </div>
+                                <div className="mt-1 whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
+                                  {item.text}
+                                </div>
+                                {item.summary ? (
+                                  <div className="mt-2 border-l border-[var(--color-border-strong)] pl-2 text-[var(--color-text-secondary)]">
+                                    <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                                      {todoSummaryLabel(item.status)}
+                                    </span>
+                                    <div className="mt-1 whitespace-pre-wrap break-words">
+                                      {item.summary}
+                                    </div>
+                                  </div>
+                                ) : null}
+                              </div>
+                              <span
+                                className={`border px-2 py-0.5 uppercase ${todoStatusClassName(item.status)}`}
+                              >
+                                {formatTodoStatusLabel(item.status)}
+                              </span>
+                            </div>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="mt-3 text-[var(--color-text-secondary)]">
+                        Waiting for the agent to create <code>.spur/todo.md</code>.
+                      </p>
+                    )}
+                  </div>
                 </section>
               ) : null}
 

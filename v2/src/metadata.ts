@@ -66,7 +66,8 @@ function githubSnapshotFilePath(
 }
 
 function readSessionFile(path: string): SessionRecord {
-  return JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  const session = JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  return session.todo ? { ...session, todo: normalizeTodoState(session.todo) } : session;
 }
 
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
@@ -134,10 +135,19 @@ function normalizeQueuedMessagesState(
 }
 
 function normalizeTodoState(todo: SessionTodoState): SessionTodoState {
+  const legacyTodo = todo as Partial<SessionTodoState>;
   return {
     status: todo.status,
     total: todo.total,
     done: todo.done,
+    skipped: legacyTodo.skipped ?? 0,
+    failed: legacyTodo.failed ?? 0,
+    items: (legacyTodo.items ?? []).map((item) => ({
+      id: item.id,
+      text: item.text,
+      status: item.status,
+      ...(item.summary !== undefined ? { summary: item.summary } : {}),
+    })),
     ...(todo.lastNudgeAt !== undefined ? { lastNudgeAt: todo.lastNudgeAt } : {}),
   };
 }

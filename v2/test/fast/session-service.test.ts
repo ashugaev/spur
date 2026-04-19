@@ -992,6 +992,9 @@ describe("SessionService", () => {
       status: "running",
       total: 0,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
     });
     expect(sessions.get("api-1")?.pipeline).toBeUndefined();
   });
@@ -1104,6 +1107,9 @@ describe("SessionService", () => {
       status: "running",
       total: 0,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
     });
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
   });
@@ -1130,6 +1136,9 @@ describe("SessionService", () => {
         status: "running",
         total: 0,
         done: 0,
+        skipped: 0,
+        failed: 0,
+        items: [],
       },
     });
     readAgentHookStateMock
@@ -1167,12 +1176,80 @@ describe("SessionService", () => {
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
-      expect.stringContaining("[Spur todo] 1/2 tasks complete."),
+      expect.stringContaining("[Spur todo] 1/2 tasks resolved (1 done)."),
       {
         agent: "codex",
       },
     );
     expect(sessions.get("api-1")?.todo?.lastNudgeAt).toBe("2026-03-18T10:05:00.000Z");
+  });
+
+  it("marks todo failed when every item is terminal and one item failed", async () => {
+    const sessions = createSessionStore();
+    const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-failed-"));
+    mkdirSync(`${worktreePath}/.spur`, { recursive: true });
+    writeFileSync(
+      `${worktreePath}/.spur/todo.md`,
+      "- [x] #1 Ship API :: Added the endpoint\n- [f] #2 Deploy to staging :: Missing credentials\n",
+      "utf8",
+    );
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath,
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      todo: {
+        status: "running",
+        total: 0,
+        done: 0,
+        skipped: 0,
+        failed: 0,
+        items: [],
+      },
+    });
+    mockClaudeJsonlState("waiting");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await (
+        service as unknown as {
+          checkTodoProgress: (sessionId: string, session: SessionRecord) => Promise<void>;
+        }
+      ).checkTodoProgress("api-1", sessions.get("api-1") as SessionRecord);
+    } finally {
+      service.dispose();
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+
+    expect(sessions.get("api-1")?.todo).toMatchObject({
+      status: "failed",
+      total: 2,
+      done: 1,
+      skipped: 0,
+      failed: 1,
+      items: [
+        { id: 1, status: "done", summary: "Added the endpoint" },
+        { id: 2, status: "failed", summary: "Missing credentials" },
+      ],
+    });
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.todo.failed",
+        sessionId: "api-1",
+      }),
+    );
   });
 
   it("resumes an unfinished pipeline into a cooldown before the next auto-step", async () => {

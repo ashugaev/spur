@@ -90,11 +90,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 - PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
 
-- `spawn --todo` enables agent-managed todo list mode, injects todo instructions into the initial prompt, and persists `todo: { status: "running", total: 0, done: 0 }` in the session record.
+- `spawn --todo` enables agent-managed todo list mode, injects todo instructions into the initial prompt, and persists `todo: { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] }` in the session record.
 - Config can define project default `spawn.todo`, and the request `--todo` flag overrides it.
-- Todo parser extracts markdown checkbox items with `#ID` format and tracks done vs pending counts.
-- Todo nudge fires when the agent returns to `waiting` with incomplete todo items, respects a 60-second cooldown, and includes progress and next-item hints.
-- Todo state transitions to `completed` when all items are checked off.
+- Todo parser extracts markdown checkbox items with `#ID` format, supports `[ ]`, `[x]`, `[s]`, and `[f]`, and preserves optional terminal summaries after `::`.
+- Todo nudge fires when the agent returns to `waiting` with unresolved todo items, respects a 60-second cooldown, and includes resolved counts plus the next pending item hint.
+- Todo state transitions to `completed` when all items are terminal without failures, and to `failed` when all items are terminal but one or more items are marked failed.
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).

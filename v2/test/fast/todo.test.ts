@@ -11,15 +11,17 @@ import {
 import type { SessionTodoState } from "../../src/types.js";
 
 describe("parseTodoFile", () => {
-  it("parses a mixed todo list", () => {
+  it("parses pending, done, skipped, and failed items", () => {
     const content = `- [ ] #1 Research the codebase
-- [x] #2 Implement the feature
-- [ ] #3 Write tests`;
+- [x] #2 Implement the feature :: Added API wiring
+- [s] #3 Optional cleanup :: Not needed after the merge
+- [f] #4 Deploy to staging :: Missing credentials`;
     const items = parseTodoFile(content);
     expect(items).toEqual([
-      { id: 1, text: "Research the codebase", done: false },
-      { id: 2, text: "Implement the feature", done: true },
-      { id: 3, text: "Write tests", done: false },
+      { id: 1, text: "Research the codebase", status: "pending" },
+      { id: 2, text: "Implement the feature", status: "done", summary: "Added API wiring" },
+      { id: 3, text: "Optional cleanup", status: "skipped", summary: "Not needed after the merge" },
+      { id: 4, text: "Deploy to staging", status: "failed", summary: "Missing credentials" },
     ]);
   });
 
@@ -41,33 +43,65 @@ describe("todoStateFromSnapshot", () => {
       status: "running",
       total: 0,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
     });
   });
 
-  it("returns completed when all done", () => {
+  it("returns completed when all items are terminal without failures", () => {
     const snapshot: TodoSnapshot = {
-      items: [{ id: 1, text: "task", done: true }],
-      total: 1,
+      items: [
+        { id: 1, text: "task", status: "done", summary: "shipped" },
+        { id: 2, text: "cleanup", status: "skipped", summary: "not needed" },
+      ],
+      total: 2,
       done: 1,
-      allDone: true,
-      raw: "- [x] #1 task",
+      skipped: 1,
+      failed: 0,
+      pending: 0,
+      allResolved: true,
+      raw: "- [x] #1 task :: shipped\n- [s] #2 cleanup :: not needed",
     };
     expect(todoStateFromSnapshot(snapshot)).toEqual({
       status: "completed",
-      total: 1,
+      total: 2,
       done: 1,
+      skipped: 1,
+      failed: 0,
+      items: snapshot.items,
     });
+  });
+
+  it("returns failed when all items are terminal and at least one failed", () => {
+    const snapshot: TodoSnapshot = {
+      items: [
+        { id: 1, text: "a", status: "done", summary: "ok" },
+        { id: 2, text: "b", status: "failed", summary: "blocked" },
+      ],
+      total: 2,
+      done: 1,
+      skipped: 0,
+      failed: 1,
+      pending: 0,
+      allResolved: true,
+      raw: "",
+    };
+    expect(todoStateFromSnapshot(snapshot).status).toBe("failed");
   });
 
   it("returns running when items remain", () => {
     const snapshot: TodoSnapshot = {
       items: [
-        { id: 1, text: "a", done: true },
-        { id: 2, text: "b", done: false },
+        { id: 1, text: "a", status: "done", summary: "ok" },
+        { id: 2, text: "b", status: "pending" },
       ],
       total: 2,
       done: 1,
-      allDone: false,
+      skipped: 0,
+      failed: 0,
+      pending: 1,
+      allResolved: false,
       raw: "",
     };
     expect(todoStateFromSnapshot(snapshot).status).toBe("running");
@@ -81,6 +115,8 @@ describe("formatTodoSpawnMessage", () => {
     expect(msg).toContain(".spur/todo.md");
     expect(msg).toContain("ship the task");
     expect(msg).toContain("- [ ] #1");
+    expect(msg).toContain("- [s] #3");
+    expect(msg).toContain('append " :: <summary or reason>"');
   });
 });
 
@@ -88,43 +124,78 @@ describe("formatTodoNudgeMessage", () => {
   it("includes progress and next item", () => {
     const snapshot: TodoSnapshot = {
       items: [
-        { id: 1, text: "done task", done: true },
-        { id: 2, text: "next task", done: false },
+        { id: 1, text: "done task", status: "done", summary: "ok" },
+        { id: 2, text: "skipped task", status: "skipped", summary: "n/a" },
+        { id: 3, text: "next task", status: "pending" },
       ],
-      total: 2,
+      total: 3,
       done: 1,
-      allDone: false,
+      skipped: 1,
+      failed: 0,
+      pending: 1,
+      allResolved: false,
       raw: "",
     };
     const msg = formatTodoNudgeMessage(snapshot);
-    expect(msg).toContain("1/2 tasks complete");
-    expect(msg).toContain("#2 next task");
-    expect(msg).toContain("cannot stop");
+    expect(msg).toContain("2/3 tasks resolved");
+    expect(msg).toContain("1 done, 1 skipped");
+    expect(msg).toContain("#3 next task");
+    expect(msg).toContain("[x], [s], or [f]");
   });
 });
 
 describe("shouldNudge", () => {
   const snapshot: TodoSnapshot = {
-    items: [{ id: 1, text: "task", done: false }],
+    items: [{ id: 1, text: "task", status: "pending" }],
     total: 1,
     done: 0,
-    allDone: false,
+    skipped: 0,
+    failed: 0,
+    pending: 1,
+    allResolved: false,
     raw: "",
   };
 
   it("returns true when todo is running with incomplete items", () => {
-    const state: SessionTodoState = { status: "running", total: 1, done: 0 };
+    const state: SessionTodoState = {
+      status: "running",
+      total: 1,
+      done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    };
     expect(shouldNudge(state, snapshot)).toBe(true);
   });
 
-  it("returns false when all items are done", () => {
-    const state: SessionTodoState = { status: "running", total: 1, done: 1 };
-    const doneSnapshot: TodoSnapshot = { ...snapshot, allDone: true, done: 1 };
+  it("returns false when all items are terminal", () => {
+    const state: SessionTodoState = {
+      status: "running",
+      total: 1,
+      done: 1,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    };
+    const doneSnapshot: TodoSnapshot = {
+      ...snapshot,
+      items: [{ id: 1, text: "task", status: "done", summary: "ok" }],
+      done: 1,
+      pending: 0,
+      allResolved: true,
+    };
     expect(shouldNudge(state, doneSnapshot)).toBe(false);
   });
 
   it("returns false when todo status is completed", () => {
-    const state: SessionTodoState = { status: "completed", total: 1, done: 1 };
+    const state: SessionTodoState = {
+      status: "completed",
+      total: 1,
+      done: 1,
+      skipped: 0,
+      failed: 0,
+      items: [],
+    };
     expect(shouldNudge(state, snapshot)).toBe(false);
   });
 
@@ -133,6 +204,9 @@ describe("shouldNudge", () => {
       status: "running",
       total: 1,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
       lastNudgeAt: new Date(Date.now() - TODO_NUDGE_COOLDOWN_MS / 2).toISOString(),
     };
     expect(shouldNudge(state, snapshot)).toBe(false);
@@ -143,6 +217,9 @@ describe("shouldNudge", () => {
       status: "running",
       total: 1,
       done: 0,
+      skipped: 0,
+      failed: 0,
+      items: [],
       lastNudgeAt: new Date(Date.now() - TODO_NUDGE_COOLDOWN_MS - 1000).toISOString(),
     };
     expect(shouldNudge(state, snapshot)).toBe(true);

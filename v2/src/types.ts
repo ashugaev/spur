@@ -20,7 +20,8 @@ export interface SessionLink {
   url: string;
 }
 export type SessionPipelineStatus = "running" | "completed" | "errored";
-export type SessionTodoStatus = "running" | "completed";
+export type SessionTodoStatus = "running" | "completed" | "failed";
+export type TodoItemStatus = "pending" | "done" | "skipped" | "failed";
 
 export interface SessionSlots {
   title?: string;
@@ -191,10 +192,20 @@ export interface SessionPipelineState {
   error?: string;
 }
 
+export interface SessionTodoItem {
+  id: number;
+  text: string;
+  status: TodoItemStatus;
+  summary?: string;
+}
+
 export interface SessionTodoState {
   status: SessionTodoStatus;
   total: number;
   done: number;
+  skipped: number;
+  failed: number;
+  items: SessionTodoItem[];
   lastNudgeAt?: string;
 }
 

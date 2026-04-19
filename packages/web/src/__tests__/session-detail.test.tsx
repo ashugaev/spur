@@ -1004,7 +1004,9 @@ describe("SessionDetail voice input", () => {
         body: JSON.stringify({ message: "Queued follow up", queue: true }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    });
   });
 
   it("sends immediately without queue when clicking Send now", async () => {
@@ -1042,7 +1044,127 @@ describe("SessionDetail voice input", () => {
         }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    });
+  });
+
+  it("renders todo progress, terminal statuses, and per-item summaries", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              todo: {
+                status: "failed",
+                total: 4,
+                done: 1,
+                skipped: 1,
+                failed: 1,
+                items: [
+                  {
+                    id: 1,
+                    text: "Research the codebase",
+                    status: "done",
+                    summary: "Mapped the session flow",
+                  },
+                  {
+                    id: 2,
+                    text: "Optional cleanup",
+                    status: "skipped",
+                    summary: "Not needed after the merge",
+                  },
+                  {
+                    id: 3,
+                    text: "Backfill migration path",
+                    status: "failed",
+                    summary: "Blocked by stale upstream contract",
+                  },
+                  { id: 4, text: "Update the dashboard", status: "pending" },
+                ],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /todo/i })).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("todo 3/4 failed")).toBeInTheDocument();
+    expect(screen.getByText("3/4 resolved")).toBeInTheDocument();
+    expect(screen.getByText("Done")).toBeInTheDocument();
+    expect(screen.getByText("Skipped")).toBeInTheDocument();
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.getByText("Mapped the session flow")).toBeInTheDocument();
+    expect(screen.getByText("Not needed after the merge")).toBeInTheDocument();
+    expect(screen.getByText("Blocked by stale upstream contract")).toBeInTheDocument();
+    expect(screen.getByText("Update the dashboard")).toBeInTheDocument();
+    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("skipped").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("done").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
+  });
+
+  it("renders running todo status while items are still pending", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              todo: {
+                status: "running",
+                total: 2,
+                done: 1,
+                skipped: 0,
+                failed: 0,
+                items: [
+                  {
+                    id: 1,
+                    text: "Research the codebase",
+                    status: "done",
+                    summary: "Mapped the flow",
+                  },
+                  { id: 2, text: "Update the dashboard", status: "pending" },
+                ],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("todo 1/2 running")).toBeInTheDocument();
+    });
+
+    expect(screen.getAllByText("running").length).toBeGreaterThan(0);
+    expect(screen.getByText("1/2 resolved")).toBeInTheDocument();
   });
 
   it("renders the full queued stack in FIFO order", async () => {

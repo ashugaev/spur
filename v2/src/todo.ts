@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import type { SessionTodoState } from "./types.js";
+import type { SessionTodoItem, SessionTodoState, TodoItemStatus } from "./types.js";
 
 const TODO_FILENAME = "todo.md";
 const TODO_DIR = ".spur";
@@ -8,21 +8,40 @@ const TODO_DIR = ".spur";
 /** Minimum seconds between nudges for the same session. */
 export const TODO_NUDGE_COOLDOWN_MS = 60_000;
 
-export interface TodoItem {
-  id: number;
-  text: string;
-  done: boolean;
-}
+export type TodoItem = SessionTodoItem;
 
 export interface TodoSnapshot {
   items: TodoItem[];
   total: number;
   done: number;
-  allDone: boolean;
+  skipped: number;
+  failed: number;
+  pending: number;
+  allResolved: boolean;
   raw: string;
 }
 
-const ITEM_RE = /^- \[([ x])\] #(\d+) (.+)$/;
+const ITEM_RE = /^- \[([ xsf])\] #(\d+) (.+)$/i;
+const SUMMARY_SEPARATOR = " :: ";
+
+function parseTodoStatus(marker: string): TodoItemStatus {
+  const normalized = marker.toLowerCase();
+  if (normalized === "x") return "done";
+  if (normalized === "s") return "skipped";
+  if (normalized === "f") return "failed";
+  return "pending";
+}
+
+function splitTodoTextAndSummary(value: string): Pick<TodoItem, "text" | "summary"> {
+  const trimmed = value.trim();
+  const separatorIndex = trimmed.indexOf(SUMMARY_SEPARATOR);
+  if (separatorIndex === -1) {
+    return { text: trimmed };
+  }
+  const text = trimmed.slice(0, separatorIndex).trim();
+  const summary = trimmed.slice(separatorIndex + SUMMARY_SEPARATOR.length).trim();
+  return summary ? { text, summary } : { text };
+}
 
 export function todoFilePath(worktreePath: string): string {
   return join(worktreePath, TODO_DIR, TODO_FILENAME);
@@ -33,10 +52,13 @@ export function parseTodoFile(content: string): TodoItem[] {
   for (const line of content.split("\n")) {
     const m = ITEM_RE.exec(line.trim());
     if (m) {
+      const status = parseTodoStatus(m[1] ?? "");
+      const { text, summary } = splitTodoTextAndSummary(m[3] ?? "");
       items.push({
         id: Number(m[2]),
-        text: m[3] ?? "",
-        done: m[1] === "x",
+        text,
+        status,
+        ...(summary ? { summary } : {}),
       });
     }
   }
@@ -54,12 +76,18 @@ export function readTodoSnapshot(worktreePath: string): TodoSnapshot | null {
     if (items.length === 0) {
       return null;
     }
-    const done = items.filter((i) => i.done).length;
+    const done = items.filter((item) => item.status === "done").length;
+    const skipped = items.filter((item) => item.status === "skipped").length;
+    const failed = items.filter((item) => item.status === "failed").length;
+    const pending = items.filter((item) => item.status === "pending").length;
     return {
       items,
       total: items.length,
       done,
-      allDone: done === items.length,
+      skipped,
+      failed,
+      pending,
+      allResolved: pending === 0,
       raw,
     };
   } catch {
@@ -69,12 +97,15 @@ export function readTodoSnapshot(worktreePath: string): TodoSnapshot | null {
 
 export function todoStateFromSnapshot(snapshot: TodoSnapshot | null): SessionTodoState {
   if (!snapshot) {
-    return { status: "running", total: 0, done: 0 };
+    return { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] };
   }
   return {
-    status: snapshot.allDone ? "completed" : "running",
+    status: snapshot.pending > 0 ? "running" : snapshot.failed > 0 ? "failed" : "completed",
     total: snapshot.total,
     done: snapshot.done,
+    skipped: snapshot.skipped,
+    failed: snapshot.failed,
+    items: snapshot.items,
   };
 }
 
@@ -84,24 +115,34 @@ Your first step is to analyze the task and create a todo list at .spur/todo.md.
 Format: one line per task, using markdown checkboxes with numeric IDs.
 Example:
 - [ ] #1 Research the codebase
-- [ ] #2 Implement the feature
-- [ ] #3 Write tests
+- [x] #2 Implement the feature :: Added the session API and tests
+- [s] #3 Optional cleanup :: Not needed after the merge
+- [f] #4 Deploy to staging :: Missing required credentials
 
 Rules:
-- Mark each task [x] when complete
+- Use [ ] for pending, [x] for done, [s] for skipped, [f] for failed
+- When marking [x], [s], or [f], append " :: <summary or reason>"
 - Add new tasks: append to end, prepend to start, or insert after any #ID
 - Keep IDs unique and sequential
-- You cannot stop until ALL tasks are [x]
+- You cannot stop until every task is terminal: [x], [s], or [f]
 
 Task:
 ${prompt}`;
 }
 
 export function formatTodoNudgeMessage(snapshot: TodoSnapshot): string {
-  const next = snapshot.items.find((i) => !i.done);
-  const progress = `${snapshot.done}/${snapshot.total} tasks complete.`;
+  const next = snapshot.items.find((item) => item.status === "pending");
+  const resolved = snapshot.total - snapshot.pending;
+  const detail = [`${snapshot.done} done`];
+  if (snapshot.skipped > 0) {
+    detail.push(`${snapshot.skipped} skipped`);
+  }
+  if (snapshot.failed > 0) {
+    detail.push(`${snapshot.failed} failed`);
+  }
+  const progress = `${resolved}/${snapshot.total} tasks resolved (${detail.join(", ")}).`;
   const nextHint = next ? ` Next: #${next.id} ${next.text}.` : "";
-  return `[Spur todo] ${progress}${nextHint} You cannot stop until all tasks are done.`;
+  return `[Spur todo] ${progress}${nextHint} You cannot stop until every task is marked [x], [s], or [f].`;
 }
 
 export function shouldNudge(
@@ -111,7 +152,7 @@ export function shouldNudge(
   if (!todoState || todoState.status !== "running") {
     return false;
   }
-  if (!snapshot || snapshot.allDone) {
+  if (!snapshot || snapshot.allResolved) {
     return false;
   }
   if (todoState.lastNudgeAt) {

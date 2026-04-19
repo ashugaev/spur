@@ -202,6 +202,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
 
+### S2d: Todo state
+
+- Visible when the session payload includes `todo`
+- Header badge shows `todo <resolved>/<total> <status>`
+- Section header is `TODO`
+- Summary block shows `Done`, `Skipped`, `Failed`, and `Pending` counts
+- Each todo item renders `#ID`, task text, and a status chip (`pending`, `done`, `skipped`, `failed`)
+- Terminal items show the agent-provided summary/reason text when present
+- When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `.spur/todo.md`
+
 ### S3: Message section
 
 - Textarea for sending messages when session accepts input
