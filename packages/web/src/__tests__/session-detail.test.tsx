@@ -68,6 +68,31 @@ class EmptyAudioMediaRecorder extends MockMediaRecorder {
   }
 }
 
+class MobilePwaMediaRecorder extends MockMediaRecorder {
+  private requestedFlush = false;
+
+  requestData() {
+    this.requestedFlush = true;
+  }
+
+  override stop() {
+    this.state = "inactive";
+    if (this.requestedFlush) {
+      this.emit("stop");
+      queueMicrotask(() => {
+        this.emit(
+          "dataavailable",
+          new Blob(["voice-audio"], {
+            type: this.mimeType,
+          }),
+        );
+      });
+      return;
+    }
+    super.stop();
+  }
+}
+
 function sessionFixture(overrides?: Partial<SpurSessionView>) {
   return {
     id: "api-a1",
@@ -227,6 +252,59 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(fetchMock).not.toHaveBeenCalledWith("/api/runtime/voice/transcribe", expect.anything());
+  });
+
+  it("records audio on mobile-style recorders that misorder the final chunk after requestData", async () => {
+    vi.stubGlobal("MediaRecorder", MobilePwaMediaRecorder as unknown as typeof MediaRecorder);
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Mobile PWA voice still works" }), {
+          status: 200,
+        });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Mobile PWA voice still works")).toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByText(
+        "Voice recording captured no audio. Check your microphone input and try again.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/runtime/voice/transcribe",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 
   it("shows the final transcribe retry error instead of a raw JSON blob", async () => {

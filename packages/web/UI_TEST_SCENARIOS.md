@@ -208,6 +208,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
