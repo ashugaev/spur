@@ -1008,6 +1008,70 @@ projects:
     }
   });
 
+  it.each(["claude", "codex"] as const)(
+    "falls back to session-id branch naming when %s preflight returns empty output",
+    async (agent) => {
+      const port = await findFreePort();
+      const context = await createRuntimeTestContext(port);
+      const sessionPrefix = `rt-preflight-empty-${agent}-${port}`;
+      activeContexts.push({ context, sessionPrefix });
+      await syncTmuxEnvironment({
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      });
+      const configPath = await context.writeConfig(
+        `${agent}-preflight-empty.yaml`,
+        baseConfig(
+          context,
+          sessionPrefix,
+          `    preflight:
+      prompt: "Return empty preflight output"
+`,
+        ),
+      );
+      const daemon = await context.startDaemon(configPath);
+      currentActiveContext().daemonPid = daemon.info.pid;
+
+      const spawned = JSON.parse(
+        (
+          await context.execCli([
+            "--config",
+            configPath,
+            "spawn",
+            "api",
+            `runtime empty preflight prompt for ${agent}`,
+            "--agent",
+            agent,
+            "--json",
+          ])
+        ).stdout,
+      ) as SessionView;
+
+      expect(spawned.branch).toBe(spawned.id);
+      expect(spawned.branchSource).toBeUndefined();
+
+      const branch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: spawned.worktreePath,
+      });
+      expect(branch.stdout.trim()).toBe(spawned.id);
+
+      await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+
+      const respawned = JSON.parse(
+        (await context.execCli(["--config", configPath, "respawn", spawned.id, "--json"])).stdout,
+      ) as SessionView;
+
+      expect(respawned.branch).toBe(respawned.id);
+      expect(respawned.branchSource).toBeUndefined();
+
+      const respawnedBranch = await execFileAsync("git", ["branch", "--show-current"], {
+        cwd: respawned.worktreePath,
+      });
+      expect(respawnedBranch.stdout.trim()).toBe(respawned.id);
+    },
+  );
+
   it("rejects an explicit branch when another worktree already has it checked out", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

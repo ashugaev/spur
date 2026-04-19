@@ -57,7 +57,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
   if (!trimmed) {
-    throw new Error("Spawn preflight returned empty output");
+    return {};
   }
   if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
     return {};
