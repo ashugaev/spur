@@ -1148,6 +1148,70 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
+  it("background spawn reserves sidecar ports during autostart and passes them into sidecar env", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: true,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+              },
+            },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("sidecarPorts");
+    await vi.waitFor(() => {
+      expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "api-1",
+          sidecarName: "dev",
+          env: expect.objectContaining({
+            SPUR_RESERVED_PORT_DEV: "3000",
+          }),
+        }),
+      );
+    });
+    expect(
+      writeSessionMock.mock.calls.find(
+        ([, session]) => session.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV === 3000,
+      )?.[1],
+    ).toMatchObject({
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
+    expect(writeSessionMock.mock.calls.at(-1)?.[1]).toMatchObject({
+      id: "api-1",
+      status: "running",
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
+  });
+
   it("injects self-destruct instructions into foreground and background spawn prompts", async () => {
     mockClaudeJsonlState("waiting");
     const { SessionService } = await loadSessionServiceModule();
