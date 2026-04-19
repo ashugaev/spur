@@ -201,7 +201,7 @@ function normalizeSpawnRequest(
   if (!prompt) {
     return normalized;
   }
-  if (!steps || steps.length === 0) {
+  if (normalized.planMode || !steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
@@ -2363,15 +2363,21 @@ export class SessionService {
         restorePrompt,
         planOptions,
       );
+      const effectivePlan =
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
-        throw new Error(
-          `Session is not restorable (no ${current.agent} resume state): ${sessionId}`,
-        );
+        this.logEvent("session.restore.started", {
+          level: "info",
+          sessionId,
+          projectId: current.project,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
+        });
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
-      if (current.agent === "claude") {
+      let restoreLaunchCommand = effectivePlan.launchCommand;
+      let restoreReadyMarkers = effectivePlan.readyMarkers;
+      if (current.agent === "claude" && launchPlan) {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
           current.worktreePath,
@@ -2380,7 +2386,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            launchPlan.launchCommand,
+            effectivePlan.launchCommand,
             planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -2413,7 +2419,7 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
+        effectivePlan.initialMessage,
         restoreSidecarNames,
       );
       await this.sendAgentMessage(current, restoreInitialMessage);
