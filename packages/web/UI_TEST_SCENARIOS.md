@@ -248,6 +248,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
+### S7: Display state override
+
+- When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`
+- When `session.state` is active (`working`, `waiting`, `needs_input`), a Claude conversation endpoint reporting `working` still overrides the badge to `working` (fast in-progress signal)
+
 ## Responsive
 
 ### R1: Mobile (<640px)

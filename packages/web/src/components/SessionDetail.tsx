@@ -332,11 +332,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const displayState = useMemo(
-    () =>
-      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
-    [conversation?.state, session?.agent, session?.state],
-  );
+  const displayState = useMemo(() => {
+    if (!session) return undefined;
+    if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
+      return session.state;
+    }
+    if (session.agent === "claude" && conversation?.state === "working") return "working";
+    return session.state;
+  }, [conversation?.state, session]);
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation

@@ -155,6 +155,13 @@ function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "paused";
 }
 
+function statusFallbackState(status: SessionStatus): SessionState {
+  if (status === "killed") return "killed";
+  if (status === "errored") return "error";
+  if (status === "paused" || status === "completed") return "stopped";
+  return "working"; // running, spawning
+}
+
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
@@ -926,7 +933,11 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    const fallback: ConversationResponse = {
+      messages: [],
+      durationMs,
+      state: statusFallbackState(session.status),
+    };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
