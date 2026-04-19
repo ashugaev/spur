@@ -1,13 +1,20 @@
-import { describe, expect, it } from "vitest";
-import {
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const ghMock = vi.fn();
+vi.mock("../../src/gh.js", () => ({
+  gh: ghMock,
+}));
+
+const {
   shortText,
   parseRepoFromUrl,
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
-  type GitHubCheck,
-  type GitHubPrSummary,
-} from "../../src/event-sources/github.js";
+  resolvePrSummary,
+} = await import("../../src/event-sources/github.js");
+type GitHubCheck = import("../../src/event-sources/github.js").GitHubCheck;
+type GitHubPrSummary = import("../../src/event-sources/github.js").GitHubPrSummary;
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -156,5 +163,72 @@ describe("hasMergeConflict", () => {
 
   it("returns false for null-ish fields", () => {
     expect(hasMergeConflict(prSummary({ mergeable: "", mergeStateStatus: "" }))).toBe(false);
+  });
+});
+
+describe("resolvePrSummary", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+  afterEach(() => {
+    ghMock.mockReset();
+  });
+
+  const listPr = {
+    number: 212,
+    title: "t",
+    url: "https://github.com/o/r/pull/212",
+    reviewDecision: "REVIEW_REQUIRED",
+  };
+
+  it("forces compute via pr view when pr list returns UNKNOWN mergeability", async () => {
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
+      )
+      .mockResolvedValueOnce(JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }));
+
+    const pr = await resolvePrSummary("/wt", "feature/x");
+    expect(pr?.mergeable).toBe("CONFLICTING");
+    expect(pr?.mergeStateStatus).toBe("DIRTY");
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(ghMock.mock.calls[1]).toEqual([
+      "/wt",
+      "pr",
+      "view",
+      "212",
+      "--json",
+      "mergeable,mergeStateStatus",
+    ]);
+  });
+
+  it("skips pr view when pr list already returns a resolved mergeability", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([{ ...listPr, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }]),
+    );
+
+    const pr = await resolvePrSummary("/wt", "feature/x");
+    expect(pr?.mergeable).toBe("MERGEABLE");
+    expect(pr?.mergeStateStatus).toBe("BLOCKED");
+    expect(ghMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps UNKNOWN when the pr view fallback fails", async () => {
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
+      )
+      .mockRejectedValueOnce(new Error("gh offline"));
+
+    const pr = await resolvePrSummary("/wt", "feature/x");
+    expect(pr?.mergeable).toBe("UNKNOWN");
+    expect(pr?.mergeStateStatus).toBe("UNKNOWN");
+  });
+
+  it("returns null when no PR matches the branch", async () => {
+    ghMock.mockResolvedValueOnce("[]");
+    const pr = await resolvePrSummary("/wt", "feature/x");
+    expect(pr).toBeNull();
+    expect(ghMock).toHaveBeenCalledTimes(1);
   });
 });
