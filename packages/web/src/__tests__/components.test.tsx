@@ -391,7 +391,11 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    const completedButton = await screen.findByRole("button", { name: /Completed/i });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Completed/i })).toHaveTextContent("1");
+    });
+
+    const completedButton = screen.getByRole("button", { name: /Completed/i });
     expect(within(completedButton).getByText("1").getAttribute("style")).toBeFalsy();
 
     fireEvent.click(completedButton);
