@@ -423,10 +423,7 @@ export async function ensureCodexHooksConfig(
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
   const trustedProjects = [...new Set((options?.trustedProjects ?? []).filter(Boolean))];
   const trustBlocks = trustedProjects
-    .map(
-      (projectPath) =>
-        `\n[projects.${JSON.stringify(projectPath)}]\ntrust_level = "trusted"\n`,
-    )
+    .map((projectPath) => `\n[projects.${JSON.stringify(projectPath)}]\ntrust_level = "trusted"\n`)
     .filter((block) => !baseConfig.includes(block.trim()))
     .join("");
   const configWithWarnings = baseConfig.includes("suppress_unstable_features_warning")

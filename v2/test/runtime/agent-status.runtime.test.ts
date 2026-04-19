@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionView } from "../../src/types.js";
 import { findFreePort, pollUntil } from "../helpers/common.js";
@@ -216,6 +218,31 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "waiting", 45_000);
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
+  });
+
+  it("Codex: spawn trusts the worktree path in the session-local config", async () => {
+    const { context, configPath } = await setup("codex-trust");
+    const session = await spawnSession(context, configPath, "codex");
+    const worktreePath = session.worktreePath;
+    if (!worktreePath) {
+      throw new Error("expected spawned Codex session to have a worktree path");
+    }
+    const configPathname = join(
+      context.dataDir,
+      "session-tools",
+      session.id,
+      "codex-home",
+      "config.toml",
+    );
+    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
+
+    const content = await pollUntil(async () => readFile(configPathname, "utf8").catch(() => ""), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(trustBlock),
+    });
+
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain(trustBlock);
   });
 
   it("Codex: pause → stopped, resume → waiting, kill → killed", async () => {
