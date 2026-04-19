@@ -93,7 +93,7 @@ export function hasMergeConflict(pr: GitHubPrSummary): boolean {
   );
 }
 
-async function resolvePrSummary(
+export async function resolvePrSummary(
   worktreePath: string,
   branch: string,
 ): Promise<GitHubPrSummary | null> {
@@ -118,14 +118,43 @@ async function resolvePrSummary(
   }> = JSON.parse(raw);
   const pr = prs[0];
   if (!pr) return null;
+
+  let mergeable = pr.mergeable ?? "";
+  let mergeStateStatus = pr.mergeStateStatus ?? "";
+  // `gh pr list` returns `UNKNOWN` until GitHub finishes computing mergeability;
+  // `gh pr view` forces the compute so merge_conflict signals are not silently dropped.
+  if (
+    normalizeGitHubState(mergeable) === "UNKNOWN" ||
+    normalizeGitHubState(mergeStateStatus) === "UNKNOWN"
+  ) {
+    try {
+      const rawView = await gh(
+        worktreePath,
+        "pr",
+        "view",
+        String(pr.number),
+        "--json",
+        "mergeable,mergeStateStatus",
+      );
+      const view = JSON.parse(rawView) as {
+        mergeable?: string | null;
+        mergeStateStatus?: string | null;
+      };
+      if (view.mergeable) mergeable = view.mergeable;
+      if (view.mergeStateStatus) mergeStateStatus = view.mergeStateStatus;
+    } catch {
+      // Leave UNKNOWN; next poll retries.
+    }
+  }
+
   return {
     number: pr.number,
     title: pr.title,
     url: pr.url,
     reviewDecision: normalizeReviewDecision(pr.reviewDecision),
     repo: parseRepoFromUrl(pr.url),
-    mergeable: pr.mergeable ?? "",
-    mergeStateStatus: pr.mergeStateStatus ?? "",
+    mergeable,
+    mergeStateStatus,
   };
 }
 

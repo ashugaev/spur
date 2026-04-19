@@ -38,7 +38,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
 - Busy manual `send` requests queue per session, flush after the agent returns to a prompt, and stay ahead of the next pipeline step.
 - Unfinished running pipelines resume after daemon restart without restarting the session.
-- Worktree creation fetches `origin`, fast-forwards a purely behind local branch, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
+- Worktree creation fetches `origin`, fast-forwards a clean checked-out local default branch that is purely behind, uses `origin/<defaultBranch>` as the new worktree base when that checked-out default branch is dirty and behind, creates explicit branches from `origin/<branch>` when needed, and fails fast when freshness cannot be proven.
 - Session service can also spawn in a shared workspace when `worktree=false`, rejects branch overrides that would mutate the shared repo, skips worktree cleanup on kill, rejects restore for shared workspace sessions, and rejects `defaultBranch` overrides outside worktree mode.
 - Opt-in project spawn preflight runs only for worktree spawns without an explicit `branch`, can use either an explicit `preflight.prompt` or Spur's default rule-or-defer prompt, accepts either one branch name or the `NO_PROJECT_RULES` sentinel, and fails before reserving a session id when preflight output is invalid.
 - `SessionService.preflight()` returns a suggested branch when the project has preflight config and worktree enabled.
@@ -115,7 +115,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` without `[prompt...]` creates a blank session, does not deliver an initial message, and does not apply default pipeline steps.
 - `spawn --json --plan` ignores manual and configured spawn steps and sends only the raw prompt to the agent.
-- `spawn --json` fetches `origin` before worktree creation, so a remote-advanced `main` lands in both the new Spur worktree and the local base branch.
+- `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
+- `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
 - `spawn --json` can use an opt-in project spawn preflight through built `claude` and `codex` one-shot paths, and the returned branch becomes the live worktree branch.
 - `spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
@@ -171,7 +172,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - State history records transitions during a Claude session lifecycle.
 - Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
-- Sidecar cleanup on kill/complete.
+- Sidecar cleanup on kill/complete/pause and failed spawn rollback.
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`, and `start` also allows one nested hop through the injected `spur-sidecar` helper.
 - Sidecar status reported in session view.
 
@@ -223,10 +224,11 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 - Sidecar auto-starts only on session spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
-- Reserved sidecar ports are assigned per live session at spawn, injected into sidecar env, and released after cleanup
+- Reserved sidecar ports are assigned when a sidecar starts, injected into sidecar env, and released after cleanup
+- Spawn continues when sidecar autostart cannot reserve a port; manual `sidecar start` fails fast until a port is released, then succeeds
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
-- Sidecar cleanup on kill/complete
+- Sidecar cleanup on kill/complete/pause and failed spawn rollback
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
 - Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
