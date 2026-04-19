@@ -23,7 +23,7 @@ bash scripts/setup.sh
 spur --version
 ```
 
-The setup script installs dependencies, builds `v2/` and `packages/web/`, and links the `spur` CLI globally.
+The setup script installs dependencies, builds `v2/`, and links the `spur` CLI globally.
 
 If `spur` is not on your `PATH` afterward, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -79,6 +79,8 @@ For an explicit production update on a host that runs `spur-daemon.service` and 
 ```bash
 pnpm main:deploy
 ```
+
+That command deploys the latest `origin/main` from a dedicated release clone. It does not rely on the current checkout being clean or on `main`.
 
 ## Local Validation
 

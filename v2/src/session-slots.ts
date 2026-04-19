@@ -16,6 +16,7 @@ export const SLOT_TOOL_NAME = "spur-slots";
 export const AGENT_STATE_TOOL_NAME = "spur-agent-state";
 const AGENT_STATE_UPDATER_NAME = "spur-agent-state-updater.mjs";
 const SPUR_WRAPPER_NAME = "spur";
+const SPUR_SESSION_WRAPPER_NAME = "spur-session";
 
 interface NormalizedSlotsUpdate {
   title?: string;
@@ -184,10 +185,19 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     { encoding: "utf8", mode: 0o755 },
   );
   writeFileSync(
+    join(toolDir, SPUR_SESSION_WRAPPER_NAME),
+    `#!/usr/bin/env bash
+set -euo pipefail
+exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} "$@"
+`,
+    { encoding: "utf8", mode: 0o755 },
+  );
+  writeFileSync(
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} slots --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_SESSION_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -289,7 +299,13 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar start --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="start"
+if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
+  action="$1"
+  shift
+fi
+exec "$SCRIPT_DIR/${SPUR_SESSION_WRAPPER_NAME}" sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

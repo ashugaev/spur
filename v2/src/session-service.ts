@@ -11,6 +11,12 @@ import {
 } from "./agents/index.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
+  codexHookHomePath,
+  captureCodexRolloutBaseline,
+  scanCodexRolloutForMessage,
+  type RolloutBaseline,
+} from "./agents/codex.js";
+import {
   readClaudeConversation,
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
@@ -87,8 +93,10 @@ import {
   type ServiceInstanceRecord,
   type ServiceInstanceView,
   type SendMessageRequest,
+  type StartSidecarRequest,
   type SessionRecord,
   type SessionStatus,
+  type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
   type SessionStateTransition,
@@ -98,6 +106,15 @@ import {
   type SessionTodoState,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
+import {
+  formatNestedSidecarStartError,
+  MAX_SIDECAR_DEPTH,
+  nextSidecarDepth,
+  ROOT_SIDECAR_DEPTH,
+  sidecarCallerContextFromRequest,
+  SPUR_SIDECAR_DEPTH_ENV,
+  SPUR_SIDECAR_NAME_ENV,
+} from "./sidecar-runtime.js";
 import {
   createWorktree,
   findWorktreePathForBranch,
@@ -113,7 +130,7 @@ import { gh } from "./gh.js";
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
-const PIPELINE_READY_GRACE_MS = 2_000;
+const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
@@ -126,7 +143,8 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
-const CODEX_SUBMIT_ACK_TIMEOUT_MS = 5_000;
+const SPAWN_RETRY_ATTEMPTS = 3;
+const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -143,6 +161,7 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
 type AttentionState = "needs_input" | "error";
+type BackgroundSpawnAttemptResult = "completed" | "retry";
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -154,6 +173,13 @@ function isTerminalSessionStatus(status: SessionStatus): status is "completed" |
 
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "paused";
+}
+
+function statusFallbackState(status: SessionStatus): SessionState {
+  if (status === "killed") return "killed";
+  if (status === "errored") return "error";
+  if (status === "paused" || status === "completed") return "stopped";
+  return "working"; // running, spawning
 }
 
 type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
@@ -199,7 +225,7 @@ function normalizeSpawnRequest(
   if (!prompt) {
     return normalized;
   }
-  if (!steps || steps.length === 0) {
+  if (normalized.planMode || !steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
@@ -210,10 +236,22 @@ function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
 }
 
 function withPlanMode(
-  options: { claudeSettingsPath?: string; codexHomePath?: string },
+  options: { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[] },
   planMode: boolean,
-): { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean } {
+): {
+  claudeSettingsPath?: string;
+  codexHomePath?: string;
+  codexArgs?: string[];
+  planMode?: boolean;
+} {
   return planMode ? { ...options, planMode: true } : options;
+}
+
+function withProjectAgentOptions(
+  project: Pick<ProjectConfig, "codexArgs">,
+  options: { claudeSettingsPath?: string; codexHomePath?: string },
+): { claudeSettingsPath?: string; codexHomePath?: string; codexArgs?: string[] } {
+  return project.codexArgs ? { ...options, codexArgs: project.codexArgs } : options;
 }
 
 function createRuntimeInfo(config: AppConfig, startedAt: string): RuntimeInfo {
@@ -247,64 +285,11 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
 
-function hookStateTimestampMs(updatedAt: string | undefined): number | null {
-  if (!updatedAt) {
-    return null;
-  }
-  const parsed = Date.parse(updatedAt);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
-function hookStateFileAdvanced(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!baseline || !current) {
-    return false;
-  }
-  return (
-    typeof baseline.fileMtimeMs === "number" &&
-    typeof current.fileMtimeMs === "number" &&
-    current.fileMtimeMs > baseline.fileMtimeMs
-  );
-}
-
-function isCodexSubmitAcknowledged(
-  baseline: ReturnType<typeof readAgentHookState>,
-  current: ReturnType<typeof readAgentHookState>,
-): boolean {
-  if (!current) {
-    return false;
-  }
-  if (!baseline) {
-    return current.hookEvent === "UserPromptSubmit";
-  }
-  if (current.turnId && baseline.turnId && current.turnId !== baseline.turnId) {
-    return true;
-  }
-  if (hookStateFileAdvanced(baseline, current)) {
-    return true;
-  }
-  const baselineMs = hookStateTimestampMs(baseline.updatedAt);
-  const currentMs = hookStateTimestampMs(current.updatedAt);
-  const advanced =
-    baselineMs === null || currentMs === null
-      ? current.updatedAt !== baseline.updatedAt
-      : currentMs > baselineMs;
-  if (!advanced) {
-    return false;
-  }
-  // Codex can emit UserPromptSubmit and then quickly overwrite the hook state with
-  // a follow-up event (for example Stop) before the daemon polls. Any newer hook
-  // record after the pre-send baseline means Codex observed and processed the submit.
-  return true;
-}
-
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -324,6 +309,32 @@ function queuedMessages(session: SessionRecord): string[] {
 
 function hasQueuedMessages(session: SessionRecord): boolean {
   return queuedMessages(session).length > 0;
+}
+
+function queuedPipelineMessages(session: Pick<SessionRecord, "prompt" | "pipeline">): string[] {
+  const pipeline = session.pipeline;
+  if (!pipeline || pipeline.status !== "running") {
+    return [];
+  }
+  return pipeline.steps
+    .slice(pipeline.nextStepIndex)
+    .map((step, offset) =>
+      formatPipelineStepMessage(
+        session.prompt,
+        step,
+        pipeline.nextStepIndex + offset,
+        pipeline.steps.length,
+      ),
+    );
+}
+
+function displayQueuedMessages(session: SessionRecord): SessionQueuedMessagesState | undefined {
+  const messages = [...queuedMessages(session), ...queuedPipelineMessages(session)];
+  const awaitingPrompt = session.queuedMessages?.awaitingPrompt ?? false;
+  if (messages.length === 0 && !awaitingPrompt) {
+    return undefined;
+  }
+  return { messages, awaitingPrompt };
 }
 
 function withQueuedMessages(
@@ -415,49 +426,6 @@ function collectReservedSidecarPorts(
   );
 }
 
-function reserveSidecarPorts(
-  dataDir: string,
-  sidecars: ProjectConfig["sidecars"],
-): SessionRecord["sidecarPorts"] | undefined {
-  const unavailable = new Set<number>();
-  for (const service of listServiceInstances(dataDir)) {
-    if (service.port !== undefined) {
-      unavailable.add(service.port);
-    }
-  }
-  for (const session of listSessions(dataDir)) {
-    for (const port of collectReservedSidecarPorts(session)) {
-      unavailable.add(port);
-    }
-  }
-
-  const reserved: NonNullable<SessionRecord["sidecarPorts"]> = {};
-  for (const [sidecarName, sidecar] of Object.entries(sidecars)) {
-    if (!sidecar.ports) continue;
-    const reservedEnvPorts: Record<string, number> = {};
-    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
-      let selectedPort: number | undefined;
-      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-        if (unavailable.has(candidate)) continue;
-        selectedPort = candidate;
-        unavailable.add(candidate);
-        break;
-      }
-      if (selectedPort === undefined) {
-        throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
-        );
-      }
-      reservedEnvPorts[portConfig.env] = selectedPort;
-    }
-    if (Object.keys(reservedEnvPorts).length > 0) {
-      reserved[sidecarName] = reservedEnvPorts;
-    }
-  }
-
-  return Object.keys(reserved).length > 0 ? reserved : undefined;
-}
-
 function sidecarPortEnv(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
@@ -466,11 +434,45 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function buildSidecarRuntimeEnv(
+  sessionEnv: Record<string, string>,
+  session: Pick<SessionRecord, "sidecarPorts">,
+  sidecarName: string,
+  sidecarEnv: Record<string, string> | undefined,
+  sidecarDepth: number,
+): Record<string, string> {
+  return {
+    ...sessionEnv,
+    ...(sidecarEnv ?? {}),
+    [SPUR_SIDECAR_NAME_ENV]: sidecarName,
+    [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
+    ...sidecarPortEnv(session, sidecarName),
+  };
+}
+
+function sessionSidecarNames(
+  session: Pick<SessionRecord, "sidecarNames">,
+  project?: Pick<ProjectConfig, "sidecars">,
+): string[] {
+  return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
+  const updated: SessionRecord = { ...session };
+  delete updated.sidecarPorts;
+  return updated;
+}
+
 async function waitForRestorePlan(
   agent: SessionRecord["agent"],
   worktreePath: string,
   restoreMessage: string,
-  options?: { claudeSettingsPath?: string; codexHomePath?: string; planMode?: boolean },
+  options?: {
+    claudeSettingsPath?: string;
+    codexHomePath?: string;
+    codexArgs?: string[];
+    planMode?: boolean;
+  },
 ) {
   const deadline = Date.now() + RESTORE_PLAN_WAIT_MS;
   let plan = await buildAgentRestorePlan(agent, worktreePath, restoreMessage, options);
@@ -502,6 +504,21 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+interface PreparedSpawn {
+  request: SpawnSessionRequest;
+  project: ProjectConfig;
+  agent: SessionRecord["agent"];
+  prompt: string;
+  steps?: string[];
+  planMode: boolean;
+  worktree: boolean;
+  defaultBranch: string;
+  sessionId: string;
+  resolvedBranch?: ResolvedSpawnBranch;
+  placeholder: SessionRecord;
+  sessionToolDir: string;
 }
 
 function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
@@ -908,6 +925,141 @@ export class SessionService {
     );
   }
 
+  private ensureSidecarReservation(
+    session: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): SessionRecord {
+    if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
+      return session;
+    }
+
+    const currentSidecarPorts = session.sidecarPorts?.[sidecarName] ?? {};
+    const keepReserved = new Set(Object.values(currentSidecarPorts));
+    const unavailable = new Set<number>();
+
+    for (const service of listServiceInstances(this.config.dataDir)) {
+      if (service.port !== undefined) {
+        unavailable.add(service.port);
+      }
+    }
+    for (const liveSession of listSessions(this.config.dataDir)) {
+      for (const port of collectReservedSidecarPorts(liveSession)) {
+        if (liveSession.id === session.id && keepReserved.has(port)) {
+          continue;
+        }
+        unavailable.add(port);
+      }
+    }
+
+    const reservedForSidecar: Record<string, number> = {};
+    let changed = false;
+    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
+      const existingPort = currentSidecarPorts[portConfig.env];
+      if (existingPort !== undefined) {
+        reservedForSidecar[portConfig.env] = existingPort;
+        unavailable.add(existingPort);
+        continue;
+      }
+
+      let selectedPort: number | undefined;
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        if (unavailable.has(candidate)) continue;
+        selectedPort = candidate;
+        unavailable.add(candidate);
+        break;
+      }
+      if (selectedPort === undefined) {
+        throw new Error(
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+        );
+      }
+      reservedForSidecar[portConfig.env] = selectedPort;
+      changed = true;
+    }
+
+    if (!changed) {
+      return session;
+    }
+
+    const updated: SessionRecord = {
+      ...session,
+      sidecarPorts: {
+        ...(session.sidecarPorts ?? {}),
+        [sidecarName]: {
+          ...currentSidecarPorts,
+          ...reservedForSidecar,
+        },
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
+  private async startSidecarInternal(args: {
+    session: SessionRecord;
+    project: ProjectConfig;
+    sidecarName: string;
+    sidecar: ProjectConfig["sidecars"][string];
+    sidecarDepth: number;
+  }): Promise<SessionRecord> {
+    if (await sidecarTmuxAlive(args.session.id, args.sidecarName)) {
+      return args.session;
+    }
+
+    const reservedSession = this.ensureSidecarReservation(
+      args.session,
+      args.sidecarName,
+      args.sidecar,
+    );
+
+    try {
+      const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
+      const sessionEnv = buildSessionEnv({
+        agent: reservedSession.agent,
+        projectId: reservedSession.project,
+        sessionId: reservedSession.id,
+        sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: args.project.path,
+        symlinks: args.project.symlinks,
+      });
+      await createTmuxSidecarSession({
+        sessionId: reservedSession.id,
+        sidecarName: args.sidecarName,
+        cwd: reservedSession.worktreePath,
+        command: args.sidecar.command,
+        env: buildSidecarRuntimeEnv(
+          sessionEnv,
+          reservedSession,
+          args.sidecarName,
+          args.sidecar.env,
+          args.sidecarDepth,
+        ),
+      });
+    } catch (error) {
+      if (reservedSession !== args.session) {
+        writeSession(this.config.dataDir, {
+          ...args.session,
+          updatedAt: nowIso(),
+        });
+      }
+      throw error;
+    }
+
+    const sidecarNames = sessionSidecarNames(reservedSession, args.project);
+    const updated: SessionRecord = {
+      ...reservedSession,
+      updatedAt: nowIso(),
+      ...(sidecarNames.includes(args.sidecarName)
+        ? {}
+        : { sidecarNames: [...sidecarNames, args.sidecarName] }),
+    };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
+
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
     const currentProject = this.config.projects[session.project];
     if (currentProject) {
@@ -954,7 +1106,11 @@ export class SessionService {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     const durationMs = Date.now() - new Date(session.createdAt).getTime();
-    const fallback: ConversationResponse = { messages: [], durationMs, state: "working" };
+    const fallback: ConversationResponse = {
+      messages: [],
+      durationMs,
+      state: statusFallbackState(session.status),
+    };
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
@@ -1197,7 +1353,6 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
-      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
       if (preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
@@ -1279,7 +1434,9 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
-        ...(sidecarPorts ? { sidecarPorts } : {}),
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -1336,11 +1493,8 @@ export class SessionService {
         worktreePath: workspacePath,
         sessionToolDir,
       });
-      const launchPlan = buildAgentLaunchPlan(
-        agent,
-        initialMessage,
-        withPlanMode(hookSetup, planMode),
-      );
+      const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
+      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, planOptions);
       const pipeline = steps
         ? {
             steps,
@@ -1417,7 +1571,7 @@ export class SessionService {
       }
 
       stage = "record.write";
-      const persistedRecord = await this.captureAgentSessionId(
+      let persistedRecord = await this.captureAgentSessionId(
         runningRecord,
         AGENT_SESSION_ID_INITIAL_WAIT_MS,
       );
@@ -1425,18 +1579,14 @@ export class SessionService {
       const projectSidecars = project.sidecars;
       for (const [name, sidecar] of Object.entries(projectSidecars)) {
         if (!sidecar.autoStart) continue;
+        const sidecarDepth = ROOT_SIDECAR_DEPTH;
         try {
-          await createTmuxSidecarSession({
-            sessionId,
+          persistedRecord = await this.startSidecarInternal({
+            session: persistedRecord,
+            project,
             sidecarName: name,
-            cwd: workspacePath,
-            command: sidecar.command,
-            env: {
-              ...sessionEnv,
-              SPUR_SIDECAR_NAME: name,
-              ...(sidecar.env ?? {}),
-              ...sidecarPortEnv(runningRecord, name),
-            },
+            sidecar,
+            sidecarDepth,
           });
           this.logEvent("session.sidecar.started", {
             level: "info",
@@ -1446,6 +1596,8 @@ export class SessionService {
             details: {
               sidecarName: name,
               command: sidecar.command,
+              manualOnly: false,
+              sidecarDepth,
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
@@ -1552,50 +1704,544 @@ export class SessionService {
     }
   }
 
+  private resetSpawnAttemptArtifacts(sessionId: string): void {
+    deleteAgentHookState(this.config.dataDir, sessionId);
+    deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+  }
+
+  private async cleanupBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    workspacePath: string,
+    finalFailure: boolean,
+  ): Promise<void> {
+    await killTmuxSession(prepared.sessionId);
+    for (const sidecarName of Object.keys(prepared.project.sidecars)) {
+      await killSidecarTmux(prepared.sessionId, sidecarName).catch(() => {});
+    }
+    if (finalFailure) {
+      this.removeSessionArtifacts(prepared.sessionId);
+    } else {
+      this.resetSpawnAttemptArtifacts(prepared.sessionId);
+    }
+    if (prepared.worktree && workspacePath) {
+      await removeWorktree(prepared.project.path, workspacePath);
+    }
+  }
+
+  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+    let stage = "validating";
+    let sessionId: string | undefined;
+    let project: ProjectConfig | undefined;
+    let agent: SessionRecord["agent"] | undefined;
+    let worktree = false;
+    let createdAt: string | undefined;
+    let placeholderWritten = false;
+    let prompt = "";
+    let steps: string[] | undefined;
+    let planMode: boolean;
+    let resolvedBranch: ResolvedSpawnBranch | undefined;
+    let explicitBranch: string | undefined;
+    try {
+      project = this.getProject(request.project);
+      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn));
+      if (
+        request.branch !== undefined &&
+        (typeof request.branch !== "string" || !request.branch.trim())
+      ) {
+        throw new Error("branch must be a non-empty string when provided");
+      }
+      explicitBranch = request.branch?.trim() || undefined;
+
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      worktree = resolveSpawnWorktree(project, overrides);
+      const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      sessionId = await reserveNextSessionId(
+        this.config.dataDir,
+        request.project,
+        project.sessionPrefix,
+      );
+      if (!worktree) {
+        stage = "branch.resolve";
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          ...(request.branch ? { requestBranchSource: "explicit" as const } : {}),
+          worktree,
+          fallbackBranch: sessionId,
+        });
+      }
+      createdAt = nowIso();
+      const placeholderBranch = resolvedBranch?.branch ?? explicitBranch ?? sessionId;
+      const placeholderBranchSource =
+        resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+      const placeholderWorktreePath = worktree
+        ? join(this.config.worktreeDir, request.project, sessionId)
+        : project.path;
+      const placeholder: SessionRecord = {
+        id: sessionId,
+        project: request.project,
+        agent,
+        planMode,
+        prompt,
+        branch: placeholderBranch,
+        ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
+        worktree,
+        worktreePath: placeholderWorktreePath,
+        tmuxSession: sessionId,
+        launchCommand: "",
+        status: "spawning",
+        createdAt,
+        updatedAt: createdAt,
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
+      };
+      writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
+
+      this.logEvent("session.spawn.started", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawning ${sessionId}`,
+        details: {
+          agent,
+          branch: placeholderBranch,
+          worktree,
+          defaultBranch,
+          branchSource: placeholderBranchSource ?? null,
+          mode: "background",
+        },
+      });
+
+      return {
+        request,
+        project,
+        agent,
+        prompt,
+        ...(steps ? { steps } : {}),
+        planMode,
+        worktree,
+        defaultBranch,
+        sessionId,
+        ...(resolvedBranch ? { resolvedBranch } : {}),
+        placeholder,
+        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (sessionId && project && placeholderWritten) {
+        this.removeSessionArtifacts(sessionId);
+        const erroredBranchSource =
+          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+        writeSession(this.config.dataDir, {
+          id: sessionId,
+          project: request.project,
+          agent:
+            agent ??
+            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          prompt,
+          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+          worktree,
+          worktreePath: worktree
+            ? join(this.config.worktreeDir, request.project, sessionId)
+            : project.path,
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "errored",
+          createdAt: createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          error: message,
+        });
+      }
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        ...(sessionId ? { sessionId } : {}),
+        projectId: request.project,
+        message: sessionId
+          ? `Failed to spawn ${sessionId}: ${message}`
+          : `Failed to spawn session: ${message}`,
+        details: {
+          stage,
+          requestedAgent: request.agent ?? null,
+        },
+      });
+      throw error;
+    }
+  }
+
+  private async runBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    attempt: number,
+  ): Promise<BackgroundSpawnAttemptResult> {
+    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
+    let workspacePath = prepared.worktree ? "" : project.path;
+    let initialPromptSent = false;
+    try {
+      let resolvedBranch = prepared.resolvedBranch;
+      let preflightOutcome: "branch" | "defer" | undefined;
+      let preflightBranch: string | undefined;
+      if (!resolvedBranch) {
+        let effectiveBranch = request.branch;
+        let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
+          request.branch ? "explicit" : undefined;
+        if (!effectiveBranch && prepared.worktree && project.preflight && prompt) {
+          const preflight = await runSpawnPreflight({
+            agent,
+            projectId: request.project,
+            project,
+            baseBranch: prepared.defaultBranch,
+            worktree: prepared.worktree,
+            prompt,
+          });
+          if (preflight.branch) {
+            preflightOutcome = "branch";
+            preflightBranch = preflight.branch;
+            effectiveBranch = preflight.branch;
+            effectiveBranchSource = "preflight";
+          } else {
+            preflightOutcome = "defer";
+          }
+        }
+        if (preflightOutcome) {
+          this.logEvent("session.preflight.completed", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message:
+              preflightOutcome === "branch"
+                ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
+                : `Spawn preflight deferred branch selection for ${sessionId}`,
+            details: {
+              outcome: preflightOutcome,
+              branch: preflightBranch ?? null,
+              baseBranch: prepared.defaultBranch,
+              attempt,
+            },
+          });
+        }
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: effectiveBranch,
+          ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
+          worktree: prepared.worktree,
+          fallbackBranch: sessionId,
+        });
+        if (prepared.worktree && resolvedBranch.branch !== sessionId) {
+          const branchConflictPath = await findWorktreePathForBranch(
+            project.path,
+            resolvedBranch.branch,
+          );
+          if (branchConflictPath) {
+            if (resolvedBranch.branchSource === "explicit") {
+              throw new Error(
+                `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+              );
+            }
+            this.logEvent("session.spawn.branch_conflict", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+              details: {
+                occupiedBranch: resolvedBranch.branch,
+                conflictingWorktreePath: branchConflictPath,
+                fallbackBranch: sessionId,
+                branchSource: resolvedBranch.branchSource ?? null,
+                attempt,
+              },
+            });
+            resolvedBranch = { branch: sessionId };
+          }
+        }
+        prepared.resolvedBranch = resolvedBranch;
+      }
+
+      const spawnPlaceholder: SessionRecord = {
+        ...prepared.placeholder,
+        branch: resolvedBranch.branch,
+        ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, spawnPlaceholder);
+      prepared.placeholder = spawnPlaceholder;
+
+      stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
+      if (prepared.worktree) {
+        workspacePath = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: request.project,
+          sessionId,
+          defaultBranch: prepared.defaultBranch,
+          branch: resolvedBranch.branch,
+          symlinks: project.symlinks,
+        });
+        this.logEvent("session.spawn.worktree_created", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Created worktree for ${sessionId}`,
+          details: {
+            worktreePath: workspacePath,
+            symlinkCount: project.symlinks.length,
+            attempt,
+          },
+        });
+      } else {
+        this.logEvent("session.spawn.shared_workspace", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Using shared workspace for ${sessionId}`,
+          details: {
+            workspacePath,
+            branch: resolvedBranch.branch,
+            attempt,
+          },
+        });
+      }
+
+      const firstStage = prepared.steps?.[0];
+      const initialMessage =
+        prepared.steps && firstStage
+          ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
+          : prompt;
+      const hookSetup = await setupAgentHooks({
+        agent,
+        worktreePath: workspacePath,
+        sessionToolDir: prepared.sessionToolDir,
+      });
+      const launchPlan = buildAgentLaunchPlan(
+        agent,
+        initialMessage,
+        withPlanMode(hookSetup, planMode),
+      );
+      const pipeline = prepared.steps
+        ? {
+            steps: prepared.steps,
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running" as const,
+          }
+        : undefined;
+      const runningRecord: SessionRecord = {
+        ...spawnPlaceholder,
+        planMode,
+        worktreePath: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+        ...(pipeline ? { pipeline } : {}),
+      };
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+      const sessionEnv = buildSessionEnv({
+        agent,
+        projectId: request.project,
+        sessionId,
+        sessionToolDir: prepared.sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: project.path,
+        symlinks: project.symlinks,
+      });
+      await createTmuxSession({
+        sessionName: sessionId,
+        cwd: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        agent,
+        env: sessionEnv,
+      });
+      this.logEvent("session.spawn.tmux_created", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Created tmux session for ${sessionId}`,
+        details: {
+          tmuxSession: sessionId,
+          attempt,
+        },
+      });
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
+      await syncTmuxStatus(sessionId, runningRecord.slots);
+      stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
+      await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
+      this.logEvent("session.spawn.ready", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Agent prompt is ready for ${sessionId}`,
+        details: { attempt },
+      });
+
+      if (launchPlan.initialMessage.trim()) {
+        stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
+        const sidecarNames = Object.keys(project.sidecars);
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
+        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        initialPromptSent = true;
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            messageLength: launchPlan.initialMessage.length,
+            attempt,
+          },
+        });
+      }
+
+      stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
+      const persistedRecord = await this.captureAgentSessionId(
+        runningRecord,
+        AGENT_SESSION_ID_INITIAL_WAIT_MS,
+      );
+
+      for (const [name, sidecar] of Object.entries(project.sidecars)) {
+        if (!sidecar.autoStart) continue;
+        try {
+          await createTmuxSidecarSession({
+            sessionId,
+            sidecarName: name,
+            cwd: workspacePath,
+            command: sidecar.command,
+            env: {
+              ...sessionEnv,
+              SPUR_SIDECAR_NAME: name,
+              ...(sidecar.env ?? {}),
+              ...sidecarPortEnv(runningRecord, name),
+            },
+          });
+          this.logEvent("session.sidecar.started", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-started sidecar ${name} for ${sessionId}`,
+            details: {
+              sidecarName: name,
+              command: sidecar.command,
+              tmuxSession: sidecarTmuxSession(sessionId, name),
+              attempt,
+            },
+          });
+        } catch (sidecarError) {
+          const sidecarMessage =
+            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+          this.logEvent("session.sidecar.autostart.failed", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
+          });
+        }
+      }
+
+      writeSession(this.config.dataDir, persistedRecord);
+      this.logEvent("session.spawn.completed", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawned ${sessionId}`,
+        details: {
+          worktreePath: workspacePath,
+          tmuxSession: sessionId,
+          agent,
+          agentSessionId: persistedRecord.agentSessionId ?? null,
+          attempt,
+        },
+      });
+      if (this.shouldRunDelivery(persistedRecord)) {
+        this.scheduleDeliveryRunner(persistedRecord.id);
+      }
+      return "completed";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finalFailure = attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      if (!finalFailure) {
+        writeSession(this.config.dataDir, {
+          ...prepared.placeholder,
+          launchCommand: "",
+          status: "spawning",
+          updatedAt: nowIso(),
+        });
+        this.logEvent("session.spawn.retrying", {
+          level: "warn",
+          sessionId,
+          projectId: request.project,
+          message: `Spawn attempt ${attempt} failed for ${sessionId}; retrying`,
+          details: {
+            stage,
+            attempt,
+            nextAttempt: attempt + 1,
+            error: message,
+          },
+        });
+        return "retry";
+      }
+      writeSession(this.config.dataDir, {
+        ...prepared.placeholder,
+        worktreePath: workspacePath || prepared.placeholder.worktreePath,
+        launchCommand: "",
+        status: "errored",
+        updatedAt: nowIso(),
+        error: message,
+      });
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        sessionId,
+        projectId: request.project,
+        message: `Failed to spawn ${sessionId}: ${message}`,
+        details: {
+          stage,
+          attempt,
+          worktree: prepared.worktree,
+          worktreePath: workspacePath || prepared.placeholder.worktreePath || null,
+          agent,
+          branch: prepared.placeholder.branch,
+        },
+      });
+      return "completed";
+    }
+  }
+
+  async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
+    const prepared = await this.prepareBackgroundSpawn(request);
+    const placeholder = await this.enrich(prepared.placeholder);
+    queueMicrotask(() => {
+      void (async () => {
+        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+          if (result === "completed") {
+            return;
+          }
+        }
+      })();
+    });
+    return placeholder;
+  }
+
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!message && !hasAttachments) {
+    if (!hasMessageContent(request)) {
       throw new Error("message or attachments required");
     }
     if (!isRestorableStatus(session.status)) {
       throw new Error(`Session is not running: ${sessionId}`);
     }
-
-    let finalMessage = message;
-    if (hasAttachments) {
-      const attachments = request.attachments ?? [];
-      if (attachments.length > MAX_ATTACHMENTS) {
-        throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
-      }
-      const attachDir = join(session.worktreePath, ".spur", "attachments");
-      mkdirSync(attachDir, { recursive: true });
-      const prefixLines: string[] = [];
-      for (const att of attachments) {
-        if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
-          throw new Error(`Invalid attachment name: ${String(att.name)}`);
-        }
-        const ext = extname(att.name).toLowerCase();
-        if (!ALLOWED_EXT.has(ext)) {
-          throw new Error(`Unsupported attachment extension: ${ext}`);
-        }
-        if (typeof att.data !== "string" || !att.data) {
-          throw new Error("Attachment data must be a non-empty base64 string");
-        }
-        const buf = Buffer.from(att.data, "base64");
-        if (buf.length > MAX_DECODED_SIZE) {
-          throw new Error(`Attachment ${att.name} exceeds 5MB`);
-        }
-        const filename = `${Date.now()}-${att.name}`;
-        const filePath = join(attachDir, filename);
-        writeFileSync(filePath, buf, { mode: 0o644 });
-        prefixLines.push(`[Attached file: ${filePath}]`);
-      }
-      finalMessage = prefixLines.join("\n") + (message ? `\n${message}` : "");
+    const finalMessage = this.prepareSendMessage(session, request);
+    if (request.queue === false) {
+      return this.deliverPrepared(sessionId, finalMessage, {
+        interrupt: request.interrupt === true,
+      });
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
@@ -1618,7 +2264,9 @@ export class SessionService {
         messageLength: finalMessage.length,
       },
     });
-    await this.tryDeliverQueuedMessage(sessionId);
+    if (updated.queuedMessages?.awaitingPrompt !== true) {
+      await this.tryDeliverQueuedMessage(sessionId);
+    }
     this.scheduleDeliveryRunner(sessionId);
     return this.enrich(readSession(this.config.dataDir, sessionId) ?? updated);
   }
@@ -1639,8 +2287,20 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
 
+    return this.deliverPrepared(sessionId, message, options);
+  }
+
+  private async deliverPrepared(
+    sessionId: string,
+    message: string,
+    options?: { interrupt?: boolean },
+  ): Promise<SessionView> {
+    const initialSession = readSession(this.config.dataDir, sessionId);
     try {
-      const readySession = await this.ensureSessionReadyForSend(session);
+      if (!initialSession) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      const readySession = await this.ensureSessionReadyForSend(initialSession);
       let interrupt = options?.interrupt === true;
       if (interrupt) {
         const sendState = await this.classifySessionState(readySession);
@@ -1658,7 +2318,7 @@ export class SessionService {
       this.logEvent("session.message.sent", {
         level: "info",
         sessionId,
-        projectId: session.project,
+        projectId: initialSession.project,
         message: `Delivered message to ${sessionId}`,
         details: {
           interrupt,
@@ -1672,7 +2332,7 @@ export class SessionService {
       this.logEvent("session.message.failed", {
         level: "error",
         sessionId,
-        projectId: session.project,
+        ...(initialSession ? { projectId: initialSession.project } : {}),
         message: `Failed to deliver message to ${sessionId}: ${failure}`,
         details: {
           interrupt: options?.interrupt === true,
@@ -1680,6 +2340,46 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "worktreePath">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const attachments = request.attachments ?? [];
+    if (attachments.length > MAX_ATTACHMENTS) {
+      throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
+    }
+    const attachDir = join(session.worktreePath, ".spur", "attachments");
+    mkdirSync(attachDir, { recursive: true });
+    const prefixLines: string[] = [];
+    for (const att of attachments) {
+      if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
+        throw new Error(`Invalid attachment name: ${String(att.name)}`);
+      }
+      const ext = extname(att.name).toLowerCase();
+      if (!ALLOWED_EXT.has(ext)) {
+        throw new Error(`Unsupported attachment extension: ${ext}`);
+      }
+      if (typeof att.data !== "string" || !att.data) {
+        throw new Error("Attachment data must be a non-empty base64 string");
+      }
+      const buf = Buffer.from(att.data, "base64");
+      if (buf.length > MAX_DECODED_SIZE) {
+        throw new Error(`Attachment ${att.name} exceeds 5MB`);
+      }
+      const filename = `${Date.now()}-${att.name}`;
+      const filePath = join(attachDir, filename);
+      writeFileSync(filePath, buf, { mode: 0o644 });
+      prefixLines.push(`[Attached file: ${filePath}]`);
+    }
+    return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
   async pause(sessionId: string): Promise<SessionView> {
@@ -1691,21 +2391,27 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
-    const codexBaseline =
-      session.agent === "codex"
-        ? (readAgentHookState(this.config.dataDir, session.id) ??
-          (await this.waitForCodexHookBaseline(session.id)) ??
-          null)
-        : null;
+    const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
+    const codexSessionsDir =
+      session.agent === "codex" ? join(codexHookHomePath(sessionToolDir), "sessions") : null;
+    const baseline: RolloutBaseline | null = codexSessionsDir
+      ? await captureCodexRolloutBaseline(codexSessionsDir)
+      : null;
+    const startedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (session.agent !== "codex") {
+    if (session.agent !== "codex" || !codexSessionsDir || !baseline) {
       return;
     }
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
-      if (await this.waitForCodexSubmitAck(session.id, codexBaseline)) {
+      lastResult = await this.waitForCodexRolloutAck(codexSessionsDir, message, baseline);
+      if (lastResult.found) {
         return;
       }
       if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
@@ -1713,59 +2419,38 @@ export class SessionService {
       }
     }
     const processAlive = await isProcessRunningInTmux(session.tmuxSession, session.agent);
-    const currentHook = readAgentHookState(this.config.dataDir, session.id);
     this.logEvent("session.codex.submit.timeout", {
       level: "warn",
       sessionId: session.id,
       message: `Codex submit ack timed out for ${session.id}`,
       details: {
-        baseline: codexBaseline
-          ? {
-              turnId: codexBaseline.turnId ?? null,
-              updatedAt: codexBaseline.updatedAt,
-              hookEvent: codexBaseline.hookEvent ?? null,
-            }
-          : null,
-        current: currentHook
-          ? {
-              turnId: currentHook.turnId ?? null,
-              updatedAt: currentHook.updatedAt,
-              hookEvent: currentHook.hookEvent ?? null,
-            }
-          : null,
+        lastScannedFile: lastResult.lastScannedFile,
+        messageLength: message.length,
+        elapsedMs: Date.now() - startedAt,
         processAlive,
       },
     });
     throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
   }
 
-  private async waitForCodexSubmitAck(
-    sessionId: string,
-    baseline: ReturnType<typeof readAgentHookState>,
-  ): Promise<boolean> {
+  private async waitForCodexRolloutAck(
+    sessionsDir: string,
+    messageText: string,
+    baseline: RolloutBaseline,
+  ): Promise<{ found: boolean; lastScannedFile: string | null }> {
     const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    let lastResult: { found: boolean; lastScannedFile: string | null } = {
+      found: false,
+      lastScannedFile: null,
+    };
     while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (isCodexSubmitAcknowledged(baseline, current)) {
-        return true;
+      lastResult = await scanCodexRolloutForMessage(sessionsDir, messageText, baseline);
+      if (lastResult.found) {
+        return lastResult;
       }
       await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
     }
-    return false;
-  }
-
-  private async waitForCodexHookBaseline(
-    sessionId: string,
-  ): Promise<ReturnType<typeof readAgentHookState>> {
-    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      const current = readAgentHookState(this.config.dataDir, sessionId);
-      if (current) {
-        return current;
-      }
-      await sleep(AGENT_SESSION_ID_POLL_INTERVAL_MS);
-    }
-    return null;
+    return lastResult;
   }
 
   async complete(sessionId: string, options?: { retainInList?: boolean }): Promise<SessionView> {
@@ -1800,7 +2485,29 @@ export class SessionService {
     return this.enrich(updated);
   }
 
-  async startSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+  async startSidecar(
+    sessionId: string,
+    sidecarName: string,
+    request: StartSidecarRequest = {},
+  ): Promise<SessionView> {
+    const caller = sidecarCallerContextFromRequest(request);
+    const sidecarDepth = nextSidecarDepth(caller);
+    if (caller.name && sidecarDepth > MAX_SIDECAR_DEPTH) {
+      const message = formatNestedSidecarStartError(sidecarName, caller.name);
+      this.logEvent("session.sidecar.start_rejected", {
+        level: "warn",
+        sessionId,
+        message,
+        details: {
+          callerSidecarDepth: caller.depth,
+          callerSidecarName: caller.name,
+          maxSidecarDepth: MAX_SIDECAR_DEPTH,
+          reason: "max_depth_exceeded",
+          sidecarName,
+        },
+      });
+      throw new Error(message);
+    }
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1824,40 +2531,62 @@ export class SessionService {
       return this.enrich(session);
     }
 
-    const sessionToolDir = this.prepareSessionTools(session.id, session.agent);
-    const sessionEnv = buildSessionEnv({
-      agent: session.agent,
-      projectId: session.project,
-      sessionId: session.id,
-      sessionToolDir,
-      dataDir: this.config.dataDir,
-      repoPath: project.path,
-      symlinks: project.symlinks,
-    });
-
-    await createTmuxSidecarSession({
-      sessionId,
+    const updated = await this.startSidecarInternal({
+      session,
+      project,
       sidecarName,
-      cwd: session.worktreePath,
-      command: sidecar.command,
-      env: {
-        ...sessionEnv,
-        SPUR_SIDECAR_NAME: sidecarName,
-        ...(sidecar.env ?? {}),
-        ...sidecarPortEnv(session, sidecarName),
-      },
+      sidecar,
+      sidecarDepth,
     });
-
-    const updated: SessionRecord = { ...session, updatedAt: nowIso() };
-    writeSession(this.config.dataDir, updated);
     this.logEvent("session.sidecar.started", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Started sidecar ${sidecarName} for ${sessionId}`,
       details: {
+        callerSidecarName: caller.name ?? null,
         sidecarName,
+        sidecarDepth,
         command: sidecar.command,
+        manualOnly: sidecarDepth > ROOT_SIDECAR_DEPTH,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      },
+    });
+    return this.enrich(updated);
+  }
+
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    const project = this.resolveProjectForSession(session);
+    const sidecarNames = sessionSidecarNames(session, project);
+    if (!sidecarNames.includes(sidecarName)) {
+      throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
+    }
+
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+      return this.enrich(session);
+    }
+
+    await killSidecarTmux(sessionId, sidecarName);
+
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.stopped", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+      details: {
+        sidecarName,
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
@@ -1865,8 +2594,8 @@ export class SessionService {
   }
 
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
-    const project = this.config.projects[session.project];
-    for (const scName of Object.keys(project?.sidecars ?? {})) {
+    const project = this.resolveProjectForSession(session);
+    for (const scName of sessionSidecarNames(session, project)) {
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -1931,7 +2660,7 @@ export class SessionService {
 
     this.stateCache.delete(sessionId);
     const record: SessionRecord = {
-      ...session,
+      ...copySessionWithoutSidecarPorts(session),
       status: targetStatus,
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
@@ -2007,7 +2736,7 @@ export class SessionService {
     }
 
     const record: SessionRecord = {
-      ...session,
+      ...copySessionWithoutSidecarPorts(session),
       status: "killed",
       updatedAt: nowIso(),
     };
@@ -2033,9 +2762,18 @@ export class SessionService {
       return session;
     }
 
+    const codexSessionRootDir =
+      session.agent === "codex"
+        ? join(
+            codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)),
+            "sessions",
+          )
+        : undefined;
     const deadline = Date.now() + Math.max(timeoutMs, 0);
     while (Date.now() <= deadline) {
-      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath);
+      const agentSessionId = await findAgentSessionId(session.agent, session.worktreePath, {
+        ...(codexSessionRootDir ? { codexSessionRootDir } : {}),
+      });
       if (agentSessionId) {
         if (agentSessionId === session.agentSessionId) {
           return session;
@@ -2109,18 +2847,16 @@ export class SessionService {
       sessionToolDir,
     });
     const planMode = resolvePlanMode(session);
-    const baseLaunchPlan = buildAgentLaunchPlan(
-      session.agent,
-      session.prompt,
-      withPlanMode(hookSetup, planMode),
-    );
+    const project = this.getProject(session.project);
+    const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
+    const baseLaunchPlan = buildAgentLaunchPlan(session.agent, session.prompt, planOptions);
     const baseLaunchCommand = baseLaunchPlan.launchCommand;
     const recoveryPlan = sessionWithAgentId.agentSessionId
       ? buildAgentResumePlan(
           sessionWithAgentId.agent,
           sessionWithAgentId.agentSessionId,
           baseLaunchCommand,
-          withPlanMode(hookSetup, planMode),
+          planOptions,
         )
       : null;
     this.logEvent("session.recover.started", {
@@ -2264,15 +3000,19 @@ export class SessionService {
       });
       const planMode = resolvePlanMode(current);
       const restorePrompt = buildRestorePrompt(current.prompt);
+      const restoreProjectConfig = this.getProject(current.project);
+      const planOptions = withPlanMode(
+        withProjectAgentOptions(restoreProjectConfig, hookSetup),
+        planMode,
+      );
       const launchPlan = await waitForRestorePlan(
         current.agent,
         current.worktreePath,
         restorePrompt,
-        withPlanMode(hookSetup, planMode),
+        planOptions,
       );
       const effectivePlan =
-        launchPlan ??
-        buildAgentLaunchPlan(current.agent, restorePrompt, withPlanMode(hookSetup, planMode));
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
         this.logEvent("session.restore.started", {
           level: "info",
@@ -2285,7 +3025,7 @@ export class SessionService {
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
-      if (current.agent === "claude") {
+      if (current.agent === "claude" && launchPlan) {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
           current.worktreePath,
@@ -2295,35 +3035,37 @@ export class SessionService {
             current.agent,
             restoredAgentSessionId,
             effectivePlan.launchCommand,
-            withPlanMode(hookSetup, planMode),
+            planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
           restoreReadyMarkers = resumePlan.readyMarkers;
         }
       }
       restoredLaunchCommand = restoreLaunchCommand;
+      const restoreProject = this.config.projects[current.project];
+      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
+      const env = buildSessionEnv({
+        agent: current.agent,
+        projectId: current.project,
+        sessionId: current.id,
+        sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: this.getProject(current.project).path,
+        symlinks: this.getProject(current.project).symlinks,
+      });
+
       await createTmuxSession({
         sessionName: current.tmuxSession,
         cwd: current.worktreePath,
         launchCommand: restoreLaunchCommand,
         agent: current.agent,
-        env: buildSessionEnv({
-          agent: current.agent,
-          projectId: current.project,
-          sessionId: current.id,
-          sessionToolDir,
-          dataDir: this.config.dataDir,
-          repoPath: this.getProject(current.project).path,
-          symlinks: this.getProject(current.project).symlinks,
-        }),
+        env,
       });
       await syncTmuxStatus(current.tmuxSession, current.slots);
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreProject = this.config.projects[current.project];
-      const restoreSidecarNames = Object.keys(restoreProject?.sidecars ?? {});
       const restoreInitialMessage = buildInitialMessage(
         effectivePlan.initialMessage,
         restoreSidecarNames,
@@ -2732,7 +3474,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(stepUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(stepUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -2767,7 +3509,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, PIPELINE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, MESSAGE_READY_GRACE_MS)) {
         return "ready";
       }
 
@@ -3018,11 +3760,12 @@ export class SessionService {
       services.push(await this.enrichService(service));
     }
 
-    const projectSidecars = this.resolveProjectForSession(session)?.sidecars ?? {};
+    const project = this.resolveProjectForSession(session);
     const sidecars: { name: string; alive: boolean }[] = [];
-    for (const name of Object.keys(projectSidecars)) {
+    for (const name of sessionSidecarNames(session, project)) {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
+    const queuedMessagesView = displayQueuedMessages(session);
 
     return {
       ...session,
@@ -3034,6 +3777,7 @@ export class SessionService {
       lastActivityAt,
       services,
       sidecars,
+      ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }
 
@@ -3056,4 +3800,11 @@ export class SessionService {
     const hookState = readAgentHookState(this.config.dataDir, session.id);
     return hookState?.state ?? "waiting";
   }
+}
+
+function hasMessageContent(request: SendMessageRequest): boolean {
+  return (
+    (typeof request.message === "string" && request.message.trim().length > 0) ||
+    (Array.isArray(request.attachments) && request.attachments.length > 0)
+  );
 }

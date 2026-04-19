@@ -77,7 +77,7 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
+      expect(screen.getByLabelText("Project filter")).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
@@ -194,9 +194,10 @@ describe("Dashboard", () => {
     render(<Dashboard />);
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "API" })).toBeInTheDocument();
+      expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
     });
 
+    expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
   });
 
@@ -219,6 +220,285 @@ describe("Dashboard", () => {
 
     const sessionLink = await screen.findByRole("link", { name: "Fix auth" });
     expect(sessionLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
+  });
+
+  it("shows a reset-filters empty state when stat filters hide all sessions", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Needs Input: 0" }));
+
+    expect(
+      screen.getByText("No sessions match the current filters.", { exact: false }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Filters" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+  });
+
+  it("hides completed sessions by default and toggles them into view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              sessionsPayload().sessions[0],
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-1",
+                prompt: "Ship auth",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Ship auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Fix auth" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
+  });
+
+  it("keeps completed-only dashboards neutral until Completed is selected", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-only",
+                prompt: "Already finished",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("No current sessions are visible.")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Toggle Completed/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Already finished" })).toBeInTheDocument();
+    });
+  });
+
+  it("colors Completed stats only when the completed filter is active with results", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              sessionsPayload().sessions[0],
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-done-2",
+                prompt: "Ship stats",
+                status: "completed",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Completed/i })).toHaveTextContent("1");
+    });
+
+    const completedButton = screen.getByRole("button", { name: /Completed/i });
+    expect(within(completedButton).getByText("1").getAttribute("style")).toBeFalsy();
+
+    fireEvent.click(completedButton);
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("1")
+          .getAttribute("style"),
+      ).toContain("var(--color-status-ready)");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("1")
+          .getAttribute("style"),
+      ).toBeFalsy();
+    });
+  });
+
+  it("keeps Completed stats neutral when active but empty", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const completedButton = await screen.findByRole("button", { name: /Completed/i });
+    fireEvent.click(completedButton);
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByRole("button", { name: /Completed/i }))
+          .getByText("0")
+          .getAttribute("style"),
+      ).toBeFalsy();
+    });
+  });
+
+  it("resets search and project filters from the empty state action", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(
+          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [sessionsPayload().sessions[0]],
+          }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No sessions match the current filters in API.", { exact: false }),
+      ).toBeInTheDocument();
+    });
+
+    const searchInput = screen.getByPlaceholderText("Filter sessions...");
+    fireEvent.change(searchInput, { target: { value: "zzz" } });
+    expect(searchInput).toHaveValue("zzz");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions", { cache: "no-store" });
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(searchInput).toHaveValue("");
+    expect(window.location.search).toBe("");
   });
 
   it("does not open terminal from query params when session is not attachable", async () => {
@@ -281,13 +561,12 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    const filterSelect = screen.getByRole("combobox");
+    const filterSelect = screen.getByRole("combobox", { name: "Project filter" });
     expect(within(filterSelect).getByRole("option", { name: "spur-local" })).toBeInTheDocument();
     expect(within(filterSelect).getByRole("option", { name: "Spur Core" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    const spawnSelects = screen.getAllByRole("combobox");
-    const spawnProjectSelect = spawnSelects[1];
+    const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     expect(
       within(spawnProjectSelect).getByRole("option", { name: "spur-local" }),
     ).toBeInTheDocument();
@@ -322,7 +601,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], {
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },
     });
 
@@ -344,6 +623,44 @@ describe("Dashboard", () => {
         }),
       );
     });
+  });
+
+  it("restores a saved spawn prompt from history with its timestamp", async () => {
+    window.localStorage.setItem(
+      "spur:input-history:spawn-prompt",
+      JSON.stringify([
+        {
+          value: "Re-run the flaky deploy",
+          savedAt: "2026-04-17T12:34:56.000Z",
+        },
+      ]),
+    );
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.queryByText(/^History$/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "History" }));
+
+    expect(screen.getByText("2026-04-17 12:34 UTC")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Re-run the flaky deploy/i }));
+
+    expect(screen.getByDisplayValue("Re-run the flaky deploy")).toBeInTheDocument();
   });
 
   it.each([
@@ -382,7 +699,9 @@ describe("Dashboard", () => {
       });
 
       fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-      fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+      fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+        target: { value: "api" },
+      });
       const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
       fireEvent.change(prompt, { target: { value } });
       fireEvent.keyDown(prompt, keydown);
@@ -425,7 +744,9 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
     const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
     fireEvent.change(prompt, { target: { value: "Do not submit" } });
     fireEvent.keyDown(prompt, { key: "Enter" });
@@ -458,10 +779,14 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
+      target: { value: "sp" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    const spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("sp");
   });
 
@@ -490,13 +815,19 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "sp" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
+      target: { value: "sp" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    const spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     fireEvent.change(spawnProjectSelect, { target: { value: "api" } });
 
-    expect((screen.getAllByRole("combobox")[1] as HTMLSelectElement).value).toBe("api");
+    expect(
+      (screen.getByRole("combobox", { name: "Spawn project" }) as HTMLSelectElement).value,
+    ).toBe("api");
   });
 
   it("uses stored spawn project for all-projects filter and ignores stale values", async () => {
@@ -524,10 +855,12 @@ describe("Dashboard", () => {
         screen.getByRole("button", { name: "Open web terminal for api-a1" }),
       ).toBeInTheDocument();
     });
-    expect(screen.getByRole("heading", { name: "All Projects" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    let spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    let spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("sp");
 
     unmount();
@@ -539,7 +872,9 @@ describe("Dashboard", () => {
       ).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    spawnProjectSelect = screen.getAllByRole("combobox")[1] as HTMLSelectElement;
+    spawnProjectSelect = screen.getByRole("combobox", {
+      name: "Spawn project",
+    }) as HTMLSelectElement;
     expect(spawnProjectSelect.value).toBe("api");
   });
 
@@ -557,7 +892,22 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
-      if (url === "/api/spawn") return new Response("ok", { status: 200 });
+      if (url === "/api/spawn")
+        return new Response(
+          JSON.stringify({
+            ...sessionsData.sessions[0],
+            id: "sp-spawn-1",
+            project: "sp",
+            prompt: "Ship it",
+            status: "spawning",
+            state: "working",
+            runtimeAlive: false,
+            workspaceExists: false,
+            tmuxSession: "sp-spawn-1",
+            worktreePath: "/tmp/worktrees/sp-spawn-1",
+          }),
+          { status: 201 },
+        );
       if (url === "/api/sessions?project=sp")
         return new Response(JSON.stringify({ ...sessionsData, sessions: [] }), { status: 200 });
       if (url === "/api/sessions")
@@ -574,7 +924,7 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    const spawnProjectSelect = screen.getAllByRole("combobox")[1];
+    const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
 
@@ -586,6 +936,152 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+    });
+  });
+
+  it("closes spawn modal on early ack and shows the spawning session immediately", async () => {
+    const spawned = {
+      ...sessionsPayload().sessions[0],
+      id: "api-spawn-1",
+      prompt: "Spawn in background",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "api-spawn-1",
+      worktreePath: "/tmp/worktrees/api-spawn-1",
+    };
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify(spawned), { status: 201 });
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(
+          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
+        );
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Spawn in background" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Spawn in background" })).toBeInTheDocument();
+    });
+  });
+
+  it("keeps spawn modal open and preserves fields when spawn ack fails", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/spawn")
+        return new Response(JSON.stringify({ error: "Daemon down" }), { status: 502 });
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Keep this prompt" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("Keep this prompt");
+      expect(screen.getByRole("heading", { name: "Spawn Session" })).toBeInTheDocument();
+      expect(screen.getByText(/Daemon down/i)).toBeInTheDocument();
+    });
+  });
+
+  it("ignores a second spawn click while the first request is still in flight", async () => {
+    const spawned = {
+      ...sessionsPayload().sessions[0],
+      id: "api-spawn-guard-1",
+      prompt: "Only one submit",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "api-spawn-guard-1",
+      worktreePath: "/tmp/worktrees/api-spawn-guard-1",
+    };
+    let spawnCalls = 0;
+    let resolveSpawn: ((response: Response) => void) | undefined;
+    const pendingSpawn = new Promise<Response>((resolve) => {
+      resolveSpawn = resolve;
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/spawn") {
+        spawnCalls += 1;
+        return pendingSpawn;
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Only one submit" },
+    });
+
+    const spawnButton = screen.getByRole("button", { name: "Spawn" });
+    fireEvent.click(spawnButton);
+    fireEvent.click(spawnButton);
+
+    expect(spawnCalls).toBe(1);
+    expect(spawnButton).toBeDisabled();
+
+    resolveSpawn?.(new Response(JSON.stringify(spawned), { status: 201 }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Only one submit" })).toBeInTheDocument();
     });
   });
 
@@ -642,6 +1138,7 @@ describe("StatusBar", () => {
       new Response(
         JSON.stringify({
           available: true,
+          daemonAlive: true,
           cpuPercent: 12,
           memoryPercent: 34,
           diskPercent: 56,
@@ -652,15 +1149,24 @@ describe("StatusBar", () => {
     render(<StatusBar sessions={[]} />);
 
     await waitFor(() => {
-      const footerText = screen.getByRole("contentinfo").textContent ?? "";
-      expect(footerText).toContain("CPU12%");
-      expect(footerText).toContain("RAM34%");
-      expect(footerText).toContain("DISK56%");
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Healthy");
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+
+    expect(screen.getByText("System")).toBeInTheDocument();
+    expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU 12% healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM 34% healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 56% healthy")).toBeInTheDocument();
   });
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(new Response(JSON.stringify({ available: false })));
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ available: false, daemonAlive: true })),
+    );
 
     render(<StatusBar sessions={[]} />);
 
@@ -669,5 +1175,73 @@ describe("StatusBar", () => {
       expect(screen.queryByText(/RAM \d+%/)).not.toBeInTheDocument();
       expect(screen.queryByText(/DISK \d+%/)).not.toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+
+    expect(screen.getByLabelText("Daemon online healthy")).toBeInTheDocument();
+    expect(screen.getByLabelText("CPU unavailable unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM unavailable unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD unavailable unavailable")).toBeInTheDocument();
+  });
+
+  it("shows warning and error states in the online tooltip", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 88,
+          memoryPercent: 86,
+          diskPercent: 91,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Critical");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+
+    expect(screen.getAllByText("Critical")).toHaveLength(2);
+    expect(screen.getByLabelText("CPU 88% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("RAM 86% warning")).toBeInTheDocument();
+    expect(screen.getByLabelText("HDD 91% critical")).toBeInTheDocument();
+  });
+
+  it("syncs warning status text in the footer and closes the tooltip when its content is clicked", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          available: true,
+          daemonAlive: true,
+          cpuPercent: 86,
+          memoryPercent: 48,
+          diskPercent: 41,
+        }),
+      ),
+    );
+
+    render(<StatusBar sessions={[]} />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Warning");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+
+    const tooltipHeader = screen.getByText("System").closest("div");
+    expect(tooltipHeader).not.toBeNull();
+    expect(within(tooltipHeader!).getByText("Warning")).toBeInTheDocument();
+
+    fireEvent.click(tooltipHeader!);
+
+    expect(screen.queryByText("System")).not.toBeInTheDocument();
   });
 });

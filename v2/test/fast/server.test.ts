@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
 import { startServer } from "../../src/server.js";
+import { SessionService } from "../../src/session-service.js";
 import { findFreePort } from "../helpers/common.js";
 
 describe("startServer", () => {
@@ -57,5 +58,74 @@ describe("startServer", () => {
       "daemon.stopped",
     ]);
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
+  });
+
+  it("routes POST /sessions/background to background spawn", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const spawnInBackground = SessionService.prototype.spawnInBackground;
+    SessionService.prototype.spawnInBackground = async function mockSpawnInBackground() {
+      return {
+        id: "demo-1",
+        project: "demo",
+        agent: "claude",
+        prompt: "ship it",
+        branch: "demo-1",
+        worktree: true,
+        worktreePath: join(worktreeDir, "demo", "demo-1"),
+        tmuxSession: "demo-1",
+        launchCommand: "",
+        status: "spawning",
+        state: "working",
+        runtimeAlive: false,
+        workspaceExists: false,
+        createdAt: "2026-04-15T00:00:00.000Z",
+        updatedAt: "2026-04-15T00:00:00.000Z",
+        lastActivityAt: "2026-04-15T00:00:00.000Z",
+        services: [],
+        sidecars: [],
+      };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/sessions/background`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ project: "demo", prompt: "ship it" }),
+      });
+      expect(response.status).toBe(201);
+      await expect(response.json()).resolves.toMatchObject({
+        id: "demo-1",
+        status: "spawning",
+      });
+    } finally {
+      SessionService.prototype.spawnInBackground = spawnInBackground;
+      await server.stop();
+    }
   });
 });

@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
@@ -87,14 +88,16 @@ describe("session slots", () => {
     });
 
     const wrapper = readFileSync(join(toolDir, "spur"), "utf8");
+    const sessionWrapper = readFileSync(join(toolDir, "spur-session"), "utf8");
     expect(wrapper).toContain("--config '/tmp/spur.yaml'");
     expect(wrapper).toContain('"$@"');
+    expect(sessionWrapper).toContain("--config '/tmp/spur.yaml'");
     expect(readFileSync(join(toolDir, SLOT_TOOL_NAME), "utf8")).toContain(
-      "slots --session 'api-1'",
+      'exec "$SCRIPT_DIR/spur-session" slots --session \'api-1\' "$@"',
     );
   });
 
-  it("writes spur-sidecar wrapper pointing at prod config", async () => {
+  it("writes spur-sidecar wrapper through the local spur helper", async () => {
     const dataDir = await createTempDir("spur-slots-fast-");
     tempDirs.push(dataDir);
 
@@ -105,8 +108,47 @@ describe("session slots", () => {
     });
 
     const sidecar = readFileSync(join(toolDir, "spur-sidecar"), "utf8");
-    expect(sidecar).toContain("sidecar start");
-    expect(sidecar).toContain("--session 'api-2'");
-    expect(sidecar).toContain("--config '/tmp/spur.yaml'");
+    expect(sidecar).toContain(
+      'exec "$SCRIPT_DIR/spur-session" sidecar "$action" --session \'api-2\' "$@"',
+    );
+    expect(sidecar).toContain('action="start"');
+    expect(sidecar).toContain('if [[ "$' + '{1-}" == "start" || "$' + '{1-}" == "stop" ]]');
+  });
+
+  it("keeps spur-sidecar bound to the stable session wrapper when spur is overwritten", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    const captureFile = join(dataDir, "captured-args.txt");
+    writeFileSync(
+      join(toolDir, "spur"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+exit 7
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    writeFileSync(
+      join(toolDir, "spur-session"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
+`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+
+    execFileSync(join(toolDir, "spur-sidecar"), ["stop", "--name", "isolated-ui"], {
+      env: { ...process.env },
+    });
+
+    expect(readFileSync(captureFile, "utf8")).toBe(
+      ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
+    );
   });
 });

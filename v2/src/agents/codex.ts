@@ -169,7 +169,7 @@ function sessionResumeId(line: CodexSessionLine): string | null {
   return null;
 }
 
-async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
+export async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
   if (depth > MAX_SESSION_SCAN_DEPTH) {
     return [];
   }
@@ -318,20 +318,21 @@ export async function findCodexSessionId(
   options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
 ): Promise<string | null> {
   const candidates = await resolveWorktreePathCandidates(worktreePath);
-  let bestMatch: IndexedSessionFile | null = null;
   for (const sessionRootDir of resolveSessionRootDirs(options)) {
     const sessionIndex = await loadSessionIndexForRoot(sessionRootDir);
+    let bestMatch: IndexedSessionFile | null = null;
     for (const candidate of candidates) {
       const match = sessionIndex.get(candidate);
       if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
         bestMatch = match;
       }
     }
+    if (!bestMatch) {
+      continue;
+    }
+    return bestMatch.threadId ?? readThreadId(bestMatch.path);
   }
-  if (!bestMatch) {
-    return null;
-  }
-  return bestMatch.threadId ?? readThreadId(bestMatch.path);
+  return null;
 }
 
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
@@ -341,13 +342,23 @@ function withCodexHome(command: string, codexHomePath: string | undefined): stri
   return `CODEX_HOME=${shellEscape(codexHomePath)} ${command}`;
 }
 
+function appendCodexArgs(command: string, codexArgs: string[] | undefined): string {
+  if (!codexArgs || codexArgs.length === 0) {
+    return command;
+  }
+  return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentLaunchPlan {
   return {
     launchCommand: withCodexHome(
-      `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+      appendCodexArgs(
+        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     initialMessage: prompt,
@@ -358,11 +369,14 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+      appendCodexArgs(
+        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     readyMarkers: ["›"],
@@ -372,7 +386,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -395,23 +409,165 @@ export function codexHookHomePath(sessionToolDir: string): string {
   return join(sessionToolDir, CODEX_HOME_DIR);
 }
 
-export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<string> {
+// JSON.stringify yields a valid TOML basic-string for filesystem paths.
+export function appendCodexTrustedProjects(
+  configText: string,
+  trustedProjects: readonly string[],
+): string {
+  if (trustedProjects.length === 0) {
+    return configText;
+  }
+  let result = configText;
+  for (const projectPath of trustedProjects) {
+    const header = `[projects.${JSON.stringify(projectPath)}]`;
+    if (result.includes(header)) {
+      continue;
+    }
+    const trimmed = result.trimEnd();
+    const separator = trimmed ? "\n\n" : "";
+    result = `${trimmed}${separator}${header}\ntrust_level = "trusted"\n`;
+  }
+  return result;
+}
+
+export async function buildEphemeralCodexConfig(
+  trustedProjects: readonly string[],
+): Promise<string> {
+  const userConfigPath = join(homedir(), ".codex", "config.toml");
+  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
+  return appendCodexTrustedProjects(baseConfig, trustedProjects);
+}
+
+export async function ensureCodexHooksConfig(
+  sessionToolDir: string,
+  trustedProjects: readonly string[] = [],
+): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
-  const userConfigPath = join(homedir(), ".codex", "config.toml");
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
-  const suppressWarningConfig = baseConfig.includes("suppress_unstable_features_warning")
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
+  const trimmed = baseConfig.trimEnd();
+  const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
     ? baseConfig
-    : `${baseConfig.trimEnd()}\n${baseConfig.trimEnd() ? "\n" : ""}suppress_unstable_features_warning = true\n`;
-  await writeFile(sessionConfigPath, suppressWarningConfig, "utf8");
+    : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
+  await writeFile(sessionConfigPath, finalConfig, "utf8");
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
   }
   await writeFile(hooksPath, JSON.stringify(next, null, 2) + "\n", "utf8");
   return codexDir;
+}
+
+export type RolloutBaseline = Map<string, number>;
+
+export async function captureCodexRolloutBaseline(sessionsDir: string): Promise<RolloutBaseline> {
+  const baseline: RolloutBaseline = new Map();
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return baseline;
+  }
+  for (const filePath of files) {
+    try {
+      const fileStat = await stat(filePath);
+      baseline.set(filePath, fileStat.size);
+    } catch {
+      // Ignore inaccessible files.
+    }
+  }
+  return baseline;
+}
+
+interface RolloutResponseItemPayload {
+  type?: string;
+  role?: string;
+  content?: Array<{ type?: string; text?: string }>;
+}
+
+interface RolloutEventMsgPayload {
+  type?: string;
+  message?: string;
+}
+
+function extractUserTextFromLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "response_item") {
+    const p = payload as unknown as RolloutResponseItemPayload;
+    if (p.type === "message" && p.role === "user" && Array.isArray(p.content)) {
+      const texts = p.content
+        .filter(
+          (c): c is { type: string; text: string } =>
+            isRecord(c) && c.type === "input_text" && typeof c.text === "string",
+        )
+        .map((c) => c.text);
+      return texts.length > 0 ? texts.join("") : null;
+    }
+  }
+
+  if (type === "event_msg") {
+    const p = payload as unknown as RolloutEventMsgPayload;
+    if (p.type === "user_message" && typeof p.message === "string") {
+      return p.message;
+    }
+  }
+
+  return null;
+}
+
+export async function scanCodexRolloutForMessage(
+  sessionsDir: string,
+  messageText: string,
+  baseline: RolloutBaseline,
+): Promise<{ found: boolean; lastScannedFile: string | null }> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return { found: false, lastScannedFile: null };
+  }
+  let lastScannedFile: string | null = null;
+  const trimmedTarget = messageText.trim();
+  for (const filePath of files) {
+    lastScannedFile = filePath;
+    const offset = baseline.get(filePath) ?? 0;
+    try {
+      const input = createReadStream(filePath, { encoding: "utf-8", start: offset });
+      const reader = createInterface({ input, crlfDelay: Infinity });
+      try {
+        for await (const rawLine of reader) {
+          const trimmedLine = rawLine.trim();
+          if (!trimmedLine) continue;
+          const extracted = extractUserTextFromLine(trimmedLine);
+          if (extracted !== null && extracted.trim() === trimmedTarget) {
+            reader.close();
+            return { found: true, lastScannedFile: filePath };
+          }
+        }
+      } finally {
+        reader.close();
+      }
+    } catch {
+      // Ignore unreadable files.
+    }
+  }
+  return { found: false, lastScannedFile };
 }

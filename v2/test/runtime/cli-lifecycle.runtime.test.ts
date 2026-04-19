@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { chmod, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
@@ -70,6 +71,35 @@ ${extraProjectYaml}
 `;
 }
 
+async function writeSidecarDepthRecorder(
+  context: RuntimeTestContext,
+  scriptName: string,
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_SIDECAR_DEPTH:-}" > ".sidecar-depth-\${SPUR_SIDECAR_NAME:?}-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+function sidecarDepthPath(worktreePath: string, sessionId: string, sidecarName: string): string {
+  return join(worktreePath, `.sidecar-depth-${sidecarName}-${sessionId}`);
+}
+
+function sessionSidecarHelperPath(context: RuntimeTestContext, sessionId: string): string {
+  return join(context.dataDir, "session-tools", sessionId, "spur-sidecar");
+}
+
 async function installFakeDesktopNotifier(context: RuntimeTestContext): Promise<string> {
   const logPath = join(context.rootDir, "desktop-notify.log");
   const binary = process.platform === "darwin" ? "osascript" : "notify-send";
@@ -83,6 +113,18 @@ printf '%s\n' "$*" >> ${JSON.stringify(logPath)}
   );
   await chmod(join(context.fakeBinDir, binary), 0o755);
   return logPath;
+}
+
+async function processExists(pid: number): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "pid="]);
+    return stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .includes(String(pid));
+  } catch {
+    return false;
+  }
 }
 
 async function runRestoreScenario(args: {
@@ -294,7 +336,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       const firstNotification = await pollUntil(
         async () => (existsSync(logPath) ? readFile(logPath, "utf8") : ""),
         {
-          timeoutMs: 15_000,
+          timeoutMs: TOOL_USE_STALE_MS + 10_000,
           accept: (value) => value.includes(`Spur needs input [${spawned.id}]`),
         },
       );
@@ -694,6 +736,118 @@ projects:
     expect(listed).toEqual([]);
   });
 
+  it("complete after a project rename still tears down sidecar tmux and processes", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-project-rename-sidecar-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const sidecarPath = join(context.repoDir, "record-dev-sidecar.sh");
+    await writeFile(
+      sidecarPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$$" > ".sidecar-pid-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+      "utf8",
+    );
+    await chmod(sidecarPath, 0o755);
+    const configPath = await context.writeConfig(
+      "rename-sidecar.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "${sidecarPath}"
+        autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "rename sidecar complete",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+    const devSessionName = `${spawned.id}--dev`;
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    const sidecarPid = Number.parseInt(
+      await pollUntil(
+        async () =>
+          readFile(join(spawned.worktreePath, `.sidecar-pid-${spawned.id}`), "utf8").catch(
+            () => "",
+          ),
+        { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+      ),
+      10,
+    );
+    expect(Number.isInteger(sidecarPid)).toBe(true);
+    expect(await processExists(sidecarPid)).toBe(true);
+
+    await writeFile(
+      configPath,
+      `server:
+  host: 127.0.0.1
+  port: ${context.port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  web:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}-web
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+
+    const completed = JSON.parse(
+      (await context.execCli(["--config", configPath, "complete", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(completed.status).toBe("completed");
+    expect(completed.workspaceExists).toBe(false);
+
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
+    expect(devSessionGone).toBe(true);
+    await pollUntil(() => processExists(sidecarPid), {
+      timeoutMs: 15_000,
+      accept: (value) => value === false,
+    });
+  });
+
   it("creates a new worktree branch from a per-spawn worktree base override", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -962,6 +1116,78 @@ projects:
 
     expect(worktreeFile.stdout.trim()).toBe("fresh main");
     expect(localMainFile.stdout.trim()).toBe("fresh main");
+  });
+
+  it("uses origin/main for spawn when checked-out main is dirty and origin/main is ahead", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-dirty-main-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+
+    const remoteRepoDir = join(context.rootDir, "origin-dirty-main-clone");
+    await execFileAsync("git", ["clone", "--quiet", context.originDir, remoteRepoDir]);
+    try {
+      await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+        cwd: remoteRepoDir,
+      });
+      await execFileAsync("git", ["config", "user.name", "Spur Test"], { cwd: remoteRepoDir });
+      await writeFile(join(remoteRepoDir, "REMOTE_DIRTY.txt"), "fresh remote\n", "utf8");
+      await execFileAsync("git", ["add", "REMOTE_DIRTY.txt"], { cwd: remoteRepoDir });
+      await execFileAsync("git", ["commit", "-m", "remote main update for dirty branch"], {
+        cwd: remoteRepoDir,
+      });
+      await execFileAsync("git", ["push", "origin", "main"], { cwd: remoteRepoDir });
+    } finally {
+      await rm(remoteRepoDir, { recursive: true, force: true });
+    }
+
+    await writeFile(join(context.repoDir, "LOCAL_DIRTY.txt"), "local dirty change\n", "utf8");
+
+    await expect(
+      execFileAsync("git", ["show", "main:REMOTE_DIRTY.txt"], { cwd: context.repoDir }),
+    ).rejects.toThrow();
+
+    const configPath = await context.writeConfig(
+      "dirty-main.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dirty main prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const worktreeFile = await execFileAsync("git", ["show", "HEAD:REMOTE_DIRTY.txt"], {
+      cwd: spawned.worktreePath,
+    });
+    const localDirtyStatus = await execFileAsync(
+      "git",
+      ["status", "--short", "--", "LOCAL_DIRTY.txt"],
+      {
+        cwd: context.repoDir,
+      },
+    );
+
+    await expect(
+      execFileAsync("git", ["show", "main:REMOTE_DIRTY.txt"], { cwd: context.repoDir }),
+    ).rejects.toThrow();
+    expect(worktreeFile.stdout.trim()).toBe("fresh remote");
+    expect(localDirtyStatus.stdout).toContain("LOCAL_DIRTY.txt");
   });
 
   it("spawns and kills a shared workspace session without removing the project path", async () => {
@@ -2223,6 +2449,64 @@ projects:
     expect(overridePane).not.toContain("[Spur step 1/2: research]");
   });
 
+  it("disables spawn steps in plan mode and sends the raw prompt", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-plan-no-steps-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "plan-no-steps.yaml",
+      baseConfig(
+        context,
+        sessionPrefix,
+        `    spawn:
+      steps:
+        - "research"
+        - "test"
+`,
+      ),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "ship the task",
+          "--plan",
+          "--step",
+          "review",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    expect(spawned.planMode).toBe(true);
+    expect(spawned.pipeline).toBeUndefined();
+    const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+    expect(pane).toContain("ship the task");
+    expect(pane).not.toContain("[Spur step");
+
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("ship the task"),
+    });
+    expect(log).toContain("ship the task");
+    expect(log).not.toContain("[Spur step");
+  });
+
   it("queues a busy manual send and delivers it before the next pipeline step", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -2268,8 +2552,13 @@ projects:
       "--json",
     ]);
 
+    await sleep(10_000);
+    const earlyQueuedLog = await context.readAgentLog(spawned.id);
+    expect(earlyQueuedLog).toContain("simulate-work");
+    expect(earlyQueuedLog).not.toContain("queued follow up");
+
     const queuedLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
+      timeoutMs: 30_000,
       accept: (value) => value.includes("queued follow up"),
     });
     expect(queuedLog).toContain("simulate-work");
@@ -2638,7 +2927,7 @@ projects:
     expect(liveCaller?.workspaceExists).toBe(true);
   });
 
-  it("falls back to a fresh restore in the TTY list when native resume state is missing", async () => {
+  it("falls back to a fresh launch in the TTY list when native resume state is missing", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-restore-missing-${port}`;
@@ -2704,38 +2993,38 @@ projects:
     });
 
     await sendKeysToTmux(controllerSessionName, "r");
-
-    const controllerPane = await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes(`Restored ${spawned.id}.`),
-    });
-
-    await sendKeysToTmux(controllerSessionName, "q");
-
-    const restoreLog = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("startup:launch::"),
-    });
-
-    const listedSessions = await pollUntil(
+    const restored = await pollUntil(
       async () =>
         JSON.parse(
           (await context.execCli(["--config", configPath, "list", "--json"])).stdout,
         ) as SessionView[],
       {
         timeoutMs: 30_000,
-        accept: (sessions) =>
-          sessions[0]?.runtimeAlive === true && sessions[0]?.state !== "stopped",
+        accept: (value) => value[0]?.state !== "stopped" && value[0]?.runtimeAlive === true,
       },
     );
-    expect(listedSessions[0]?.id).toBe(spawned.id);
-    expect(listedSessions[0]?.runtimeAlive).toBe(true);
-    expect(listedSessions[0]?.workspaceExists).toBe(true);
-    expect(controllerPane).toContain(`Restored ${spawned.id}.`);
-    expect(restoreLog).toContain("startup:launch::");
+    const restoredPane = await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 30_000,
+      accept: (value) => value.includes("This session was restored after the agent exited."),
+    });
+
+    await sendKeysToTmux(controllerSessionName, "q");
+
+    expect(restored[0]?.id).toBe(spawned.id);
+    expect(restored[0]?.runtimeAlive).toBe(true);
+    expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
+    expect(restoredPane).toContain("Original task:");
+    expect(
+      readEventLog(context.dataDir).some(
+        (entry) =>
+          entry.event === "session.restore.started" &&
+          typeof entry.message === "string" &&
+          entry.message.includes("falling back to fresh launch"),
+      ),
+    ).toBe(true);
   });
 
-  it("POST /sessions/:id/dev-server/start creates the --dev tmux session", async () => {
+  it("POST /sessions/:id/sidecars/:name/start creates the --dev tmux session", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-devserver-start-${port}`;
@@ -2791,6 +3080,494 @@ projects:
       accept: (v) => v === true,
     });
     expect(devSessionAlive).toBe(true);
+  });
+
+  it("manual sidecar start and stop toggles the --dev tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-devserver-cli-stop-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "devserver-cli-stop.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    devServer:
+      command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "dev server cli stop test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${spawned.id}--dev`;
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === true,
+    });
+    expect(devSessionAlive).toBe(true);
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "stop",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+    const devSessionStopped = await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 10_000,
+      accept: (v) => v === false,
+    });
+    expect(devSessionStopped).toBe(false);
+
+    const sidecarEvents = readEventLog(context.dataDir)
+      .map((e) => e.event)
+      .filter((ev) => typeof ev === "string" && ev.startsWith("session.sidecar"));
+    expect(sidecarEvents).toContain("session.sidecar.started");
+    expect(sidecarEvents).toContain("session.sidecar.stopped");
+  });
+
+  it("hidden sidecar start command creates the configured sidecar tmux session", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-cli-start-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-cli-start.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar cli start test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.execCli([
+      "--config",
+      configPath,
+      "sidecar",
+      "start",
+      "--session",
+      spawned.id,
+      "--name",
+      "dev",
+      "--json",
+    ]);
+
+    const devSessionAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--dev`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(devSessionAlive).toBe(true);
+  });
+
+  it("spur-sidecar helper lets a first-level sidecar manually start one nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-helper-nested-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-nested-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-helper-nested.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar helper test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--dev`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(devAlive).toBe(true);
+
+    const helperPath = sessionSidecarHelperPath(context, spawned.id);
+    await execFileAsync(helperPath, ["--name", "preview", "--json"], {
+      cwd: spawned.worktreePath,
+      env: {
+        ...context.env,
+        SPUR_SESSION: spawned.id,
+        SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+        SPUR_SIDECAR_DEPTH: "1",
+        SPUR_SIDECAR_NAME: "dev",
+      },
+    });
+
+    const previewAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--preview`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(previewAlive).toBe(true);
+
+    const nestedDepth = await pollUntil(
+      async () =>
+        (
+          await readFile(
+            sidecarDepthPath(spawned.worktreePath, spawned.id, "preview"),
+            "utf8",
+          ).catch(() => "")
+        ).trim(),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => value === "2",
+      },
+    );
+    expect(nestedDepth).toBe("2");
+  });
+
+  it("spur-sidecar helper rejects callers already inside a nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-helper-reject-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-nested-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-helper-reject.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+      worker:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar reject test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = sessionSidecarHelperPath(context, spawned.id);
+    await execFileAsync(helperPath, ["--name", "preview", "--json"], {
+      cwd: spawned.worktreePath,
+      env: {
+        ...context.env,
+        SPUR_SESSION: spawned.id,
+        SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+        SPUR_SIDECAR_DEPTH: "1",
+        SPUR_SIDECAR_NAME: "dev",
+      },
+    });
+
+    await expect(
+      execFileAsync(helperPath, ["--name", "worker", "--json"], {
+        cwd: spawned.worktreePath,
+        env: {
+          ...context.env,
+          SPUR_SESSION: spawned.id,
+          SPUR_SESSION_TOOL_DIR: join(context.dataDir, "session-tools", spawned.id),
+          SPUR_SIDECAR_DEPTH: "2",
+          SPUR_SIDECAR_NAME: "preview",
+        },
+      }),
+    ).rejects.toThrow("Sidecars can nest only one level deep");
+    expect(await tmuxSessionExists(`${spawned.id}--worker`)).toBe(false);
+
+    const rejectedEvent = await pollUntil(
+      async () =>
+        readEventLog(context.dataDir).find(
+          (entry) =>
+            entry.event === "session.sidecar.start_rejected" &&
+            entry.sessionId === spawned.id &&
+            entry.details?.["sidecarName"] === "worker",
+        ),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => Boolean(value),
+      },
+    );
+    expect(rejectedEvent).toMatchObject({
+      details: expect.objectContaining({
+        callerSidecarDepth: 2,
+        callerSidecarName: "preview",
+        reason: "max_depth_exceeded",
+        sidecarName: "worker",
+      }),
+      event: "session.sidecar.start_rejected",
+    });
+  });
+
+  it("POST /sessions/:id/sidecars/:name/start allows one nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-api-nested-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = await writeSidecarDepthRecorder(context, "record-api-sidecar.sh");
+    const configPath = await context.writeConfig(
+      "sidecar-api-nested.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
+      preview:
+        command: "${recorderPath}"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar api test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/preview/start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callerSidecarDepth: 1, callerSidecarName: "dev" }),
+    });
+
+    const previewAlive = await pollUntil(() => tmuxSessionExists(`${spawned.id}--preview`), {
+      timeoutMs: 10_000,
+      accept: (value) => value === true,
+    });
+    expect(previewAlive).toBe(true);
+
+    const nestedDepth = await pollUntil(
+      async () =>
+        (
+          await readFile(
+            sidecarDepthPath(spawned.worktreePath, spawned.id, "preview"),
+            "utf8",
+          ).catch(() => "")
+        ).trim(),
+      {
+        timeoutMs: 10_000,
+        accept: (value) => value === "2",
+      },
+    );
+    expect(nestedDepth).toBe("2");
+  });
+
+  it("POST /sessions/:id/sidecars/:name/start rejects callers already inside a nested sidecar", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-api-reject-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "sidecar-api-reject.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+      preview:
+        command: "tail -f /dev/null"
+      worker:
+        command: "tail -f /dev/null"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "nested sidecar api reject test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await expect(
+      context.fetchJson<SessionView>(`/sessions/${spawned.id}/sidecars/worker/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ callerSidecarDepth: 2, callerSidecarName: "preview" }),
+      }),
+    ).rejects.toThrow("Sidecars can nest only one level deep");
+    expect(await tmuxSessionExists(`${spawned.id}--worker`)).toBe(false);
   });
 
   it("spawn with autoStart: true creates the --dev tmux session", async () => {
@@ -2937,7 +3714,7 @@ projects:
     expect(thirdPort.trim()).toBe("4600");
   });
 
-  it("fails spawn when no reserved sidecar ports remain", async () => {
+  it("keeps spawn running when no reserved sidecar ports remain and allows manual retry later", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-ports-full-${port}`;
@@ -2989,11 +3766,38 @@ projects:
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
-    await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"]);
+    const first = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
+    ) as SessionView;
+    const second = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"])).stdout,
+    ) as SessionView;
+
+    await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim() === "4700" },
+    );
+    expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
+      "session.sidecar.autostart.failed",
+    );
 
     await expect(
-      context.execCli(["--config", configPath, "spawn", "api", "second", "--json"]),
+      context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+        method: "POST",
+      }),
     ).rejects.toThrow("No free reserved port for sidecar dev.http in range 4700-4700");
+
+    await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
+    await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+      method: "POST",
+    });
+    const secondPort = await pollUntil(
+      async () =>
+        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    expect(secondPort.trim()).toBe("4700");
   });
 
   it("kill cleans up the --dev tmux session", async () => {
@@ -3058,5 +3862,101 @@ projects:
 
     const devSessionGone = !(await tmuxSessionExists(devSessionName));
     expect(devSessionGone).toBe(true);
+  });
+
+  it("pause cleans up the sidecar tmux session and keeps the workspace", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-pause-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const recorderPath = join(context.repoDir, "record-pause-sidecar-port.sh");
+    await writeFile(
+      recorderPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
+tail -f /dev/null
+`,
+      "utf8",
+    );
+    await chmod(recorderPath, 0o755);
+    const configPath = await context.writeConfig(
+      "sidecar-pause.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "${recorderPath}"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 4800
+            end: 4800
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const first = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "sidecar pause test",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const devSessionName = `${first.id}--dev`;
+
+    await pollUntil(() => tmuxSessionExists(devSessionName), {
+      timeoutMs: 15_000,
+      accept: (v) => v === true,
+    });
+
+    const paused = JSON.parse(
+      (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(paused.status).toBe("paused");
+    expect(paused.workspaceExists).toBe(true);
+
+    const devSessionGone = !(await tmuxSessionExists(devSessionName));
+    expect(devSessionGone).toBe(true);
+    expect(existsSync(first.worktreePath)).toBe(true);
+
+    const second = JSON.parse(
+      (await context.execCli(["--config", configPath, "spawn", "api", "sidecar retry", "--json"]))
+        .stdout,
+    ) as SessionView;
+    await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+      method: "POST",
+    });
+    const secondPort = await pollUntil(
+      async () =>
+        readFile(join(second.worktreePath, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
+    );
+    expect(secondPort.trim()).toBe("4800");
   });
 });

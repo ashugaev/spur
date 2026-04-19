@@ -149,6 +149,7 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
@@ -220,6 +221,7 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   todo?: SessionTodoState;
@@ -289,12 +291,19 @@ export interface SendMessageAttachment {
 export interface SendMessageRequest {
   message: string;
   attachments?: SendMessageAttachment[];
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export interface RunServiceRequest {
   command: string;
   cwd: string;
   port?: number;
+}
+
+export interface StartSidecarRequest {
+  callerSidecarName?: string;
+  callerSidecarDepth?: number;
 }
 
 export interface KillSessionRequest {

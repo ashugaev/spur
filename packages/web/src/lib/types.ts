@@ -47,6 +47,10 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  queuedMessages?: {
+    messages: string[];
+    awaitingPrompt: boolean;
+  };
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -86,6 +90,10 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  queuedMessages: {
+    messages: string[];
+    awaitingPrompt: boolean;
+  };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
   error?: string;
@@ -101,6 +109,7 @@ export function toDashboardSession(
   projectName = session.project,
 ): DashboardSession {
   const links = session.slots?.links ?? [];
+  const queuedMessages = session.queuedMessages ?? { messages: [], awaitingPrompt: false };
   return {
     id: session.id,
     projectId: session.project,
@@ -120,6 +129,7 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
     error: session.error,
@@ -196,12 +206,11 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "respond";
   }
 
-  if (
-    session.status === "paused" ||
-    session.status === "spawning" ||
-    session.state === "waiting" ||
-    session.state === "stopped"
-  ) {
+  if (session.status === "spawning") {
+    return "working";
+  }
+
+  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
     return "pending";
   }
 

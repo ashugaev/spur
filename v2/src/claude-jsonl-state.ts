@@ -8,6 +8,10 @@ export interface ParsedRecord {
   role?: string;
   stopReason?: string;
   hasToolUse?: boolean;
+  /** True when at least one tool_use block declares `run_in_background: true`. */
+  toolUseInBackground?: boolean;
+  /** Largest `input.timeout` (ms) across tool_use blocks in this record. */
+  toolUseTimeoutMs?: number;
   timestampMs: number;
 }
 
@@ -19,11 +23,23 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+// Default grace window for silent tool_use before we surface needs_input.
+// Per-tool timeouts and run_in_background hints can extend or bypass it.
+export const TOOL_USE_STALE_MS = 3_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
-export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number): SessionState {
+export function classifyClaudeJsonlState(
+  records: ParsedRecord[],
+  nowMs: number,
+  /**
+   * Optional JSONL mtime. Treated as "last observed activity" — if the file was
+   * modified recently, the classifier keeps `working` even when a pending
+   * tool_use is older than its stale budget. Deterministic: always taken from
+   * a concrete `stat()` call, never inferred.
+   */
+  fileMtimeMs?: number,
+): SessionState {
   // Walk backwards, skip progress noise to find the last meaningful record.
   for (let i = records.length - 1; i >= 0; i--) {
     const record = records[i];
@@ -43,13 +59,27 @@ export function classifyClaudeJsonlState(records: ParsedRecord[], nowMs: number)
         return "waiting";
       }
       if (record.hasToolUse) {
+        // Model explicitly ran the tool in the background → not waiting on input.
+        if (record.toolUseInBackground) {
+          return "working";
+        }
+        // Respect the tool's own declared timeout: a fresh `pnpm test` with
+        // timeout=900s is legitimately working until the budget expires.
+        const effectiveStaleMs =
+          typeof record.toolUseTimeoutMs === "number"
+            ? record.toolUseTimeoutMs + TOOL_USE_STALE_MS
+            : TOOL_USE_STALE_MS;
         // Check if a progress event followed within the stale window.
         const hasRecentProgress = records
           .slice(i + 1)
           .some(
             (r) => r.type === "progress" && r.timestampMs - record.timestampMs <= TOOL_USE_STALE_MS,
           );
-        if (hasRecentProgress || nowMs - record.timestampMs <= TOOL_USE_STALE_MS) {
+        // Anchor "last activity" to whichever is newer: the tool_use timestamp
+        // or the file's mtime (Claude only touches the JSONL when it writes a
+        // record, so a recent mtime is a hard signal that the session is live).
+        const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
+        if (hasRecentProgress || nowMs - lastActivityMs <= effectiveStaleMs) {
           return "working";
         }
         return "needs_input";
@@ -132,6 +162,41 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
+/**
+ * Pull deterministic stale-window hints out of any tool_use blocks:
+ *  - `input.run_in_background: true` → the model launched a background task.
+ *  - `input.timeout` (ms) → the tool's own declared budget.
+ * Multiple tool_use blocks in one message: take max timeout, OR the bg flags.
+ */
+function extractToolUseHints(blocks: unknown[]): {
+  hasToolUse: boolean;
+  inBackground: boolean;
+  timeoutMs?: number;
+} {
+  let hasToolUse = false;
+  let inBackground = false;
+  let timeoutMs: number | undefined;
+  for (const block of blocks) {
+    if (
+      typeof block !== "object" ||
+      block === null ||
+      (block as Record<string, unknown>)["type"] !== "tool_use"
+    ) {
+      continue;
+    }
+    hasToolUse = true;
+    const input = (block as Record<string, unknown>)["input"];
+    if (typeof input !== "object" || input === null) continue;
+    const inp = input as Record<string, unknown>;
+    if (inp["run_in_background"] === true) inBackground = true;
+    const rawTimeout = inp["timeout"];
+    if (typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0) {
+      timeoutMs = Math.max(timeoutMs ?? 0, rawTimeout);
+    }
+  }
+  return { hasToolUse, inBackground, ...(typeof timeoutMs === "number" ? { timeoutMs } : {}) };
+}
+
 function extractTextContent(message: Record<string, unknown>): string {
   const raw = message["content"];
   if (typeof raw === "string") return raw.trim();
@@ -151,7 +216,7 @@ function extractTextContent(message: Record<string, unknown>): string {
 
 // ── JSONL parser ──────────────────────────────────────────────────────
 
-function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
+export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | null {
   const parsed = tryParseJson(line);
   if (!parsed) return null;
 
@@ -173,11 +238,16 @@ function parseJsonlRecord(line: string, timestampMs: number): ParsedRecord | nul
     const stopReason =
       typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
     const blocks = contentBlocks(message);
+    const toolUseHints = extractToolUseHints(blocks);
     return {
       type: "assistant",
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
-      hasToolUse: hasBlockType(blocks, "tool_use"),
+      hasToolUse: toolUseHints.hasToolUse,
+      ...(toolUseHints.inBackground ? { toolUseInBackground: true } : {}),
+      ...(typeof toolUseHints.timeoutMs === "number"
+        ? { toolUseTimeoutMs: toolUseHints.timeoutMs }
+        : {}),
       timestampMs: recordTimestampMs,
     };
   }
@@ -225,7 +295,7 @@ export async function readClaudeJsonlState(
   // Mtime unchanged and we already have records → skip re-read
   if (fileStat.mtimeMs === currentReader.lastMtimeMs && currentReader.tailRecords.length > 0) {
     return {
-      state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now()),
+      state: classifyClaudeJsonlState(currentReader.tailRecords, Date.now(), fileStat.mtimeMs),
       reader: currentReader,
     };
   }
@@ -271,7 +341,7 @@ export async function readClaudeJsonlState(
   }
 
   return {
-    state: classifyClaudeJsonlState(combined, nowMs),
+    state: classifyClaudeJsonlState(combined, nowMs, fileStat.mtimeMs),
     reader: nextReader,
   };
 }

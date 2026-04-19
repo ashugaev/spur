@@ -178,15 +178,15 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to spawnDaemon when external restart does not appear", async () => {
+  it("falls back to spawnDaemon after a short external restart grace period", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);
     // Probe: running daemon
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
     // waitUntilDaemonPidChanges: daemon stopped
     fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
-    // First waitForReadyDaemon: all 160 attempts fail (no external restart)
-    for (let attempt = 0; attempt < 160; attempt += 1) {
+    // First waitForReadyDaemon: external restart grace period expires without a daemon
+    for (let attempt = 0; attempt < 20; attempt += 1) {
       fetchMock.mockRejectedValueOnce(new Error("still down"));
     }
     // Second waitForReadyDaemon (after spawnDaemon): daemon comes up

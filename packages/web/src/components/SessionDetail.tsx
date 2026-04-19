@@ -2,8 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { InputHistoryButton } from "@/components/InputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import {
@@ -68,7 +70,24 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
   );
 }
 
+function PlayIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
+const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -140,6 +159,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
       setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
@@ -252,6 +272,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       });
       if (!response.ok) throw new Error(await response.text());
       if (action === "send") {
+        const submittedMessage =
+          body && typeof body["message"] === "string" ? body["message"].trim() : "";
+        if (submittedMessage) {
+          messageHistory.saveEntry(submittedMessage);
+        }
         setMessage("");
         setAttachments([]);
       }
@@ -274,6 +299,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
+    setBusyAction(`sidecar:${action}:${sidecarName}`);
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(sessionId)}/sidecars/${encodeURIComponent(sidecarName)}/${action}`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error(await response.text());
+      const payload = (await response.json()) as SpurSessionView;
+      setSession(toDashboardSession(payload));
+      setError(null);
+    } catch (sidecarError) {
+      setError(
+        sidecarError instanceof Error
+          ? sidecarError.message
+          : `Failed to ${action} sidecar ${sidecarName}`,
+      );
     } finally {
       setBusyAction(null);
     }
@@ -304,7 +351,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       .catch(() => {});
   };
 
-  const doSend = async () => {
+  const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
     const encoded = attachments.map((att) => ({
@@ -313,6 +360,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }));
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
+    if (options?.queue !== undefined) body.queue = options.queue;
+    if (options?.interrupt !== undefined) body.interrupt = options.interrupt;
     await handleAction("send", body);
   };
 
@@ -321,11 +370,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sessionId],
   );
   const subtitle = useMemo(() => (session ? getSessionSubtitle(session) : null), [session]);
-  const displayState = useMemo(
-    () =>
-      session?.agent === "claude" && conversation?.state === "working" ? "working" : session?.state,
-    [conversation?.state, session?.agent, session?.state],
-  );
+  const displayState = useMemo(() => {
+    if (!session) return undefined;
+    if (session.state === "error" || session.state === "killed" || session.state === "stopped") {
+      return session.state;
+    }
+    if (session.agent === "claude" && conversation?.state === "working") return "working";
+    return session.state;
+  }, [conversation?.state, session]);
   const dialogMessages = useMemo<DialogMessage[]>(
     () =>
       conversation
@@ -565,6 +617,40 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
+              {/* Queued messages */}
+              {session.queuedMessages.messages.length > 0 ||
+              session.queuedMessages.awaitingPrompt ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Queued messages
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  {session.queuedMessages.messages.length > 0 ? (
+                    <ol aria-label="Queued messages list" className="space-y-2">
+                      {session.queuedMessages.messages.map((queuedMessage, index) => (
+                        <li
+                          key={`${session.id}:queued:${index}:${queuedMessage}`}
+                          className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2"
+                        >
+                          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                            #{index + 1}
+                          </div>
+                          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--color-text-secondary)]">
+                            {queuedMessage}
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : null}
+                  {session.queuedMessages.awaitingPrompt ? (
+                    <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                      Awaiting agent prompt. Queued messages will send automatically when the agent
+                      is ready.
+                    </p>
+                  ) : null}
+                </section>
+              ) : null}
+
               {/* Message */}
               <section>
                 <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
@@ -579,7 +665,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend();
+                            void doSend({ queue: true });
                           }
                         }}
                         onPaste={(e) => {
@@ -626,16 +712,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         <VoiceStatusHint voice={voice} />{" "}
                         {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
-                      <button
-                        type="button"
-                        disabled={
-                          busyAction !== null || (!message.trim() && attachments.length === 0)
-                        }
-                        onClick={() => void doSend()}
-                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      >
-                        {busyAction === "send" ? "Sending..." : "Send"}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <InputHistoryButton
+                          entries={messageHistory.entries}
+                          onSelect={setMessage}
+                        />
+                        <button
+                          type="button"
+                          disabled={
+                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                          }
+                          onClick={() => void doSend({ queue: true })}
+                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                        >
+                          {busyAction === "send" ? "Queueing..." : "Queue"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            busyAction !== null || (!message.trim() && attachments.length === 0)
+                          }
+                          onClick={() => void doSend({ queue: false, interrupt: true })}
+                          className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        >
+                          {busyAction === "send" ? "Sending..." : "Send now"}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -780,6 +882,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             Open
                           </a>
                         ) : null}
+                        <button
+                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={busyAction !== null}
+                          onClick={() =>
+                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                          }
+                          type="button"
+                        >
+                          {sc.alive ? <StopIcon /> : <PlayIcon />}
+                        </button>
                       </div>
                     </div>
                   ))}

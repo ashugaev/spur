@@ -10,6 +10,7 @@ coverage/
 *.patch
 *-context.md
 packages/web/screenshots/
+packages/web/test-results/
 
 # Environment files (secrets)
 .env
@@ -58,6 +59,7 @@ id_ed25519
 .claude/settings.json
 .claude/metadata-updater.sh
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 
 # Optional local Spur config overrides
 spur.local.yaml

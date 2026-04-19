@@ -75,8 +75,21 @@ if [[ ! -f "$RUNTIME_FILE" ]]; then
   exit 1
 fi
 
-# shellcheck source=/dev/null
-source "$RUNTIME_FILE"
+RUNTIME_READY=0
+for _ in $(seq 1 30); do
+  # shellcheck source=/dev/null
+  source "$RUNTIME_FILE"
+  if [[ -n "${SPUR_ISOLATED_DAEMON_URL:-}" ]] && curl -fsS -o /dev/null "$SPUR_ISOLATED_DAEMON_URL/info"; then
+    RUNTIME_READY=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$RUNTIME_READY" -ne 1 ]]; then
+  echo "Timed out waiting for isolated daemon runtime in $RUNTIME_FILE" >&2
+  exit 1
+fi
 
 UI_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_UI" "$UI_PORT_START" "$UI_PORT_END")
 TERMINAL_PORT=$(resolve_sidecar_port "SPUR_RESERVED_PORT_TERMINAL" "$TERMINAL_PORT_START" "$TERMINAL_PORT_END")

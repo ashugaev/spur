@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionView } from "../../src/types.js";
 import { findFreePort, pollUntil } from "../helpers/common.js";
@@ -56,7 +58,10 @@ async function waitForState(
 describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
-      const current = activeContexts.pop()!;
+      const current = activeContexts.pop();
+      if (!current) {
+        throw new Error("expected active runtime context during cleanup");
+      }
       if (current.daemonPid) {
         try {
           process.kill(current.daemonPid, "SIGTERM");
@@ -85,7 +90,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
       baseConfig(context, sessionPrefix),
     );
     const daemon = await context.startDaemon(configPath);
-    activeContexts[activeContexts.length - 1]!.daemonPid = daemon.info.pid;
+    const current = activeContexts[activeContexts.length - 1];
+    if (!current) {
+      throw new Error("expected active runtime context after setup");
+    }
+    current.daemonPid = daemon.info.pid;
     return { context, configPath, port };
   }
 
@@ -116,11 +125,23 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     await waitForState(port, session.id, "waiting");
 
     // show-waiting-menu makes fake agent write tool_use JSONL without later ack.
-    // After the 3s stale window + debounce, daemon classifies as needs_input.
+    // After the stale window + debounce, daemon classifies as needs_input.
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
     const view = await waitForState(port, session.id, "needs_input");
     expect(view.state).toBe("needs_input");
+  });
+
+  it("Claude: slow tool_result stays working until the tool completes", async () => {
+    const { context, configPath, port } = await setup("claude-slow-tool");
+    const session = await spawnSession(context, configPath, "claude");
+    await waitForState(port, session.id, "waiting");
+
+    await context.execCli(["--config", configPath, "send", session.id, "slow-tool-result"]);
+
+    const view = await waitForState(port, session.id, "waiting");
+    const states = view.stateHistory?.map((entry) => entry.state) ?? [];
+    expect(states).not.toContain("needs_input");
   });
 
   it("Claude: pause → stopped, resume → waiting, kill → killed", async () => {
@@ -177,8 +198,12 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "needs_input");
 
     expect(view.stateHistory).toBeDefined();
-    expect(view.stateHistory!.length).toBeGreaterThanOrEqual(2);
-    const states = view.stateHistory!.map((t) => t.state);
+    const stateHistory = view.stateHistory;
+    if (!stateHistory) {
+      throw new Error("expected state history to be present");
+    }
+    expect(stateHistory.length).toBeGreaterThanOrEqual(2);
+    const states = stateHistory.map((t) => t.state);
     expect(states).toContain("waiting");
     expect(states).toContain("needs_input");
   });
@@ -193,6 +218,31 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "waiting", 45_000);
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
+  });
+
+  it("Codex: spawn trusts the worktree path in the session-local config", async () => {
+    const { context, configPath } = await setup("codex-trust");
+    const session = await spawnSession(context, configPath, "codex");
+    const worktreePath = session.worktreePath;
+    if (!worktreePath) {
+      throw new Error("expected spawned Codex session to have a worktree path");
+    }
+    const configPathname = join(
+      context.dataDir,
+      "session-tools",
+      session.id,
+      "codex-home",
+      "config.toml",
+    );
+    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
+
+    const content = await pollUntil(async () => readFile(configPathname, "utf8").catch(() => ""), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(trustBlock),
+    });
+
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain(trustBlock);
   });
 
   it("Codex: pause → stopped, resume → waiting, kill → killed", async () => {

@@ -39,7 +39,7 @@ export async function POST(request: NextRequest) {
     if (overrides) payload.overrides = overrides;
 
     const session = await spurRequestJson<SpurSessionView>(
-      "/sessions",
+      "/sessions/background",
       spurJsonInit("POST", payload),
     );
 
