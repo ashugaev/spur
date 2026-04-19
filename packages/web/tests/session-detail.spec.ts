@@ -410,7 +410,9 @@ test.describe("S3 mobile voice", () => {
         "Mobile PWA voice still works",
       );
       await expect(
-        page.getByText("Voice recording captured no audio. Check your microphone input and try again."),
+        page.getByText(
+          "Voice recording captured no audio. Check your microphone input and try again.",
+        ),
       ).toHaveCount(0);
       expect(transcribeCalls).toBe(1);
     } finally {
