@@ -431,6 +431,46 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(count).toBe(1);
   });
 
+  it("adds trusted project entries to the session config", async () => {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return '[model]\nname = "test"\n';
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool", {
+      trustedProjects: ["/repo/project"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    expect(writeCall?.[1]).toContain('[projects."/repo/project"]');
+    expect(writeCall?.[1]).toContain('trust_level = "trusted"');
+  });
+
+  it("does not duplicate trusted project entries already present in user config", async () => {
+    const config = '[model]\nname = "test"\n[projects."/repo/project"]\ntrust_level = "trusted"\n';
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return config;
+      }
+      return "";
+    });
+
+    await ensureCodexHooksConfig("/session/tool", {
+      trustedProjects: ["/repo/project", "/repo/project"],
+    });
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[projects\."\/repo\/project"\]/g) ?? []).length;
+    expect(count).toBe(1);
+  });
+
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
