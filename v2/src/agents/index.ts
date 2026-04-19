@@ -131,5 +131,9 @@ export async function setupAgentHooks(args: {
     // Claude uses JSONL-based state classification — no hook settings needed.
     return {};
   }
-  return { codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir) };
+  return {
+    codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir, {
+      trustedProjects: [args.worktreePath],
+    }),
+  };
 }

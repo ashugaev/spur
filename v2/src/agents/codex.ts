@@ -409,7 +409,10 @@ export function codexHookHomePath(sessionToolDir: string): string {
   return join(sessionToolDir, CODEX_HOME_DIR);
 }
 
-export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<string> {
+export async function ensureCodexHooksConfig(
+  sessionToolDir: string,
+  options?: { trustedProjects?: string[] },
+): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
@@ -418,10 +421,19 @@ export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<st
   const userConfigPath = join(homedir(), ".codex", "config.toml");
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
-  const suppressWarningConfig = baseConfig.includes("suppress_unstable_features_warning")
+  const trustedProjects = [...new Set((options?.trustedProjects ?? []).filter(Boolean))];
+  const trustBlocks = trustedProjects
+    .map(
+      (projectPath) =>
+        `\n[projects.${JSON.stringify(projectPath)}]\ntrust_level = "trusted"\n`,
+    )
+    .filter((block) => !baseConfig.includes(block.trim()))
+    .join("");
+  const configWithWarnings = baseConfig.includes("suppress_unstable_features_warning")
     ? baseConfig
     : `${baseConfig.trimEnd()}\n${baseConfig.trimEnd() ? "\n" : ""}suppress_unstable_features_warning = true\n`;
-  await writeFile(sessionConfigPath, suppressWarningConfig, "utf8");
+  const finalConfig = `${configWithWarnings.trimEnd()}${trustBlocks}\n`;
+  await writeFile(sessionConfigPath, finalConfig, "utf8");
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
