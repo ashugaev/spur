@@ -186,7 +186,9 @@ describe("resolvePrSummary", () => {
       .mockResolvedValueOnce(
         JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
       )
-      .mockResolvedValueOnce(JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }));
+      .mockResolvedValueOnce(
+        JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
+      );
 
     const pr = await resolvePrSummary("/wt", "feature/x");
     expect(pr?.mergeable).toBe("CONFLICTING");
