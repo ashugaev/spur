@@ -150,9 +150,7 @@ export async function isProcessRunningInTmux(
       .filter((matcher) => matcher.trim().length > 0)
       .map(
         (matcher) =>
-          new RegExp(
-            `(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`,
-          ),
+          new RegExp(`(?:^|/)${matcher.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s|$)`),
       );
     if (processRes.length === 0) {
       return false;

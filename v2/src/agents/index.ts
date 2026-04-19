@@ -62,10 +62,7 @@ interface AgentAdapter {
     binary: string,
     options?: AgentPlanOptions,
   ): AgentResumePlan;
-  findSessionId(
-    worktreePath: string,
-    options?: AgentSessionLookupOptions,
-  ): Promise<string | null>;
+  findSessionId(worktreePath: string, options?: AgentSessionLookupOptions): Promise<string | null>;
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
@@ -136,9 +133,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       buildCodexResumePlan(agentSessionId, binary, codexPlanOptions(options)),
     findSessionId: (worktreePath, options) =>
       findCodexSessionId(worktreePath, {
-        ...(options?.codexSessionRootDir
-          ? { sessionRootDir: options.codexSessionRootDir }
-          : {}),
+        ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
     setup: async ({ sessionToolDir, worktreePath }) => ({
       codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),

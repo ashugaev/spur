@@ -362,27 +362,26 @@ describe("SessionService", () => {
         }
         return agent === "cursor" ? ["agent", "cursor-agent"] : [agent];
       });
-    agentSessionConfigMock.mockReset().mockImplementation(
-      (agent: string, args?: { dataDir: string; sessionId: string }) =>
-      agent === "cursor"
-        ? {
-            env: {
-              CURSOR_CONFIG_DIR: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
-            },
-            planOptions: {
-              cursorConfigDir: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
-            },
-          }
-        : {},
-    );
+    agentSessionConfigMock
+      .mockReset()
+      .mockImplementation((agent: string, args?: { dataDir: string; sessionId: string }) =>
+        agent === "cursor"
+          ? {
+              env: {
+                CURSOR_CONFIG_DIR: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+              },
+              planOptions: {
+                cursorConfigDir: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+              },
+            }
+          : {},
+      );
     agentStateStrategyMock
       .mockReset()
       .mockImplementation((agent: string) =>
         agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
       );
-    agentWaitsForSubmitAckMock
-      .mockReset()
-      .mockImplementation((agent: string) => agent === "codex");
+    agentWaitsForSubmitAckMock.mockReset().mockImplementation((agent: string) => agent === "codex");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
@@ -775,9 +774,7 @@ describe("SessionService", () => {
     );
   });
 
-  it(
-    "keeps spawn running when autostart cannot reserve a sidecar port, and manual start still fails while that port is held",
-    async () => {
+  it("keeps spawn running when autostart cannot reserve a sidecar port, and manual start still fails while that port is held", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -833,8 +830,7 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.autostart.failed",
     );
-    },
-  );
+  });
 
   it("passes planMode to launch planning and persists it on the session", async () => {
     const { SessionService } = await loadSessionServiceModule();

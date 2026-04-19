@@ -172,9 +172,7 @@ describe("buildCursorRestorePlan", () => {
     const plan = await buildCursorRestorePlan("/worktree/path", "restore prompt");
 
     expect(plan).not.toBeNull();
-    expect(plan?.launchCommand).toBe(
-      "'agent' --resume 'chat-123' --force --sandbox disabled",
-    );
+    expect(plan?.launchCommand).toBe("'agent' --resume 'chat-123' --force --sandbox disabled");
     expect(plan?.initialMessage).toBe("restore prompt");
     expect(plan?.readyMarkers).toEqual(["Cursor Agent"]);
   });

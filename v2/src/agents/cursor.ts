@@ -66,10 +66,7 @@ export async function findCursorSessionId(
   return best?.chatId ?? null;
 }
 
-export function buildCursorPlan(
-  prompt: string,
-  options?: { planMode?: boolean },
-): AgentLaunchPlan {
+export function buildCursorPlan(prompt: string, options?: { planMode?: boolean }): AgentLaunchPlan {
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}`,

@@ -304,7 +304,7 @@ $extra"
       ;;
   esac
 	done`
-	        : `while IFS= read -r line; do
+        : `while IFS= read -r line; do
   printf '%s\\n' "$line" >> "$log_file"
   touch_chat_store "$chat_id"
   case "$line" in

@@ -165,10 +165,7 @@ interface SessionCleanupContext {
   symlinks: string[];
 }
 
-function cleanupIgnoredPaths(
-  session: Pick<SessionRecord, "agent">,
-  symlinks: string[],
-): string[] {
+function cleanupIgnoredPaths(session: Pick<SessionRecord, "agent">, symlinks: string[]): string[] {
   if (session.agent !== "cursor") {
     return symlinks;
   }
@@ -254,9 +251,7 @@ function withPlanMode(
   return planMode ? { ...options, planMode: true } : options;
 }
 
-function sessionProcessMatchers(
-  session: Pick<SessionRecord, "agent" | "launchCommand">,
-): string[] {
+function sessionProcessMatchers(session: Pick<SessionRecord, "agent" | "launchCommand">): string[] {
   return agentProcessMatchers(session.agent, session.launchCommand);
 }
 
@@ -2427,10 +2422,9 @@ export class SessionService {
     options?: { interrupt?: boolean },
   ): Promise<void> {
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const codexSessionsDir =
-      agentWaitsForSubmitAck(session.agent)
-        ? join(codexHookHomePath(sessionToolDir), "sessions")
-        : null;
+    const codexSessionsDir = agentWaitsForSubmitAck(session.agent)
+      ? join(codexHookHomePath(sessionToolDir), "sessions")
+      : null;
     const baseline: RolloutBaseline | null = codexSessionsDir
       ? await captureCodexRolloutBaseline(codexSessionsDir)
       : null;
@@ -2953,10 +2947,7 @@ export class SessionService {
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
-          agentProcessMatchers(
-            session.agent,
-            recoveryPlan?.launchCommand ?? baseLaunchCommand,
-          ),
+          agentProcessMatchers(session.agent, recoveryPlan?.launchCommand ?? baseLaunchCommand),
         ))
       ) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`);
