@@ -12,10 +12,10 @@
 import type { ITheme } from "xterm";
 
 /** Mirrors `--color-bg-base`. Used by Next.js manifest / viewport / icon routes. */
-export const BG_BASE_HEX = "#27272a";
+export const BG_BASE_HEX = "#0d0d0e";
 
 /** Mirrors `--color-terminal-bg`. Used by the xterm `ITheme` and the container div. */
-export const TERMINAL_BG_HEX = "#18181b";
+export const TERMINAL_BG_HEX = "#0a0a0f";
 
 /**
  * Full xterm `ITheme`. Passed straight to the Terminal constructor.

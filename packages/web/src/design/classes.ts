@@ -5,4 +5,4 @@
  */
 
 export const INPUT_CLASS =
-  "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent-violet)]";
+  "border border-[var(--color-input-border)] bg-[var(--color-input-bg)] px-2.5 py-2 text-[var(--color-input-text)] outline-none transition focus:border-[var(--color-accent)]";
