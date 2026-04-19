@@ -201,7 +201,7 @@ function normalizeSpawnRequest(
   if (!prompt) {
     return normalized;
   }
-  if (!steps || steps.length === 0) {
+  if (normalized.planMode || !steps || steps.length === 0) {
     return normalized;
   }
   return { ...normalized, steps };
@@ -265,7 +265,7 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
   const base = withSessionSlotInstructions(initialMessage);
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
-  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+  return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -1982,6 +1982,44 @@ export class SessionService {
     return this.enrich(updated);
   }
 
+  async stopSidecar(sessionId: string, sidecarName: string): Promise<SessionView> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    if (!isRestorableStatus(session.status)) {
+      throw new Error(`Session is not running: ${sessionId}`);
+    }
+    const project = this.resolveProjectForSession(session);
+    const sidecarNames = sessionSidecarNames(session, project);
+    if (!sidecarNames.includes(sidecarName)) {
+      throw new Error(`Session ${sessionId} has no sidecar "${sidecarName}"`);
+    }
+
+    if (!(await sidecarTmuxAlive(sessionId, sidecarName))) {
+      return this.enrich(session);
+    }
+
+    await killSidecarTmux(sessionId, sidecarName);
+
+    const updated: SessionRecord = {
+      ...session,
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.logEvent("session.sidecar.stopped", {
+      level: "info",
+      sessionId,
+      projectId: session.project,
+      message: `Stopped sidecar ${sidecarName} for ${sessionId}`,
+      details: {
+        sidecarName,
+        tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
+      },
+    });
+    return this.enrich(updated);
+  }
+
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
@@ -2400,15 +2438,21 @@ export class SessionService {
         restorePrompt,
         planOptions,
       );
+      const effectivePlan =
+        launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
       if (!launchPlan) {
-        throw new Error(
-          `Session is not restorable (no ${current.agent} resume state): ${sessionId}`,
-        );
+        this.logEvent("session.restore.started", {
+          level: "info",
+          sessionId,
+          projectId: current.project,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
+        });
       }
       await killTmuxSession(current.tmuxSession);
-      let restoreLaunchCommand = launchPlan.launchCommand;
-      let restoreReadyMarkers = launchPlan.readyMarkers;
-      if (current.agent === "claude") {
+      let restoreLaunchCommand = effectivePlan.launchCommand;
+      let restoreReadyMarkers = effectivePlan.readyMarkers;
+      if (current.agent === "claude" && launchPlan) {
         const restoredAgentSessionId = await findAgentSessionId(
           current.agent,
           current.worktreePath,
@@ -2417,7 +2461,7 @@ export class SessionService {
           const resumePlan = buildAgentResumePlan(
             current.agent,
             restoredAgentSessionId,
-            launchPlan.launchCommand,
+            effectivePlan.launchCommand,
             planOptions,
           );
           restoreLaunchCommand = resumePlan.launchCommand;
@@ -2450,7 +2494,7 @@ export class SessionService {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
       const restoreInitialMessage = buildInitialMessage(
-        launchPlan.initialMessage,
+        effectivePlan.initialMessage,
         restoreSidecarNames,
       );
       await this.sendAgentMessage(current, restoreInitialMessage);

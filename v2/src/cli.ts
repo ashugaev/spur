@@ -1306,7 +1306,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--agent <name>", "Agent to start: claude or codex")
     .option(
       "--plan",
-      "Start in plan mode (Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1717,9 +1717,11 @@ export function createProgram(cliEntrypoint: string): Command {
       });
     });
 
-  program
+  const sidecar = program
     .command("sidecar", { hidden: true })
-    .description("Internal sidecar management.")
+    .description("Internal sidecar management.");
+
+  sidecar
     .command("start")
     .requiredOption("--session <id>", "Session id")
     .requiredOption("--name <name>", "Sidecar name")
@@ -1739,6 +1741,30 @@ export function createProgram(cliEntrypoint: string): Command {
             configPath,
           ),
         success: (session) => `Started sidecar ${options.name as string} for ${session.id}.`,
+        render: renderSessionCard,
+      });
+    });
+
+  sidecar
+    .command("stop")
+    .requiredOption("--session <id>", "Session id")
+    .requiredOption("--name <name>", "Sidecar name")
+    .option("--json", "Print raw JSON")
+    .action(async (options, command) => {
+      const configPath = prepareInstanceConfig(
+        (command.parent as Command).parent as Command,
+      ).configPath;
+      await outputResult({
+        json: Boolean(options.json),
+        label: "stopping sidecar",
+        action: () =>
+          postJson<SessionView>(
+            cliEntrypoint,
+            `/sessions/${options.session as string}/sidecars/${options.name as string}/stop`,
+            {},
+            configPath,
+          ),
+        success: (session) => `Stopped sidecar ${options.name as string} for ${session.id}.`,
         render: renderSessionCard,
       });
     });

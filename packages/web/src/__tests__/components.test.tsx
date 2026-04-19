@@ -197,6 +197,7 @@ describe("Dashboard", () => {
       expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
     });
 
+    expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
   });
 

@@ -370,6 +370,16 @@ export async function startServer(
         return;
       }
 
+      const stopSidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/stop$/);
+      if (method === "POST" && stopSidecarMatch?.[1] && stopSidecarMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.stopSidecar(stopSidecarMatch[1], stopSidecarMatch[2]),
+        );
+        return;
+      }
+
       const listServicesSessionId = path.match(/^\/sessions\/([^/]+)\/services$/)?.[1];
       if (method === "GET" && listServicesSessionId) {
         sendJson(response, 200, await service.listServices(listServicesSessionId));

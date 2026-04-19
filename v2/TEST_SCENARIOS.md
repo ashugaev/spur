@@ -29,6 +29,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
+- `spawn --plan` disables request and project-default `spawn.steps`, so the agent receives only the raw task prompt.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
@@ -62,8 +63,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
 - Repeating the same manual status (`pause` or `complete`) stays idempotent and does not rewrite metadata.
 - Codex submit ack polls session rollout jsonl files for the exact trimmed user message text, with a 60s timeout and one Enter key retry.
-- Codex restore throws when no native resume state (thread id) is found, without falling back to fresh launch.
-- Claude restore throws when no native resume state (session id) is found, without falling back to fresh launch.
+- Codex restore falls back to a fresh launch when no native resume state (thread id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
+- Claude restore falls back to a fresh launch when no native resume state (session id) is found, keeps the same worktree/session id, and still delivers the restore prompt.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook-based classification for Codex.
 - Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+tool_use within the stale window→working, assistant+tool_use past the stale window→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, user→working, progress→working, empty→working. The stale window is `TOOL_USE_STALE_MS` (3s) by default, extended by `input.timeout` when the tool declares one, and the window is bypassed entirely when the tool sets `input.run_in_background: true`. The optional `fileMtimeMs` argument is treated as last-observed activity and keeps the classifier on `working` while the JSONL is still being written.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
@@ -109,6 +110,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` without `[prompt...]` creates a blank session, does not deliver an initial message, and does not apply default pipeline steps.
+- `spawn --json --plan` ignores manual and configured spawn steps and sends only the raw prompt to the agent.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.
@@ -136,7 +138,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
 - TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
-- TTY `list` rejects restore when the agent's native resume state is missing, showing an error message instead of falling back to a fresh launch.
+- TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session id/worktree, and still delivers the restore prompt.
 - Codex restore throws on ack timeout instead of falling back to a fresh launch.
 - Daemon desktop notifications establish a startup baseline, notify once when a live session enters `needs_input` or `error`, and stay quiet until that attention state clears.
 - `spawn` rejects an unknown project through the built CLI without creating session side effects.
@@ -166,7 +168,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback.
-- Manual sidecar start via `spur sidecar start --session <id> --name <name>`, including one nested hop through the injected `spur-sidecar` helper.
+- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`, and `start` also allows one nested hop through the injected `spur-sidecar` helper.
 - Sidecar status reported in session view.
 
 ## Real-Agent Smoke
@@ -222,8 +224,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback
-- Manual sidecar start via `spur sidecar start --session <id> --name <name>`
-- Nested sidecars are manual-only through `spur-sidecar`, stop after one extra level, and rejected depth overruns are logged
+- Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
+- Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
 
 ## Regression Rule

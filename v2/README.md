@@ -20,7 +20,7 @@ spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
-- `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -365,7 +365,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. Claude startup enters plan mode; Codex currently accepts this flag but startup behavior is unchanged.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, and makes Claude startup enter plan mode; Codex currently accepts the flag but launch behavior is unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
