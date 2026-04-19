@@ -753,8 +753,8 @@ describe("Dashboard", () => {
       short_name: "Spur",
       start_url: "/",
       display: "standalone",
-      background_color: "#0D0D0E",
-      theme_color: "#0D0D0E",
+      background_color: "#27272a",
+      theme_color: "#27272a",
     });
     expect(appManifest.icons).toEqual(
       expect.arrayContaining([

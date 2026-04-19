@@ -8,6 +8,7 @@ import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -413,7 +414,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       </a>
 
       {error || voice.voiceError ? (
-        <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
+        <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
           {error || voice.voiceError}
         </div>
       ) : null}
@@ -450,10 +451,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-red-500/30 px-2 py-0.5 text-red-200">offline</span>
+                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">offline</span>
               ) : null}
               {hasServiceProblems(session) ? (
-                <span className="border border-orange-400/30 px-2 py-0.5 text-orange-200">
+                <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">
                   service issue
                 </span>
               ) : null}
@@ -476,7 +477,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("pause")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "pause" ? "Pausing..." : "Pause"}
               </button>
@@ -486,7 +487,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleAction("restore")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "restore" ? "Restoring..." : "Restore"}
               </button>
@@ -516,7 +517,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 type="button"
                 disabled={busyAction !== null}
                 onClick={() => void handleRespawn()}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
                 {busyAction === "respawn" ? "Respawning..." : "Respawn"}
               </button>
@@ -524,7 +525,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             <button
               type="button"
               onClick={() => void openLogs()}
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
             >
               Logs
             </button>
@@ -620,7 +621,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <div className="relative">
                       <textarea
-                        className="min-h-24 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                        className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -658,7 +659,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               onClick={() =>
                                 setAttachments((prev) => prev.filter((_, j) => j !== i))
                               }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-white opacity-0 transition group-hover:opacity-100"
+                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
                             >
                               x
                             </button>
@@ -682,7 +683,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 disabled:opacity-50"
+                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
                           {busyAction === "send" ? "Queueing..." : "Queue"}
                         </button>
@@ -793,7 +794,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </div>
 
               {session.error ? (
-                <div className="mt-3 border border-red-500/30 bg-red-500/[0.08] px-2.5 py-2 text-red-100">
+                <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]">
                   {session.error}
                 </div>
               ) : null}
@@ -814,7 +815,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     >
                       <div className="flex items-center gap-2">
                         <span
-                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-green-400" : "bg-[var(--color-text-tertiary)]"}`}
+                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
                         />
                         <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
                         <span className="text-[var(--color-text-tertiary)]">
@@ -825,7 +826,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {sc.alive && canAttach ? (
                           <button
                             type="button"
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                             onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                           >
                             Terminal
@@ -833,7 +834,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         ) : null}
                         {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
                           <a
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5 hover:no-underline"
+                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
                             href={sidecarUiLink}
                             rel="noreferrer"
                             target="_blank"

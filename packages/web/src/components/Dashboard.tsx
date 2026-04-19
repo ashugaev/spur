@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -616,12 +617,12 @@ export function Dashboard() {
 
         {spawnOpen ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
             onClick={(event) => {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -638,7 +639,7 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <select
                     aria-label="Spawn project"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
                   >
@@ -650,7 +651,7 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={INPUT_CLASS}
                     onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                     value={spawnAgent}
                   >
@@ -661,14 +662,14 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <input
                     aria-label="branch name"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
                   />
                   <select
                     aria-label="workspace mode"
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={INPUT_CLASS}
                     onChange={(event) =>
                       setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
                     }
@@ -692,7 +693,7 @@ export function Dashboard() {
                 </div>
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
-                    className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`w-full ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
@@ -704,7 +705,7 @@ export function Dashboard() {
                       <div className="flex gap-2" key={step.id}>
                         <input
                           aria-label={`step ${index + 1}`}
-                          className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                          className={`flex-1 ${INPUT_CLASS}`}
                           onChange={(event) => updateStep(step.id, event.target.value)}
                           placeholder={`Step ${index + 1}`}
                           value={step.value}
@@ -729,7 +730,7 @@ export function Dashboard() {
                 </div>
                 <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
-                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)] sm:min-h-[10rem]"
+                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
                     onChange={(event) => setSpawnPrompt(event.target.value)}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
@@ -741,7 +742,7 @@ export function Dashboard() {
                   <VoiceButton voice={voice} />
                 </div>
                 {voice.voiceError ? (
-                  <div className="border border-red-500/30 bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-100">
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
                   </div>
                 ) : null}
@@ -761,7 +762,7 @@ export function Dashboard() {
                       {!spawning ? (
                         <span
                           aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                         >
                           CMD + ⏎
                         </span>
@@ -775,7 +776,7 @@ export function Dashboard() {
         ) : null}
 
         {error ? (
-          <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
+          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
             {error}
           </div>
         ) : null}

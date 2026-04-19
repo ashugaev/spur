@@ -1,6 +1,7 @@
 "use client";
 
 import { InputHistoryButton } from "@/components/InputHistory";
+import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
 
@@ -41,7 +42,7 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
 const ACTIVE_STYLE =
   "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
 const IDLE_STYLE =
-  "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-white/5 text-[var(--color-text-primary)]";
+  "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-[var(--color-hover-overlay)] text-[var(--color-text-primary)]";
 
 export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
   if (!voice.canUseVoice) return null;
@@ -83,7 +84,7 @@ export function VoiceConfirmModal({
     <div
       aria-label="Confirm voice input"
       aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
       role="dialog"
     >
       <div className="w-full max-w-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
@@ -105,7 +106,7 @@ export function VoiceConfirmModal({
           </p>
           <div className="relative">
             <textarea
-              className="min-h-40 w-full resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+              className={`min-h-40 w-full resize-y ${INPUT_CLASS}`}
               onChange={(event) => voice.setVoiceDraft(event.target.value)}
               value={voice.voiceDraft}
             />
@@ -125,7 +126,7 @@ export function VoiceConfirmModal({
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
               type="button"
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-white/5"
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
               onClick={voice.dismissModal}
             >
               Cancel

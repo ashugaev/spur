@@ -87,6 +87,7 @@
 - Load `$frontend-codestyle` when implementing or reviewing `packages/web` changes.
 - `pnpm --dir packages/web build` and `pnpm --dir packages/web test` must pass before completion.
 - Every `packages/web` change that adds or alters visible behavior must include a Playwright E2E step in the task checklist: write or update tests in `packages/web/tests/`, then run `pnpm --dir packages/web exec playwright test` on the isolated-ui sidecar. All tests must pass before completion. Use the official Playwright MCP agent (`$playwright-test-generator`) when generating new tests.
+- Color literals (hex, `rgb`, `rgba`, `hsl`, Tailwind `*-white/N`, `*-black/N`, `*-red-*`, `*-zinc-*`, etc.) are only allowed in `packages/web/src/app/globals.css` inside `@theme { ... }` and in `packages/web/src/design/colors.ts`. Every component, stylesheet, and metadata file must reference the palette via `var(--color-*)` (for CSS/Tailwind) or by importing from `@/design/colors` (for TS that cannot use CSS vars: Next.js metadata, xterm `ITheme`, tests that guard palette values). Adding a new color means adding a `--color-*` token in `globals.css` first.
 
 ## PR Pipeline Resolve Team (Terminal-Driven)
 
