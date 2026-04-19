@@ -11,6 +11,20 @@ function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSes
   });
 }
 
+function mockSessionConversation(
+  page: Page,
+  sessionId: string,
+  state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed",
+) {
+  return page.route(`**/api/sessions/${sessionId}/conversation`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ messages: [], durationMs: 0, state }),
+    });
+  });
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("back link visible", async ({ page }) => {
@@ -453,5 +467,50 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.getByRole("button", { name: /close terminal/i }).click();
     const overflowRestored = await page.evaluate(() => document.body.style.overflow);
     expect(overflowRestored).not.toBe("hidden");
+  });
+});
+
+// S7: Display state preserves terminal states over claude JSONL "working"
+test.describe("S7: Display state override", () => {
+  test("errored session shows error, not working, even when conversation reports working", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s7-1",
+      status: "errored",
+      state: "error",
+      runtimeAlive: false,
+      error: "Failed to fast-forward local branch",
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("error", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("working", { exact: true })).toHaveCount(0);
+  });
+
+  test("completed session shows paused label (stopped state), not working", async ({ page }) => {
+    const session = makeCompletedSession({ id: "detail-s7-2" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("paused", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("working", { exact: true })).toHaveCount(0);
+  });
+
+  test("working session still shows working when conversation reports working", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s7-3" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("working", { exact: true }).first()).toBeVisible();
   });
 });

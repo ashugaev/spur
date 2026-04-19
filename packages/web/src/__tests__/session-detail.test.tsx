@@ -1,6 +1,7 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionDetail } from "@/components/SessionDetail";
+import type { SpurSessionView } from "@/lib/types";
 
 const pushMock = vi.fn();
 const replaceMock = vi.fn();
@@ -67,7 +68,7 @@ class EmptyAudioMediaRecorder extends MockMediaRecorder {
   }
 }
 
-function sessionFixture() {
+function sessionFixture(overrides?: Partial<SpurSessionView>) {
   return {
     id: "api-a1",
     project: "api",
@@ -92,6 +93,7 @@ function sessionFixture() {
     slots: {
       links: [],
     },
+    ...overrides,
   };
 }
 
@@ -1063,5 +1065,75 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail display state", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  function stubFetch(
+    sessionOverrides: Parameters<typeof sessionFixture>[0],
+    conversationState: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed",
+  ) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture(sessionOverrides)), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ state: conversationState })), {
+          status: 200,
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  async function expectStateBadge(label: string): Promise<void> {
+    const heading = await screen.findByRole("heading", { level: 1 });
+    const container = heading.parentElement;
+    if (!container) throw new Error("header container not found");
+    await within(container).findByText(label);
+  }
+
+  it("shows error state when session is errored (does not override to working)", async () => {
+    stubFetch({ status: "errored", state: "error" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("error");
+  });
+
+  it("shows killed state when session is killed (does not override to working)", async () => {
+    stubFetch({ status: "killed", state: "killed" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("killed");
+  });
+
+  it("shows stopped state when session is stopped (does not override to working)", async () => {
+    stubFetch({ status: "paused", state: "stopped" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    // ActivityDot renders the "stopped" state as the "paused" label.
+    await expectStateBadge("paused");
+  });
+
+  it("overrides to working when session state is waiting and claude conversation reports working", async () => {
+    stubFetch({ status: "running", state: "waiting" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("working");
+  });
+
+  it("shows working when session state is working and claude conversation reports working", async () => {
+    stubFetch({ status: "running", state: "working" }, "working");
+    render(<SessionDetail sessionId="api-a1" />);
+    await expectStateBadge("working");
   });
 });
