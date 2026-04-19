@@ -1727,7 +1727,6 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
-      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
       if (!worktree) {
         stage = "branch.resolve";
         resolvedBranch = await resolveSpawnBranch({
@@ -1763,7 +1762,6 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(sidecarPorts ? { sidecarPorts } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
