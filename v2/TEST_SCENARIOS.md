@@ -104,6 +104,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `appendEventLog` creates the data directory, writes JSONL entries, and auto-fills timestamps; `readEventLog` skips malformed lines; `readSessionEventLog` filters by session and respects a limit parameter.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.
+- Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
 
 ## Runtime Integration
 

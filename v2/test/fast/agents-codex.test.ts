@@ -38,6 +38,7 @@ import {
   buildCodexRestorePlan,
   codexHookHomePath,
   ensureCodexHooksConfig,
+  appendCodexTrustedProjects,
   findCodexSessionId,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
@@ -431,46 +432,105 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
     expect(count).toBe(1);
   });
 
-  it("adds trusted worktree projects to the session-local config", async () => {
-    const worktreePath = "/home/testuser/.spur/worktrees/sp/spur-1234";
-    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
-
-    await ensureCodexHooksConfig("/session/tool", {
-      trustedProjects: [worktreePath, worktreePath],
-    });
-
-    const writeCall = mockWriteFile.mock.calls.find(
-      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
-    );
-    const content = requireValue(writeCall, "expected config.toml write")[1] as string;
-    expect(content).toContain(trustBlock);
-    expect(content.split(trustBlock).length - 1).toBe(1);
-  });
-
-  it("does not duplicate an existing trusted worktree block from user config", async () => {
-    const worktreePath = "/home/testuser/.spur/worktrees/sp/spur-1234";
-    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
-    mockReadFile.mockImplementation(async (filePath: unknown) => {
-      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
-        return `${trustBlock}\n`;
-      }
-      return "";
-    });
-
-    await ensureCodexHooksConfig("/session/tool", {
-      trustedProjects: [worktreePath],
-    });
-
-    const writeCall = mockWriteFile.mock.calls.find(
-      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
-    );
-    const content = requireValue(writeCall, "expected config.toml write")[1] as string;
-    expect(content.split(trustBlock).length - 1).toBe(1);
-  });
-
   it("returns the codex dir path", async () => {
     const result = await ensureCodexHooksConfig("/session/tool");
     expect(result).toBe("/session/tool/codex-home");
+  });
+});
+
+describe("appendCodexTrustedProjects", () => {
+  it("appends a trust_level = trusted section for a plain path", () => {
+    const result = appendCodexTrustedProjects('[model]\nname = "test"\n', ["/worktree/path"]);
+    expect(result).toContain('[projects."/worktree/path"]');
+    expect(result).toContain('trust_level = "trusted"');
+  });
+
+  it("preserves existing config content", () => {
+    const result = appendCodexTrustedProjects('[model]\nname = "test"\n', ["/worktree/path"]);
+    expect(result).toContain('[model]\nname = "test"');
+  });
+
+  it("is idempotent when the same trust section already exists", () => {
+    const base = '[projects."/worktree/path"]\ntrust_level = "trusted"\n';
+    const result = appendCodexTrustedProjects(base, ["/worktree/path"]);
+    const count = (result.match(/\[projects\."\/worktree\/path"\]/g) ?? []).length;
+    expect(count).toBe(1);
+  });
+
+  it("returns the input unchanged when no trusted projects are provided", () => {
+    const base = '[model]\nname = "test"\n';
+    expect(appendCodexTrustedProjects(base, [])).toBe(base);
+  });
+});
+
+describe("ensureCodexHooksConfig trusted projects", () => {
+  function setUserConfig(text: string) {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return text;
+      }
+      return "";
+    });
+  }
+
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+    mockCp.mockResolvedValue(undefined);
+    mockExistsSync.mockReturnValue(false);
+    mockReadFile.mockResolvedValue("");
+  });
+
+  it("writes the trust section for the given worktree path", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[projects."/worktree/path"]');
+    expect(content).toContain('trust_level = "trusted"');
+  });
+
+  it("does not duplicate the trust section when already present in user config", async () => {
+    setUserConfig('[model]\nname = "test"\n[projects."/worktree/path"]\ntrust_level = "trusted"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[projects\."\/worktree\/path"\]/g) ?? []).length;
+    expect(count).toBe(1);
+  });
+
+  it("preserves base config plus suppress line when adding a trust section", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[model]\nname = "test"');
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain('[projects."/worktree/path"]');
+  });
+
+  it("does not add any projects section when trustedProjects is empty or missing", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[projects.");
   });
 });
 

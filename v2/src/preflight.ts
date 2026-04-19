@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
-import { codexCommand } from "./agents/codex.js";
+import { buildEphemeralCodexConfig, codexCommand } from "./agents/codex.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -95,8 +95,13 @@ async function runCodexPreflight(
 ): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
+  const codexHomePath = join(tempDir, "codex-home");
 
   try {
+    await mkdir(codexHomePath, { recursive: true });
+    const ephemeralConfig = await buildEphemeralCodexConfig([cwd]);
+    await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
+
     const { stdout } = await execFileAsync(
       codexCommand(),
       [
@@ -118,7 +123,7 @@ async function runCodexPreflight(
         cwd,
         env: {
           ...process.env,
-          CODEX_HOME: undefined,
+          CODEX_HOME: codexHomePath,
         },
         timeout: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
