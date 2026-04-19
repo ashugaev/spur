@@ -299,7 +299,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
 
           {onlineOpen ? (
             <div
-              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
               onClick={() => {
                 setOnlineDismissed(true);
                 setOnlinePinned(false);
@@ -367,7 +367,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
             <CiStatusDot status={aggregate} />
 
             {/* Tooltip */}
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
+            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] group-focus-within/ci:block group-hover/ci:block">
               {prEntries.slice(0, 8).map((entry) => (
                 <div key={entry.url} className="flex items-center gap-2 py-0.5">
                   <span className="truncate text-[var(--color-text-secondary)]">{entry.label}</span>

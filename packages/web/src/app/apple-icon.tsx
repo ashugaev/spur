@@ -1,4 +1,5 @@
 import { ImageResponse } from "next/og";
+import { BG_BASE_HEX } from "@/design/colors";
 
 export const size = { width: 180, height: 180 };
 export const contentType = "image/png";
@@ -9,7 +10,7 @@ export default function AppleIcon() {
       style={{
         width: "180px",
         height: "180px",
-        background: "#0D0D0E",
+        background: BG_BASE_HEX,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
