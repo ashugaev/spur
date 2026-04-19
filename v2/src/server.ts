@@ -301,6 +301,12 @@ export async function startServer(
         return;
       }
 
+      if (method === "POST" && path === "/sessions/background") {
+        const body = await readJsonBody<SpawnSessionRequest>(request);
+        sendJson(response, 201, await service.spawnInBackground(body));
+        return;
+      }
+
       const sendSessionId = path.match(/^\/sessions\/([^/]+)\/send$/)?.[1];
       if (method === "POST" && sendSessionId) {
         const body = await readJsonBody<SendMessageRequest>(request, 15_000_000);

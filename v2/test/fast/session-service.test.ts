@@ -492,6 +492,152 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("returns a spawning placeholder immediately for background spawn and completes later", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(placeholder.status).toBe("spawning");
+    expect(placeholder.state).toBe("working");
+    expect(placeholder.runtimeAlive).toBe(false);
+    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      id: "api-1",
+      status: "spawning",
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+    });
+
+    await vi.waitFor(() => {
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
+        true,
+      );
+    });
+
+    expect(createWorktreeMock).toHaveBeenCalledWith({
+      repoPath: "/repo/api",
+      worktreeBaseDir: "/tmp/spur-worktrees",
+      projectId: "api",
+      sessionId: "api-1",
+      defaultBranch: "main",
+      branch: "api-1",
+      symlinks: [".env"],
+    });
+    expect(
+      writeSessionMock.mock.calls.some(
+        ([, session]) =>
+          session.id === "api-1" &&
+          session.status === "running" &&
+          session.worktreePath === "/tmp/spur-worktrees/api/api-1",
+      ),
+    ).toBe(true);
+  });
+
+  it("retries background spawn up to three attempts without reserving a new session id", async () => {
+    mockClaudeJsonlState("waiting");
+    createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    createTmuxSessionMock
+      .mockRejectedValueOnce(new Error("tmux boom 1"))
+      .mockRejectedValueOnce(new Error("tmux boom 2"))
+      .mockResolvedValueOnce(undefined);
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    expect(placeholder.id).toBe("api-1");
+
+    await vi.waitFor(() => {
+      expect(createTmuxSessionMock).toHaveBeenCalledTimes(3);
+      expect(writeSessionMock.mock.calls.some(([, session]) => session.status === "running")).toBe(
+        true,
+      );
+    });
+
+    expect(reserveNextSessionIdMock).toHaveBeenCalledTimes(1);
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(2);
+    expect(removeWorktreeMock).toHaveBeenCalledTimes(2);
+    expect(deleteAgentHookStateMock).toHaveBeenCalledTimes(2);
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.spawn.retrying"),
+    ).toBe(true);
+    expect(
+      writeSessionMock.mock.calls.some(
+        ([, session]) => session.id === "api-1" && session.status === "running",
+      ),
+    ).toBe(true);
+  });
+
+  it("rejects an explicit branch conflict during background spawn", async () => {
+    const sessions = createSessionStore();
+    findWorktreePathForBranchMock.mockResolvedValue("/tmp/spur-worktrees/api/api-existing");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const placeholder = await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+      branch: "feature/api-1",
+    });
+
+    expect(placeholder.id).toBe("api-1");
+    expect(placeholder.branch).toBe("feature/api-1");
+    expect(placeholder.branchSource).toBe("explicit");
+
+    await vi.waitFor(() => {
+      expect(sessions.get("api-1")?.status).toBe("errored");
+    });
+
+    expect(createWorktreeMock).not.toHaveBeenCalled();
+    expect(createTmuxSessionMock).not.toHaveBeenCalled();
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) =>
+          entry.event === "session.spawn.failed" &&
+          entry.message.includes('branch "feature/api-1" is already checked out'),
+      ),
+    ).toBe(true);
+  });
+
+  it("does not retry background spawn after sending the initial prompt", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    findAgentSessionIdMock.mockRejectedValueOnce(new Error("capture boom"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawnInBackground({
+      project: "api",
+      prompt: "hello",
+    });
+
+    await vi.waitFor(() => {
+      expect(sessions.get("api-1")?.status).toBe("errored");
+    });
+
+    expect(createTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(killTmuxSessionMock).toHaveBeenCalledTimes(1);
+    expect(removeWorktreeMock).toHaveBeenCalledTimes(1);
+    expect(
+      logSpurEventMock.mock.calls.some(([, entry]) => entry.event === "session.spawn.retrying"),
+    ).toBe(false);
+  });
+
   it("adds sidecar-only testing instructions to the initial message when sidecars are configured", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -1231,6 +1377,7 @@ describe("SessionService", () => {
         steps: ["research", "test"],
         nextStepIndex: 1,
         status: "running",
+        nextStepNotBefore: "2026-03-18T10:05:00.000Z",
       },
     });
     listSessionsMock.mockReturnValue([]);
