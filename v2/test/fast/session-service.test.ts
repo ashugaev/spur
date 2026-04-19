@@ -65,6 +65,7 @@ const readClaudeConversationMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
 const captureCodexRolloutBaselineMock = vi.fn();
+const readCodexRolloutStateMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
@@ -137,6 +138,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
+  readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
@@ -390,6 +392,7 @@ describe("SessionService", () => {
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
+    readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
@@ -1589,8 +1592,8 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
-  it.fails(
-    "should classify the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes",
+  it(
+    "classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes",
     async () => {
       vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
       readSessionMock.mockReturnValue({
@@ -1611,6 +1614,14 @@ describe("SessionService", () => {
         state: "working",
         updatedAt: "2026-04-14T13:45:22.442Z",
         hookEvent: "PreToolUse",
+        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+      });
+      readCodexRolloutStateMock.mockResolvedValue({
+        state: "waiting",
+        timestamp: "2026-04-14T19:27:57.488Z",
+        timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
+        filePath: "/tmp/spur-1c0e/rollout.jsonl",
+        reason: "task_complete",
         turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
       });
 
@@ -1750,7 +1761,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
-  it("detects needs_input for Codex from hook state", async () => {
+  it("reports needs_input from hook state for Codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1767,8 +1778,47 @@ describe("SessionService", () => {
     });
     readAgentHookStateMock.mockReturnValue({
       state: "needs_input",
+      updatedAt: "2026-03-18T10:05:01.000Z",
+      hookEvent: "NeedsInput",
+      turnId: "api-1-3",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("promotes needs_input from structured Codex rollout JSONL", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
       updatedAt: "2026-03-18T10:04:59.000Z",
-      hookEvent: "on_agent_question",
+      hookEvent: "UserPromptSubmit",
+      turnId: "api-1-2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "needs_input",
+      timestamp: "2026-03-18T10:05:01.000Z",
+      timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+      reason: "input_required",
+      turnId: "api-1-3",
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -2082,10 +2132,17 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    readAgentHookStateMock.mockReturnValue({
-      state: "working",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      })
+      .mockReturnValue({
+        state: "needs_input",
+        updatedAt: "2026-03-18T10:05:01.000Z",
+        hookEvent: "NeedsInput",
+        turnId: "api-1-3",
+      });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2093,11 +2150,6 @@ describe("SessionService", () => {
     const first = await service.get("api-1");
     expect(first.state).toBe("working");
 
-    readAgentHookStateMock.mockReturnValue({
-      state: "needs_input",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-      hookEvent: "on_agent_question",
-    });
     const second = await service.get("api-1");
 
     expect(second.state).toBe("needs_input");

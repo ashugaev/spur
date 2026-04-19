@@ -208,8 +208,9 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(states).toContain("needs_input");
   });
 
-  // ── Codex hook-based state detection ───────────────────────────────────
-  // Codex hook propagation: no-hook default is "waiting"; STATE_HOLD_MS (4s) debounce applies.
+  // ── Codex hook/jsonl-based state detection ─────────────────────────────
+  // Codex defaults to hook state, falls back to structured rollout JSONL,
+  // and still uses the same STATE_HOLD_MS (4s) debounce rules.
 
   it("Codex: spawn reaches waiting state from Stop hook", async () => {
     const { context, configPath, port } = await setup("codex-wait");
@@ -218,6 +219,17 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "waiting", 45_000);
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
+  });
+
+  it("Codex: show-waiting-menu produces needs_input from structured hook/jsonl state", async () => {
+    const { context, configPath, port } = await setup("codex-needs");
+    const session = await spawnSession(context, configPath, "codex");
+    await waitForState(port, session.id, "waiting", 45_000);
+
+    await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
+
+    const view = await waitForState(port, session.id, "needs_input", 45_000);
+    expect(view.state).toBe("needs_input");
   });
 
   it("Codex: spawn trusts the worktree path in the session-local config", async () => {
