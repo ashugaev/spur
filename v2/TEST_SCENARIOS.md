@@ -27,6 +27,9 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
+- Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
+- Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
 - `spawn --plan` disables request and project-default `spawn.steps`, so the agent receives only the raw task prompt.
@@ -118,6 +121,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json` falls back to the session id branch when a preflight-suggested branch is already checked out in another worktree, and `spawn --json --branch <name>` rejects that same conflict with the conflicting worktree path.
 - Interactive spawn with preflight-enabled project calls `/projects/:id/preflight`, shows branch confirmation, and passes the confirmed branch in the spawn request.
 - Non-TTY and `--json` spawn skip the preflight endpoint call.
+- `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.

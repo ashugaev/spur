@@ -135,6 +135,7 @@ const RESTORE_PLAN_POLL_MS = 250;
 const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
+const SPAWN_RETRY_ATTEMPTS = 3;
 const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
@@ -152,6 +153,7 @@ const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
 type ManualSessionStatus = "paused" | "completed";
 type AttentionState = "needs_input" | "error";
+type BackgroundSpawnAttemptResult = "completed" | "retry";
 interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
@@ -480,6 +482,21 @@ function resolveSpawnDefaultBranch(args: {
 interface ResolvedSpawnBranch {
   branch: string;
   branchSource?: BranchSource;
+}
+
+interface PreparedSpawn {
+  request: SpawnSessionRequest;
+  project: ProjectConfig;
+  agent: SessionRecord["agent"];
+  prompt: string;
+  steps?: string[];
+  planMode: boolean;
+  worktree: boolean;
+  defaultBranch: string;
+  sessionId: string;
+  resolvedBranch?: ResolvedSpawnBranch;
+  placeholder: SessionRecord;
+  sessionToolDir: string;
 }
 
 function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
@@ -1651,6 +1668,530 @@ export class SessionService {
       });
       throw error;
     }
+  }
+
+  private resetSpawnAttemptArtifacts(sessionId: string): void {
+    deleteAgentHookState(this.config.dataDir, sessionId);
+    deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+  }
+
+  private async cleanupBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    workspacePath: string,
+    finalFailure: boolean,
+  ): Promise<void> {
+    await killTmuxSession(prepared.sessionId);
+    for (const sidecarName of Object.keys(prepared.project.sidecars)) {
+      await killSidecarTmux(prepared.sessionId, sidecarName).catch(() => {});
+    }
+    if (finalFailure) {
+      this.removeSessionArtifacts(prepared.sessionId);
+    } else {
+      this.resetSpawnAttemptArtifacts(prepared.sessionId);
+    }
+    if (prepared.worktree && workspacePath) {
+      await removeWorktree(prepared.project.path, workspacePath);
+    }
+  }
+
+  private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
+    let stage = "validating";
+    let sessionId: string | undefined;
+    let project: ProjectConfig | undefined;
+    let agent: SessionRecord["agent"] | undefined;
+    let worktree = false;
+    let createdAt: string | undefined;
+    let placeholderWritten = false;
+    let prompt = "";
+    let steps: string[] | undefined;
+    let planMode: boolean;
+    let resolvedBranch: ResolvedSpawnBranch | undefined;
+    let explicitBranch: string | undefined;
+    try {
+      project = this.getProject(request.project);
+      ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
+      if (
+        request.branch !== undefined &&
+        (typeof request.branch !== "string" || !request.branch.trim())
+      ) {
+        throw new Error("branch must be a non-empty string when provided");
+      }
+      explicitBranch = request.branch?.trim() || undefined;
+
+      const overrides = parseSpawnOverrides(request.overrides, "overrides");
+      worktree = resolveSpawnWorktree(project, overrides);
+      const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
+      agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
+      sessionId = await reserveNextSessionId(
+        this.config.dataDir,
+        request.project,
+        project.sessionPrefix,
+      );
+      const sidecarPorts = reserveSidecarPorts(this.config.dataDir, project.sidecars);
+      if (!worktree) {
+        stage = "branch.resolve";
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: request.branch,
+          ...(request.branch ? { requestBranchSource: "explicit" as const } : {}),
+          worktree,
+          fallbackBranch: sessionId,
+        });
+      }
+      createdAt = nowIso();
+      const placeholderBranch = resolvedBranch?.branch ?? explicitBranch ?? sessionId;
+      const placeholderBranchSource =
+        resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+      const placeholderWorktreePath = worktree
+        ? join(this.config.worktreeDir, request.project, sessionId)
+        : project.path;
+      const placeholder: SessionRecord = {
+        id: sessionId,
+        project: request.project,
+        agent,
+        planMode,
+        prompt,
+        branch: placeholderBranch,
+        ...(placeholderBranchSource ? { branchSource: placeholderBranchSource } : {}),
+        worktree,
+        worktreePath: placeholderWorktreePath,
+        tmuxSession: sessionId,
+        launchCommand: "",
+        status: "spawning",
+        createdAt,
+        updatedAt: createdAt,
+        ...(Object.keys(project.sidecars).length > 0
+          ? { sidecarNames: Object.keys(project.sidecars) }
+          : {}),
+        ...(sidecarPorts ? { sidecarPorts } : {}),
+      };
+      writeSession(this.config.dataDir, placeholder);
+      placeholderWritten = true;
+
+      this.logEvent("session.spawn.started", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawning ${sessionId}`,
+        details: {
+          agent,
+          branch: placeholderBranch,
+          worktree,
+          defaultBranch,
+          branchSource: placeholderBranchSource ?? null,
+          mode: "background",
+        },
+      });
+
+      return {
+        request,
+        project,
+        agent,
+        prompt,
+        ...(steps ? { steps } : {}),
+        planMode,
+        worktree,
+        defaultBranch,
+        sessionId,
+        ...(resolvedBranch ? { resolvedBranch } : {}),
+        placeholder,
+        sessionToolDir: this.prepareSessionTools(sessionId, agent),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (sessionId && project && placeholderWritten) {
+        this.removeSessionArtifacts(sessionId);
+        const erroredBranchSource =
+          resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
+        writeSession(this.config.dataDir, {
+          id: sessionId,
+          project: request.project,
+          agent:
+            agent ??
+            parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent),
+          prompt,
+          branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
+          ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
+          worktree,
+          worktreePath: worktree
+            ? join(this.config.worktreeDir, request.project, sessionId)
+            : project.path,
+          tmuxSession: sessionId,
+          launchCommand: "",
+          status: "errored",
+          createdAt: createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          error: message,
+        });
+      }
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        ...(sessionId ? { sessionId } : {}),
+        projectId: request.project,
+        message: sessionId
+          ? `Failed to spawn ${sessionId}: ${message}`
+          : `Failed to spawn session: ${message}`,
+        details: {
+          stage,
+          requestedAgent: request.agent ?? null,
+        },
+      });
+      throw error;
+    }
+  }
+
+  private async runBackgroundSpawnAttempt(
+    prepared: PreparedSpawn,
+    attempt: number,
+  ): Promise<BackgroundSpawnAttemptResult> {
+    const { agent, planMode, project, prompt, request, sessionId } = prepared;
+    let stage = attempt > 1 ? `retry.${attempt}.preflight` : "preflight";
+    let workspacePath = prepared.worktree ? "" : project.path;
+    let initialPromptSent = false;
+    try {
+      let resolvedBranch = prepared.resolvedBranch;
+      let preflightOutcome: "branch" | "defer" | undefined;
+      let preflightBranch: string | undefined;
+      if (!resolvedBranch) {
+        let effectiveBranch = request.branch;
+        let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
+          request.branch ? "explicit" : undefined;
+        if (!effectiveBranch && prepared.worktree && project.preflight && prompt) {
+          const preflight = await runSpawnPreflight({
+            agent,
+            projectId: request.project,
+            project,
+            baseBranch: prepared.defaultBranch,
+            worktree: prepared.worktree,
+            prompt,
+          });
+          if (preflight.branch) {
+            preflightOutcome = "branch";
+            preflightBranch = preflight.branch;
+            effectiveBranch = preflight.branch;
+            effectiveBranchSource = "preflight";
+          } else {
+            preflightOutcome = "defer";
+          }
+        }
+        if (preflightOutcome) {
+          this.logEvent("session.preflight.completed", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message:
+              preflightOutcome === "branch"
+                ? `Spawn preflight selected branch ${preflightBranch} for ${sessionId}`
+                : `Spawn preflight deferred branch selection for ${sessionId}`,
+            details: {
+              outcome: preflightOutcome,
+              branch: preflightBranch ?? null,
+              baseBranch: prepared.defaultBranch,
+              attempt,
+            },
+          });
+        }
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: effectiveBranch,
+          ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
+          worktree: prepared.worktree,
+          fallbackBranch: sessionId,
+        });
+        if (prepared.worktree && resolvedBranch.branch !== sessionId) {
+          const branchConflictPath = await findWorktreePathForBranch(
+            project.path,
+            resolvedBranch.branch,
+          );
+          if (branchConflictPath) {
+            if (resolvedBranch.branchSource === "explicit") {
+              throw new Error(
+                `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+              );
+            }
+            this.logEvent("session.spawn.branch_conflict", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+              details: {
+                occupiedBranch: resolvedBranch.branch,
+                conflictingWorktreePath: branchConflictPath,
+                fallbackBranch: sessionId,
+                branchSource: resolvedBranch.branchSource ?? null,
+                attempt,
+              },
+            });
+            resolvedBranch = { branch: sessionId };
+          }
+        }
+        prepared.resolvedBranch = resolvedBranch;
+      }
+
+      const spawnPlaceholder: SessionRecord = {
+        ...prepared.placeholder,
+        branch: resolvedBranch.branch,
+        ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
+        updatedAt: nowIso(),
+      };
+      writeSession(this.config.dataDir, spawnPlaceholder);
+      prepared.placeholder = spawnPlaceholder;
+
+      stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
+      if (prepared.worktree) {
+        workspacePath = await createWorktree({
+          repoPath: project.path,
+          worktreeBaseDir: this.config.worktreeDir,
+          projectId: request.project,
+          sessionId,
+          defaultBranch: prepared.defaultBranch,
+          branch: resolvedBranch.branch,
+          symlinks: project.symlinks,
+        });
+        this.logEvent("session.spawn.worktree_created", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Created worktree for ${sessionId}`,
+          details: {
+            worktreePath: workspacePath,
+            symlinkCount: project.symlinks.length,
+            attempt,
+          },
+        });
+      } else {
+        this.logEvent("session.spawn.shared_workspace", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Using shared workspace for ${sessionId}`,
+          details: {
+            workspacePath,
+            branch: resolvedBranch.branch,
+            attempt,
+          },
+        });
+      }
+
+      const firstStage = prepared.steps?.[0];
+      const initialMessage =
+        prepared.steps && firstStage
+          ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
+          : prompt;
+      const hookSetup = await setupAgentHooks({
+        agent,
+        worktreePath: workspacePath,
+        sessionToolDir: prepared.sessionToolDir,
+      });
+      const launchPlan = buildAgentLaunchPlan(
+        agent,
+        initialMessage,
+        withPlanMode(hookSetup, planMode),
+      );
+      const pipeline = prepared.steps
+        ? {
+            steps: prepared.steps,
+            nextStepIndex: 1,
+            awaitingStepIndex: 0,
+            status: "running" as const,
+          }
+        : undefined;
+      const runningRecord: SessionRecord = {
+        ...spawnPlaceholder,
+        planMode,
+        worktreePath: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        status: "running",
+        updatedAt: nowIso(),
+        ...(pipeline ? { pipeline } : {}),
+      };
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.create` : "tmux.create";
+      const sessionEnv = buildSessionEnv({
+        agent,
+        projectId: request.project,
+        sessionId,
+        sessionToolDir: prepared.sessionToolDir,
+        dataDir: this.config.dataDir,
+        repoPath: project.path,
+        symlinks: project.symlinks,
+      });
+      await createTmuxSession({
+        sessionName: sessionId,
+        cwd: workspacePath,
+        launchCommand: launchPlan.launchCommand,
+        agent,
+        env: sessionEnv,
+      });
+      this.logEvent("session.spawn.tmux_created", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Created tmux session for ${sessionId}`,
+        details: {
+          tmuxSession: sessionId,
+          attempt,
+        },
+      });
+
+      stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
+      await syncTmuxStatus(sessionId, runningRecord.slots);
+      stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
+      await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
+      this.logEvent("session.spawn.ready", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Agent prompt is ready for ${sessionId}`,
+        details: { attempt },
+      });
+
+      if (launchPlan.initialMessage.trim()) {
+        stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
+        const sidecarNames = Object.keys(project.sidecars);
+        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
+        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        initialPromptSent = true;
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            messageLength: launchPlan.initialMessage.length,
+            attempt,
+          },
+        });
+      }
+
+      stage = attempt > 1 ? `retry.${attempt}.record.write` : "record.write";
+      const persistedRecord = await this.captureAgentSessionId(
+        runningRecord,
+        AGENT_SESSION_ID_INITIAL_WAIT_MS,
+      );
+
+      for (const [name, sidecar] of Object.entries(project.sidecars)) {
+        if (!sidecar.autoStart) continue;
+        try {
+          await createTmuxSidecarSession({
+            sessionId,
+            sidecarName: name,
+            cwd: workspacePath,
+            command: sidecar.command,
+            env: {
+              ...sessionEnv,
+              SPUR_SIDECAR_NAME: name,
+              ...(sidecar.env ?? {}),
+              ...sidecarPortEnv(runningRecord, name),
+            },
+          });
+          this.logEvent("session.sidecar.started", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-started sidecar ${name} for ${sessionId}`,
+            details: {
+              sidecarName: name,
+              command: sidecar.command,
+              tmuxSession: sidecarTmuxSession(sessionId, name),
+              attempt,
+            },
+          });
+        } catch (sidecarError) {
+          const sidecarMessage =
+            sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
+          this.logEvent("session.sidecar.autostart.failed", {
+            level: "warn",
+            sessionId,
+            projectId: request.project,
+            message: `Auto-start sidecar ${name} failed for ${sessionId}: ${sidecarMessage}`,
+          });
+        }
+      }
+
+      writeSession(this.config.dataDir, persistedRecord);
+      this.logEvent("session.spawn.completed", {
+        level: "info",
+        sessionId,
+        projectId: request.project,
+        message: `Spawned ${sessionId}`,
+        details: {
+          worktreePath: workspacePath,
+          tmuxSession: sessionId,
+          agent,
+          agentSessionId: persistedRecord.agentSessionId ?? null,
+          attempt,
+        },
+      });
+      if (this.shouldRunDelivery(persistedRecord)) {
+        this.scheduleDeliveryRunner(persistedRecord.id);
+      }
+      return "completed";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finalFailure = attempt >= SPAWN_RETRY_ATTEMPTS || initialPromptSent;
+      await this.cleanupBackgroundSpawnAttempt(prepared, workspacePath, finalFailure);
+      if (!finalFailure) {
+        writeSession(this.config.dataDir, {
+          ...prepared.placeholder,
+          launchCommand: "",
+          status: "spawning",
+          updatedAt: nowIso(),
+        });
+        this.logEvent("session.spawn.retrying", {
+          level: "warn",
+          sessionId,
+          projectId: request.project,
+          message: `Spawn attempt ${attempt} failed for ${sessionId}; retrying`,
+          details: {
+            stage,
+            attempt,
+            nextAttempt: attempt + 1,
+            error: message,
+          },
+        });
+        return "retry";
+      }
+      writeSession(this.config.dataDir, {
+        ...prepared.placeholder,
+        worktreePath: workspacePath || prepared.placeholder.worktreePath,
+        launchCommand: "",
+        status: "errored",
+        updatedAt: nowIso(),
+        error: message,
+      });
+      this.logEvent("session.spawn.failed", {
+        level: "error",
+        sessionId,
+        projectId: request.project,
+        message: `Failed to spawn ${sessionId}: ${message}`,
+        details: {
+          stage,
+          attempt,
+          worktree: prepared.worktree,
+          worktreePath: workspacePath || prepared.placeholder.worktreePath || null,
+          agent,
+          branch: prepared.placeholder.branch,
+        },
+      });
+      return "completed";
+    }
+  }
+
+  async spawnInBackground(request: SpawnSessionRequest): Promise<SessionView> {
+    const prepared = await this.prepareBackgroundSpawn(request);
+    const placeholder = await this.enrich(prepared.placeholder);
+    queueMicrotask(() => {
+      void (async () => {
+        for (let attempt = 1; attempt <= SPAWN_RETRY_ATTEMPTS; attempt += 1) {
+          const result = await this.runBackgroundSpawnAttempt(prepared, attempt);
+          if (result === "completed") {
+            return;
+          }
+        }
+      })();
+    });
+    return placeholder;
   }
 
   async send(sessionId: string, request: SendMessageRequest): Promise<SessionView> {

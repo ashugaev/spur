@@ -106,6 +106,17 @@ export function makeWorkingSession(overrides?: Partial<SpurSessionView>): SpurSe
   };
 }
 
+export function makeSpawningSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-spawning-1"),
+    runtimeAlive: false,
+    status: "spawning",
+    state: "working",
+    workspaceExists: false,
+    ...overrides,
+  };
+}
+
 export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-stopped-1"),
@@ -203,20 +214,18 @@ export function makeSessionWithSidecar(
 
 export async function mockSessions(
   page: Page,
-  sessions: SpurSessionView[],
-  projects?: ProjectInfo[],
+  sessions: SpurSessionView[] | (() => SpurSessionView[]),
+  projects?: ProjectInfo[] | (() => ProjectInfo[]),
 ): Promise<void> {
-  const body = JSON.stringify({
-    sessions,
-    projects: projects ?? [],
-  });
-
   // Match /api/sessions and /api/sessions?project=... but NOT /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body,
+      body: JSON.stringify({
+        sessions: typeof sessions === "function" ? sessions() : sessions,
+        projects: typeof projects === "function" ? projects() : (projects ?? []),
+      }),
     });
   });
 

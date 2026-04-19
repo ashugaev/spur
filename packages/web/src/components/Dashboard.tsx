@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -157,6 +157,18 @@ function buildSpawnOverrides(
   return undefined;
 }
 
+function upsertSession(
+  sessions: SpurSessionView[],
+  nextSession: SpurSessionView,
+  activeProjectId: string,
+): SpurSessionView[] {
+  const filtered = sessions.filter((session) => session.id !== nextSession.id);
+  if (activeProjectId && nextSession.project !== activeProjectId) {
+    return filtered;
+  }
+  return [nextSession, ...filtered];
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -180,6 +192,7 @@ export function Dashboard() {
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
+  const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -464,8 +477,9 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId) return;
+    if (!nextProjectId || spawningRef.current) return;
 
+    spawningRef.current = true;
     setSpawning(true);
     try {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
@@ -488,6 +502,8 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
+      const session = (await response.json()) as SpurSessionView;
+      setRawSessions((current) => upsertSession(current, session, nextProjectId));
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -497,11 +513,11 @@ export function Dashboard() {
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
-      await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
+      spawningRef.current = false;
       setSpawning(false);
     }
   };
