@@ -44,6 +44,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
+- After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters

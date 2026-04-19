@@ -60,6 +60,82 @@ describe("startServer", () => {
     await expect(fetch(`http://127.0.0.1:${port}/info`)).rejects.toThrow();
   });
 
+  it("includes completed sessions only when GET /sessions opts in", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalList = SessionService.prototype.list;
+    const calls: Array<{ includeCompleted?: boolean }> = [];
+    SessionService.prototype.list = async function mockList(options) {
+      calls.push(options);
+      return [
+        {
+          id: "demo-done",
+          project: "demo",
+          agent: "claude",
+          prompt: "ship it",
+          branch: "demo-done",
+          worktree: true,
+          worktreePath: join(worktreeDir, "demo", "demo-done"),
+          tmuxSession: null,
+          launchCommand: "",
+          status: "completed",
+          state: "stopped",
+          runtimeAlive: false,
+          workspaceExists: false,
+          createdAt: "2026-04-15T00:00:00.000Z",
+          updatedAt: "2026-04-15T00:00:00.000Z",
+          lastActivityAt: "2026-04-15T00:00:00.000Z",
+          services: [],
+          sidecars: [],
+        },
+      ];
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const defaultResponse = await fetch(`http://127.0.0.1:${port}/sessions`);
+      expect(defaultResponse.status).toBe(200);
+      await expect(defaultResponse.json()).resolves.toMatchObject([{ id: "demo-done" }]);
+
+      const completedResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions?includeCompleted=1`,
+      );
+      expect(completedResponse.status).toBe(200);
+      await expect(completedResponse.json()).resolves.toMatchObject([
+        { id: "demo-done", status: "completed" },
+      ]);
+    } finally {
+      SessionService.prototype.list = originalList;
+      await server.stop();
+    }
+
+    expect(calls).toEqual([{ includeCompleted: false }, { includeCompleted: true }]);
+  });
+
   it("routes POST /sessions/background to background spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
     const repoDir = join(root, "repo");
