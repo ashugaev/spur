@@ -48,6 +48,7 @@
 - `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent` and `--branch`. Empty prompt opens a blank session and skips default pipeline steps / initial message injection.
 - Workspace setup in `Spur` is only: `git worktree`, configured symlinks, detached `tmux`, then agent launch.
 - Supported agents in `Spur` are only `claude` and `codex`.
+- For agent state detection and `Needs Input`, use only hook state and agent history JSONL. Do not infer state from `tmux` pane capture, terminal text, or other screen-content heuristics.
 - Both `Spur` agents must launch with full access by default:
   `claude --dangerously-skip-permissions` and
   `codex --dangerously-bypass-approvals-and-sandbox`.
