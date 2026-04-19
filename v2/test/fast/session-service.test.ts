@@ -1592,47 +1592,44 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
-  it(
-    "classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes",
-    async () => {
-      vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
-      readSessionMock.mockReturnValue({
-        id: "spur-1c0e",
-        project: "api",
-        agent: "codex",
-        prompt: "header project select",
-        branch: "feature/header-project-select",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/spur-1c0e",
-        tmuxSession: "spur-1c0e",
-        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-        status: "running",
-        createdAt: "2026-04-14T13:34:40.615Z",
-        updatedAt: "2026-04-14T13:46:31.938Z",
-      });
-      readAgentHookStateMock.mockReturnValue({
-        state: "working",
-        updatedAt: "2026-04-14T13:45:22.442Z",
-        hookEvent: "PreToolUse",
-        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
-      });
-      readCodexRolloutStateMock.mockResolvedValue({
-        state: "waiting",
-        timestamp: "2026-04-14T19:27:57.488Z",
-        timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
-        filePath: "/tmp/spur-1c0e/rollout.jsonl",
-        reason: "task_complete",
-        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
-      });
+  it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {
+    vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
+    readSessionMock.mockReturnValue({
+      id: "spur-1c0e",
+      project: "api",
+      agent: "codex",
+      prompt: "header project select",
+      branch: "feature/header-project-select",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/spur-1c0e",
+      tmuxSession: "spur-1c0e",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T13:46:31.938Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-14T13:45:22.442Z",
+      hookEvent: "PreToolUse",
+      turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-14T19:27:57.488Z",
+      timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
+      filePath: "/tmp/spur-1c0e/rollout.jsonl",
+      reason: "task_complete",
+      turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+    });
 
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
 
-      const result = await service.get("spur-1c0e");
+    const result = await service.get("spur-1c0e");
 
-      expect(result.state).toBe("waiting");
-    },
-  );
+    expect(result.state).toBe("waiting");
+  });
 
   it("Claude: defaults to working when no JSONL exists yet", async () => {
     readSessionMock.mockReturnValue({

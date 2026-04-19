@@ -3586,7 +3586,10 @@ export class SessionService {
   }
 
   private codexSessionsDir(sessionId: string): string {
-    return join(codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)), "sessions");
+    return join(
+      codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
+      "sessions",
+    );
   }
 
   private async classifyCodexState(sessionId: string): Promise<{
