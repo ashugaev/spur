@@ -1327,6 +1327,7 @@ describe("SessionService", () => {
         steps: ["research", "test"],
         nextStepIndex: 1,
         status: "running",
+        nextStepNotBefore: "2026-03-18T10:05:00.000Z",
       },
     });
     listSessionsMock.mockReturnValue([]);
