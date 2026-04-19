@@ -111,6 +111,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn` auto-inits the global instance config when missing and auto-connects the nearest local project config before project validation.
 - `send`, `pause`, `complete`, `kill`, `service`, and hidden `daemon` commands use the global instance config but do not auto-connect a local project config.
 - `spawn --json` creates a normal Spur session through the built CLI, with a real `git worktree`, configured symlinks, detached `tmux`, and fake agent launch.
+- `spawn --json --agent codex` writes the spawned worktree path into the session-local `CODEX_HOME/config.toml` as `trusted`, so worktree launches stay non-interactive.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` without `[prompt...]` creates a blank session, does not deliver an initial message, and does not apply default pipeline steps.
 - `spawn --json --plan` ignores manual and configured spawn steps and sends only the raw prompt to the agent.
