@@ -451,7 +451,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
-                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">offline</span>
+                <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
+                  offline
+                </span>
               ) : null}
               {hasServiceProblems(session) ? (
                 <span className="border border-[var(--color-chip-warn-border)] px-2 py-0.5 text-[var(--color-chip-warn-text)]">

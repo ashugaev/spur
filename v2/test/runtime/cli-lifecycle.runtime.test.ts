@@ -1145,9 +1145,13 @@ projects:
     const worktreeFile = await execFileAsync("git", ["show", "HEAD:REMOTE_DIRTY.txt"], {
       cwd: spawned.worktreePath,
     });
-    const localDirtyStatus = await execFileAsync("git", ["status", "--short", "--", "LOCAL_DIRTY.txt"], {
-      cwd: context.repoDir,
-    });
+    const localDirtyStatus = await execFileAsync(
+      "git",
+      ["status", "--short", "--", "LOCAL_DIRTY.txt"],
+      {
+        cwd: context.repoDir,
+      },
+    );
 
     await expect(
       execFileAsync("git", ["show", "main:REMOTE_DIRTY.txt"], { cwd: context.repoDir }),
