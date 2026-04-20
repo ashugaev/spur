@@ -304,6 +304,18 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
+  it("submits claude slash hotkeys as bracketed paste plus enter", async () => {
+    await mountTerminal("test-claude-hotkey-submit", "claude");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
+
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~/compact\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("/compact\r");
+    });
+  });
+
   it("shows a visible error when codex slash hotkey submit fails", async () => {
     await mountTerminal("test-codex-hotkey-submit-error", "codex");
 
