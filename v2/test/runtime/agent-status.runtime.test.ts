@@ -119,13 +119,12 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("running");
   });
 
-  it("Claude: tool_use produces needs_input after stale window", async () => {
+  it("Claude: AskUserQuestion JSONL produces needs_input", async () => {
     const { context, configPath, port } = await setup("claude-needs");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
 
-    // show-waiting-menu makes fake agent write tool_use JSONL without later ack.
-    // After the stale window + debounce, daemon classifies as needs_input.
+    // show-waiting-menu makes fake agent write AskUserQuestion JSONL metadata.
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
     const view = await waitForState(port, session.id, "needs_input");

@@ -180,7 +180,7 @@ fi`;
       : `emit_hook_event "Stop"`;
   const signalNeedsInput =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
       : `emit_hook_needs_input
       emit_rollout_input_required`;
   const signalSlowToolResult =
