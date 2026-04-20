@@ -54,11 +54,7 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
 }
 
-function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
-  if (agent !== "codex") {
-    return [`${text}\r`];
-  }
-
+function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -214,12 +210,12 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(agent, text)) {
+      for (const payload of buildSubmittedTextPayloads(text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [agent, draftHistory, sendWithAck],
+    [draftHistory, sendWithAck],
   );
 
   const sendHotkey = useCallback(
@@ -227,7 +223,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -239,7 +235,7 @@ export function DirectTerminal({
         );
       }
     },
-    [agent, sendTerminalInput, sendWithAck],
+    [sendTerminalInput, sendWithAck],
   );
 
   useEffect(() => {
