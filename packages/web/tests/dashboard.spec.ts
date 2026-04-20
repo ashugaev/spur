@@ -672,11 +672,22 @@ test.describe("D7: Spawn modal", () => {
     // Project select (contains "Select project" option)
     await expect(page.getByRole("option", { name: /select project/i })).toBeAttached();
     // Agent select
+    await expect(page.getByRole("combobox", { name: "spawn agent" })).toBeVisible();
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     // Plan checkbox - it's a checkbox input inside a label with "Plan" text
     await expect(page.getByRole("checkbox")).toBeVisible();
+  });
+
+  test("codex shows a plan-mode limitation hint", async ({ page }) => {
+    await openSpawnModal(page);
+
+    await expect(page.getByText(/codex does not enter a native plan mode/i)).toHaveCount(0);
+    await page.getByRole("combobox", { name: "spawn agent" }).selectOption("codex");
+    await expect(
+      page.getByText(/plan skips steps and sends the raw prompt\. codex does not enter a native plan mode\./i),
+    ).toBeVisible();
   });
 
   test("modal has Spawn button", async ({ page }) => {

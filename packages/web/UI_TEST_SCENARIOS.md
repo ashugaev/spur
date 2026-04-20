@@ -118,6 +118,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
+- When agent is `codex`, the modal explains that Plan skips steps and sends the raw prompt only; Codex does not enter a native plan mode
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp

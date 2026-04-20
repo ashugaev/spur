@@ -695,6 +695,7 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
+                    aria-label="spawn agent"
                     className={INPUT_CLASS}
                     onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                     value={spawnAgent}
@@ -735,6 +736,12 @@ export function Dashboard() {
                     </span>
                   </label>
                 </div>
+                {spawnAgent === "codex" ? (
+                  <p className="text-[var(--color-text-secondary)]">
+                    Plan skips steps and sends the raw prompt. Codex does not enter a native plan
+                    mode.
+                  </p>
+                ) : null}
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
                     className={`w-full ${INPUT_CLASS}`}
