@@ -365,7 +365,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, and makes Claude startup enter plan mode; Codex currently accepts the flag but launch behavior is unchanged.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, and makes Claude startup enter plan mode; Codex currently accepts the flag but launch behavior is unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.

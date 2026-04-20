@@ -76,6 +76,7 @@ describe("spur help", () => {
     expect(help).toContain("--shared");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
+    expect(help).toContain("adds a planning-only prompt");
     expect(help).toContain("Use the project path directly for this session (no worktree)");
     expect(help).toContain(
       "If the project enables spawn preflight, worktree spawns can derive a branch before worktree creation.",

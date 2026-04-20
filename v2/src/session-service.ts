@@ -151,6 +151,8 @@ interface PrCheckTracker {
 
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
+const PLAN_MODE_PROMPT_SUFFIX =
+  "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.";
 type ManualSessionStatus = "paused" | "completed";
 type AttentionState = "needs_input" | "error";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
@@ -218,6 +220,17 @@ function normalizeSpawnRequest(
 
 function resolvePlanMode(session: Pick<SessionRecord, "planMode">): boolean {
   return session.planMode === true;
+}
+
+function buildPlanModePrompt(prompt: string): string {
+  return `${prompt}\n\n${PLAN_MODE_PROMPT_SUFFIX}`;
+}
+
+function buildSessionPrompt(prompt: string, planMode: boolean): string {
+  if (!planMode || !prompt.trim()) {
+    return prompt;
+  }
+  return buildPlanModePrompt(prompt);
 }
 
 function withPlanMode(
@@ -349,8 +362,8 @@ export function isRestorableSession(
   );
 }
 
-export function buildRestorePrompt(prompt: string): string {
-  return `${RESTORE_PROMPT_PREFIX}\n\n${prompt}`;
+export function buildRestorePrompt(prompt: string, planMode = false): string {
+  return `${RESTORE_PROMPT_PREFIX}\n\n${buildSessionPrompt(prompt, planMode)}`;
 }
 
 function joinReasons(reasons: string[]): string {
@@ -1467,7 +1480,7 @@ export class SessionService {
       const initialMessage =
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
-          : prompt;
+          : buildSessionPrompt(prompt, planMode);
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
@@ -1986,7 +1999,7 @@ export class SessionService {
       const initialMessage =
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
-          : prompt;
+          : buildSessionPrompt(prompt, planMode);
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
@@ -2976,7 +2989,7 @@ export class SessionService {
         sessionToolDir,
       });
       const planMode = resolvePlanMode(current);
-      const restorePrompt = buildRestorePrompt(current.prompt);
+      const restorePrompt = buildRestorePrompt(current.prompt, planMode);
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, hookSetup),

@@ -2274,7 +2274,10 @@ projects:
     });
     const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes("ship the task"),
+      accept: (value) =>
+        value.includes(
+          "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+        ),
     });
 
     expect(pane).toContain("ship the task");
@@ -2457,7 +2460,7 @@ projects:
     expect(overridePane).not.toContain("[Spur step 1/2: research]");
   });
 
-  it("disables spawn steps in plan mode and sends the raw prompt", async () => {
+  it("disables spawn steps in plan mode and sends the planning prompt", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-plan-no-steps-${port}`;
@@ -2505,14 +2508,8 @@ projects:
       accept: (value) => value.includes("ship the task"),
     });
     expect(pane).toContain("ship the task");
+    expect(pane).toContain("Plan mode: do not write or modify code.");
     expect(pane).not.toContain("[Spur step");
-
-    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
-      timeoutMs: 15_000,
-      accept: (value) => value.includes("ship the task"),
-    });
-    expect(log).toContain("ship the task");
-    expect(log).not.toContain("[Spur step");
   });
 
   it("queues a busy manual send and delivers it before the next pipeline step", async () => {

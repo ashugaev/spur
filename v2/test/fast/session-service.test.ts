@@ -795,9 +795,16 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      expect.stringContaining("hello"),
+      {
       planMode: true,
-    });
+      },
+    );
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+    );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
@@ -833,9 +840,16 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      expect.stringContaining("hello"),
+      {
       planMode: true,
-    });
+      },
+    );
+    expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
+      "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+    );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
@@ -970,7 +984,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("disables request spawn steps in plan mode and sends the raw prompt", async () => {
+  it("disables request spawn steps in plan mode and sends the planning prompt", async () => {
     const { SessionService } = await loadSessionServiceModule();
     createSessionStore();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -986,6 +1000,9 @@ describe("SessionService", () => {
     expect(result.pipeline).toBeUndefined();
     expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
+      "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+    );
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
   });
 
@@ -1015,6 +1032,9 @@ describe("SessionService", () => {
     expect(result.pipeline).toBeUndefined();
     expect(sendMessageToTmuxMock.mock.calls[0]?.[0]).toBe("api-1");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
+      "Plan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
+    );
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).not.toContain("[Spur step");
   });
 
@@ -3490,7 +3510,7 @@ describe("SessionService", () => {
       launchCommand:
         "claude --resume session-uuid --dangerously-skip-permissions --permission-mode plan",
       initialMessage:
-        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+        "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
       readyMarkers: ["❯"],
     });
     readSessionMock.mockReturnValue({
@@ -3518,7 +3538,7 @@ describe("SessionService", () => {
     expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
       "claude",
       "/tmp/spur-worktrees/api/api-1",
-      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello",
+      "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:\n\nhello\n\nPlan mode: do not write or modify code. Only plan the task and describe the intended implementation.",
       { planMode: true },
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
