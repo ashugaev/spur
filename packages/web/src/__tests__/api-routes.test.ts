@@ -261,7 +261,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           projectId: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           branch: "feat/new",
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
@@ -277,7 +277,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           project: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           branch: "feat/new",
           planMode: true,
           steps: ["step 1", "step 2"],
@@ -697,7 +697,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           projectId: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           overrides: { worktree: true },
         }),
       }),
@@ -706,7 +706,7 @@ describe("Spur web API routes", () => {
     const body = JSON.parse(
       (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
     ) as Record<string, unknown>;
-    expect(body).toMatchObject({ agent: "codex", overrides: { worktree: true } });
+    expect(body).toMatchObject({ agent: "cursor", overrides: { worktree: true } });
   });
 
   it("POST /api/preflight returns 502 on daemon error", async () => {

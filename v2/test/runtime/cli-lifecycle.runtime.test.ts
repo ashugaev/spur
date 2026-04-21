@@ -178,28 +178,32 @@ async function runRestoreScenario(args: {
   );
   expect(exited[0]?.workspaceExists).toBe(true);
 
-  const controllerSessionName = `${sessionPrefix}-ui`;
-  currentActiveContext().controllerSessionName = controllerSessionName;
-  await createTmuxSession({
-    sessionName: controllerSessionName,
-    cwd: context.rootDir,
-    command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
-    env: {
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    },
-  });
+  if (args.agent) {
+    await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
+  } else {
+    const controllerSessionName = `${sessionPrefix}-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
 
-  await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-    timeoutMs: 15_000,
-    accept: (value) => value.includes("Sessions"),
-  });
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Sessions"),
+    });
 
-  await sendKeysToTmux(controllerSessionName, "r");
-  await sleep(1_000);
-  await sendKeysToTmux(controllerSessionName, "q");
+    await sendKeysToTmux(controllerSessionName, "r");
+    await sleep(1_000);
+    await sendKeysToTmux(controllerSessionName, "q");
+  }
 
   const restored = await pollUntil(
     async () =>

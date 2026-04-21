@@ -192,4 +192,32 @@ describe("runtime-tmux", () => {
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(500);
   });
+
+  it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
+    let captureCount = 0;
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        captureCount += 1;
+        return {
+          stdout:
+            captureCount === 1
+              ? "Cursor Agent can execute code and access files.\nWorkspace Trust Required\nDo you trust the contents of this directory?"
+              : "Cursor Agent\nComposer 2 Fast",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" });
+
+    expect(
+      execFileAsyncMock.mock.calls.some(
+        ([, args]) => args[0] === "send-keys" && args.includes("Enter"),
+      ),
+    ).toBe(true);
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
+  });
 });

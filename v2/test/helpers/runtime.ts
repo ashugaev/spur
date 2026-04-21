@@ -93,8 +93,7 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
       : agentName === "codex"
         ? "OpenAI Codex"
         : "Cursor Agent";
-  const prompt =
-    agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Shift+Enter for newlines";
+  const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then

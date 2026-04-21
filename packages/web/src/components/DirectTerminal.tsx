@@ -8,7 +8,8 @@ import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { ITheme, Terminal as TerminalType } from "xterm";
 import { cn } from "@/lib/cn";
-import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
+import { getAgentHotkeys } from "@/lib/agent-hotkeys";
+import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
 
 interface DirectTerminalProps {
   sessionId: string;
@@ -79,7 +80,7 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
 }
 
 function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
-  if (agent !== "codex") {
+  if (!agentUsesBracketedPaste(agent)) {
     return [`${text}\r`];
   }
 
@@ -680,7 +681,7 @@ export function DirectTerminal({
                 role="menu"
               >
                 <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                  {getAgentDisplayName(agent)}
                 </div>
                 {hotkeys.map((hotkey) => (
                   <button

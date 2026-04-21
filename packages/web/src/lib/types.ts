@@ -1,3 +1,5 @@
+import type { AgentName } from "./agents";
+
 export type SpurSessionStatus =
   | "spawning"
   | "running"
@@ -33,7 +35,7 @@ export interface SpurSessionLink {
 export interface SpurSessionView {
   id: string;
   project: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   prompt: string;
   branch: string;
   worktree: boolean;
@@ -75,7 +77,7 @@ export interface DashboardSession {
   id: string;
   projectId: string;
   projectName: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   title: string | null;
   prompt: string;
   branch: string | null;

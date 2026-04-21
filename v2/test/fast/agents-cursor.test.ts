@@ -80,7 +80,7 @@ describe("buildCursorPlan", () => {
     const plan = buildCursorPlan("ship it");
     expect(plan.launchCommand).toBe("agent --force --sandbox disabled");
     expect(plan.initialMessage).toBe("ship it");
-    expect(plan.readyMarkers).toEqual(["Cursor Agent"]);
+    expect(plan.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
 
   it("adds --plan when requested", () => {
@@ -95,7 +95,7 @@ describe("buildCursorResumePlan", () => {
     expect(plan.launchCommand).toBe(
       "'/opt/cursor agent' --resume 'chat-123' --force --sandbox disabled",
     );
-    expect(plan.readyMarkers).toEqual(["Cursor Agent"]);
+    expect(plan.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
 
   it("adds --plan when requested", () => {
@@ -174,7 +174,7 @@ describe("buildCursorRestorePlan", () => {
     expect(plan).not.toBeNull();
     expect(plan?.launchCommand).toBe("'agent' --resume 'chat-123' --force --sandbox disabled");
     expect(plan?.initialMessage).toBe("restore prompt");
-    expect(plan?.readyMarkers).toEqual(["Cursor Agent"]);
+    expect(plan?.readyMarkers).toEqual(["Cursor Agent", "Composer"]);
   });
 
   it("uses an explicit Cursor config dir when restoring", async () => {

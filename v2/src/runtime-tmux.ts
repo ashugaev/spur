@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { agentSendMode } from "./agents/index.js";
+import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
@@ -26,6 +27,9 @@ const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
 const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
 let activeTmuxSocketName: string | null = null;
+const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
+const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
+const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 
 export function setTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = socketName?.trim() || null;
@@ -335,6 +339,7 @@ export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
   timeoutMs = 30_000,
+  options?: { agent?: AgentName },
 ): Promise<void> {
   if (readyMarkers.length === 0) {
     await sleep(1_500);
@@ -343,11 +348,31 @@ export async function waitForTmuxReady(
 
   const deadline = Date.now() + timeoutMs;
   let lastCapture = "";
+  let lastCursorTrustConfirmAt = 0;
+  let cursorTrustConfirmAttempts = 0;
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
     lastCapture = capture;
+    if (options?.agent === "cursor" && cursorShowsReadyPrompt(capture)) {
+      if (cursorTrustConfirmAttempts > 0) {
+        await sleep(CURSOR_READY_SETTLE_DELAY_MS);
+      }
+      return;
+    }
     if (readyMarkers.every((marker) => capture.includes(marker))) {
       return;
+    }
+    if (
+      options?.agent === "cursor" &&
+      cursorShowsWorkspaceTrustPrompt(capture) &&
+      cursorTrustConfirmAttempts < CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS &&
+      Date.now() - lastCursorTrustConfirmAt >= CURSOR_TRUST_CONFIRM_DELAY_MS
+    ) {
+      cursorTrustConfirmAttempts += 1;
+      lastCursorTrustConfirmAt = Date.now();
+      await sendSubmitKeyToTmux(sessionName);
+      await sleep(500);
+      continue;
     }
     await sleep(500);
   }

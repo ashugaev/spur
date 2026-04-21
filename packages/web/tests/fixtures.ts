@@ -35,7 +35,7 @@ export type SpurSessionState =
 export interface SpurSessionView {
   id: string;
   project: string;
-  agent: "claude" | "codex";
+  agent: "claude" | "codex" | "cursor";
   prompt: string;
   branch: string;
   worktree: boolean;

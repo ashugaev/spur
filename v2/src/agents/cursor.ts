@@ -8,6 +8,7 @@ import { resolveWorktreePathCandidates } from "./worktree-path.js";
 import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 const CURSOR_TRUST_FILENAME = ".workspace-trusted";
+export const CURSOR_READY_MARKERS = ["Cursor Agent", "Composer"] as const;
 
 interface CursorSessionFile {
   chatId: string;
@@ -71,7 +72,7 @@ export function buildCursorPlan(prompt: string, options?: { planMode?: boolean }
   return {
     launchCommand: `${cursorCommand()} --force --sandbox disabled${planArg}`,
     initialMessage: prompt,
-    readyMarkers: ["Cursor Agent"],
+    readyMarkers: [...CURSOR_READY_MARKERS],
   };
 }
 
@@ -83,7 +84,7 @@ export function buildCursorResumePlan(
   const planArg = options?.planMode ? " --plan" : "";
   return {
     launchCommand: `${shellEscape(binary)} --resume ${shellEscape(chatId)} --force --sandbox disabled${planArg}`,
-    readyMarkers: ["Cursor Agent"],
+    readyMarkers: [...CURSOR_READY_MARKERS],
   };
 }
 

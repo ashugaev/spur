@@ -11,7 +11,7 @@ describe("classifyCursorPaneState", () => {
       }),
     ).toEqual({
       state: "needs_input",
-      reason: "Workspace Trust Required",
+      reason: "Do you trust the contents of this directory?",
     });
   });
 
@@ -30,7 +30,7 @@ describe("classifyCursorPaneState", () => {
   it("treats recent pane activity as working", () => {
     expect(
       classifyCursorPaneState({
-        pane: "Cursor Agent\nShift+Enter for newlines",
+        pane: "Cursor Agent\nComposer 2 Fast",
         activityAt: new Date("2026-03-18T10:00:10.000Z"),
         now: Date.parse("2026-03-18T10:00:20.000Z"),
       }),
@@ -40,10 +40,26 @@ describe("classifyCursorPaneState", () => {
     });
   });
 
+  it("ignores stale trust text once the Composer prompt is below it", () => {
+    expect(
+      classifyCursorPaneState({
+        pane: `Workspace Trust Required
+Do you trust the contents of this directory?
+Cursor Agent
+Composer 2 Fast`,
+        activityAt: new Date("2026-03-18T10:00:00.000Z"),
+        now: Date.parse("2026-03-18T10:00:20.000Z"),
+      }),
+    ).toEqual({
+      state: "waiting",
+      reason: "idle pane",
+    });
+  });
+
   it("falls back to waiting when the pane is idle", () => {
     expect(
       classifyCursorPaneState({
-        pane: "Cursor Agent\nShift+Enter for newlines",
+        pane: "Cursor Agent\nComposer 2 Fast",
         activityAt: new Date("2026-03-18T10:00:00.000Z"),
         now: Date.parse("2026-03-18T10:00:20.000Z"),
       }),

@@ -72,6 +72,8 @@ interface AgentAdapter {
   stateStrategy: AgentStateStrategy;
   sendMode: AgentSendMode;
   waitsForSubmitAck: boolean;
+  busyQueuedSendAwaitsPrompt: boolean;
+  queuedSendPromptGraceMs: number;
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -123,6 +125,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     stateStrategy: "claude_jsonl",
     sendMode: "default",
     waitsForSubmitAck: false,
+    busyQueuedSendAwaitsPrompt: false,
+    queuedSendPromptGraceMs: 15_000,
   },
   codex: {
     command: codexCommand,
@@ -142,6 +146,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     stateStrategy: "hook",
     sendMode: "bracketed_paste",
     waitsForSubmitAck: true,
+    busyQueuedSendAwaitsPrompt: false,
+    queuedSendPromptGraceMs: 15_000,
   },
   cursor: {
     command: cursorCommand,
@@ -177,6 +183,8 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     stateStrategy: "cursor_pane",
     sendMode: "default",
     waitsForSubmitAck: false,
+    busyQueuedSendAwaitsPrompt: true,
+    queuedSendPromptGraceMs: 5_000,
   },
 };
 
@@ -279,4 +287,12 @@ export function agentProcessMatchers(agent: AgentName, launchCommand: string): s
 
 export function agentWaitsForSubmitAck(agent: AgentName): boolean {
   return agentAdapter(agent).waitsForSubmitAck;
+}
+
+export function agentBusyQueuedSendAwaitsPrompt(agent: AgentName): boolean {
+  return agentAdapter(agent).busyQueuedSendAwaitsPrompt;
+}
+
+export function agentQueuedSendPromptGraceMs(agent: AgentName): number {
+  return agentAdapter(agent).queuedSendPromptGraceMs;
 }

@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  agentBusyQueuedSendAwaitsPrompt,
   agentProcessMatchers,
+  agentQueuedSendPromptGraceMs,
   agentSessionConfig,
   agentStateStrategy,
   agentWaitsForSubmitAck,
@@ -1577,7 +1579,7 @@ export class SessionService {
       stage = "tmux.status";
       await syncTmuxStatus(tmuxSession, runningRecord.slots);
       stage = "tmux.ready";
-      await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
+      await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
@@ -2099,7 +2101,7 @@ export class SessionService {
       stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
       await syncTmuxStatus(sessionId, runningRecord.slots);
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
-      await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
+      await waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
         level: "info",
         sessionId,
@@ -2275,6 +2277,9 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
+    const sendState = agentBusyQueuedSendAwaitsPrompt(readySession.agent)
+      ? await this.classifySessionState(readySession)
+      : "waiting";
     const updated = withQueuedMessages(
       {
         ...readySession,
@@ -2282,6 +2287,7 @@ export class SessionService {
         updatedAt: nowIso(),
       },
       [...queuedMessages(readySession), finalMessage],
+      readySession.queuedMessages?.awaitingPrompt === true || sendState !== "waiting",
     );
     writeSession(this.config.dataDir, updated);
     this.logEvent("session.message.queued", {
@@ -2943,6 +2949,8 @@ export class SessionService {
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
+        undefined,
+        { agent: session.agent },
       );
       if (
         !(await isProcessRunningInTmux(
@@ -2980,7 +2988,9 @@ export class SessionService {
         env,
       });
       await syncTmuxStatus(session.tmuxSession, session.slots);
-      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
+      await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
+        agent: session.agent,
+      });
       if (
         !(await isProcessRunningInTmux(
           session.tmuxSession,
@@ -3078,18 +3088,10 @@ export class SessionService {
       );
       const effectivePlan =
         launchPlan ?? buildAgentLaunchPlan(current.agent, restorePrompt, planOptions);
-      if (!launchPlan) {
-        this.logEvent("session.restore.started", {
-          level: "info",
-          sessionId,
-          projectId: current.project,
-          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
-          details: { agent: current.agent, worktreePath: current.worktreePath },
-        });
-      }
       await killTmuxSession(current.tmuxSession);
       let restoreLaunchCommand = effectivePlan.launchCommand;
       let restoreReadyMarkers = effectivePlan.readyMarkers;
+      let restoredAgentSessionId = current.agent === "cursor" ? current.agentSessionId : undefined;
       if (launchPlan) {
         const codexSessionRootDir =
           current.agent === "codex"
@@ -3098,7 +3100,7 @@ export class SessionService {
                 "sessions",
               )
             : undefined;
-        const restoredAgentSessionId = await findAgentSessionId(
+        const discoveredAgentSessionId = await findAgentSessionId(
           current.agent,
           current.worktreePath,
           {
@@ -3108,16 +3110,28 @@ export class SessionService {
               : {}),
           },
         );
-        if (restoredAgentSessionId) {
-          const resumePlan = buildAgentResumePlan(
-            current.agent,
-            restoredAgentSessionId,
-            effectivePlan.launchCommand,
-            planOptions,
-          );
-          restoreLaunchCommand = resumePlan.launchCommand;
-          restoreReadyMarkers = resumePlan.readyMarkers;
+        if (discoveredAgentSessionId) {
+          restoredAgentSessionId = discoveredAgentSessionId;
         }
+      }
+      if (!launchPlan && !restoredAgentSessionId) {
+        this.logEvent("session.restore.started", {
+          level: "info",
+          sessionId,
+          projectId: current.project,
+          message: `No native resume state for ${sessionId}, falling back to fresh launch`,
+          details: { agent: current.agent, worktreePath: current.worktreePath },
+        });
+      }
+      if (restoredAgentSessionId) {
+        const resumePlan = buildAgentResumePlan(
+          current.agent,
+          restoredAgentSessionId,
+          launchPlan?.launchCommand ?? current.launchCommand,
+          planOptions,
+        );
+        restoreLaunchCommand = resumePlan.launchCommand;
+        restoreReadyMarkers = resumePlan.readyMarkers;
       }
       restoredLaunchCommand = restoreLaunchCommand;
       const restoreProject = this.config.projects[current.project];
@@ -3141,7 +3155,9 @@ export class SessionService {
         env,
       });
       await syncTmuxStatus(current.tmuxSession, current.slots);
-      await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
+      await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
+        agent: current.agent,
+      });
       if (
         !(await isProcessRunningInTmux(
           current.tmuxSession,
@@ -3576,6 +3592,7 @@ export class SessionService {
       }
 
       const messageUpdatedAt = new Date(session.updatedAt);
+      const promptGraceMs = agentQueuedSendPromptGraceMs(session.agent);
 
       const agentState = await this.classifySessionState(session);
       if (agentState === "working") {
@@ -3586,7 +3603,7 @@ export class SessionService {
         await sleep(PIPELINE_POLL_INTERVAL_MS);
         continue;
       }
-      if (agentState === "waiting" && !isFresh(messageUpdatedAt, MESSAGE_READY_GRACE_MS)) {
+      if (agentState === "waiting" && !isFresh(messageUpdatedAt, promptGraceMs)) {
         return "ready";
       }
 

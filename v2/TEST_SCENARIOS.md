@@ -106,8 +106,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude`, `codex`, and `cursor` and throws for unsupported agent names.
 - Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
-- `parseAgentName` accepts `claude`, `codex`, and `cursor` and throws for unsupported agent names.
-- Codex preflight and runtime launch inject a `trust_level = "trusted"` entry for the relevant project path so fresh worktrees never hit the interactive "Do you trust..." prompt.
+- Cursor launch and resume treat the workspace-trust screen as pre-ready state, auto-confirm it once, and wait for the Composer prompt before Spur sends the first message.
 
 ## Runtime Integration
 
