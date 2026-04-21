@@ -237,7 +237,11 @@ export function Dashboard() {
 
   const queryClient = useQueryClient();
   const sessionsQueryKey = ["sessions", projectId] as const;
-  const { data, isPending, error: sessionsError } = useQuery<SpurSessionsResponse>({
+  const {
+    data,
+    isPending,
+    error: sessionsError,
+  } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
       const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
