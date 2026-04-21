@@ -6,7 +6,7 @@ export async function GET(request: NextRequest) {
   try {
     const projectId = request.nextUrl.searchParams.get("project")?.trim();
     const [sessions, projects] = await Promise.all([
-      spurRequestJson<SpurSessionView[]>("/sessions"),
+      spurRequestJson<SpurSessionView[]>("/sessions?includeCompleted=1"),
       spurRequestJson<Array<{ id: string; name: string }>>("/projects"),
     ]);
     const filtered = projectId

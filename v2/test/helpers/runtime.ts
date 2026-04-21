@@ -97,6 +97,9 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
+  if printf '%s' "$*" | grep -q "empty preflight output"; then
+    exit 0
+  fi
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
@@ -136,6 +139,12 @@ jsonl_append() {
   preflight_input="$*"
   if [[ "\${args[\${#args[@]}-1]:-}" == "-" ]]; then
     preflight_input="$(cat)"
+  fi
+  if printf '%s' "$preflight_input" | grep -q "empty preflight output"; then
+    if [[ -n "$output_file" ]]; then
+      : > "$output_file"
+    fi
+    exit 0
   fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   payload='NO_PROJECT_RULES'

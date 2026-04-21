@@ -210,7 +210,10 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/sessions") {
-        sendJson(response, 200, await service.list());
+        const includeCompleted =
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
+        sendJson(response, 200, await service.list({ includeCompleted }));
         return;
       }
 

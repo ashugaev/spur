@@ -6,7 +6,8 @@ import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
-import type { ITheme, Terminal as TerminalType } from "xterm";
+import type { Terminal as TerminalType } from "xterm";
+import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
@@ -28,31 +29,6 @@ interface TerminalLocation {
 interface DirectTerminalConfig {
   directTerminalPort?: string | number;
 }
-
-const terminalTheme: ITheme = {
-  background: "#0a0a0f",
-  foreground: "#d4d4d8",
-  cursor: "#5b7ef8",
-  cursorAccent: "#0a0a0f",
-  selectionBackground: "rgba(91, 126, 248, 0.3)",
-  selectionInactiveBackground: "rgba(128, 128, 128, 0.2)",
-  black: "#1a1a24",
-  red: "#ef4444",
-  green: "#22c55e",
-  yellow: "#f59e0b",
-  blue: "#5b7ef8",
-  magenta: "#a371f7",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#50506a",
-  brightRed: "#f87171",
-  brightGreen: "#4ade80",
-  brightYellow: "#fbbf24",
-  brightBlue: "#7b9cfb",
-  brightMagenta: "#c084fc",
-  brightCyan: "#67e8f9",
-  brightWhite: "#eeeef5",
-};
 
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
@@ -83,7 +59,6 @@ function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
   if (!agentUsesBracketedPaste(agent)) {
     return [`${text}\r`];
   }
-
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -314,7 +289,7 @@ export function DirectTerminal({
           fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
-          theme: terminalTheme,
+          theme: TERMINAL_THEME,
           minimumContrastRatio: 1,
           scrollback: 10_000,
           allowProposedApi: true,
@@ -612,12 +587,12 @@ export function DirectTerminal({
           ? (error ?? "Error")
           : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
   const terminalControlIconButtonClass =
-    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[#0a0a0f]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
       <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
         <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
         <div className="min-w-0">
@@ -634,7 +609,7 @@ export function DirectTerminal({
         {onClose ? (
           <button
             aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
+            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
             onClick={onClose}
             type="button"
           >
@@ -656,7 +631,7 @@ export function DirectTerminal({
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
       {(voice.voiceError ?? submitError) ? (
-        <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
+        <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
           {voice.voiceError ?? submitError}
         </div>
       ) : null}
@@ -677,7 +652,7 @@ export function DirectTerminal({
             {hotkeysOpen ? (
               <div
                 aria-label={`${agent} shortcuts`}
-                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
                 role="menu"
               >
                 <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -685,7 +660,7 @@ export function DirectTerminal({
                 </div>
                 {hotkeys.map((hotkey) => (
                   <button
-                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-white/5"
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
                     key={hotkey.id}
                     onClick={() => {
                       void sendHotkey(hotkey);

@@ -13,5 +13,5 @@ export function getAgentDisplayName(agent: AgentName): string {
 }
 
 export function agentUsesBracketedPaste(agent: AgentName): boolean {
-  return agent === "codex";
+  return agent !== "cursor";
 }

@@ -355,6 +355,42 @@ describe("runSpawnPreflight", () => {
     ).rejects.toThrow("Spawn preflight must return exactly one branch name");
   });
 
+  it("treats empty output as a fallback to Spur default naming", async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: "\n",
+      stderr: "",
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "claude",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix login rate limiting for PR #42",
+      }),
+    ).resolves.toEqual({});
+  });
+
+  it("treats an empty codex output file as a fallback to Spur default naming", async () => {
+    mockExecFileAsync.mockImplementationOnce(async (_command: string, args: string[]) => {
+      writeFileSync(getCodexOutputPath(args), "", "utf8");
+      return { stdout: "", stderr: "" };
+    });
+
+    await expect(
+      runSpawnPreflight({
+        agent: "codex",
+        projectId: "api",
+        project: PROJECT,
+        baseBranch: "main",
+        worktree: true,
+        prompt: "Fix runtime regression from INT-42",
+      }),
+    ).resolves.toEqual({});
+  });
+
   it("treats the defer sentinel as an explicit fallback to Spur default naming", async () => {
     mockExecFileAsync.mockResolvedValueOnce({
       stdout: `${PREFLIGHT_DEFER_SENTINEL}\n`,
