@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -24,7 +25,7 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 
-const POLL_INTERVAL_MS = 5_000;
+const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
@@ -173,13 +174,10 @@ function upsertSession(
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(() => {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -233,50 +231,26 @@ export function Dashboard() {
     [locationSearch],
   );
 
-  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-
-    try {
-      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = (await response.json()) as SpurSessionsResponse;
-      setRawSessions(payload.sessions);
-      setProjects(payload.projects ?? []);
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, []);
-
   useEffect(() => {
     setProjectId(requestedProject);
   }, [requestedProject]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async (silent = false) => {
-      if (cancelled) return;
-      await fetchSessions(projectId, silent);
-    };
-
-    void run(false);
-    const timer = setInterval(() => {
-      void run(true);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchSessions, projectId]);
+  const queryClient = useQueryClient();
+  const sessionsQueryKey = ["sessions", projectId] as const;
+  const { data, isPending, error: sessionsError } = useQuery<SpurSessionsResponse>({
+    queryKey: sessionsQueryKey,
+    queryFn: async ({ signal }) => {
+      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(`sessions ${response.status}`);
+      return (await response.json()) as SpurSessionsResponse;
+    },
+    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+  const rawSessions = data?.sessions ?? [];
+  const projects = data?.projects ?? [];
+  const loading = isPending;
 
   const filterProjectOptions = useMemo(() => {
     const merged = new Map(projects.map((project) => [project.id, project]));
@@ -504,7 +478,13 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
-      setRawSessions((current) => upsertSession(current, session, nextProjectId));
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = current?.sessions ?? [];
+        return {
+          sessions: upsertSession(currentSessions, session, nextProjectId),
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -819,9 +799,12 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error ? (
+        {error || sessionsError ? (
           <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error}
+            {error ??
+              (sessionsError instanceof Error
+                ? sessionsError.message
+                : "Failed to load Spur sessions")}
           </div>
         ) : null}
 
