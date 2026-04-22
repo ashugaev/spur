@@ -60,7 +60,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
-- Sidecar and service `tmux` output is appended to the same session event log as `sidecar.output` and `service.output`, and `readSessionEventLog` can filter those runtime entries by scope and name.
+- `readSessionEventLog` still supports filtering runtime-style `sidecar.output` and `service.output` entries by scope and name when such entries exist, but Spur no longer appends them from `tmux`.
 - Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
@@ -134,8 +134,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message.
 - The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
-- `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a live session log view with structured events plus the main agent pane tail.
-- `service logs` reads collected runtime log lines for the live session, works inside a session workspace via the injected `spur` wrapper, filters sidecar output with `--sidecar`, and rejects missing session context outside a Spur session.
+- `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
+- `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
 - `POST /sessions/:id/sidecars/:name/start` follows the same depth rule as the hidden CLI command: root session and first-level sidecar callers may start a sidecar, while nested sidecars are rejected.
 - Daemon startup, CLI session lifecycle, and automation source/trigger flows append structured key events to `dataDir/events.jsonl`.
@@ -165,7 +165,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
-- Service source polling emits `service:<ruleId>` only for configured session-bound services, and matching send triggers notify that same live session with inspection commands instead of inlined logs.
+- Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.
 
 - Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` from `AskUserQuestion` JSONL metadata, and normal message exchange cycles waiting→working→waiting.
 - Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), `show-waiting-menu` produces `needs_input` from structured hook/rollout state, stale `PreToolUse` snapshots are cleared by `task_complete`, and normal message exchange cycles waiting→working→waiting.

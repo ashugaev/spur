@@ -1813,28 +1813,18 @@ projects:
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
 
-    const helperLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await execFileAsync(helperPath, ["service", "logs", "--json"], {
-              cwd: spawned.worktreePath,
-              env: {
-                ...context.env,
-                SPUR_SESSION: spawned.id,
-              },
-            })
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT",
-          ),
-      },
-    );
-    expect(helperLogs.some((entry) => entry.event === "service.output")).toBe(true);
+    const helperLogs = JSON.parse(
+      (
+        await execFileAsync(helperPath, ["service", "logs", "--json"], {
+          cwd: spawned.worktreePath,
+          env: {
+            ...context.env,
+            SPUR_SESSION: spawned.id,
+          },
+        })
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(helperLogs).toEqual([]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -1864,10 +1854,12 @@ projects:
         value.includes(`Logs ${spawned.id}`) &&
         value.includes("session.spawn.completed") &&
         value.includes("service.run.completed") &&
-        value.includes("service runtime prompt"),
+        value.includes("(runtime log capture unavailable)"),
     });
     expect(logPane).toContain("service.run.completed");
     expect(logPane).toContain("Agent Output");
+    expect(logPane).toContain("(runtime log capture unavailable)");
+    expect(logPane).not.toContain("SERVICE_BOOT");
 
     await sendKeysToTmux(controllerSessionName, "C-g");
 
@@ -1878,7 +1870,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("collects sidecar output into the session log and exposes it through service logs", async () => {
+  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -1930,38 +1922,21 @@ projects:
         .stdout,
     ) as SessionView;
 
-    const sidecarLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await context.execCli([
-              "--config",
-              configPath,
-              "service",
-              "logs",
-              spawned.id,
-              "browser",
-              "--sidecar",
-              "--json",
-            ])
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY",
-          ),
-      },
-    );
-    expect(sidecarLogs).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: "sidecar.output",
-          message: "BROWSER_READY",
-        }),
-      ]),
-    );
+    const sidecarLogs = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "service",
+          "logs",
+          spawned.id,
+          "browser",
+          "--sidecar",
+          "--json",
+        ])
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(sidecarLogs).toEqual([]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {

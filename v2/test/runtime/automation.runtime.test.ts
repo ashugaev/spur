@@ -853,7 +853,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     },
   );
 
-  it("delivers service problem alerts back into the bound session", async () => {
+  it("does not emit service problem alerts without tmux log scraping", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-service-alert-${port}`;
@@ -911,7 +911,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         "--",
         "sh",
         "-lc",
-        `'printf "SERVICE_BOOT\\nSERVICE_ERROR\\n"; sleep 30'`,
+        `'printf "SERVICE_BOOT\\nSERVICE_ERROR\\n"; sleep 1'`,
       ],
       {
         cwd: session.worktreePath,
@@ -922,25 +922,10 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       },
     );
 
-    await pollUntil(async () => context.readAgentLog(session.id), {
-      timeoutMs: 45_000,
-      accept: (value) =>
-        value.includes('The bound service "web" has a problem.') &&
-        value.includes(`select ${session.id} and press l`),
-    });
-
-    const events = await pollUntil(
-      async () => readEventLog(context.dataDir).map((entry) => entry.event),
-      {
-        timeoutMs: 20_000,
-        accept: (value) =>
-          value.includes("source.started") &&
-          value.includes("source.event.emitted") &&
-          value.includes("trigger.send.queued"),
-      },
-    );
-    expect(events).toEqual(
-      expect.arrayContaining(["source.started", "source.event.emitted", "trigger.send.queued"]),
-    );
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const events = readEventLog(context.dataDir).map((entry) => entry.event);
+    expect(events).toContain("source.started");
+    expect(events).not.toContain("source.event.emitted");
+    expect(events).not.toContain("trigger.send.queued");
   });
 });

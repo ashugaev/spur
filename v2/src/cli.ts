@@ -69,8 +69,8 @@ const ENTER_ALT_SCREEN = "\u001b[?1049h\u001b[H\u001b[?25l";
 const EXIT_ALT_SCREEN = "\u001b[?25h\u001b[?1049l";
 const RESELECT_MESSAGE = "No session selected. Use ↑↓ to reselect first.";
 const SESSION_LOG_EVENT_LIMIT = 16;
-const SESSION_LOG_OUTPUT_LINES = 16;
 const SESSION_LOG_LOCAL_LIMIT = 8;
+const RUNTIME_LOGS_UNAVAILABLE = "(runtime log capture unavailable)";
 
 function enableTmuxMouse(sessionName: string): void {
   try {
@@ -104,12 +104,10 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
   ).trimEnd();
 }
 
-function tryCaptureTmuxTarget(sessionName: string, lines = 200): string | null {
-  try {
-    return captureTmuxTarget(sessionName, lines);
-  } catch {
-    return null;
-  }
+function sessionLogAgentPane(session: SessionView): string {
+  return session.runtimeAlive
+    ? dimText(RUNTIME_LOGS_UNAVAILABLE)
+    : dimText("(agent is not live)");
 }
 
 function currentTmuxSessionHasAttachedClient(): boolean {
@@ -811,10 +809,7 @@ async function runInteractiveSessionList(
           ...logView,
           session: nextSession,
           eventLines: readDisplaySessionEventLines(info.dataDir, logView.session.id),
-          agentPane: nextSession.runtimeAlive
-            ? (tryCaptureTmuxTarget(nextSession.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-              dimText("(agent output unavailable)"))
-            : "",
+          agentPane: sessionLogAgentPane(nextSession),
         };
         return;
       }
@@ -868,10 +863,7 @@ async function runInteractiveSessionList(
       session,
       eventLines: readDisplaySessionEventLines(info.dataDir, session.id),
       localLines: [],
-      agentPane: session.runtimeAlive
-        ? (tryCaptureTmuxTarget(session.tmuxSession, SESSION_LOG_OUTPUT_LINES) ??
-          dimText("(agent output unavailable)"))
-        : "",
+      agentPane: sessionLogAgentPane(session),
     };
     attachedPane = null;
     pendingKillConfirmationSessionId = null;
