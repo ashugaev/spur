@@ -154,4 +154,38 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
 
     expect(() => readFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), "utf8")).toThrow();
   });
+
+  it("maps structured question metadata to needs_input in the agent state helper", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-4",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    execFileSync(join(toolDir, "spur-agent-state"), {
+      env: { ...process.env },
+      input: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        turn_id: "api-4-7",
+        questions: [{ header: "Plan", question: "Which tier should I run next?" }],
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(dataDir, "session-agent-state", "api-4.json"), "utf8"),
+    ) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+
+    expect(state).toMatchObject({
+      state: "needs_input",
+      hookEvent: "UserPromptSubmit",
+      turnId: "api-4-7",
+    });
+  });
 });

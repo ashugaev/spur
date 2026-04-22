@@ -19,7 +19,9 @@ import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js"
 import {
   codexHookHomePath,
   captureCodexRolloutBaseline,
+  readCodexRolloutState,
   scanCodexRolloutForMessage,
+  type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
 import {
@@ -298,6 +300,22 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
     }
   }
   return latest;
+}
+
+function shouldUseCodexRolloutState(
+  hookState: { state: SessionState; updatedAt: string; turnId?: string } | null,
+  rolloutState: CodexRolloutStateRecord,
+): boolean {
+  const sameTurn =
+    typeof hookState?.turnId === "string" &&
+    typeof rolloutState.turnId === "string" &&
+    hookState.turnId === rolloutState.turnId;
+  const hookUpdatedAtMs = hookState ? new Date(hookState.updatedAt).getTime() : 0;
+  const rolloutNewerThanHook = !hookState || rolloutState.timestampMs >= hookUpdatedAtMs;
+  if (rolloutState.state === "needs_input") {
+    return sameTurn || rolloutNewerThanHook;
+  }
+  return !hookState || sameTurn || hookState.state === "needs_input";
 }
 
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
@@ -3694,6 +3712,37 @@ export class SessionService {
     };
   }
 
+  private codexSessionsDir(sessionId: string): string {
+    return join(
+      codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
+      "sessions",
+    );
+  }
+
+  private async classifyCodexState(sessionId: string): Promise<{
+    state: SessionState;
+    source: StateSource;
+    hookState: ReturnType<typeof readAgentHookState>;
+    rolloutState: CodexRolloutStateRecord | null;
+  }> {
+    const hookState = readAgentHookState(this.config.dataDir, sessionId);
+    const rolloutState = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    let state: SessionState = hookState?.state ?? "waiting";
+    let source: StateSource = hookState ? "hook" : "status";
+
+    if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
+      state = rolloutState.state;
+      source = "jsonl";
+    }
+
+    return {
+      state,
+      source,
+      hookState,
+      rolloutState,
+    };
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
@@ -3743,10 +3792,18 @@ export class SessionService {
           });
         }
       } else if (strategy === "hook") {
-        stateSource = "hook";
-        const hookState = readAgentHookState(this.config.dataDir, session.id);
-        if (hookState) {
-          state = hookState.state;
+        const codexState = await this.classifyCodexState(session.id);
+        state = codexState.state;
+        stateSource = codexState.source;
+        if (stateSource === "jsonl" && codexState.rolloutState) {
+          this.logEvent("session.state.classified", {
+            level: "info",
+            sessionId: session.id,
+            projectId: session.project,
+            message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
+          });
+        } else if (codexState.hookState) {
+          const hookState = codexState.hookState;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
@@ -3754,12 +3811,11 @@ export class SessionService {
             message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
           });
         } else {
-          state = "waiting";
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
             projectId: session.project,
-            message: `State: ${state} (no hook)`,
+            message: `State: ${state} (no hook/jsonl)`,
           });
         }
       } else {
@@ -3849,8 +3905,7 @@ export class SessionService {
       return "working";
     }
     if (strategy === "hook") {
-      const hookState = readAgentHookState(this.config.dataDir, session.id);
-      return hookState?.state ?? "waiting";
+      return (await this.classifyCodexState(session.id)).state;
     }
 
     const pane = await captureTmuxPane(session.tmuxSession);

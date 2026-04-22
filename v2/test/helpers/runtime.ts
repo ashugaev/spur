@@ -210,7 +210,8 @@ if [[ "\${1:-}" == "--resume" ]]; then
   chat_id="$resume_id"
 fi
 touch_chat_store "$chat_id"`;
-  // State signal helpers — Claude writes JSONL records, Codex writes hook state files.
+  // State signal helpers — Claude writes JSONL records, Codex writes hook state
+  // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
@@ -219,8 +220,11 @@ touch_chat_store "$chat_id"`;
         : ":";
   const signalNeedsInput =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
-      : ":";
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
+      : agentName === "codex"
+        ? `emit_hook_needs_input
+      emit_rollout_input_required`
+        : ":";
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -345,6 +349,17 @@ emit_hook_event() {
   local event_name="$1"
   hook_seq=$((hook_seq + 1))
   printf '{"hook_event_name":"%s","turn_id":"%s-%s"}' "$event_name" "\${SPUR_SESSION:-no-session}" "$hook_seq" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
+}
+emit_hook_needs_input() {
+  hook_seq=$((hook_seq + 1))
+  local turn_id="\${SPUR_SESSION:-no-session}-$hook_seq"
+  printf '{"hook_event_name":"NeedsInput","turn_id":"%s","state":"needs_input","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}' "$turn_id" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
+}
+emit_rollout_input_required() {
+  if [[ -z "\${session_rollout:-}" ]]; then
+    return
+  fi
+  printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 printf '%s\n' "${header}"

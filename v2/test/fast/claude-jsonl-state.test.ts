@@ -64,6 +64,18 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
+  it("returns needs_input immediately for AskUserQuestion metadata", () => {
+    const records = [
+      rec({
+        type: "assistant",
+        hasToolUse: true,
+        requestsUserInput: true,
+        timestampMs: NOW - 500,
+      }),
+    ];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
+  });
+
   it("returns needs_input for tool_use past stale window with no progress", () => {
     const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
@@ -103,6 +115,11 @@ describe("classifyClaudeJsonlState", () => {
   it("returns working for user tool_result", () => {
     const records = [rec({ type: "user", role: "tool_result" })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+  });
+
+  it("returns needs_input for AskUserQuestion tool references", () => {
+    const records = [rec({ type: "user", role: "tool_result", requestsUserInput: true })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
   // ── progress → working ─────────────────────────────────────────────
