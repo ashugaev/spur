@@ -105,9 +105,7 @@ function captureTmuxTarget(sessionName: string, lines = 200): string {
 }
 
 function sessionLogAgentPane(session: SessionView): string {
-  return session.runtimeAlive
-    ? dimText(RUNTIME_LOGS_UNAVAILABLE)
-    : dimText("(agent is not live)");
+  return session.runtimeAlive ? dimText(RUNTIME_LOGS_UNAVAILABLE) : dimText("(agent is not live)");
 }
 
 function currentTmuxSessionHasAttachedClient(): boolean {
