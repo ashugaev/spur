@@ -44,6 +44,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
+- After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
@@ -251,7 +252,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
+- Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea

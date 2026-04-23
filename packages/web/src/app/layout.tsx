@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono } from "next/font/google";
+import { BG_BASE_HEX } from "@/design/colors";
 import "./globals.css";
 
 const jetbrainsMono = JetBrains_Mono({
@@ -13,7 +14,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#0D0D0E",
+  themeColor: BG_BASE_HEX,
 };
 
 export async function generateMetadata(): Promise<Metadata> {

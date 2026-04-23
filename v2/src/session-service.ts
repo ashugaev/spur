@@ -1086,10 +1086,13 @@ export class SessionService {
     };
   }
 
-  async list(): Promise<SessionView[]> {
-    const sessions = listSessions(this.config.dataDir).filter(
-      (session) => !isTerminalSessionStatus(session.status) || session.retainInList === true,
-    );
+  async list(options?: { includeCompleted?: boolean }): Promise<SessionView[]> {
+    const sessions = listSessions(this.config.dataDir).filter((session) => {
+      if (session.status === "completed") {
+        return options?.includeCompleted === true || session.retainInList === true;
+      }
+      return session.status !== "killed" || session.retainInList === true;
+    });
     const views: SessionView[] = [];
     for (const session of sessions) {
       views.push(await this.enrich(session));

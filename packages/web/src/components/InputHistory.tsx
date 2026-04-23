@@ -39,7 +39,7 @@ interface InputHistoryButtonProps {
 }
 
 const DEFAULT_BUTTON_CLASS =
-  "inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-white/5";
+  "inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]";
 
 export function InputHistoryButton({ entries, onSelect, className }: InputHistoryButtonProps) {
   const [open, setOpen] = useState(false);
@@ -82,7 +82,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
       {open ? (
         <div
           aria-label="Input history"
-          className="absolute bottom-full right-0 z-20 mb-2 w-80 max-w-[calc(100vw-2rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-base)] shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+          className="absolute bottom-full right-0 z-20 mb-2 w-80 max-w-[calc(100vw-2rem)] border border-[var(--color-border-default)] bg-[var(--color-bg-base)] shadow-[0_8px_30px_var(--color-shadow-menu)]"
           role="dialog"
         >
           <div className="border-b border-[var(--color-border-default)] px-3 py-2 font-bold uppercase text-[var(--color-text-primary)]">
@@ -92,7 +92,7 @@ export function InputHistoryButton({ entries, onSelect, className }: InputHistor
             <div className="max-h-80 overflow-y-auto">
               {entries.map((entry) => (
                 <button
-                  className="block w-full border-b border-[var(--color-border-subtle)] px-3 py-2 text-left transition hover:bg-white/5 last:border-b-0"
+                  className="block w-full border-b border-[var(--color-border-subtle)] px-3 py-2 text-left transition hover:bg-[var(--color-hover-overlay)] last:border-b-0"
                   key={`${entry.savedAt}:${entry.value}`}
                   onClick={() => {
                     onSelect(entry.value);

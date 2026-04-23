@@ -2301,7 +2301,7 @@ describe("SessionService", () => {
     expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
   });
 
-  it("hides completed and killed sessions from list while keeping paused sessions", async () => {
+  it("hides terminal sessions from list by default and includes only completed when requested", async () => {
     listSessionsMock.mockReturnValue([
       {
         id: "api-1",
@@ -2368,10 +2368,14 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const listed = await service.list();
+    const listedWithCompleted = await service.list({ includeCompleted: true });
 
     expect(listed.map((session) => session.id)).toEqual(["api-1", "api-2"]);
     expect(listed[1]?.status).toBe("paused");
     expect(listed[1]?.state).toBe("stopped");
+    expect(listedWithCompleted.map((session) => session.id)).toEqual(["api-1", "api-2", "api-3"]);
+    expect(listedWithCompleted[2]?.status).toBe("completed");
+    expect(listedWithCompleted[2]?.state).toBe("stopped");
   });
 
   it("includes queued manual messages before future pipeline steps in session views", async () => {

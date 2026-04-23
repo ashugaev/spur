@@ -124,7 +124,7 @@ describe("DirectTerminal voice confirm", () => {
     MockWebSocket.mockClear();
   });
 
-  it("submits confirmed voice input with enter for claude", async () => {
+  it("submits confirmed voice input as bracketed paste plus enter for claude", async () => {
     const { DirectTerminal } = await import("@/components/DirectTerminal");
 
     await act(async () => {
@@ -139,7 +139,8 @@ describe("DirectTerminal voice confirm", () => {
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
-      expect(sentInputPayloads()).toEqual(["git status\r"]);
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
     });
   });
 
