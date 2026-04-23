@@ -481,13 +481,7 @@ export function DirectTerminal({
 
         const maybeRefreshConnection = () => {
           if (document.visibilityState === "hidden") return;
-          if (
-            !websocket ||
-            websocket.readyState === WebSocket.CLOSED ||
-            websocket.readyState === WebSocket.CLOSING
-          ) {
-            connect();
-          }
+          connect();
         };
 
         inputDisposable = terminal.onData((data) => {
@@ -502,23 +496,17 @@ export function DirectTerminal({
           }
         });
 
-        const handleVisibilityChange = () => {
-          if (document.visibilityState !== "hidden") {
-            maybeRefreshConnection();
-          }
-        };
-
         window.addEventListener("resize", resizeHandler);
         window.addEventListener("focus", maybeRefreshConnection);
         window.addEventListener("online", maybeRefreshConnection);
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", maybeRefreshConnection);
 
         touchCleanup = () => {
           touchTarget.removeEventListener("touchstart", onTouchStart);
           touchTarget.removeEventListener("touchmove", onTouchMove);
           window.removeEventListener("focus", maybeRefreshConnection);
           window.removeEventListener("online", maybeRefreshConnection);
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
+          document.removeEventListener("visibilitychange", maybeRefreshConnection);
         };
       })
       .catch(() => {
