@@ -263,7 +263,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
-- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
+- If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ### S7: Display state override
