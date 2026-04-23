@@ -892,6 +892,56 @@ describe("SessionDetail voice input", () => {
     expect(screen.getAllByText("working")).toHaveLength(1);
   });
 
+  it("hard-wraps long dialog and queued message tokens without widening the layout", async () => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(8);
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            queuedMessages: {
+              messages: [longToken],
+              awaitingPrompt: false,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(
+          JSON.stringify(
+            conversationFixture({
+              messages: [{ role: "assistant", text: longToken, timestampMs: 1 }],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
+    const queuedSection = (
+      await screen.findByRole("heading", { name: /queued messages/i })
+    ).parentElement;
+    expect(dialogSection).not.toBeNull();
+    expect(queuedSection).not.toBeNull();
+
+    const dialogText = within(dialogSection as HTMLElement).getByText(longToken);
+    expect(dialogText).toHaveClass("[overflow-wrap:anywhere]");
+    expect(dialogText.parentElement).toHaveClass("min-w-0");
+
+    const queuedText = within(queuedSection as HTMLElement).getByText(longToken);
+    expect(queuedText).toHaveClass("[overflow-wrap:anywhere]");
+  });
+
   it("auto-scrolls the dialog when a pending assistant bubble appears", async () => {
     const intervalCallbacks: Array<() => void | Promise<void>> = [];
     const setIntervalSpy = vi
