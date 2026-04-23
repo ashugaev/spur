@@ -202,4 +202,60 @@ describe("startServer", () => {
       await server.stop();
     }
   });
+
+  it("routes slash command suggestion endpoints through the session service", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spur-server-test-"));
+    const repoDir = join(root, "repo");
+    const dataDir = join(root, "data");
+    const worktreeDir = join(root, "worktrees");
+    const port = await findFreePort();
+    await mkdir(repoDir, { recursive: true });
+    const configPath = join(root, "spur.yaml");
+    await writeFile(
+      configPath,
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${dataDir}`,
+        `worktreeDir: ${worktreeDir}`,
+        "projects:",
+        "  demo:",
+        `    path: ${repoDir}`,
+      ].join("\n"),
+      "utf8",
+    );
+
+    const originalProjectSuggestions = SessionService.prototype.getProjectSuggestions;
+    const originalSessionSuggestions = SessionService.prototype.getSessionSuggestions;
+    SessionService.prototype.getProjectSuggestions = async function mockProjectSuggestions() {
+      return { agent: "claude", commands: [], skills: [], agents: [] };
+    };
+    SessionService.prototype.getSessionSuggestions = async function mockSessionSuggestions() {
+      return { agent: "codex", commands: [], skills: [], agents: [] };
+    };
+
+    const server = await startServer(configPath, {
+      info: () => undefined,
+      warn: () => undefined,
+    });
+
+    try {
+      const projectResponse = await fetch(
+        `http://127.0.0.1:${port}/projects/demo/slash-commands?agent=claude`,
+      );
+      expect(projectResponse.status).toBe(200);
+      await expect(projectResponse.json()).resolves.toMatchObject({ agent: "claude" });
+
+      const sessionResponse = await fetch(
+        `http://127.0.0.1:${port}/sessions/demo-a1/slash-commands`,
+      );
+      expect(sessionResponse.status).toBe(200);
+      await expect(sessionResponse.json()).resolves.toMatchObject({ agent: "codex" });
+    } finally {
+      SessionService.prototype.getProjectSuggestions = originalProjectSuggestions;
+      SessionService.prototype.getSessionSuggestions = originalSessionSuggestions;
+      await server.stop();
+    }
+  });
 });

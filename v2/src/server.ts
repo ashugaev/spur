@@ -261,6 +261,19 @@ export async function startServer(
         return;
       }
 
+      const projectSuggestionsId = path.match(/^\/projects\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && projectSuggestionsId) {
+        sendJson(
+          response,
+          200,
+          await service.getProjectSuggestions(
+            projectSuggestionsId,
+            url.searchParams.get("agent")?.trim() || undefined,
+          ),
+        );
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
@@ -295,6 +308,12 @@ export async function startServer(
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
         sendJson(response, 200, await service.getConversation(conversationSessionId));
+        return;
+      }
+
+      const sessionSuggestionsId = path.match(/^\/sessions\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && sessionSuggestionsId) {
+        sendJson(response, 200, await service.getSessionSuggestions(sessionSuggestionsId));
         return;
       }
 

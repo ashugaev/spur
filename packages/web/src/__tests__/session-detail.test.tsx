@@ -485,6 +485,58 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("inserts a slash suggestion into the message composer", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/slash-commands") {
+        return new Response(
+          JSON.stringify({
+            agent: "claude",
+            commands: [
+              {
+                id: "cmd-status",
+                label: "/status",
+                insertText: "/status",
+                detail: "Show status",
+                source: "built-in",
+                kind: "command",
+              },
+            ],
+            skills: [],
+            agents: [],
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/status/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/status/i }));
+
+    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("/status");
+  });
+
   it("shows a permission error instead of the raw browser getUserMedia message", async () => {
     Object.defineProperty(window, "isSecureContext", {
       configurable: true,

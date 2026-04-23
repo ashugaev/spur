@@ -18,6 +18,7 @@ import {
   type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
+import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -75,6 +76,7 @@ import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from
 import {
   SPUR_DAEMON_API_VERSION,
   type AgentName,
+  type AgentSuggestionsResponse,
   type AppConfig,
   type BranchSource,
   type ConversationResponse,
@@ -1120,6 +1122,29 @@ export class SessionService {
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
+  }
+
+  async getProjectSuggestions(
+    projectId: string,
+    requestedAgent?: string,
+  ): Promise<AgentSuggestionsResponse> {
+    const project = this.getProject(projectId);
+    const agent = parseAgentName(requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent);
+    return loadProjectSuggestions(agent, project.path);
+  }
+
+  async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    return loadSessionSuggestions({
+      agent: session.agent,
+      worktreePath: session.worktreePath,
+      ...(session.agent === "codex"
+        ? { codexHomePath: codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)) }
+        : {}),
+    });
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {

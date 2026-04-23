@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -125,6 +126,26 @@ interface DialogMessage {
   pending?: boolean;
 }
 
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
+
 function formatLogTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -172,6 +193,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -665,6 +687,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     <div className="relative">
                       <textarea
                         className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
+                        ref={messageRef}
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -716,6 +739,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <div className="flex items-center gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            session ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands` : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
+                          }
+                        />
                         <InputHistoryButton
                           entries={messageHistory.entries}
                           onSelect={setMessage}
