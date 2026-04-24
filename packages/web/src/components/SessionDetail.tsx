@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceButton, VoiceRecordingTimer, VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -710,11 +710,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         ))}
                       </div>
                     )}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />{" "}
-                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
-                      </span>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                          <VoiceStatusHint voice={voice} />{" "}
+                          {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                        </span>
+                        <VoiceRecordingTimer voice={voice} />
+                      </div>
                       <div className="flex items-center gap-2">
                         <InputHistoryButton
                           entries={messageHistory.entries}
