@@ -469,9 +469,7 @@ async function verifySidecarStartup(sessionId: string, sidecarName: string): Pro
   const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
   await killTmuxSession(tmuxSession);
   const detail = output ? `\nLast output:\n${output}` : "";
-  throw new Error(
-    `Sidecar "${sidecarName}" exited immediately after launch.${detail}`,
-  );
+  throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
 function sessionSidecarNames(
@@ -1000,9 +998,7 @@ export class SessionService {
         break;
       }
       if (selectedPort === undefined) {
-        const busyDetail = hostBusy.length > 0
-          ? ` Host-bound: ${hostBusy.join(", ")}.`
-          : "";
+        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
         throw new Error(
           `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
         );
