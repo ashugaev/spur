@@ -2997,7 +2997,8 @@ export class SessionService {
         sessionToolDir,
       });
       const planMode = resolvePlanMode(current);
-      const restorePrompt = buildRestorePrompt(current.prompt);
+      const shouldSendRestoreMessage = current.status !== "paused";
+      const restorePrompt = shouldSendRestoreMessage ? buildRestorePrompt(current.prompt) : "";
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, hookSetup),
@@ -3064,11 +3065,13 @@ export class SessionService {
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
-        restoreSidecarNames,
-      );
-      await this.sendAgentMessage(current, restoreInitialMessage);
+      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+        const restoreInitialMessage = buildInitialMessage(
+          effectivePlan.initialMessage,
+          restoreSidecarNames,
+        );
+        await this.sendAgentMessage(current, restoreInitialMessage);
+      }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
