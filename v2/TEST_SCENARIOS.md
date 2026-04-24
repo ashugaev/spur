@@ -62,6 +62,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - `readSessionEventLog` still supports filtering runtime-style `sidecar.output` and `service.output` entries by scope and name when such entries exist, but Spur no longer appends them from `tmux`.
+- `readEventLog` and `readSessionEventLog` stream the event log in chunks, so logs larger than Node's ~512 MiB single-string cap are read correctly, and `readSessionEventLog` with a `limit` bounds retained entries to the last N matches.
+- `isHostPortFree` reports true for an unused port and false when another listener already holds the same port, so sidecar port reservation rejects host-level conflicts before handing a port to a sidecar.
+- `startSidecar` fails loudly when the sidecar tmux pane dies immediately after launch, capturing the pane's last output in the error and killing the dead tmux session.
+- Session and sidecar env include `SPUR_REAL_HOME` resolved from `/etc/passwd`, so sidecar commands can source files under the real user home even when the parent agent sandbox remaps `$HOME`.
 - Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
