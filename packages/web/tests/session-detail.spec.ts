@@ -1,5 +1,6 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
+import { installMockVoiceRecorder, mockVoiceStatus, mockVoiceTranscribe } from "./voice-fixtures.js";
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -103,27 +104,6 @@ function mockSessionConversation(
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ messages: [], durationMs: 0, state }),
-    });
-  });
-}
-
-function mockVoiceStatus(page: Page) {
-  return page.route("**/api/runtime/voice", (route) => {
-    void route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
-    });
-  });
-}
-
-function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
-  return page.route("**/api/runtime/voice/transcribe", async (route) => {
-    onRequest?.();
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ text }),
     });
   });
 }
@@ -420,61 +400,7 @@ test.describe("S3 mobile voice", () => {
     let transcribeCalls = 0;
 
     try {
-      await page.addInitScript(() => {
-        class MobilePwaMediaRecorder {
-          mimeType = "audio/webm";
-          state = "inactive";
-          private listeners = new Map<string, Array<(event?: unknown) => void>>();
-          private requestedFlush = false;
-
-          addEventListener(type: string, listener: (event?: unknown) => void) {
-            this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
-          }
-
-          start() {
-            this.state = "recording";
-          }
-
-          requestData() {
-            this.requestedFlush = true;
-          }
-
-          stop() {
-            this.state = "inactive";
-            const blob = new Blob(["voice-audio"], { type: this.mimeType });
-            if (this.requestedFlush) {
-              this.emit("stop");
-              queueMicrotask(() => {
-                this.emit("dataavailable", blob);
-              });
-              return;
-            }
-            this.emit("dataavailable", blob);
-            this.emit("stop");
-          }
-
-          private emit(type: string, data?: Blob) {
-            for (const listener of this.listeners.get(type) ?? []) {
-              listener(data ? { data } : undefined);
-            }
-          }
-        }
-
-        Object.defineProperty(window, "MediaRecorder", {
-          configurable: true,
-          writable: true,
-          value: MobilePwaMediaRecorder,
-        });
-        Object.defineProperty(navigator, "mediaDevices", {
-          configurable: true,
-          value: {
-            getUserMedia: async () => ({
-              getTracks: () => [{ stop() {} }],
-            }),
-          },
-        });
-      });
-
+      await installMockVoiceRecorder(page, { delayedFinalChunk: true });
       await mockSessionDetail(page, session);
       await mockSessionConversation(page, session.id, "waiting");
       await mockVoiceStatus(page);
@@ -710,46 +636,7 @@ test.describe("S6: Terminal modal from detail page", () => {
 
   test("terminal voice popup shows compact edit/send actions after recording", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-voice-1" });
-    await page.addInitScript(() => {
-      class MockMediaRecorder {
-        mimeType = "audio/webm";
-        state = "inactive";
-        private listeners = new Map<string, Array<(event?: unknown) => void>>();
-
-        addEventListener(type: string, listener: (event?: unknown) => void) {
-          this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
-        }
-
-        start() {
-          this.state = "recording";
-        }
-
-        stop() {
-          this.state = "inactive";
-          const blob = new Blob(["voice-audio"], { type: this.mimeType });
-          for (const listener of this.listeners.get("dataavailable") ?? []) {
-            listener({ data: blob });
-          }
-          for (const listener of this.listeners.get("stop") ?? []) {
-            listener();
-          }
-        }
-      }
-
-      Object.defineProperty(window, "MediaRecorder", {
-        configurable: true,
-        writable: true,
-        value: MockMediaRecorder,
-      });
-      Object.defineProperty(navigator, "mediaDevices", {
-        configurable: true,
-        value: {
-          getUserMedia: async () => ({
-            getTracks: () => [{ stop() {} }],
-          }),
-        },
-      });
-    });
+    await installMockVoiceRecorder(page);
     await mockSessionDetail(page, session);
     await mockTerminalWebSocket(page);
     await mockVoiceStatus(page);

@@ -202,7 +202,7 @@ export function VoiceConfirmModal({
             <div className="flex items-center gap-2">
               <button
                 aria-label="Pause and edit voice draft"
-                className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                 onClick={() => textareaRef.current?.focus()}
                 title="Pause and edit voice draft"
                 type="button"
@@ -211,13 +211,14 @@ export function VoiceConfirmModal({
               </button>
               <button
                 aria-label="Send voice draft"
-                className="inline-flex h-8 w-8 items-center justify-center bg-[var(--color-accent)] text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                className="inline-flex h-8 shrink-0 items-center justify-center gap-2 bg-[var(--color-accent)] px-3 font-bold uppercase whitespace-nowrap text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                 disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
                 onClick={() => voice.confirmDraft(onInsert)}
                 title="Send voice draft now"
                 type="button"
               >
                 <SendIcon />
+                <span>Send</span>
               </button>
             </div>
           </div>
