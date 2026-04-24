@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { VoiceButton, VoiceConfirmModal, VoiceRecordingTimer } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -727,6 +727,10 @@ export function DirectTerminal({
             </button>
           </div>
           <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          <VoiceRecordingTimer
+            voice={voice}
+            className="inline-flex min-w-[3.5rem] items-center justify-center border border-[var(--color-status-error)] px-2 py-1 font-mono text-[10px] font-bold tracking-[0.08em] text-[var(--color-status-error)]"
+          />
         </div>
       </div>
       <VoiceConfirmModal

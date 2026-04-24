@@ -486,6 +486,9 @@ test.describe("S3 mobile voice", () => {
 
       await page.getByRole("button", { name: /start voice recording/i }).click();
       await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+      await expect(page.getByText("Recording 00:00... click the mic to stop")).toBeVisible();
+      await page.waitForTimeout(1_100);
+      await expect(page.getByText("Recording 00:01... click the mic to stop")).toBeVisible();
       await page.getByRole("button", { name: /stop voice recording/i }).click();
 
       await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(

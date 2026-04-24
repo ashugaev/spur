@@ -445,13 +445,37 @@ describe("DirectTerminal scroll integration", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
     });
+    expect(screen.getByRole("button", { name: "Pause and edit voice draft" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send voice draft" })).toBeInTheDocument();
 
     wsInstances[0].readyState = 3;
-    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send voice draft" }));
 
     await waitFor(() => {
       expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+  });
+
+  it("shows a live recording timer in the terminal controls while recording", async () => {
+    await mountTerminal("test-voice-timer");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("00:00")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    expect(screen.getByText("00:02")).toBeInTheDocument();
   });
 });

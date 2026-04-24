@@ -57,6 +57,37 @@ function sessionsPayload() {
 
 const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
 
+class MockMediaRecorder {
+  mimeType = "audio/webm";
+  state = "inactive";
+  private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+  addEventListener(type: string, listener: (event?: unknown) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  start() {
+    this.state = "recording";
+  }
+
+  stop() {
+    this.state = "inactive";
+    this.emit(
+      "dataavailable",
+      new Blob(["voice-audio"], {
+        type: this.mimeType,
+      }),
+    );
+    this.emit("stop");
+  }
+
+  private emit(type: string, data?: Blob) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(data ? { data } : undefined);
+    }
+  }
+}
+
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -199,6 +230,62 @@ describe("Dashboard", () => {
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
+  });
+
+  it("shows a live recording timer in the spawn modal while voice capture is active", async () => {
+    vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn() }],
+        }),
+      },
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Recording 00:00... click the mic to stop")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+
+    expect(screen.getByText("Recording 00:03... click the mic to stop")).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it("preserves the explicit project filter in session links", async () => {

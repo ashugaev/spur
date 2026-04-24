@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockVoiceState = {
   canUseVoice: true,
   recording: false,
+  recordingDurationLabel: "00:00",
+  recordingDurationMs: 0,
   voiceBusy: null as "starting" | "transcribing" | null,
   voiceModalOpen: true,
   voiceDraft: "git status",
@@ -50,6 +52,7 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 
 vi.mock("@/components/VoiceInput", () => ({
   VoiceButton: () => <button type="button">Voice</button>,
+  VoiceRecordingTimer: () => null,
   VoiceConfirmModal: ({
     onInsert,
     voice,
@@ -58,9 +61,12 @@ vi.mock("@/components/VoiceInput", () => ({
     voice: typeof mockVoiceState;
   }) =>
     voice.voiceModalOpen ? (
-      <button onClick={() => voice.confirmDraft(onInsert)} type="button">
-        Confirm voice input
-      </button>
+      <div>
+        <button onClick={() => voice.confirmDraft(onInsert)} type="button">
+          Send voice draft
+        </button>
+        <button type="button">Pause and edit voice draft</button>
+      </div>
     ) : null,
 }));
 
@@ -135,7 +141,7 @@ describe("DirectTerminal voice confirm", () => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send voice draft" }));
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
@@ -155,7 +161,7 @@ describe("DirectTerminal voice confirm", () => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send voice draft" }));
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
@@ -175,7 +181,7 @@ describe("DirectTerminal voice confirm", () => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send voice draft" }));
 
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:input-history:terminal-draft")).toContain(

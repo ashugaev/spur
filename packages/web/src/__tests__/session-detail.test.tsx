@@ -211,6 +211,46 @@ describe("SessionDetail voice input", () => {
     expect(fetchMock).not.toHaveBeenCalledWith("/api/sessions/api-a1/send", expect.anything());
   });
 
+  it("shows a live recording timer while voice capture is active", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Recording 00:00... click the mic to stop")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    expect(screen.getByText("Recording 00:02... click the mic to stop")).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
   it("shows an inline error when stopping recording yields no audio", async () => {
     vi.stubGlobal("MediaRecorder", EmptyAudioMediaRecorder as unknown as typeof MediaRecorder);
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {

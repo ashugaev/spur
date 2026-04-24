@@ -25,6 +25,17 @@ const TRANSCRIBE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503,
 
 class RetryableTranscriptionError extends Error {}
 
+function formatRecordingDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -156,6 +167,8 @@ function readRecordingStartError(error: unknown): string {
 export interface UseVoiceInput {
   canUseVoice: boolean;
   recording: boolean;
+  recordingDurationLabel: string;
+  recordingDurationMs: number;
   voiceBusy: "starting" | "transcribing" | null;
   voiceModalOpen: boolean;
   voiceDraft: string;
@@ -172,10 +185,12 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   onTranscribedRef.current = options?.onTranscribed;
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [recording, setRecording] = useState(false);
+  const [recordingDurationMs, setRecordingDurationMs] = useState(0);
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
+  const recordingStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     voiceModalOpenRef.current = voiceModalOpen;
@@ -210,11 +225,31 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     };
   }, []);
 
+  useEffect(() => {
+    if (!recording) {
+      setRecordingDurationMs(0);
+      return;
+    }
+
+    const updateDuration = () => {
+      const startedAt = recordingStartedAtRef.current;
+      setRecordingDurationMs(startedAt === null ? 0 : Date.now() - startedAt);
+    };
+
+    updateDuration();
+    const timerId = window.setInterval(updateDuration, 1_000);
+    return () => {
+      window.clearInterval(timerId);
+    };
+  }, [recording]);
+
   const stopStream = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
     mediaChunksRef.current = [];
+    recordingStartedAtRef.current = null;
+    setRecordingDurationMs(0);
     setRecording(false);
   }, []);
 
@@ -294,6 +329,8 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         });
 
         recorder.start();
+        recordingStartedAtRef.current = Date.now();
+        setRecordingDurationMs(0);
         setRecording(true);
       } catch (err) {
         stopStream();
@@ -337,6 +374,8 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   return {
     canUseVoice: Boolean(voiceStatus?.available),
     recording,
+    recordingDurationLabel: formatRecordingDuration(recordingDurationMs),
+    recordingDurationMs,
     voiceBusy,
     voiceModalOpen,
     voiceDraft,
