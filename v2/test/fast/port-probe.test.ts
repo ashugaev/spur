@@ -4,17 +4,6 @@ import { isHostPortFree } from "../../src/port-probe.js";
 
 const openServers: Server[] = [];
 
-function holdPort(port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen({ port, host: "0.0.0.0", exclusive: true }, () => {
-      openServers.push(server);
-      resolve();
-    });
-  });
-}
-
 afterEach(async () => {
   await Promise.all(
     openServers.splice(0).map(
