@@ -752,6 +752,73 @@ test.describe("D7: Spawn modal", () => {
     );
   });
 
+  test("spawn modal shows a live recording timer while voice capture is active", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      class MockMediaRecorder {
+        mimeType = "audio/webm";
+        state = "inactive";
+        private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+        addEventListener(type: string, listener: (event?: unknown) => void) {
+          this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+        }
+
+        start() {
+          this.state = "recording";
+        }
+
+        stop() {
+          this.state = "inactive";
+          const blob = new Blob(["voice-audio"], { type: this.mimeType });
+          for (const listener of this.listeners.get("dataavailable") ?? []) {
+            listener({ data: blob });
+          }
+          for (const listener of this.listeners.get("stop") ?? []) {
+            listener();
+          }
+        }
+      }
+
+      Object.defineProperty(window, "MediaRecorder", {
+        configurable: true,
+        writable: true,
+        value: MockMediaRecorder,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ stop() {} }],
+          }),
+        },
+      });
+    });
+
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, language: "auto" }),
+      });
+    });
+
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-voice-timer-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("button", { name: /start voice recording/i }).click();
+
+    await expect(page.getByText("Recording 00:00... click the mic to stop")).toBeVisible();
+    await page.waitForTimeout(1_100);
+    await expect(page.getByText("Recording 00:01... click the mic to stop")).toBeVisible();
+  });
+
   test("Spawn button disabled when project field is empty", async ({ page }) => {
     await mockSessions(page, [], []);
     await page.goto("/");

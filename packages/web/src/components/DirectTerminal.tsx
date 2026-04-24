@@ -596,9 +596,9 @@ export function DirectTerminal({
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
-      {(voice.voiceError ?? submitError) ? (
+      {(submitError ?? (!voice.voiceModalOpen ? voice.voiceError : null)) ? (
         <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {voice.voiceError ?? submitError}
+          {submitError ?? voice.voiceError}
         </div>
       ) : null}
 

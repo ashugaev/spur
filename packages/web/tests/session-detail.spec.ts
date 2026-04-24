@@ -707,6 +707,76 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
   });
+
+  test("terminal voice popup shows compact edit/send actions after recording", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s6-voice-1" });
+    await page.addInitScript(() => {
+      class MockMediaRecorder {
+        mimeType = "audio/webm";
+        state = "inactive";
+        private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+        addEventListener(type: string, listener: (event?: unknown) => void) {
+          this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+        }
+
+        start() {
+          this.state = "recording";
+        }
+
+        stop() {
+          this.state = "inactive";
+          const blob = new Blob(["voice-audio"], { type: this.mimeType });
+          for (const listener of this.listeners.get("dataavailable") ?? []) {
+            listener({ data: blob });
+          }
+          for (const listener of this.listeners.get("stop") ?? []) {
+            listener();
+          }
+        }
+      }
+
+      Object.defineProperty(window, "MediaRecorder", {
+        configurable: true,
+        writable: true,
+        value: MockMediaRecorder,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ stop() {} }],
+          }),
+        },
+      });
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await mockVoiceStatus(page);
+    await mockVoiceTranscribe(page, "Check deployment status");
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog.getByText("Connected")).toBeVisible();
+
+    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
+    await expect(terminalDialog.getByText("00:00")).toBeVisible();
+    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
+
+    const dialog = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /pause and edit voice draft/i })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: /send voice draft/i })).toBeVisible();
+    await expect(dialog.getByRole("textbox")).toHaveValue("Check deployment status");
+  });
 });
 
 // S7: Display state preserves terminal states over claude JSONL "working"
