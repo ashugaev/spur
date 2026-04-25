@@ -10,6 +10,7 @@ import {
   parseAgentName,
   setupAgentHooks,
 } from "./agents/index.js";
+import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   codexHookHomePath,
@@ -106,6 +107,7 @@ import {
   type SessionState,
   type SessionView,
   type SessionStateTransition,
+  type SessionWorkspaceAccess,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -153,6 +155,9 @@ const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
+const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 
 interface PrCheckTracker {
@@ -490,6 +495,36 @@ function sessionSidecarNames(
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
   return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function buildWorkspaceAccess(
+  session: Pick<SessionRecord, "worktreePath">,
+  project?: Pick<ProjectConfig, "workspaceAccess">,
+  workspaceExistsForSession = true,
+): SessionWorkspaceAccess | undefined {
+  const worktreePath = session.worktreePath.trim();
+  if (!workspaceExistsForSession || !worktreePath || !project?.workspaceAccess) {
+    return undefined;
+  }
+
+  const items = project.workspaceAccess.items.flatMap((item) => {
+    const value = item.value
+      .replaceAll(WORKTREE_PATH_TOKEN, worktreePath)
+      .replaceAll(WORKTREE_PATH_SHELL_TOKEN, shellEscape(worktreePath))
+      .replaceAll(WORKTREE_PATH_URL_TOKEN, encodeURIComponent(worktreePath));
+
+    if (item.kind === "link") {
+      try {
+        return [{ ...item, value: new URL(value).toString() }];
+      } catch {
+        return [];
+      }
+    }
+
+    return [{ ...item, value }];
+  });
+
+  return items.length > 0 ? { items } : undefined;
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -3793,6 +3828,7 @@ export class SessionService {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
     const queuedMessagesView = displayQueuedMessages(session);
+    const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
 
     return {
       ...session,
@@ -3805,6 +3841,7 @@ export class SessionService {
       artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,
       sidecars,
+      ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }

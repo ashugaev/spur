@@ -98,6 +98,19 @@ export interface SidecarPortConfig {
   env: string;
   start: number;
   end: number;
+  url?: string;
+}
+
+export type WorkspaceAccessItemKind = "copy" | "link";
+
+export interface WorkspaceAccessItemConfig {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
+}
+
+export interface WorkspaceAccessConfig {
+  items: WorkspaceAccessItemConfig[];
 }
 
 export interface ProjectSpawnConfig {
@@ -161,6 +174,7 @@ export interface ProjectConfig {
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
+  workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
@@ -252,6 +266,17 @@ export interface SessionView extends SessionRecord {
   artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
+  workspaceAccess?: SessionWorkspaceAccess;
+}
+
+export interface SessionWorkspaceAccessItem {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
+}
+
+export interface SessionWorkspaceAccess {
+  items: SessionWorkspaceAccessItem[];
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {

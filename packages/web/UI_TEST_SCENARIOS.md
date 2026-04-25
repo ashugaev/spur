@@ -177,6 +177,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- `Workspace Access` section appears only when daemon `workspaceAccess.items[]` is present, and link items open in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
@@ -251,6 +252,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace
 - Worktree path in bordered box
+- Copy workspace access items show the final text, use an interactive copy icon button, and show a styled success/error toast after copy attempts
 - Error shown in red box when present
 
 ### S6: Terminal modal (dashboard + detail page)

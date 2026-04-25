@@ -24,6 +24,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
+- Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - Config rejects duplicate `sessionPrefix` values across projects.
@@ -62,6 +63,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
+- Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - `readSessionEventLog` still supports filtering runtime-style `sidecar.output` and `service.output` entries by scope and name when such entries exist, but Spur no longer appends them from `tmux`.
@@ -221,9 +223,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 **Tier: fast**
 
 - `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
+- `sidecars` config resolves `${VAR}` placeholders in `env` values and optional port `url`, omits unresolved values, and rejects invalid published URLs
+- `sidecars` config also resolves bare env names like `SPUR_SIDECAR_PUBLIC_URL` from the project's `.env` file or process env, and omits unresolved optional values instead of leaking placeholder strings
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
 - Invalid sidecar reserved port ranges fail config validation
+- Optional `workspaceAccess.items[].value` resolves `${VAR}` placeholders and bare env names from project `.env` / process env, and drops unresolved items instead of emitting broken UI actions
 - Sidecar tmux session naming: `{sessionId}--{sidecarName}`
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`

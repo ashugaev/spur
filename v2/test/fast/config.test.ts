@@ -1,4 +1,4 @@
-import { realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
@@ -8,6 +8,8 @@ import { createTempDir } from "../helpers/common.js";
 const tempDirs: string[] = [];
 const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -17,9 +19,14 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
   const dir = await createTempDir("spur-fast-config-");
   tempDirs.push(dir);
   const repoPath = join(dir, "repo");
+  await mkdir(repoPath, { recursive: true });
   const configPath = join(dir, name);
   await writeFile(configPath, content.replaceAll("$REPO_PATH", repoPath), "utf8");
   return configPath;
+}
+
+async function writeProjectEnv(configPath: string, content: string): Promise<void> {
+  await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
 }
 
 afterEach(async () => {
@@ -546,6 +553,293 @@ projects:
     });
   });
 
+  it("resolves env placeholders in sidecar env and port url", async () => {
+    process.env["SPUR_PUBLIC_HOST_TEST"] = "host.example.com";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_HOST: \${SPUR_PUBLIC_HOST_TEST}
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://\${SPUR_PUBLIC_HOST_TEST}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.sidecars).toEqual({
+        dev: {
+          command: "pnpm dev",
+          autoStart: false,
+          env: { PUBLIC_HOST: "host.example.com" },
+          ports: {
+            http: {
+              env: "SPUR_RESERVED_PORT_DEV",
+              start: 3000,
+              end: 3099,
+              url: "http://host.example.com",
+            },
+          },
+        },
+      });
+    } finally {
+      delete process.env["SPUR_PUBLIC_HOST_TEST"];
+    }
+  });
+
+  it("reads bare env names for sidecar env and port url from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: SPUR_SIDECAR_PUBLIC_URL
+`);
+    await writeProjectEnv(configPath, "SPUR_SIDECAR_PUBLIC_URL=http://public.example.com\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: {
+        command: "pnpm dev",
+        autoStart: false,
+        env: { PUBLIC_URL: "http://public.example.com" },
+        ports: {
+          http: {
+            env: "SPUR_RESERVED_PORT_DEV",
+            start: 3000,
+            end: 3099,
+            url: "http://public.example.com",
+          },
+        },
+      },
+    });
+  });
+
+  it("parses optional workspace access block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+100.80.107.19 \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: https://code.example.com/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+        },
+        {
+          label: "Web IDE",
+          kind: "link",
+          value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+        },
+      ],
+    });
+  });
+
+  it("resolves env placeholders in optional workspace access", async () => {
+    process.env["SPUR_WORKSPACE_HOST_TEST"] = "100.80.107.19";
+    process.env["SPUR_WORKSPACE_PORT_TEST"] = "9090";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_TEST} \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}/?folder=\${worktreePathUrl}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.workspaceAccess).toEqual({
+        items: [
+          {
+            label: "Cursor",
+            kind: "copy",
+            value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+          },
+          {
+            label: "Web IDE",
+            kind: "link",
+            value: `http://100.80.107.19:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+          },
+        ],
+      });
+    } finally {
+      delete process.env["SPUR_WORKSPACE_HOST_TEST"];
+      delete process.env["SPUR_WORKSPACE_PORT_TEST"];
+    }
+  });
+
+  it("reads bare env names for optional workspace access from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
+`);
+    await writeProjectEnv(
+      configPath,
+      [
+        "SPUR_SIDECAR_PUBLIC_HOST=100.80.107.19",
+        "SPUR_VSCODE_WEB_URL=http://code.example.com:9090",
+        "",
+      ].join("\n"),
+    );
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+        },
+        {
+          label: "Web IDE",
+          kind: "link",
+          value: `http://code.example.com:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+        },
+      ],
+    });
+  });
+
+  it("omits unresolved bare env names for optional workspace access", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("omits unresolved optional workspace access entries", async () => {
+    delete process.env["SPUR_WORKSPACE_HOST_MISSING"];
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_MISSING} \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("requires workspace access items", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.workspaceAccess.items must be an array",
+    );
+  });
+
+  it("rejects invalid workspace access item kind", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Nope
+          kind: shell
+          value: echo hi
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.workspaceAccess.items[0].kind must be "copy" or "link"',
+    );
+  });
+
+  it("omits only unresolved workspace access items", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Stable docs
+          kind: link
+          value: https://example.com/docs
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [{ label: "Stable docs", kind: "link", value: "https://example.com/docs" }],
+    });
+  });
+
   it("rejects invalid sidecar port ranges", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -563,6 +857,27 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.sidecars.dev.ports.http.end must be greater than or equal to projects.backend.sidecars.dev.ports.http.start",
+    );
+  });
+
+  it("rejects sidecar port urls with explicit ports", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://host.example.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
     );
   });
 
