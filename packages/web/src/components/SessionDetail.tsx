@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -447,12 +448,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
-      <a
+      <Link
         className="inline-flex items-center gap-2 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildDashboardPath(projectId)}
       >
         ← Back
-      </a>
+      </Link>
 
       {error || voice.voiceError ? (
         <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">

@@ -156,6 +156,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7d: Sessions list cache on revisit
+
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- Background refetch on the 5s interval silently replaces the list only when the server response differs
+
 ## Session Detail
 
 ### S1: Header with white underline
