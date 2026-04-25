@@ -782,7 +782,7 @@ describe("SessionDetail voice input", () => {
             workspaceAccess: {
               items: [
                 {
-                  label: "Web VS Code",
+                  label: "Web IDE",
                   kind: "link",
                   value: "https://code.example.com/?folder=%2Ftmp%2Fapi-a1",
                 },
@@ -802,7 +802,7 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Workspace Access")).toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Open Web VS Code" })).toHaveAttribute(
+      expect(screen.getByRole("link", { name: "Open Web IDE" })).toHaveAttribute(
         "href",
         "https://code.example.com/?folder=%2Ftmp%2Fapi-a1",
       );

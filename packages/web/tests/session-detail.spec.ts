@@ -172,7 +172,7 @@ test.describe("S2: Actions bar", () => {
       workspaceAccess: {
         items: [
           {
-            label: "Web VS Code",
+            label: "Web IDE",
             kind: "link",
             value: "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
           },

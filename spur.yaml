@@ -17,7 +17,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST ${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: SPUR_VSCODE_WEB_URL/?folder=${worktreePathUrl}
     sidecars:

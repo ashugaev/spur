@@ -643,7 +643,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+100.80.107.19 \${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: https://code.example.com/?folder=\${worktreePathUrl}
 `);
@@ -658,7 +658,7 @@ projects:
           value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
         },
         {
-          label: "Web VS Code",
+          label: "Web IDE",
           kind: "link",
           value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
         },
@@ -679,7 +679,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_TEST} \${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}/?folder=\${worktreePathUrl}
 `);
@@ -694,7 +694,7 @@ projects:
             value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
           },
           {
-            label: "Web VS Code",
+            label: "Web IDE",
             kind: "link",
             value: `http://100.80.107.19:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
           },
@@ -716,7 +716,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
 `);
@@ -739,7 +739,7 @@ projects:
           value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
         },
         {
-          label: "Web VS Code",
+          label: "Web IDE",
           kind: "link",
           value: `http://code.example.com:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
         },
@@ -757,7 +757,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
 `);
@@ -778,7 +778,7 @@ projects:
         - label: Cursor
           kind: copy
           value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_MISSING} \${worktreePathShell}
-        - label: Web VS Code
+        - label: Web IDE
           kind: link
           value: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090/?folder=\${worktreePathUrl}
 `);

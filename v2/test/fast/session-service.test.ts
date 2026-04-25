@@ -4495,7 +4495,7 @@ describe("SessionService", () => {
                 value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
               },
               {
-                label: "Web VS Code",
+                label: "Web IDE",
                 kind: "link",
                 value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
               },
@@ -4519,7 +4519,7 @@ describe("SessionService", () => {
           value: "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur-worktrees/api/api-1'",
         },
         {
-          label: "Web VS Code",
+          label: "Web IDE",
           kind: "link",
           value: "https://code.example.com/?folder=%2Ftmp%2Fspur-worktrees%2Fapi%2Fapi-1",
         },
