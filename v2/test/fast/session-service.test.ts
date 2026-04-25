@@ -4464,6 +4464,126 @@ describe("SessionService", () => {
     ]);
   });
 
+  it("get exposes derived workspace access from project config", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            cursor: { sshRemoteHost: "100.80.107.19" },
+            vscodeWeb: { url: "https://code.example.com", folderQueryParam: "folder" },
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess).toEqual({
+      cursor: {
+        command:
+          "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur-worktrees/api/api-1'",
+      },
+      vscodeWeb: {
+        url: "https://code.example.com/?folder=%2Ftmp%2Fspur-worktrees%2Fapi%2Fapi-1",
+      },
+    });
+  });
+
+  it("omits workspace access when the workspace is missing", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    workspaceExistsMock.mockReturnValue(false);
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            cursor: { sshRemoteHost: "100.80.107.19" },
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess).toBeUndefined();
+  });
+
+  it("shell-escapes the cursor workspace path in derived workspace access", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur worktrees/api'space",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            cursor: { sshRemoteHost: "100.80.107.19" },
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess?.cursor?.command).toBe(
+      "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur worktrees/api'\\''space'",
+    );
+  });
+
   it("kill calls killSidecarTmux to clean up sidecar sessions", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),

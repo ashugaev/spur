@@ -1,0 +1,88 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { parse as parseYaml } from "yaml";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  buildIsolatedProjectConfig,
+  projectUsesCurrentRepository,
+} from "../../src/isolated-project-config.js";
+
+function createRepo(prefix: string): string {
+  const repoDir = mkdtempSync(join(tmpdir(), prefix));
+  execFileSync("git", ["init", "-b", "main"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.name", "Spur Test"], { cwd: repoDir });
+  execFileSync("git", ["config", "user.email", "spur@example.com"], { cwd: repoDir });
+  writeFileSync(join(repoDir, "README.md"), "# test\n", "utf8");
+  execFileSync("git", ["add", "README.md"], { cwd: repoDir });
+  execFileSync("git", ["commit", "-m", "init"], { cwd: repoDir });
+  return repoDir;
+}
+
+const cleanupPaths: string[] = [];
+
+afterEach(() => {
+  for (const path of cleanupPaths.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+describe("isolated project config", () => {
+  it("matches projects that use the current repository", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+
+    expect(projectUsesCurrentRepository(repoDir, repoDir)).toBe(true);
+
+    const otherRepoDir = createRepo("spur-isolated-project-config-other-");
+    cleanupPaths.push(otherRepoDir);
+    expect(projectUsesCurrentRepository(repoDir, otherRepoDir)).toBe(false);
+  });
+
+  it("rewrites matching projects to the current worktree and shared symlinks", () => {
+    const repoDir = createRepo("spur-isolated-project-config-");
+    cleanupPaths.push(repoDir);
+
+    const output = buildIsolatedProjectConfig(
+      `projects:
+  api:
+    path: ${repoDir}
+    defaultBranch: main
+    symlinks:
+      - .env
+  other:
+    path: /tmp/not-this-repo
+    defaultBranch: release
+`,
+      repoDir,
+      "feature/current-worktree",
+    );
+
+    const parsed = parseYaml(output) as {
+      projects: Record<
+        string,
+        {
+          path: string;
+          defaultBranch: string;
+          symlinks?: string[];
+        }
+      >;
+    };
+
+    expect(parsed.projects.api.path).toBe(repoDir);
+    expect(parsed.projects.api.defaultBranch).toBe("feature/current-worktree");
+    expect(parsed.projects.api.symlinks).toEqual([
+      ".env",
+      "spur.yaml",
+      "spur.yml",
+      "AGENTS.md",
+      "CLAUDE.md",
+      ".agents",
+      ".claude",
+    ]);
+
+    expect(parsed.projects.other.path).toBe("/tmp/not-this-repo");
+    expect(parsed.projects.other.defaultBranch).toBe("release");
+  });
+});

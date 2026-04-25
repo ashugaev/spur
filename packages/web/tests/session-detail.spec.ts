@@ -165,6 +165,24 @@ test.describe("S2: Actions bar", () => {
     // completed → isTerminalSession = true → no terminal button
     await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
   });
+
+  test("Web VS Code action visible when workspace access is configured", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2-7",
+      workspaceAccess: {
+        vscodeWeb: {
+          url: "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+        },
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("link", { name: /^web vs code$/i })).toHaveAttribute(
+      "href",
+      "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+    );
+  });
 });
 
 // S3: Message section
@@ -521,6 +539,46 @@ test.describe("S5: Runtime sidebar", () => {
 
     await expect(page.getByText("Worktree path")).toBeVisible();
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
+  });
+
+  test("Cursor command visible when workspace access is configured", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s5-3",
+      workspaceAccess: {
+        cursor: {
+          command:
+            "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3",
+        },
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Cursor", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3"),
+    ).toBeVisible();
+  });
+
+  test("Cursor copy action writes the command to clipboard", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const command = "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-4";
+    const session = makeWorkingSession({
+      id: "detail-s5-4",
+      workspaceAccess: {
+        cursor: {
+          command,
+        },
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^copy$/i }).click();
+
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(command);
   });
 });
 

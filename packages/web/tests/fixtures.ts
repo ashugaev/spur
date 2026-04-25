@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { SpurSessionWorkspaceAccess } from "../src/lib/types";
 
 export interface SpurSessionLink {
   label: string;
@@ -58,6 +59,7 @@ export interface SpurSessionView {
     title?: string;
     links: SpurSessionLink[];
   };
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 

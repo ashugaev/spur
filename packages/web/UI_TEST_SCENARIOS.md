@@ -172,6 +172,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- `Web VS Code` button appears only when daemon `workspaceAccess.vscodeWeb` is present and opens in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
@@ -237,6 +238,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace
 - Worktree path in bordered box
+- `Cursor` card appears only when daemon `workspaceAccess.cursor` is present, shows the final command, and has a `Copy` action
 - Error shown in red box when present
 
 ### S6: Terminal modal (dashboard + detail page)

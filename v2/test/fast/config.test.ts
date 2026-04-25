@@ -1,4 +1,4 @@
-import { realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
@@ -17,9 +17,14 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
   const dir = await createTempDir("spur-fast-config-");
   tempDirs.push(dir);
   const repoPath = join(dir, "repo");
+  await mkdir(repoPath, { recursive: true });
   const configPath = join(dir, name);
   await writeFile(configPath, content.replaceAll("$REPO_PATH", repoPath), "utf8");
   return configPath;
+}
+
+async function writeProjectEnv(configPath: string, content: string): Promise<void> {
+  await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
 }
 
 afterEach(async () => {
@@ -546,6 +551,242 @@ projects:
     });
   });
 
+  it("resolves env placeholders in sidecar env and port url", async () => {
+    process.env["SPUR_PUBLIC_HOST_TEST"] = "host.example.com";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_HOST: \${SPUR_PUBLIC_HOST_TEST}
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://\${SPUR_PUBLIC_HOST_TEST}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.sidecars).toEqual({
+        dev: {
+          command: "pnpm dev",
+          autoStart: false,
+          env: { PUBLIC_HOST: "host.example.com" },
+          ports: {
+            http: {
+              env: "SPUR_RESERVED_PORT_DEV",
+              start: 3000,
+              end: 3099,
+              url: "http://host.example.com",
+            },
+          },
+        },
+      });
+    } finally {
+      delete process.env["SPUR_PUBLIC_HOST_TEST"];
+    }
+  });
+
+  it("reads bare env names for sidecar env and port url from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: SPUR_SIDECAR_PUBLIC_URL
+`);
+    await writeProjectEnv(configPath, "SPUR_SIDECAR_PUBLIC_URL=http://public.example.com\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: {
+        command: "pnpm dev",
+        autoStart: false,
+        env: { PUBLIC_URL: "http://public.example.com" },
+        ports: {
+          http: {
+            env: "SPUR_RESERVED_PORT_DEV",
+            start: 3000,
+            end: 3099,
+            url: "http://public.example.com",
+          },
+        },
+      },
+    });
+  });
+
+  it("parses optional workspace access block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: 100.80.107.19
+      vscodeWeb:
+        url: https://code.example.com
+        folderQueryParam: folder
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      cursor: { sshRemoteHost: "100.80.107.19" },
+      vscodeWeb: { url: "https://code.example.com/", folderQueryParam: "folder" },
+    });
+  });
+
+  it("resolves env placeholders in optional workspace access", async () => {
+    process.env["SPUR_WORKSPACE_HOST_TEST"] = "100.80.107.19";
+    process.env["SPUR_WORKSPACE_PORT_TEST"] = "9090";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: \${SPUR_WORKSPACE_HOST_TEST}
+      vscodeWeb:
+        url: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.workspaceAccess).toEqual({
+        cursor: { sshRemoteHost: "100.80.107.19" },
+        vscodeWeb: { url: "http://100.80.107.19:9090/", folderQueryParam: "folder" },
+      });
+    } finally {
+      delete process.env["SPUR_WORKSPACE_HOST_TEST"];
+      delete process.env["SPUR_WORKSPACE_PORT_TEST"];
+    }
+  });
+
+  it("reads bare env names for optional workspace access from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
+      vscodeWeb:
+        url: SPUR_VSCODE_WEB_URL
+`);
+    await writeProjectEnv(
+      configPath,
+      ["SPUR_SIDECAR_PUBLIC_HOST=100.80.107.19", "SPUR_VSCODE_WEB_URL=http://code.example.com:9090", ""].join("\n"),
+    );
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      cursor: { sshRemoteHost: "100.80.107.19" },
+      vscodeWeb: { url: "http://code.example.com:9090/", folderQueryParam: "folder" },
+    });
+  });
+
+  it("omits unresolved bare env names for optional workspace access", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
+      vscodeWeb:
+        url: SPUR_VSCODE_WEB_URL
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("omits unresolved optional workspace access entries", async () => {
+    delete process.env["SPUR_WORKSPACE_HOST_MISSING"];
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: \${SPUR_WORKSPACE_HOST_MISSING}
+      vscodeWeb:
+        url: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("rejects invalid workspace access url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: 100.80.107.19
+      vscodeWeb:
+        url: nope
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.workspaceAccess.vscodeWeb.url must be an absolute URL",
+    );
+  });
+
+  it("rejects non-http workspace access url schemes", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: 100.80.107.19
+      vscodeWeb:
+        url: javascript:alert(1)
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.workspaceAccess.vscodeWeb.url must use http or https",
+    );
+  });
+
+  it("rejects unsafe cursor ssh remote hosts", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: "100.80.107.19; touch /tmp/spur-review-poc"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.workspaceAccess.cursor.sshRemoteHost must contain only letters, numbers, dots, underscores, or hyphens",
+    );
+  });
+
   it("rejects invalid sidecar port ranges", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -563,6 +804,27 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.sidecars.dev.ports.http.end must be greater than or equal to projects.backend.sidecars.dev.ports.http.start",
+    );
+  });
+
+  it("rejects sidecar port urls with explicit ports", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://host.example.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
     );
   });
 

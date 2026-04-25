@@ -11,6 +11,7 @@
 - Do not ask the same question twice in one task. If clarification is still needed, ask one narrower follow-up that names the remaining decision.
 - Ask the smallest precise question that changes implementation. Prefer concrete choices over broad or open-ended prompts.
 - Absolute local filesystem paths in docs and comments are an antipattern. Prefer relative paths; if that is not practical, use path placeholders or `~/`-style examples instead of machine-specific paths.
+- Do not commit machine-specific hosts, public URLs, or other environment-local values directly into repo config. In committed Spur config, use `${VAR}` placeholders and keep the real values in the environment.
 - Do not write anything for the future. No speculative hooks, no placeholder branches, no config fields, no docs sections for behavior that does not exist yet.
 - If code is not functional in the current product behavior, delete it instead of keeping it around for later.
 - Do not keep two different ways to solve the same task. Pick one interface, one code path, and remove the alternate form.

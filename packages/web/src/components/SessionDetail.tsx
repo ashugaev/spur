@@ -87,6 +87,25 @@ function StopIcon() {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+      <path
+        d="M5.25 5.25V3.5A1.25 1.25 0 0 1 6.5 2.25h6A1.25 1.25 0 0 1 13.75 3.5v6a1.25 1.25 0 0 1-1.25 1.25H10.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M3.5 5.25h6A1.25 1.25 0 0 1 10.75 6.5v6A1.25 1.25 0 0 1 9.5 13.75h-6A1.25 1.25 0 0 1 2.25 12.5v-6A1.25 1.25 0 0 1 3.5 5.25Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 
@@ -410,6 +429,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
     [session],
   );
+  const visibleLinks = useMemo(
+    () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
+    [session],
+  );
+  const cursorCommand = session?.workspaceAccess?.cursor?.command ?? null;
+  const vscodeWebUrl = session?.workspaceAccess?.vscodeWeb?.url ?? null;
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -524,6 +549,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               >
                 {busyAction === "pause" ? "Pausing..." : "Pause"}
               </button>
+            ) : null}
+            {vscodeWebUrl ? (
+              <a
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                href={vscodeWebUrl}
+                rel="noreferrer"
+                target="_blank"
+              >
+                Web VS Code
+              </a>
             ) : null}
             {isRestorable(session) ? (
               <button
@@ -751,14 +786,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </section>
 
               {/* Links */}
-              {session.links.length > 0 ? (
+              {visibleLinks.length > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Links
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
                   <div className="flex flex-wrap gap-2">
-                    {session.links.map((link) => (
+                    {visibleLinks.map((link) => (
                       <a
                         key={`${session.id}-${link.label}-${link.url}`}
                         className="border border-[var(--color-border-default)] px-2.5 py-1 text-[var(--color-accent)] hover:no-underline"
@@ -835,6 +870,29 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {cursorCommand ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                      Cursor
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(cursorCommand);
+                      }}
+                    >
+                      <CopyIcon />
+                      Copy
+                    </button>
+                  </div>
+                  <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
+                    {cursorCommand}
+                  </code>
+                </div>
+              ) : null}
 
               {session.error ? (
                 <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]">

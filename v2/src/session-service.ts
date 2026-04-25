@@ -9,6 +9,7 @@ import {
   parseAgentName,
   setupAgentHooks,
 } from "./agents/index.js";
+import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   codexHookHomePath,
@@ -93,6 +94,7 @@ import {
   type SessionState,
   type SessionView,
   type SessionStateTransition,
+  type SessionWorkspaceAccess,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -440,6 +442,34 @@ function sessionSidecarNames(
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
   return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function buildWorkspaceAccess(
+  session: Pick<SessionRecord, "worktreePath">,
+  project?: Pick<ProjectConfig, "workspaceAccess">,
+  workspaceExistsForSession = true,
+): SessionWorkspaceAccess | undefined {
+  const worktreePath = session.worktreePath.trim();
+  if (!workspaceExistsForSession || !worktreePath || !project?.workspaceAccess) {
+    return undefined;
+  }
+
+  const cursor = project.workspaceAccess.cursor
+    ? {
+        command: `cursor --remote ssh-remote+${project.workspaceAccess.cursor.sshRemoteHost} ${shellEscape(worktreePath)}`,
+      }
+    : undefined;
+  const vscodeWeb = project.workspaceAccess.vscodeWeb
+    ? (() => {
+        const url = new URL(project.workspaceAccess.vscodeWeb.url);
+        url.searchParams.set(project.workspaceAccess.vscodeWeb.folderQueryParam, worktreePath);
+        return { url: url.toString() };
+      })()
+    : undefined;
+
+  return cursor || vscodeWeb
+    ? { ...(cursor ? { cursor } : {}), ...(vscodeWeb ? { vscodeWeb } : {}) }
+    : undefined;
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -3680,6 +3710,7 @@ export class SessionService {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
     const queuedMessagesView = displayQueuedMessages(session);
+    const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
 
     return {
       ...session,
@@ -3691,6 +3722,7 @@ export class SessionService {
       lastActivityAt,
       services,
       sidecars,
+      ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }

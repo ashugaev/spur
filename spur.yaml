@@ -12,6 +12,11 @@ projects:
       - --enable
       - fast_mode
     preflight: {}
+    workspaceAccess:
+      cursor:
+        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
+      vscodeWeb:
+        url: SPUR_VSCODE_WEB_URL
     sidecars:
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh
@@ -29,13 +34,14 @@ projects:
             env: SPUR_RESERVED_PORT_UI
             start: 5600
             end: 5699
+            url: SPUR_SIDECAR_PUBLIC_URL
           terminal:
             env: SPUR_RESERVED_PORT_TERMINAL
             start: 15600
             end: 15699
         env:
-          SPUR_SIDECAR_PUBLIC_HOST: openclaw-dev.tail90e846.ts.net
-          SPUR_SIDECAR_PUBLIC_SCHEME: http
+          SPUR_SIDECAR_PUBLIC_HOST: SPUR_SIDECAR_PUBLIC_HOST
+          SPUR_SIDECAR_PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
     spawn:
       steps:
         - "run $manager"

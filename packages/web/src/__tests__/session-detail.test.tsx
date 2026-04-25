@@ -772,6 +772,82 @@ describe("SessionDetail voice input", () => {
     expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
   });
 
+  it("shows a web vscode action in the main action bar from workspace access", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            workspaceAccess: {
+              vscodeWeb: { url: "https://code.example.com/?folder=%2Ftmp%2Fapi-a1" },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Web VS Code" })).toHaveAttribute(
+        "href",
+        "https://code.example.com/?folder=%2Ftmp%2Fapi-a1",
+      );
+    });
+  });
+
+  it("copies the cursor command from workspace access", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            workspaceAccess: {
+              cursor: {
+                command:
+                  "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+              },
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+    );
+  });
+
   it("starts an offline sidecar from the icon button", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;

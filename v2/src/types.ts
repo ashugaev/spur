@@ -87,6 +87,21 @@ export interface SidecarPortConfig {
   env: string;
   start: number;
   end: number;
+  url?: string;
+}
+
+export interface CursorWorkspaceAccessConfig {
+  sshRemoteHost: string;
+}
+
+export interface WebVscodeWorkspaceAccessConfig {
+  url: string;
+  folderQueryParam: string;
+}
+
+export interface WorkspaceAccessConfig {
+  cursor?: CursorWorkspaceAccessConfig;
+  vscodeWeb?: WebVscodeWorkspaceAccessConfig;
 }
 
 export interface ProjectSpawnConfig {
@@ -150,6 +165,7 @@ export interface ProjectConfig {
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
+  workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
@@ -240,6 +256,20 @@ export interface SessionView extends SessionRecord {
   lastActivityAt: string;
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
+  workspaceAccess?: SessionWorkspaceAccess;
+}
+
+export interface CursorSessionWorkspaceAccess {
+  command: string;
+}
+
+export interface WebVscodeSessionWorkspaceAccess {
+  url: string;
+}
+
+export interface SessionWorkspaceAccess {
+  cursor?: CursorSessionWorkspaceAccess;
+  vscodeWeb?: WebVscodeSessionWorkspaceAccess;
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {
