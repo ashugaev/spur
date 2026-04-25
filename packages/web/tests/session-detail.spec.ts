@@ -1,6 +1,11 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
-import { installMockVoiceRecorder, mockVoiceStatus, mockVoiceTranscribe } from "./voice-fixtures.js";
+import {
+  installMockVoiceRecorder,
+  mockVoiceStatus,
+  mockVoiceTranscribe,
+  mockVoiceTranscribeSequence,
+} from "./voice-fixtures.js";
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -30,7 +35,24 @@ async function mockTerminalWebSocket(page: Page) {
         });
       }
 
-      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView) {}
+      send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+        if (typeof data !== "string") return;
+
+        try {
+          const parsed = JSON.parse(data) as { type?: string; id?: string };
+          if (parsed.type === "input" && typeof parsed.id === "string") {
+            queueMicrotask(() => {
+              this.onmessage?.(
+                new MessageEvent("message", {
+                  data: JSON.stringify({ type: "ack", id: parsed.id }),
+                }),
+              );
+            });
+          }
+        } catch {
+          // Ignore terminal payloads that are not JSON acks.
+        }
+      }
 
       close(code?: number, reason?: string) {
         if (this.readyState >= MockWebSocket.CLOSING) return;
@@ -663,6 +685,51 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(dialog.getByRole("button", { name: /pause and edit voice draft/i })).toBeVisible();
     await expect(dialog.getByRole("button", { name: /send voice draft/i })).toBeVisible();
     await expect(dialog.getByRole("textbox")).toHaveValue("Check deployment status");
+  });
+
+  test("terminal quick-send saves the draft into popup history on the next recording", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-voice-history-1" });
+    await installMockVoiceRecorder(page);
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await mockVoiceStatus(page);
+    await mockVoiceTranscribeSequence(page, ["Check deployment status", "Open release notes"]);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog.getByText("Connected")).toBeVisible();
+
+    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
+    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
+
+    const firstPopup = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(firstPopup.getByRole("textbox")).toHaveValue("Check deployment status");
+    await firstPopup.getByRole("button", { name: /send voice draft/i }).click();
+    await expect(firstPopup).toBeHidden();
+
+    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
+    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
+
+    const secondPopup = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(secondPopup.getByRole("textbox")).toHaveValue("Open release notes");
+    await secondPopup.getByRole("button", { name: /^history$/i }).click();
+
+    const historyDialog = secondPopup.getByRole("dialog", { name: /input history/i });
+    await expect(historyDialog.getByText(/UTC/)).toBeVisible();
+    await expect(historyDialog.getByRole("button", { name: /check deployment status/i })).toBeVisible();
+
+    await historyDialog.getByRole("button", { name: /check deployment status/i }).click();
+    await expect(secondPopup.getByRole("textbox")).toHaveValue("Check deployment status");
   });
 });
 

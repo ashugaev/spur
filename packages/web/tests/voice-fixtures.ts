@@ -81,3 +81,22 @@ export function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => 
     });
   });
 }
+
+export function mockVoiceTranscribeSequence(
+  page: Page,
+  texts: string[],
+  onRequest?: (index: number, text: string) => void,
+) {
+  let requestCount = 0;
+  return page.route("**/api/runtime/voice/transcribe", async (route) => {
+    const index = Math.min(requestCount, Math.max(0, texts.length - 1));
+    const text = texts[index] ?? "";
+    requestCount += 1;
+    onRequest?.(index, text);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ text }),
+    });
+  });
+}
