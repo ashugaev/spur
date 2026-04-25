@@ -88,6 +88,31 @@ function StopIcon() {
   );
 }
 
+function CopyIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 16 16"
+    >
+      <path
+        d="M5.25 5.25V3.5A1.25 1.25 0 0 1 6.5 2.25h6A1.25 1.25 0 0 1 13.75 3.5v6a1.25 1.25 0 0 1-1.25 1.25H10.75"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+      <path
+        d="M3.5 5.25h6A1.25 1.25 0 0 1 10.75 6.5v6A1.25 1.25 0 0 1 9.5 13.75h-6A1.25 1.25 0 0 1 2.25 12.5v-6A1.25 1.25 0 0 1 3.5 5.25Z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
+    </svg>
+  );
+}
+
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 
@@ -124,6 +149,69 @@ interface DialogMessage {
   role: "user" | "assistant";
   text: string;
   pending?: boolean;
+}
+
+interface ToastState {
+  id: number;
+  tone: "success" | "error";
+  title: string;
+  detail?: string;
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  if (typeof document === "undefined") {
+    throw new Error("Clipboard is unavailable.");
+  }
+
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, value.length);
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard is unavailable.");
+    }
+  } finally {
+    textarea.remove();
+    activeElement?.focus();
+  }
+}
+
+function ToastBanner({ toast }: { toast: ToastState }) {
+  const toneClass =
+    toast.tone === "success"
+      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
+      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
+
+  return (
+    <div
+      aria-live="polite"
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      role="status"
+    >
+      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
+        {toast.tone === "success" ? "Copied" : "Copy failed"}
+      </div>
+      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      {toast.detail ? (
+        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+      ) : null}
+    </div>
+  );
 }
 
 function formatLogTime(iso: string): string {
@@ -171,6 +259,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
 
@@ -411,6 +500,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
     [session],
   );
+  const visibleLinks = useMemo(
+    () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
+    [session],
+  );
+  const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -445,6 +539,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     );
     setLocationSearch(window.location.search);
   };
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => {
+      setToast((current) => (current?.id === toast.id ? null : current));
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
+    try {
+      await copyTextToClipboard(value);
+      setToast({
+        id: Date.now(),
+        tone: "success",
+        title: `${label} copied`,
+        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
+      });
+    } catch (copyError) {
+      setToast({
+        id: Date.now(),
+        tone: "error",
+        title: `Couldn't copy ${label}`,
+        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
+      });
+    }
+  }, []);
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -752,14 +873,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               </section>
 
               {/* Links */}
-              {session.links.length > 0 ? (
+              {visibleLinks.length > 0 ? (
                 <section>
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Links
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
                   <div className="flex flex-wrap gap-2">
-                    {session.links.map((link) => (
+                    {visibleLinks.map((link) => (
                       <a
                         key={`${session.id}-${link.label}-${link.url}`}
                         className="border border-[var(--color-border-default)] px-2.5 py-1 text-[var(--color-accent)] hover:no-underline"
@@ -836,6 +957,53 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {truncateMiddle(session.worktreePath, 60)}
                 </div>
               </div>
+
+              {workspaceAccessItems.length > 0 ? (
+                <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Workspace Access
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {workspaceAccessItems.map((item) => (
+                      <div
+                        key={`${item.kind}:${item.label}:${item.value}`}
+                        className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+                              {item.label}
+                            </div>
+                          </div>
+                          {item.kind === "link" ? (
+                            <a
+                              aria-label={`Open ${item.label}`}
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={item.value}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : (
+                            <button
+                              aria-label={`Copy ${item.label}`}
+                              type="button"
+                              className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                            >
+                              <CopyIcon />
+                            </button>
+                          )}
+                        </div>
+                        <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
+                          {item.value}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {session.error ? (
                 <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-2 text-[var(--color-chip-error-text)]">
@@ -968,6 +1136,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
+      {toast ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
+          <ToastBanner toast={toast} />
+        </div>
+      ) : null}
     </main>
   );
 }

@@ -30,6 +30,14 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export interface SpurSessionWorkspaceAccess {
+  items: Array<{
+    label: string;
+    kind: "copy" | "link";
+    value: string;
+  }>;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -56,6 +64,7 @@ export interface SpurSessionView {
     title?: string;
     links: SpurSessionLink[];
   };
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -96,6 +105,7 @@ export interface DashboardSession {
   };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -132,6 +142,7 @@ export function toDashboardSession(
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
+    workspaceAccess: session.workspaceAccess,
     error: session.error,
   };
 }
