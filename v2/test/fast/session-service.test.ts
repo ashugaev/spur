@@ -410,11 +410,14 @@ describe("SessionService", () => {
       }
       if (request.links) {
         for (const link of request.links) {
-          const index = links.findIndex((entry) => entry.label === link.label);
+          const normalizedLabel =
+            link.label === "pr" || link.label === "github_pr" ? "github-pr" : link.label;
+          const normalizedLink = { ...link, label: normalizedLabel };
+          const index = links.findIndex((entry) => entry.label === normalizedLabel);
           if (index === -1) {
-            links.push(link);
+            links.push(normalizedLink);
           } else {
-            links[index] = link;
+            links[index] = normalizedLink;
           }
         }
       }
@@ -3448,7 +3451,7 @@ describe("SessionService", () => {
           title: "Existing title",
           links: [
             { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "pr", url: "https://github.com/org/repo/pull/1" },
+            { label: "github-pr", url: "https://github.com/org/repo/pull/1" },
           ],
         },
       }),
@@ -3457,7 +3460,7 @@ describe("SessionService", () => {
       title: "Existing title",
       links: [
         { label: "tracker", url: "https://tracker.example.com/1" },
-        { label: "pr", url: "https://github.com/org/repo/pull/1" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/1" },
       ],
     });
     expect(result.slots?.links).toHaveLength(2);

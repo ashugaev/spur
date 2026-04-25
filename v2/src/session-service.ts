@@ -19,6 +19,7 @@ import {
   type RolloutBaseline,
 } from "./agents/codex.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
+import { isGitHubPrLinkLabel } from "./session-link-display.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -763,7 +764,7 @@ export class SessionService {
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
     // Skip if PR slot already exists
-    if (session.slots?.links.some((link) => link.label === "pr")) {
+    if (session.slots?.links.some((link) => isGitHubPrLinkLabel(link.label))) {
       return;
     }
     // Skip terminal states
@@ -848,12 +849,12 @@ export class SessionService {
 
     // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
-    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+    if (!current || current.slots?.links.some((link) => isGitHubPrLinkLabel(link.label))) {
       return;
     }
 
     const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
+      links: [{ label: "github-pr", url: pr.url }],
     });
     const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
     writeSession(this.config.dataDir, updated);

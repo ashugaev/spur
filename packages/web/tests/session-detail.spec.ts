@@ -516,6 +516,20 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
+  test("canonical github-pr links render as github pr", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4-pr",
+      slots: {
+        title: "Session with GitHub PR",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+  });
+
   test("links open in new tab", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-2",

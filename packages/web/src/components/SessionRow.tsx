@@ -8,6 +8,7 @@ import {
   extractLinkId,
   GithubIcon,
   JiraIcon,
+  isGitHubPrLinkLabel,
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
@@ -55,7 +56,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
-  const prLink = session.links.find((l) => l.label === "pr");
+  const prLink = session.links.find((l) => isGitHubPrLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");
   const prInfo = usePrInfo(prLink?.url);
   const showDone = prInfo.state === "merged" && canComplete(session);

@@ -170,7 +170,7 @@ export function makeSessionWithPR(overrides?: Partial<SpurSessionView>): SpurSes
     state: "working",
     slots: {
       title: "Session with PR",
-      links: [{ label: "pr", url: "https://github.com/test/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
     },
     ...overrides,
   };

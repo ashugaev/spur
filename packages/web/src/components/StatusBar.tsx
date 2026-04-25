@@ -5,6 +5,7 @@ import {
   CiStatusDot,
   fetchPrInfo,
   GithubIcon,
+  isGitHubPrLinkLabel,
   prStateColor,
   useGitError,
   type CiStatus,
@@ -58,7 +59,7 @@ function useAggregatePr(sessions: SpurSessionView[]) {
     const urls = new Set<string>();
     for (const s of sessions) {
       for (const link of s.slots?.links ?? []) {
-        if (link.label === "pr") urls.add(link.url);
+        if (isGitHubPrLinkLabel(link.label)) urls.add(link.url);
       }
     }
     return [...urls];

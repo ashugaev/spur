@@ -57,6 +57,10 @@ interface CacheEntry {
 
 const prCache = new Map<string, CacheEntry>();
 
+export function isGitHubPrLinkLabel(label: string): boolean {
+  return label === "github-pr" || label === "pr";
+}
+
 function isPrState(value: unknown): value is PrState {
   return value === "draft" || value === "open" || value === "merged" || value === "closed";
 }
@@ -92,7 +96,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
 
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
-  if (link.label === "pr") {
+  if (isGitHubPrLinkLabel(link.label)) {
     const match = url.match(/\/pull\/(\d+)/);
     return match ? `#${match[1]}` : "PR";
   }

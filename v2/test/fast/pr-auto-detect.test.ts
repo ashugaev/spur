@@ -195,7 +195,7 @@ describe("PR auto-detect", () => {
     setupEnrich();
     ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
     applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/42" }],
     } satisfies SessionSlots);
 
     const { SessionService } = await loadModule();
@@ -216,7 +216,7 @@ describe("PR auto-detect", () => {
       "1",
     );
     expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
     expect(syncTmuxStatusMock).toHaveBeenCalled();
@@ -226,7 +226,7 @@ describe("PR auto-detect", () => {
 
   it("skips check when session already has a pr slot", async () => {
     const session = makeSession({
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }] },
+      slots: { links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/1" }] },
     });
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
@@ -263,7 +263,7 @@ describe("PR auto-detect", () => {
     setupEnrich();
     ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
     applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/42" }],
     } satisfies SessionSlots);
 
     const { SessionService } = await loadModule();
@@ -393,7 +393,7 @@ describe("PR auto-detect", () => {
     // On re-read, session now has a PR slot
     readSessionMock.mockReturnValue({
       ...session,
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/99" }] },
+      slots: { links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/99" }] },
     });
     setupEnrich();
     ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));

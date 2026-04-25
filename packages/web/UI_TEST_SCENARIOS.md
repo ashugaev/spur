@@ -78,7 +78,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D5: Tracker and PR links
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
-- Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- Sessions with PR link: GitHub icon + PR number (e.g., #3439), including the canonical `github-pr` slot label
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
 
@@ -233,6 +233,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
+- Canonical `github-pr` links render as `github pr` in the raw link list
 - Each link clickable, opens in new tab
 
 ### S5: Runtime sidebar

@@ -8,6 +8,10 @@ export interface SessionLinkDisplay {
   url: string;
 }
 
+export function isGitHubPrLinkLabel(label: string): boolean {
+  return label === "github-pr" || label === "pr";
+}
+
 function readUrlPathSegments(url: URL): string[] {
   return url.pathname
     .split("/")
@@ -56,11 +60,11 @@ export function formatSessionLinkDisplay(link: SessionLink): SessionLinkDisplay 
     };
   }
 
-  if (link.label === "pr") {
+  if (isGitHubPrLinkLabel(link.label)) {
     const id = displayPrId(url);
     return {
       label: link.label,
-      text: id ? `pr ${shortText(id)}` : "pr",
+      text: id ? `github pr ${shortText(id)}` : "github pr",
       url: url.toString(),
     };
   }

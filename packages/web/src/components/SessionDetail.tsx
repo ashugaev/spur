@@ -23,6 +23,7 @@ import {
   extractLinkId,
   GithubIcon,
   JiraIcon,
+  isGitHubPrLinkLabel,
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
@@ -47,7 +48,8 @@ import {
 } from "@/lib/types";
 
 function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
+  const isPrLink = isGitHubPrLinkLabel(link.label);
+  const prUrl = isPrLink ? link.url : undefined;
   const prInfo = usePrInfo(prUrl);
   const color = prStateColor(prInfo.state);
 
@@ -58,11 +60,11 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       rel="noreferrer"
       target="_blank"
     >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      {isPrLink ? <GithubIcon /> : <JiraIcon />}
       <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
-      {link.label === "pr" ? (
+      {isPrLink ? (
         <>
           <CiStatusDot status={prInfo.ciStatus} />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
@@ -70,6 +72,10 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       ) : null}
     </a>
   );
+}
+
+function displayLinkLabel(label: string): string {
+  return isGitHubPrLinkLabel(label) ? "github pr" : label;
 }
 
 function PlayIcon() {
@@ -509,7 +515,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || l.label === "pr")
+                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
                 .map((link) => (
                   <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
@@ -797,7 +803,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {link.label}
+                        {displayLinkLabel(link.label)}
                       </a>
                     ))}
                   </div>
