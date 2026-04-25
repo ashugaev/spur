@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -14,7 +15,9 @@ import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js"
 import {
   codexHookHomePath,
   captureCodexRolloutBaseline,
+  readCodexRolloutState,
   scanCodexRolloutForMessage,
+  type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
 import {
@@ -25,6 +28,7 @@ import {
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteRuntimeLogCursorsForSession,
@@ -45,6 +49,7 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -271,6 +276,22 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
+function shouldUseCodexRolloutState(
+  hookState: { state: SessionState; updatedAt: string; turnId?: string } | null,
+  rolloutState: CodexRolloutStateRecord,
+): boolean {
+  const sameTurn =
+    typeof hookState?.turnId === "string" &&
+    typeof rolloutState.turnId === "string" &&
+    hookState.turnId === rolloutState.turnId;
+  const hookUpdatedAtMs = hookState ? new Date(hookState.updatedAt).getTime() : 0;
+  const rolloutNewerThanHook = !hookState || rolloutState.timestampMs >= hookUpdatedAtMs;
+  if (rolloutState.state === "needs_input") {
+    return sameTurn || rolloutNewerThanHook;
+  }
+  return !hookState || sameTurn || hookState.state === "needs_input";
+}
+
 function isFresh(timestamp: Date, thresholdMs: number): boolean {
   return Date.now() - timestamp.getTime() <= thresholdMs;
 }
@@ -393,6 +414,9 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
+    // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
+    // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
+    SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -438,6 +462,19 @@ function buildSidecarRuntimeEnv(
     [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
     ...sidecarPortEnv(session, sidecarName),
   };
+}
+
+const SIDECAR_STARTUP_VERIFY_MS = 600;
+const SIDECAR_STARTUP_TAIL_LINES = 40;
+
+async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
+  const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
+  await sleep(SIDECAR_STARTUP_VERIFY_MS);
+  if (!(await tmuxPaneDead(tmuxSession))) return;
+  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  await killTmuxSession(tmuxSession);
+  const detail = output ? `\nLast output:\n${output}` : "";
+  throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
 function sessionSidecarNames(
@@ -945,11 +982,11 @@ export class SessionService {
     );
   }
 
-  private ensureSidecarReservation(
+  private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
-  ): SessionRecord {
+  ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       return session;
     }
@@ -983,15 +1020,22 @@ export class SessionService {
       }
 
       let selectedPort: number | undefined;
+      const hostBusy: number[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
         if (unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) {
+          unavailable.add(candidate);
+          hostBusy.push(candidate);
+          continue;
+        }
         selectedPort = candidate;
         unavailable.add(candidate);
         break;
       }
       if (selectedPort === undefined) {
+        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
         throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
         );
       }
       reservedForSidecar[portConfig.env] = selectedPort;
@@ -1028,7 +1072,7 @@ export class SessionService {
       return args.session;
     }
 
-    const reservedSession = this.ensureSidecarReservation(
+    const reservedSession = await this.ensureSidecarReservation(
       args.session,
       args.sidecarName,
       args.sidecar,
@@ -1058,6 +1102,7 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
     } catch (error) {
       if (reservedSession !== args.session) {
         writeSession(this.config.dataDir, {
@@ -2132,6 +2177,7 @@ export class SessionService {
               ...sidecarPortEnv(runningRecord, name),
             },
           });
+          await verifySidecarStartup(sessionId, name);
           this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
@@ -3014,7 +3060,8 @@ export class SessionService {
         sessionToolDir,
       });
       const planMode = resolvePlanMode(current);
-      const restorePrompt = buildRestorePrompt(current.prompt);
+      const shouldSendRestoreMessage = current.status !== "paused";
+      const restorePrompt = shouldSendRestoreMessage ? buildRestorePrompt(current.prompt) : "";
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, hookSetup),
@@ -3081,11 +3128,13 @@ export class SessionService {
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
-        restoreSidecarNames,
-      );
-      await this.sendAgentMessage(current, restoreInitialMessage);
+      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+        const restoreInitialMessage = buildInitialMessage(
+          effectivePlan.initialMessage,
+          restoreSidecarNames,
+        );
+        await this.sendAgentMessage(current, restoreInitialMessage);
+      }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -3605,6 +3654,37 @@ export class SessionService {
     };
   }
 
+  private codexSessionsDir(sessionId: string): string {
+    return join(
+      codexHookHomePath(join(this.config.dataDir, "session-tools", sessionId)),
+      "sessions",
+    );
+  }
+
+  private async classifyCodexState(sessionId: string): Promise<{
+    state: SessionState;
+    source: StateSource;
+    hookState: ReturnType<typeof readAgentHookState>;
+    rolloutState: CodexRolloutStateRecord | null;
+  }> {
+    const hookState = readAgentHookState(this.config.dataDir, sessionId);
+    const rolloutState = await readCodexRolloutState(this.codexSessionsDir(sessionId));
+    let state: SessionState = hookState?.state ?? "waiting";
+    let source: StateSource = hookState ? "hook" : "status";
+
+    if (rolloutState && shouldUseCodexRolloutState(hookState, rolloutState)) {
+      state = rolloutState.state;
+      source = "jsonl";
+    }
+
+    return {
+      state,
+      source,
+      hookState,
+      rolloutState,
+    };
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
@@ -3654,11 +3734,19 @@ export class SessionService {
         });
       }
     } else {
-      // Codex: hook-based state classification.
-      stateSource = "pane"; // keep "pane" for now as the source label
-      const hookState = readAgentHookState(this.config.dataDir, session.id);
-      if (hookState) {
-        state = hookState.state;
+      // Codex: hook-primary classification with structured rollout JSONL fallback.
+      const codexState = await this.classifyCodexState(session.id);
+      state = codexState.state;
+      stateSource = codexState.source;
+      if (stateSource === "jsonl" && codexState.rolloutState) {
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
+        });
+      } else if (codexState.hookState) {
+        const hookState = codexState.hookState;
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -3747,9 +3835,7 @@ export class SessionService {
       return "working";
     }
 
-    // Codex: hooks only
-    const hookState = readAgentHookState(this.config.dataDir, session.id);
-    return hookState?.state ?? "waiting";
+    return (await this.classifyCodexState(session.id)).state;
   }
 }
 

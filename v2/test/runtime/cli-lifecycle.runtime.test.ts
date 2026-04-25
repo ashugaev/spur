@@ -130,6 +130,8 @@ async function processExists(pid: number): Promise<boolean> {
 async function runRestoreScenario(args: {
   agent?: "claude" | "codex";
   configName: string;
+  stopMode?: "exit" | "pause";
+  expectRestorePrompt?: boolean;
 }): Promise<{
   context: RuntimeTestContext;
   restored: SessionView[];
@@ -159,8 +161,21 @@ async function runRestoreScenario(args: {
   const spawned = JSON.parse((await context.execCli(spawnArgs)).stdout) as SessionView;
   const expectedResumeId =
     (args.agent ?? "claude") === "codex" ? `thread-${spawned.id}` : `fake-claude-${spawned.id}`;
+  const stopMode = args.stopMode ?? "exit";
+  const expectRestorePrompt = args.expectRestorePrompt ?? true;
+  const restorePrompt = "This session was restored after the agent exited.";
+  const readyMarker = (args.agent ?? "claude") === "codex" ? "›" : "❯";
 
-  await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  if (stopMode === "pause") {
+    const paused = JSON.parse(
+      (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(paused.status).toBe("paused");
+    expect(paused.runtimeAlive).toBe(false);
+    expect(paused.workspaceExists).toBe(true);
+  } else {
+    await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  }
 
   const exited = await pollUntil(
     async () =>
@@ -169,7 +184,10 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 15_000,
-      accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.state === "stopped" &&
+        value[0]?.runtimeAlive === (stopMode === "exit") &&
+        value[0]?.status === (stopMode === "pause" ? "paused" : "running"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -210,7 +228,10 @@ async function runRestoreScenario(args: {
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
-    accept: (value) => value.includes("This session was restored after the agent exited."),
+    accept: (value) =>
+      expectRestorePrompt
+        ? value.includes(restorePrompt)
+        : value.includes(readyMarker) && !value.includes(restorePrompt),
   });
 
   const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
@@ -221,7 +242,11 @@ async function runRestoreScenario(args: {
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
-  expect(pane).toContain("Original task:");
+  if (expectRestorePrompt) {
+    expect(pane).toContain("Original task:");
+  } else {
+    expect(pane).not.toContain(restorePrompt);
+  }
 
   return { context, restored, spawned, pane };
 }
@@ -1813,28 +1838,18 @@ projects:
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
 
-    const helperLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await execFileAsync(helperPath, ["service", "logs", "--json"], {
-              cwd: spawned.worktreePath,
-              env: {
-                ...context.env,
-                SPUR_SESSION: spawned.id,
-              },
-            })
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT",
-          ),
-      },
-    );
-    expect(helperLogs.some((entry) => entry.event === "service.output")).toBe(true);
+    const helperLogs = JSON.parse(
+      (
+        await execFileAsync(helperPath, ["service", "logs", "--json"], {
+          cwd: spawned.worktreePath,
+          env: {
+            ...context.env,
+            SPUR_SESSION: spawned.id,
+          },
+        })
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(helperLogs).toEqual([]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -1864,10 +1879,12 @@ projects:
         value.includes(`Logs ${spawned.id}`) &&
         value.includes("session.spawn.completed") &&
         value.includes("service.run.completed") &&
-        value.includes("service runtime prompt"),
+        value.includes("(runtime log capture unavailable)"),
     });
     expect(logPane).toContain("service.run.completed");
     expect(logPane).toContain("Agent Output");
+    expect(logPane).toContain("(runtime log capture unavailable)");
+    expect(logPane).not.toContain("SERVICE_BOOT");
 
     await sendKeysToTmux(controllerSessionName, "C-g");
 
@@ -1878,7 +1895,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("collects sidecar output into the session log and exposes it through service logs", async () => {
+  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -1930,38 +1947,21 @@ projects:
         .stdout,
     ) as SessionView;
 
-    const sidecarLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await context.execCli([
-              "--config",
-              configPath,
-              "service",
-              "logs",
-              spawned.id,
-              "browser",
-              "--sidecar",
-              "--json",
-            ])
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY",
-          ),
-      },
-    );
-    expect(sidecarLogs).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: "sidecar.output",
-          message: "BROWSER_READY",
-        }),
-      ]),
-    );
+    const sidecarLogs = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "service",
+          "logs",
+          spawned.id,
+          "browser",
+          "--sidecar",
+          "--json",
+        ])
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(sidecarLogs).toEqual([]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {
@@ -2800,6 +2800,16 @@ projects:
   it("restores an exited session in place from the TTY list", async () => {
     const result = await runRestoreScenario({ configName: "restore.yaml" });
     expect(result.spawned.agent).toBe("claude");
+  });
+
+  it("restores a paused session in place without sending a restore prompt", async () => {
+    const result = await runRestoreScenario({
+      configName: "restore-paused.yaml",
+      stopMode: "pause",
+      expectRestorePrompt: false,
+    });
+    expect(result.spawned.agent).toBe("claude");
+    expect(result.pane).not.toContain("This session was restored after the agent exited.");
   });
 
   it("restores a codex session through the native resume command", async () => {

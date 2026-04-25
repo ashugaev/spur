@@ -1,6 +1,88 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
 
+async function mockTerminalWebSocket(page: Page) {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      readyState = MockWebSocket.CONNECTING;
+      binaryType: BinaryType = "blob";
+      bufferedAmount = 0;
+      extensions = "";
+      protocol = "";
+      url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+
+      constructor(url: string | URL) {
+        this.url = String(url);
+        state.sockets.push(this);
+        queueMicrotask(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.(new Event("open"));
+        });
+      }
+
+      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView) {}
+
+      close(code?: number, reason?: string) {
+        if (this.readyState >= MockWebSocket.CLOSING) return;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.(
+          new CloseEvent("close", {
+            code: code ?? 1000,
+            reason: reason ?? "Closed",
+            wasClean: true,
+          }),
+        );
+      }
+
+      addEventListener() {}
+
+      removeEventListener() {}
+
+      dispatchEvent() {
+        return true;
+      }
+    }
+
+    const state = {
+      sockets: [] as MockWebSocket[],
+    };
+
+    Object.defineProperty(window, "__directTerminalWsState", {
+      configurable: true,
+      value: state,
+    });
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: MockWebSocket,
+    });
+  });
+}
+
+async function getTerminalSocketCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const windowWithState = window as unknown as {
+      __directTerminalWsState?: {
+        sockets: Array<{ url?: string }>;
+      };
+    };
+    return (
+      windowWithState.__directTerminalWsState?.sockets.filter((socket) =>
+        socket.url?.includes("/ws?session="),
+      ).length ?? 0
+    );
+  });
+}
+
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
     void route.fulfill({
@@ -647,6 +729,46 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.getByRole("button", { name: /close terminal/i }).click();
     const overflowRestored = await page.evaluate(() => document.body.style.overflow);
     expect(overflowRestored).not.toBe("hidden");
+  });
+
+  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-4" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+    await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await page.waitForTimeout(1_100);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
   });
 });
 

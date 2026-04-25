@@ -156,6 +156,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7d: Sessions list cache on revisit
+
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- Background refetch on the 5s interval silently replaces the list only when the server response differs
+
 ## Session Detail
 
 ### S1: Header with white underline
@@ -265,7 +270,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
-- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
+- If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ### S7: Display state override

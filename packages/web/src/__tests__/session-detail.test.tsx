@@ -1192,7 +1192,9 @@ describe("SessionDetail voice input", () => {
         }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    });
   });
 
   it("renders the full queued stack in FIFO order", async () => {
