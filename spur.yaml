@@ -13,10 +13,13 @@ projects:
       - fast_mode
     preflight: {}
     workspaceAccess:
-      cursor:
-        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
-      vscodeWeb:
-        url: SPUR_VSCODE_WEB_URL
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST ${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=${worktreePathUrl}
     sidecars:
       isolated-daemon:
         command: ./scripts/spur-isolated-daemon.sh

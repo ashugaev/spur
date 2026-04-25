@@ -60,7 +60,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
-- Session view derives optional `workspaceAccess` from project config and live workspace state, emitting a final Cursor command and optional web VS Code URL only while the workspace exists.
+- Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - Sidecar and service `tmux` output is appended to the same session event log as `sidecar.output` and `service.output`, and `readSessionEventLog` can filter those runtime entries by scope and name.
@@ -221,8 +221,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
 - Invalid sidecar reserved port ranges fail config validation
-- Optional `workspaceAccess` resolves `${VAR}` placeholders for Cursor SSH host and web VS Code URL, and omits unresolved entries instead of emitting broken UI links
-- Optional `workspaceAccess` also accepts bare env names for Cursor SSH host and web VS Code URL, reading them from the project's `.env` file before falling back to process env
+- Optional `workspaceAccess.items[].value` resolves `${VAR}` placeholders and bare env names from project `.env` / process env, and drops unresolved items instead of emitting broken UI actions
 - Sidecar tmux session naming: `{sessionId}--{sidecarName}`
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`

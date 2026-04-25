@@ -4485,8 +4485,18 @@ describe("SessionService", () => {
         api: {
           ...baseConfig().projects.api,
           workspaceAccess: {
-            cursor: { sshRemoteHost: "100.80.107.19" },
-            vscodeWeb: { url: "https://code.example.com", folderQueryParam: "folder" },
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+              },
+              {
+                label: "Web VS Code",
+                kind: "link",
+                value: "https://code.example.com/?folder=${worktreePathUrl}",
+              },
+            ],
           },
           sidecars: {},
         },
@@ -4499,13 +4509,18 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.workspaceAccess).toEqual({
-      cursor: {
-        command:
-          "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur-worktrees/api/api-1'",
-      },
-      vscodeWeb: {
-        url: "https://code.example.com/?folder=%2Ftmp%2Fspur-worktrees%2Fapi%2Fapi-1",
-      },
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur-worktrees/api/api-1'",
+        },
+        {
+          label: "Web VS Code",
+          kind: "link",
+          value: "https://code.example.com/?folder=%2Ftmp%2Fspur-worktrees%2Fapi%2Fapi-1",
+        },
+      ],
     });
   });
 
@@ -4531,7 +4546,13 @@ describe("SessionService", () => {
         api: {
           ...baseConfig().projects.api,
           workspaceAccess: {
-            cursor: { sshRemoteHost: "100.80.107.19" },
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+              },
+            ],
           },
           sidecars: {},
         },
@@ -4567,7 +4588,13 @@ describe("SessionService", () => {
         api: {
           ...baseConfig().projects.api,
           workspaceAccess: {
-            cursor: { sshRemoteHost: "100.80.107.19" },
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+              },
+            ],
           },
           sidecars: {},
         },
@@ -4579,7 +4606,7 @@ describe("SessionService", () => {
 
     const result = await service.get("api-1");
 
-    expect(result.workspaceAccess?.cursor?.command).toBe(
+    expect(result.workspaceAccess?.items[0]?.value).toBe(
       "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur worktrees/api'\\''space'",
     );
   });

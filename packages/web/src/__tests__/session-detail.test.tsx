@@ -772,7 +772,7 @@ describe("SessionDetail voice input", () => {
     expect(actionNames).toEqual(["Terminal", "Open", "Stop sidecar isolated-ui"]);
   });
 
-  it("shows a web vscode action in the main action bar from workspace access", async () => {
+  it("shows link workspace access entries in the runtime sidebar", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
@@ -780,7 +780,13 @@ describe("SessionDetail voice input", () => {
           JSON.stringify({
             ...sessionFixture(),
             workspaceAccess: {
-              vscodeWeb: { url: "https://code.example.com/?folder=%2Ftmp%2Fapi-a1" },
+              items: [
+                {
+                  label: "Web VS Code",
+                  kind: "link",
+                  value: "https://code.example.com/?folder=%2Ftmp%2Fapi-a1",
+                },
+              ],
             },
           }),
           { status: 200 },
@@ -795,14 +801,15 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByRole("link", { name: "Web VS Code" })).toHaveAttribute(
+      expect(screen.getByText("Workspace Access")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Open Web VS Code" })).toHaveAttribute(
         "href",
         "https://code.example.com/?folder=%2Ftmp%2Fapi-a1",
       );
     });
   });
 
-  it("copies the cursor command from workspace access", async () => {
+  it("copies a workspace access snippet and shows a toast", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -816,10 +823,14 @@ describe("SessionDetail voice input", () => {
           JSON.stringify({
             ...sessionFixture(),
             workspaceAccess: {
-              cursor: {
-                command:
-                  "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
-              },
+              items: [
+                {
+                  label: "Cursor",
+                  kind: "copy",
+                  value:
+                    "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+                },
+              ],
             },
           }),
           { status: 200 },
@@ -841,11 +852,12 @@ describe("SessionDetail voice input", () => {
       ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /copy/i }));
+    fireEvent.click(screen.getByRole("button", { name: /copy cursor/i }));
 
     expect(writeText).toHaveBeenCalledWith(
       "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
     );
+    expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
   });
 
   it("starts an offline sidecar from the icon button", async () => {

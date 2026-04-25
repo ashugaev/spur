@@ -144,6 +144,36 @@ interface DialogMessage {
   pending?: boolean;
 }
 
+interface ToastState {
+  id: number;
+  tone: "success" | "error";
+  title: string;
+  detail?: string;
+}
+
+function ToastBanner({ toast }: { toast: ToastState }) {
+  const toneClass =
+    toast.tone === "success"
+      ? "border-[var(--color-status-ready)] bg-[var(--color-bg-surface)] text-[var(--color-text-primary)]"
+      : "border-[var(--color-status-error)] bg-[var(--color-chip-error-bg)] text-[var(--color-chip-error-text)]";
+
+  return (
+    <div
+      aria-live="polite"
+      className={`pointer-events-auto min-w-72 max-w-sm border px-3 py-2 shadow-[0_12px_32px_rgba(0,0,0,0.35)] ${toneClass}`}
+      role="status"
+    >
+      <div className="text-[10px] font-bold uppercase tracking-[0.12em]">
+        {toast.tone === "success" ? "Copied" : "Copy failed"}
+      </div>
+      <div className="mt-1 text-sm font-medium">{toast.title}</div>
+      {toast.detail ? (
+        <div className="mt-1 text-xs text-[var(--color-text-secondary)]">{toast.detail}</div>
+      ) : null}
+    </div>
+  );
+}
+
 function formatLogTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -189,6 +219,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
 
@@ -433,8 +464,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
     [session],
   );
-  const cursorCommand = session?.workspaceAccess?.cursor?.command ?? null;
-  const vscodeWebUrl = session?.workspaceAccess?.vscodeWeb?.url ?? null;
+  const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -469,6 +499,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     );
     setLocationSearch(window.location.search);
   };
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => {
+      setToast((current) => (current?.id === toast.id ? null : current));
+    }, 2500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setToast({
+        id: Date.now(),
+        tone: "success",
+        title: `${label} copied`,
+        detail: value.length > 96 ? `${value.slice(0, 96)}...` : value,
+      });
+    } catch (copyError) {
+      setToast({
+        id: Date.now(),
+        tone: "error",
+        title: `Couldn't copy ${label}`,
+        detail: copyError instanceof Error ? copyError.message : "Clipboard is unavailable.",
+      });
+    }
+  }, []);
 
   return (
     <main className="mx-auto max-w-[1500px] px-4 py-4 sm:px-5 lg:px-6">
@@ -549,16 +606,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               >
                 {busyAction === "pause" ? "Pausing..." : "Pause"}
               </button>
-            ) : null}
-            {vscodeWebUrl ? (
-              <a
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                href={vscodeWebUrl}
-                rel="noreferrer"
-                target="_blank"
-              >
-                Web VS Code
-              </a>
             ) : null}
             {isRestorable(session) ? (
               <button
@@ -871,26 +918,50 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </div>
               </div>
 
-              {cursorCommand ? (
+              {workspaceAccessItems.length > 0 ? (
                 <div className="mt-3 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                      Cursor
-                    </div>
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      onClick={() => {
-                        void navigator.clipboard?.writeText(cursorCommand);
-                      }}
-                    >
-                      <CopyIcon />
-                      Copy
-                    </button>
+                  <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Workspace Access
                   </div>
-                  <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
-                    {cursorCommand}
-                  </code>
+                  <div className="mt-2 space-y-2">
+                    {workspaceAccessItems.map((item) => (
+                      <div
+                        key={`${item.kind}:${item.label}:${item.value}`}
+                        className="border border-[var(--color-border-subtle)] bg-[var(--color-bg-base)] px-2.5 py-2"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+                              {item.label}
+                            </div>
+                          </div>
+                          {item.kind === "link" ? (
+                            <a
+                              aria-label={`Open ${item.label}`}
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-[10px] font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={item.value}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : (
+                            <button
+                              aria-label={`Copy ${item.label}`}
+                              type="button"
+                              className="inline-flex h-7 w-7 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-accent)] active:scale-[0.97]"
+                              onClick={() => void copyWorkspaceAccessValue(item.label, item.value)}
+                            >
+                              <CopyIcon />
+                            </button>
+                          )}
+                        </div>
+                        <code className="mt-2 block whitespace-pre-wrap break-all font-mono text-[var(--color-text-secondary)]">
+                          {item.value}
+                        </code>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 
@@ -1025,6 +1096,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}
+      {toast ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-50">
+          <ToastBanner toast={toast} />
+        </div>
+      ) : null}
     </main>
   );
 }

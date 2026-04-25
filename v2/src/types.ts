@@ -90,18 +90,16 @@ export interface SidecarPortConfig {
   url?: string;
 }
 
-export interface CursorWorkspaceAccessConfig {
-  sshRemoteHost: string;
-}
+export type WorkspaceAccessItemKind = "copy" | "link";
 
-export interface WebVscodeWorkspaceAccessConfig {
-  url: string;
-  folderQueryParam: string;
+export interface WorkspaceAccessItemConfig {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
 }
 
 export interface WorkspaceAccessConfig {
-  cursor?: CursorWorkspaceAccessConfig;
-  vscodeWeb?: WebVscodeWorkspaceAccessConfig;
+  items: WorkspaceAccessItemConfig[];
 }
 
 export interface ProjectSpawnConfig {
@@ -259,17 +257,14 @@ export interface SessionView extends SessionRecord {
   workspaceAccess?: SessionWorkspaceAccess;
 }
 
-export interface CursorSessionWorkspaceAccess {
-  command: string;
-}
-
-export interface WebVscodeSessionWorkspaceAccess {
-  url: string;
+export interface SessionWorkspaceAccessItem {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
 }
 
 export interface SessionWorkspaceAccess {
-  cursor?: CursorSessionWorkspaceAccess;
-  vscodeWeb?: WebVscodeSessionWorkspaceAccess;
+  items: SessionWorkspaceAccessItem[];
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {

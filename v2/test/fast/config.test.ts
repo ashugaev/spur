@@ -637,18 +637,30 @@ projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: 100.80.107.19
-      vscodeWeb:
-        url: https://code.example.com
-        folderQueryParam: folder
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+100.80.107.19 \${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: https://code.example.com/?folder=\${worktreePathUrl}
 `);
 
     const config = loadConfig(configPath);
 
     expect(config.projects["backend"]?.workspaceAccess).toEqual({
-      cursor: { sshRemoteHost: "100.80.107.19" },
-      vscodeWeb: { url: "https://code.example.com/", folderQueryParam: "folder" },
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+        },
+        {
+          label: "Web VS Code",
+          kind: "link",
+          value: "https://code.example.com/?folder=${worktreePathUrl}",
+        },
+      ],
     });
   });
 
@@ -661,17 +673,30 @@ projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: \${SPUR_WORKSPACE_HOST_TEST}
-      vscodeWeb:
-        url: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_TEST} \${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}/?folder=\${worktreePathUrl}
 `);
 
       const config = loadConfig(configPath);
 
       expect(config.projects["backend"]?.workspaceAccess).toEqual({
-        cursor: { sshRemoteHost: "100.80.107.19" },
-        vscodeWeb: { url: "http://100.80.107.19:9090/", folderQueryParam: "folder" },
+        items: [
+          {
+            label: "Cursor",
+            kind: "copy",
+            value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+          },
+          {
+            label: "Web VS Code",
+            kind: "link",
+            value: "http://100.80.107.19:9090/?folder=${worktreePathUrl}",
+          },
+        ],
       });
     } finally {
       delete process.env["SPUR_WORKSPACE_HOST_TEST"];
@@ -685,10 +710,13 @@ projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
-      vscodeWeb:
-        url: SPUR_VSCODE_WEB_URL
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
 `);
     await writeProjectEnv(
       configPath,
@@ -698,8 +726,18 @@ projects:
     const config = loadConfig(configPath);
 
     expect(config.projects["backend"]?.workspaceAccess).toEqual({
-      cursor: { sshRemoteHost: "100.80.107.19" },
-      vscodeWeb: { url: "http://code.example.com:9090/", folderQueryParam: "folder" },
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+        },
+        {
+          label: "Web VS Code",
+          kind: "link",
+          value: "http://code.example.com:9090/?folder=${worktreePathUrl}",
+        },
+      ],
     });
   });
 
@@ -709,10 +747,13 @@ projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: SPUR_SIDECAR_PUBLIC_HOST
-      vscodeWeb:
-        url: SPUR_VSCODE_WEB_URL
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
 `);
 
     const config = loadConfig(configPath);
@@ -727,10 +768,13 @@ projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: \${SPUR_WORKSPACE_HOST_MISSING}
-      vscodeWeb:
-        url: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_MISSING} \${worktreePathShell}
+        - label: Web VS Code
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090/?folder=\${worktreePathUrl}
 `);
 
     const config = loadConfig(configPath);
@@ -738,53 +782,56 @@ projects:
     expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
   });
 
-  it("rejects invalid workspace access url", async () => {
+  it("requires workspace access items", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
-    workspaceAccess:
-      cursor:
-        sshRemoteHost: 100.80.107.19
-      vscodeWeb:
-        url: nope
+    workspaceAccess: {}
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.workspaceAccess.vscodeWeb.url must be an absolute URL",
+      "projects.backend.workspaceAccess.items must be an array",
     );
   });
 
-  it("rejects non-http workspace access url schemes", async () => {
+  it("rejects invalid workspace access item kind", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: 100.80.107.19
-      vscodeWeb:
-        url: javascript:alert(1)
+      items:
+        - label: Nope
+          kind: shell
+          value: echo hi
 `);
 
     expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.workspaceAccess.vscodeWeb.url must use http or https",
+      'projects.backend.workspaceAccess.items[0].kind must be "copy" or "link"',
     );
   });
 
-  it("rejects unsafe cursor ssh remote hosts", async () => {
+  it("omits only unresolved workspace access items", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:
     path: $REPO_PATH
     workspaceAccess:
-      cursor:
-        sshRemoteHost: "100.80.107.19; touch /tmp/spur-review-poc"
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Stable docs
+          kind: link
+          value: https://example.com/docs
 `);
 
-    expect(() => loadConfig(configPath)).toThrow(
-      "projects.backend.workspaceAccess.cursor.sshRemoteHost must contain only letters, numbers, dots, underscores, or hyphens",
-    );
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [{ label: "Stable docs", kind: "link", value: "https://example.com/docs" }],
+    });
   });
 
   it("rejects invalid sidecar port ranges", async () => {

@@ -166,19 +166,24 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
   });
 
-  test("Web VS Code action visible when workspace access is configured", async ({ page }) => {
+  test("link workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s2-7",
       workspaceAccess: {
-        vscodeWeb: {
-          url: "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
-        },
+        items: [
+          {
+            label: "Web VS Code",
+            kind: "link",
+            value: "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+          },
+        ],
       },
     });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("link", { name: /^web vs code$/i })).toHaveAttribute(
+    await expect(page.getByText("Workspace Access")).toBeVisible();
+    await expect(page.getByRole("link", { name: /^open web vs code$/i })).toHaveAttribute(
       "href",
       "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
     );
@@ -541,14 +546,17 @@ test.describe("S5: Runtime sidebar", () => {
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
   });
 
-  test("Cursor command visible when workspace access is configured", async ({ page }) => {
+  test("copy workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s5-3",
       workspaceAccess: {
-        cursor: {
-          command:
-            "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3",
-        },
+        items: [
+          {
+            label: "Cursor",
+            kind: "copy",
+            value: "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3",
+          },
+        ],
       },
     });
     await mockSessionDetail(page, session);
@@ -560,25 +568,24 @@ test.describe("S5: Runtime sidebar", () => {
     ).toBeVisible();
   });
 
-  test("Cursor copy action writes the command to clipboard", async ({ page, context }) => {
+  test("workspace access copy action writes the command to clipboard and shows a toast", async ({ page, context }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const command = "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-4";
     const session = makeWorkingSession({
       id: "detail-s5-4",
       workspaceAccess: {
-        cursor: {
-          command,
-        },
+        items: [{ label: "Cursor", kind: "copy", value: command }],
       },
     });
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await page.getByRole("button", { name: /^copy$/i }).click();
+    await page.getByRole("button", { name: /^copy cursor$/i }).click();
 
     await expect
       .poll(() => page.evaluate(() => navigator.clipboard.readText()))
       .toBe(command);
+    await expect(page.getByText("Cursor copied")).toBeVisible();
   });
 });
 

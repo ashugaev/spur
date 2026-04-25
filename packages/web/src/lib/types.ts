@@ -31,12 +31,11 @@ export interface SpurSessionLink {
 }
 
 export interface SpurSessionWorkspaceAccess {
-  cursor?: {
-    command: string;
-  };
-  vscodeWeb?: {
-    url: string;
-  };
+  items: Array<{
+    label: string;
+    kind: "copy" | "link";
+    value: string;
+  }>;
 }
 
 export interface SpurSessionView {

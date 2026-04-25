@@ -11,6 +11,7 @@ import {
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
   type ServiceRuleConfig,
@@ -34,10 +35,9 @@ const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_VOICE_LANGUAGE = "auto";
 const DEFAULT_VOICE_MODEL = "base";
-const ENV_VAR_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g;
+const ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
 const ENV_NAME_RE = /\b([A-Z_][A-Z0-9_]*)\b/g;
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
-const VALID_SSH_REMOTE_HOST_RE = /^[a-zA-Z0-9._-]+$/;
 const PROJECT_ENV_FILE = ".env";
 
 type ConfigMode = "instance" | "project";
@@ -142,16 +142,6 @@ function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   throw new Error(`${label} must be "claude" or "codex"`);
 }
 
-function asSshRemoteHost(value: unknown, label: string): string {
-  const host = asString(value, label);
-  if (!VALID_SSH_REMOTE_HOST_RE.test(host)) {
-    throw new Error(
-      `${label} must contain only letters, numbers, dots, underscores, or hyphens`,
-    );
-  }
-  return host;
-}
-
 function parseEnvFile(content: string): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const rawLine of content.split(/\r?\n/)) {
@@ -241,16 +231,11 @@ function resolveOptionalUrl(
   return asUrlString(resolved, label);
 }
 
-function resolveOptionalSshRemoteHost(
+function resolveOptionalTemplate(
   raw: string,
-  label: string,
   projectEnv: Record<string, string>,
 ): string | undefined {
-  const resolved = resolveEnvVars(raw, projectEnv);
-  if (resolved === undefined) {
-    return undefined;
-  }
-  return asSshRemoteHost(resolved, label);
+  return resolveEnvVars(raw, projectEnv);
 }
 
 function defaultTmuxSocketName(port: number): string {
@@ -595,44 +580,37 @@ function parseWorkspaceAccess(
 
   const label = `projects.${projectId}.workspaceAccess`;
   const raw = asObject(value, label);
-  const cursorRaw = raw["cursor"];
-  const vscodeWebRaw = raw["vscodeWeb"];
+  const itemsRaw = raw["items"];
+  if (itemsRaw === undefined) {
+    throw new Error(`${label}.items must be an array`);
+  }
+  if (!Array.isArray(itemsRaw)) {
+    throw new Error(`${label}.items must be an array`);
+  }
 
-  const cursor =
-    cursorRaw === undefined
-      ? undefined
-      : (() => {
-          const config = asObject(cursorRaw, `${label}.cursor`);
-          const sshRemoteHost = resolveOptionalSshRemoteHost(
-            asString(config["sshRemoteHost"], `${label}.cursor.sshRemoteHost`),
-            `${label}.cursor.sshRemoteHost`,
-            projectEnv,
-          );
-          return sshRemoteHost === undefined ? undefined : { sshRemoteHost };
-        })();
-  const vscodeWeb =
-    vscodeWebRaw === undefined
-      ? undefined
-      : (() => {
-          const config = asObject(vscodeWebRaw, `${label}.vscodeWeb`);
-          const url = resolveOptionalUrl(
-            asString(config["url"], `${label}.vscodeWeb.url`),
-            `${label}.vscodeWeb.url`,
-            projectEnv,
-          );
-          if (url === undefined) {
-            return undefined;
-          }
-          const folderQueryParam =
-            asOptionalString(config["folderQueryParam"], `${label}.vscodeWeb.folderQueryParam`) ??
-            "folder";
-          return {
-            url,
-            folderQueryParam,
-          };
-        })();
+  const items: WorkspaceAccessItemConfig[] = [];
+  for (const [index, itemRaw] of itemsRaw.entries()) {
+    const itemLabel = `${label}.items[${index}]`;
+    const item = asObject(itemRaw, itemLabel);
+    const kind = asString(item["kind"], `${itemLabel}.kind`);
+    if (kind !== "copy" && kind !== "link") {
+      throw new Error(`${itemLabel}.kind must be "copy" or "link"`);
+    }
+    const resolvedValue = resolveOptionalTemplate(
+      asString(item["value"], `${itemLabel}.value`),
+      projectEnv,
+    );
+    if (resolvedValue === undefined) {
+      continue;
+    }
+    items.push({
+      label: asString(item["label"], `${itemLabel}.label`),
+      kind,
+      value: resolvedValue,
+    });
+  }
 
-  return cursor || vscodeWeb ? { ...(cursor ? { cursor } : {}), ...(vscodeWeb ? { vscodeWeb } : {}) } : undefined;
+  return items.length > 0 ? { items } : undefined;
 }
 
 function parseTrigger(

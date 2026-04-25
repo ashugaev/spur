@@ -454,22 +454,24 @@ function buildWorkspaceAccess(
     return undefined;
   }
 
-  const cursor = project.workspaceAccess.cursor
-    ? {
-        command: `cursor --remote ssh-remote+${project.workspaceAccess.cursor.sshRemoteHost} ${shellEscape(worktreePath)}`,
-      }
-    : undefined;
-  const vscodeWeb = project.workspaceAccess.vscodeWeb
-    ? (() => {
-        const url = new URL(project.workspaceAccess.vscodeWeb.url);
-        url.searchParams.set(project.workspaceAccess.vscodeWeb.folderQueryParam, worktreePath);
-        return { url: url.toString() };
-      })()
-    : undefined;
+  const items = project.workspaceAccess.items.flatMap((item) => {
+    const value = item.value
+      .replaceAll("${worktreePath}", worktreePath)
+      .replaceAll("${worktreePathShell}", shellEscape(worktreePath))
+      .replaceAll("${worktreePathUrl}", encodeURIComponent(worktreePath));
 
-  return cursor || vscodeWeb
-    ? { ...(cursor ? { cursor } : {}), ...(vscodeWeb ? { vscodeWeb } : {}) }
-    : undefined;
+    if (item.kind === "link") {
+      try {
+        return [{ ...item, value: new URL(value).toString() }];
+      } catch {
+        return [];
+      }
+    }
+
+    return [{ ...item, value }];
+  });
+
+  return items.length > 0 ? { items } : undefined;
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
