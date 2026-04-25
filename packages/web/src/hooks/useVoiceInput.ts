@@ -22,6 +22,20 @@ const MICROPHONE_NOT_FOUND_ERROR = "No microphone was found. Connect a microphon
 const TRANSCRIBE_MAX_ATTEMPTS = 3;
 const TRANSCRIBE_REQUEST_TIMEOUT_MS = 45_000;
 const TRANSCRIBE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const WAVEFORM_BAR_COUNT = 20;
+
+type VoiceStopIntent = "default" | "draft" | "send";
+
+function buildIdleWaveformBars(): number[] {
+  return Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => 0.2 + (index % 4) * 0.05);
+}
+
+function buildFallbackWaveformBars(timestamp: number): number[] {
+  return Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
+    const wave = Math.sin(timestamp / 180 + index * 0.55);
+    return 0.24 + ((wave + 1) / 2) * 0.52;
+  });
+}
 
 class RetryableTranscriptionError extends Error {}
 
@@ -169,10 +183,14 @@ export interface UseVoiceInput {
   recording: boolean;
   recordingDurationLabel: string;
   recordingDurationMs: number;
+  waveformBars: number[];
   voiceBusy: "starting" | "transcribing" | null;
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
+  startRecording: () => void;
+  stopRecording: (intent?: VoiceStopIntent) => void;
+  cancelRecording: () => void;
   toggleRecording: () => void;
   confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
   dismissModal: () => void;
@@ -180,17 +198,24 @@ export interface UseVoiceInput {
   clearVoiceError: () => void;
 }
 
-export function useVoiceInput(options?: { onTranscribed?: (text: string) => void }): UseVoiceInput {
+export function useVoiceInput(options?: {
+  onTranscribed?: (text: string) => void;
+  onQuickSend?: (text: string) => Promise<unknown> | unknown;
+}): UseVoiceInput {
   const onTranscribedRef = useRef(options?.onTranscribed);
   onTranscribedRef.current = options?.onTranscribed;
+  const onQuickSendRef = useRef(options?.onQuickSend);
+  onQuickSendRef.current = options?.onQuickSend;
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordingDurationMs, setRecordingDurationMs] = useState(0);
+  const [waveformBars, setWaveformBars] = useState<number[]>(() => buildIdleWaveformBars());
   const [voiceBusy, setVoiceBusy] = useState<"starting" | "transcribing" | null>(null);
   const [voiceModalOpen, setVoiceModalOpen] = useState(false);
   const voiceModalOpenRef = useRef(false);
   const dismissedRef = useRef(false);
   const recordingStartedAtRef = useRef<number | null>(null);
+  const stopIntentRef = useRef<VoiceStopIntent>("default");
 
   useEffect(() => {
     voiceModalOpenRef.current = voiceModalOpen;
@@ -200,6 +225,10 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const analyserDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -218,10 +247,23 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       if (mediaRecorderRef.current?.state === "recording") {
         mediaRecorderRef.current.stop();
       }
+      if (audioSourceRef.current) {
+        audioSourceRef.current.disconnect();
+      }
+      if (analyserRef.current) {
+        analyserRef.current.disconnect();
+      }
+      if (audioContextRef.current) {
+        void audioContextRef.current.close().catch(() => undefined);
+      }
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
       mediaRecorderRef.current = null;
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
+      audioContextRef.current = null;
+      audioSourceRef.current = null;
+      analyserRef.current = null;
+      analyserDataRef.current = null;
     };
   }, []);
 
@@ -243,21 +285,114 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     };
   }, [recording]);
 
+  useEffect(() => {
+    if (!recording) {
+      setWaveformBars(buildIdleWaveformBars());
+      return;
+    }
+
+    const updateWaveform = () => {
+      const analyser = analyserRef.current;
+      const analyserData = analyserDataRef.current;
+      if (!analyser || !analyserData) {
+        setWaveformBars(buildFallbackWaveformBars(Date.now()));
+        return;
+      }
+
+      analyser.getByteFrequencyData(analyserData);
+      const bucketSize = Math.max(1, Math.floor(analyserData.length / WAVEFORM_BAR_COUNT));
+      const nextBars = Array.from({ length: WAVEFORM_BAR_COUNT }, (_, index) => {
+        const start = index * bucketSize;
+        const end = Math.min(analyserData.length, start + bucketSize);
+        let total = 0;
+        for (let cursor = start; cursor < end; cursor += 1) {
+          total += analyserData[cursor] ?? 0;
+        }
+        const average = total / Math.max(1, end - start);
+        return 0.16 + (average / 255) * 0.84;
+      });
+
+      setWaveformBars(nextBars);
+    };
+
+    updateWaveform();
+    const waveformId = window.setInterval(updateWaveform, 120);
+    return () => {
+      window.clearInterval(waveformId);
+    };
+  }, [recording]);
+
+  const resetAudioAnalysis = useCallback(() => {
+    if (audioSourceRef.current) {
+      audioSourceRef.current.disconnect();
+    }
+    if (analyserRef.current) {
+      analyserRef.current.disconnect();
+    }
+    if (audioContextRef.current) {
+      void audioContextRef.current.close().catch(() => undefined);
+    }
+    audioContextRef.current = null;
+    audioSourceRef.current = null;
+    analyserRef.current = null;
+    analyserDataRef.current = null;
+    setWaveformBars(buildIdleWaveformBars());
+  }, []);
+
   const stopStream = useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
     mediaRecorderRef.current = null;
     mediaChunksRef.current = [];
     recordingStartedAtRef.current = null;
+    stopIntentRef.current = "default";
+    resetAudioAnalysis();
     setRecordingDurationMs(0);
     setRecording(false);
-  }, []);
+  }, [resetAudioAnalysis]);
 
-  const toggleRecording = useCallback(() => {
-    if (recording) {
-      mediaRecorderRef.current?.stop();
+  const applyTranscription = useCallback(async (text: string, intent: VoiceStopIntent) => {
+    if (intent === "send" && onQuickSendRef.current) {
+      try {
+        const inserted = await onQuickSendRef.current(text);
+        if (inserted === false) {
+          throw new Error(INSERT_ERROR);
+        }
+        setVoiceError(null);
+        setVoiceDraft("");
+        setVoiceModalOpen(false);
+        return;
+      } catch (error) {
+        setVoiceDraft(text);
+        setVoiceModalOpen(true);
+        throw error instanceof Error ? error : new Error(INSERT_ERROR);
+      }
+    }
+
+    if (voiceModalOpenRef.current || intent === "draft") {
+      setVoiceDraft((prev) => {
+        const base = prev.trimEnd();
+        return base ? `${base} ${text}` : text;
+      });
+      setVoiceModalOpen(true);
       return;
     }
+
+    if (onTranscribedRef.current) {
+      try {
+        onTranscribedRef.current(text);
+      } catch (error) {
+        throw error instanceof Error ? error : new Error(INSERT_ERROR);
+      }
+      return;
+    }
+
+    setVoiceDraft(text);
+    setVoiceModalOpen(true);
+  }, []);
+
+  const startRecording = useCallback(() => {
+    if (recording) return;
     if (!voiceStatus?.available) return;
 
     setVoiceError(null);
@@ -276,6 +411,34 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         mediaStreamRef.current = stream;
         mediaRecorderRef.current = recorder;
         mediaChunksRef.current = [];
+        stopIntentRef.current = "default";
+
+        const AudioContextCtor =
+          window.AudioContext ||
+          (window as typeof window & { webkitAudioContext?: typeof AudioContext })
+            .webkitAudioContext;
+        if (AudioContextCtor) {
+          let audioContext: AudioContext | null = null;
+          try {
+            audioContext = new AudioContextCtor();
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 128;
+            analyser.smoothingTimeConstant = 0.72;
+            const source = audioContext.createMediaStreamSource(stream);
+            source.connect(analyser);
+            audioContextRef.current = audioContext;
+            audioSourceRef.current = source;
+            analyserRef.current = analyser;
+            analyserDataRef.current = new Uint8Array(analyser.frequencyBinCount);
+          } catch {
+            if (audioContext) {
+              void audioContext.close().catch(() => undefined);
+            }
+            resetAudioAnalysis();
+          }
+        } else {
+          resetAudioAnalysis();
+        }
 
         recorder.addEventListener("dataavailable", (event) => {
           if (event.data.size > 0) mediaChunksRef.current.push(event.data);
@@ -291,41 +454,30 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         });
 
         recorder.addEventListener("stop", () => {
-          const chunks = [...mediaChunksRef.current];
-          const wasDismissed = dismissedRef.current;
-          dismissedRef.current = false;
-          stopStream();
-          if (wasDismissed) return;
-          if (chunks.length === 0) {
-            setVoiceError(EMPTY_AUDIO_ERROR);
-            return;
-          }
-          void (async () => {
-            setVoiceBusy("transcribing");
-            try {
-              const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-              const text = await transcribeRecording(audio);
-              if (onTranscribedRef.current) {
-                try {
-                  onTranscribedRef.current(text);
-                } catch (error) {
-                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
-                }
-              } else if (voiceModalOpenRef.current) {
-                setVoiceDraft((prev) => {
-                  const base = prev.trimEnd();
-                  return base ? base + " " + text : text;
-                });
-              } else {
-                setVoiceDraft(text);
-                setVoiceModalOpen(true);
-              }
-            } catch (err) {
-              setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
-            } finally {
-              setVoiceBusy(null);
+          window.setTimeout(() => {
+            const chunks = [...mediaChunksRef.current];
+            const wasDismissed = dismissedRef.current;
+            dismissedRef.current = false;
+            const stopIntent = stopIntentRef.current;
+            stopStream();
+            if (wasDismissed) return;
+            if (chunks.length === 0) {
+              setVoiceError(EMPTY_AUDIO_ERROR);
+              return;
             }
-          })();
+            void (async () => {
+              setVoiceBusy("transcribing");
+              try {
+                const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+                const text = await transcribeRecording(audio);
+                await applyTranscription(text, stopIntent);
+              } catch (err) {
+                setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
+              } finally {
+                setVoiceBusy(null);
+              }
+            })();
+          }, 0);
         });
 
         recorder.start();
@@ -339,7 +491,36 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         setVoiceBusy((current) => (current === "starting" ? null : current));
       }
     })();
-  }, [recording, stopStream, voiceStatus]);
+  }, [applyTranscription, recording, resetAudioAnalysis, stopStream, voiceStatus]);
+
+  const stopRecording = useCallback(
+    (intent: VoiceStopIntent = "default") => {
+      if (!recording) return;
+      stopIntentRef.current = intent;
+      if (mediaRecorderRef.current && "requestData" in mediaRecorderRef.current) {
+        mediaRecorderRef.current.requestData();
+      }
+      mediaRecorderRef.current?.stop();
+    },
+    [recording],
+  );
+
+  const cancelRecording = useCallback(() => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      dismissedRef.current = true;
+      mediaRecorderRef.current.stop();
+    }
+    stopStream();
+    setVoiceBusy(null);
+  }, [stopStream]);
+
+  const toggleRecording = useCallback(() => {
+    if (recording) {
+      stopRecording();
+      return;
+    }
+    startRecording();
+  }, [recording, startRecording, stopRecording]);
 
   const confirmDraft = useCallback(
     async (onInsert: (text: string) => unknown) => {
@@ -376,10 +557,14 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     recording,
     recordingDurationLabel: formatRecordingDuration(recordingDurationMs),
     recordingDurationMs,
+    waveformBars,
     voiceBusy,
     voiceModalOpen,
     voiceDraft,
     setVoiceDraft,
+    startRecording,
+    stopRecording,
+    cancelRecording,
     toggleRecording,
     confirmDraft,
     dismissModal,

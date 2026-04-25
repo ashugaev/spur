@@ -278,13 +278,14 @@ describe("Dashboard", () => {
       await Promise.resolve();
     });
 
-    expect(screen.getByText("Recording 00:00... click the mic to stop")).toBeInTheDocument();
+    expect(screen.getByText("00:00")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(3_000);
     });
 
-    expect(screen.getByText("Recording 00:03... click the mic to stop")).toBeInTheDocument();
+    expect(screen.getByText("00:03")).toBeInTheDocument();
     vi.useRealTimers();
   });
 

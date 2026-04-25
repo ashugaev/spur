@@ -122,8 +122,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
-- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
-- While recording, the inline voice hint shows a live `MM:SS` timer
+- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
+- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
+- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
@@ -208,9 +209,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
-- First microphone click starts recording; button switches to stop state
-- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
-- While recording, the inline voice hint shows a live `MM:SS` timer
+- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
+- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
+- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
@@ -253,12 +254,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
-- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- While recording from the terminal control bar, a compact live `MM:SS` timer appears beside the mic button
+- Microphone button appears after arrow keys with a small gap
+- Starting terminal voice recording hides the normal control bar actions and replaces them with one full-width recording strip inside the footer
+- The terminal recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact icon-only `Cancel`, `Edit`, and `Send` actions
+- `Edit` stops recording and opens the confirmation popup with the transcribed draft; `Send` stops recording, sends straight to the agent, and saves the sent text into draft history for the next popup open
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
-- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it swaps to the same full-width recording strip and appends the transcription back into the existing draft on stop
 - Confirmation popup actions include a history icon button plus compact `Pause/Edit` and `Send` actions; history shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
-- While recording or transcribing inside the popup, the inline hint shows a live `MM:SS` timer during recording and the `Send` action stays disabled until transcription is ready
+- While transcribing inside the popup, the `Send` action stays disabled until transcription is ready
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
 - If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears inside the popup

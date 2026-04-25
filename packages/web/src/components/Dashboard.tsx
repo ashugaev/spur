@@ -6,7 +6,12 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceRecordingTimer, VoiceStatusHint } from "@/components/VoiceInput";
+import {
+  VoiceButton,
+  VoiceRecordingStrip,
+  VoiceStatusHint,
+  isVoiceActive,
+} from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -774,7 +779,9 @@ export function Dashboard() {
                 </div>
                 <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
-                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
+                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} ${
+                      isVoiceActive(voice) ? "pr-3" : "pr-12"
+                    } sm:min-h-[10rem]`}
                     onChange={(event) => setSpawnPrompt(event.target.value)}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
@@ -783,7 +790,17 @@ export function Dashboard() {
                     placeholder="Prompt for the new session..."
                     value={spawnPrompt}
                   />
-                  <VoiceButton voice={voice} />
+                  {!isVoiceActive(voice) ? <VoiceButton voice={voice} /> : null}
+                  {isVoiceActive(voice) ? (
+                    <VoiceRecordingStrip
+                      actions={[
+                        { kind: "cancel", onClick: voice.cancelRecording },
+                        { kind: "stop", onClick: () => voice.stopRecording() },
+                      ]}
+                      className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+                      voice={voice}
+                    />
+                  ) : null}
                 </div>
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
@@ -792,10 +809,11 @@ export function Dashboard() {
                 ) : null}
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex min-w-0 items-center gap-2">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                      <VoiceStatusHint voice={voice} />
-                    </span>
-                    <VoiceRecordingTimer voice={voice} />
+                    {voice.voiceBusy && !voice.recording ? (
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        <VoiceStatusHint voice={voice} />
+                      </span>
+                    ) : null}
                   </div>
                   <div className="flex items-center gap-2">
                     <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />

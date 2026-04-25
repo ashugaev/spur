@@ -4,7 +4,12 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceRecordingTimer, VoiceStatusHint } from "@/components/VoiceInput";
+import {
+  VoiceButton,
+  VoiceRecordingStrip,
+  VoiceStatusHint,
+  isVoiceActive,
+} from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -664,7 +669,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="space-y-2">
                     <div className="relative">
                       <textarea
-                        className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
+                        className={`min-h-24 w-full resize-y ${INPUT_CLASS} ${
+                          isVoiceActive(voice) ? "pr-3" : "pr-12"
+                        }`}
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
                           if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -686,8 +693,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         placeholder="Message to the running agent..."
                         value={message}
                       />
-                      <VoiceButton voice={voice} />
+                      {!isVoiceActive(voice) ? <VoiceButton voice={voice} /> : null}
                     </div>
+                    {isVoiceActive(voice) ? (
+                      <VoiceRecordingStrip
+                        actions={[
+                          { kind: "cancel", onClick: voice.cancelRecording },
+                          { kind: "stop", onClick: () => voice.stopRecording() },
+                        ]}
+                        className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+                        voice={voice}
+                      />
+                    ) : null}
                     {attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2">
                         {attachments.map((att, i) => (
@@ -713,10 +730,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex min-w-0 items-center gap-2">
                         <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                          <VoiceStatusHint voice={voice} />{" "}
+                          {voice.voiceBusy && !voice.recording ? (
+                            <VoiceStatusHint voice={voice} />
+                          ) : null}{" "}
                           {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                         </span>
-                        <VoiceRecordingTimer voice={voice} />
                       </div>
                       <div className="flex items-center gap-2">
                         <InputHistoryButton

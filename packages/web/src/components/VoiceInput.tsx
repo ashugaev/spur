@@ -40,8 +40,19 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
   return <MicIcon />;
 }
 
-const ACTIVE_STYLE =
-  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]";
+function StopIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="currentColor"
+      viewBox="0 0 24 24"
+    >
+      <rect height="10" rx="1" width="10" x="7" y="7" />
+    </svg>
+  );
+}
+
 const IDLE_STYLE =
   "border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] hover:bg-[var(--color-hover-overlay)] text-[var(--color-text-primary)]";
 
@@ -79,27 +90,184 @@ function SendIcon() {
   );
 }
 
-export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
-  if (!voice.canUseVoice) return null;
-  const active = voice.recording || voice.voiceBusy === "transcribing";
-  const baseClass =
-    className ??
-    `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
+function CloseIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6l12 12M18 6 6 18" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function VoiceWaveform({ bars }: { bars: number[] }) {
+  return (
+    <span aria-hidden="true" className="flex h-4 min-w-0 flex-1 items-end gap-px">
+      {bars.map((bar, index) => (
+        <span
+          className="flex-1 bg-[var(--color-status-error)] transition-[height,opacity] duration-100"
+          key={`voice-bar-${index}`}
+          style={{
+            height: `${Math.round((0.18 + bar * 0.82) * 100)}%`,
+            opacity: 0.55 + bar * 0.45,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function VoiceActionButton({
+  ariaLabel,
+  children,
+  onClick,
+  primary = false,
+  title,
+  disabled = false,
+}: {
+  ariaLabel: string;
+  children: React.ReactNode;
+  onClick: () => void;
+  primary?: boolean;
+  title: string;
+  disabled?: boolean;
+}) {
   return (
     <button
-      aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
-      className={`${baseClass} transition ${active ? ACTIVE_STYLE : ""} disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={voice.voiceBusy === "transcribing"}
-      onClick={voice.toggleRecording}
-      title={
-        voice.recording
-          ? `Stop voice recording (${voice.recordingDurationLabel})`
-          : "Start voice recording"
-      }
+      aria-label={ariaLabel}
+      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center border transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        primary
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
+          : "border-[var(--color-border-strong)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]"
+      }`}
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      type="button"
+    >
+      <span className="sr-only">{ariaLabel}</span>
+      {children}
+    </button>
+  );
+}
+
+export function isVoiceActive(voice: UseVoiceInput): boolean {
+  return voice.recording || voice.voiceBusy !== null;
+}
+
+export function VoiceButton({ voice, className }: { voice: UseVoiceInput; className?: string }) {
+  if (!voice.canUseVoice) return null;
+  const baseClass =
+    className ?? `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border`;
+  return (
+    <button
+      aria-label="Start voice recording"
+      className={`${baseClass} transition ${IDLE_STYLE} disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={voice.voiceBusy !== null}
+      onClick={voice.startRecording}
+      title="Start voice recording"
       type="button"
     >
       <MicOrSpinner voice={voice} />
     </button>
+  );
+}
+
+export function VoiceRecordingStrip({
+  voice,
+  actions,
+  className,
+}: {
+  voice: UseVoiceInput;
+  actions: Array<{
+    kind: "cancel" | "edit" | "send" | "stop";
+    onClick: () => void;
+    disabled?: boolean;
+  }>;
+  className?: string;
+}) {
+  const activeLabel =
+    voice.recording
+      ? voice.recordingDurationLabel
+      : voice.voiceBusy === "starting"
+        ? "ARMING"
+        : "SAVING";
+
+  return (
+    <div
+      className={
+        className ??
+        "flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+      }
+    >
+      <span className="inline-flex shrink-0 items-center gap-2">
+        <span className="dot-pulse h-1.5 w-1.5 rounded-full bg-[var(--color-status-error)]" />
+        <span className="font-mono text-[10px] font-bold uppercase tracking-[0.08em] text-[var(--color-text-primary)]">
+          {activeLabel}
+        </span>
+      </span>
+      <VoiceWaveform bars={voice.waveformBars} />
+      {actions.map((action) => {
+        const disabled = action.disabled ?? (!voice.recording && voice.voiceBusy !== null);
+        if (action.kind === "cancel") {
+          return (
+            <VoiceActionButton
+              ariaLabel="Cancel voice recording"
+              disabled={disabled}
+              key={action.kind}
+              onClick={action.onClick}
+              title="Cancel voice recording"
+            >
+              <CloseIcon />
+            </VoiceActionButton>
+          );
+        }
+        if (action.kind === "edit") {
+          return (
+            <VoiceActionButton
+              ariaLabel="Stop and edit voice draft"
+              disabled={disabled}
+              key={action.kind}
+              onClick={action.onClick}
+              title="Stop and edit voice draft"
+            >
+              <EditIcon />
+            </VoiceActionButton>
+          );
+        }
+        if (action.kind === "send") {
+          return (
+            <VoiceActionButton
+              ariaLabel="Stop and send voice draft"
+              disabled={disabled}
+              key={action.kind}
+              onClick={action.onClick}
+              primary
+              title="Stop and send voice draft"
+            >
+              <SendIcon />
+            </VoiceActionButton>
+          );
+        }
+        return (
+          <VoiceActionButton
+            ariaLabel="Stop and save voice recording"
+            disabled={disabled}
+            key={action.kind}
+            onClick={action.onClick}
+            primary
+            title="Stop and save voice recording"
+          >
+            <StopIcon />
+          </VoiceActionButton>
+        );
+      })}
+    </div>
   );
 }
 
@@ -150,6 +318,8 @@ export function VoiceConfirmModal({
 
   if (!voice.voiceModalOpen) return null;
 
+  const voiceStripActive = isVoiceActive(voice);
+
   return (
     <div
       aria-label="Confirm voice input"
@@ -173,30 +343,42 @@ export function VoiceConfirmModal({
           </button>
         </div>
         <div className="space-y-3 px-4 py-4">
-          <div className="relative">
-            <textarea
-              className={`min-h-40 w-full resize-y ${INPUT_CLASS}`}
-              onChange={(event) => voice.setVoiceDraft(event.target.value)}
-              ref={textareaRef}
-              value={voice.voiceDraft}
-            />
-            <VoiceButton
-              voice={voice}
-              className={`absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center border ${
-                voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
-              }`}
-            />
+          <div className="space-y-2">
+            <div className="relative">
+              <textarea
+                className={`min-h-40 w-full resize-y ${INPUT_CLASS} ${voiceStripActive ? "pr-3" : "pr-12"}`}
+                onChange={(event) => voice.setVoiceDraft(event.target.value)}
+                ref={textareaRef}
+                value={voice.voiceDraft}
+              />
+              {!voiceStripActive ? (
+                <VoiceButton
+                  voice={voice}
+                  className="absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center border"
+                />
+              ) : null}
+            </div>
+            {voiceStripActive ? (
+              <VoiceRecordingStrip
+                actions={[
+                  { kind: "cancel", onClick: voice.cancelRecording },
+                  { kind: "stop", onClick: () => voice.stopRecording() },
+                ]}
+                className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+                voice={voice}
+              />
+            ) : null}
           </div>
           {voice.voiceError ? (
             <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
               {voice.voiceError}
             </div>
           ) : null}
-          {(voice.recording || voice.voiceBusy) && (
+          {voice.voiceBusy && !voice.recording ? (
             <p className="text-[10px] text-[var(--color-text-tertiary)]">
               <VoiceStatusHint voice={voice} />
             </p>
-          )}
+          ) : null}
           <div className="flex items-center justify-between gap-2">
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <div className="flex items-center gap-2">

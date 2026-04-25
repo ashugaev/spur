@@ -51,6 +51,7 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 }));
 
 vi.mock("@/components/VoiceInput", () => ({
+  isVoiceActive: () => false,
   VoiceButton: () => <button type="button">Voice</button>,
   VoiceRecordingTimer: () => null,
   VoiceConfirmModal: ({

@@ -769,7 +769,8 @@ test.describe("D7: Spawn modal", () => {
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("button", { name: /start voice recording/i }).click();
 
-    await expect(page.getByText("Recording 00:00... click the mic to stop")).toBeVisible();
+    await expect(page.getByText("00:00")).toBeVisible();
+    await expect(page.getByRole("button", { name: /stop and save voice recording/i })).toBeVisible();
   });
 
   test("Spawn button disabled when project field is empty", async ({ page }) => {

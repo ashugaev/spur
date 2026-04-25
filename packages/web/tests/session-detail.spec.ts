@@ -433,11 +433,11 @@ test.describe("S3 mobile voice", () => {
       await page.goto(`/sessions/${session.id}`);
 
       await page.getByRole("button", { name: /start voice recording/i }).click();
-      await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
-      await expect(page.getByText("Recording 00:00... click the mic to stop")).toBeVisible();
+      await expect(page.getByRole("button", { name: /stop and save voice recording/i })).toBeVisible();
+      await expect(page.getByText("00:00")).toBeVisible();
       await page.waitForTimeout(1_100);
-      await expect(page.getByText("Recording 00:01... click the mic to stop")).toBeVisible();
-      await page.getByRole("button", { name: /stop voice recording/i }).click();
+      await expect(page.getByText("00:01")).toBeVisible();
+      await page.getByRole("button", { name: /stop and save voice recording/i }).click();
 
       await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
         "Mobile PWA voice still works",
@@ -678,7 +678,12 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
     await expect(terminalDialog.getByText("00:00")).toBeVisible();
-    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
+    await expect(terminalDialog.getByRole("button", { name: /^enter$/i })).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /arrow left/i })).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop and edit voice draft/i })).toBeVisible();
+    await expect(terminalDialog.getByRole("button", { name: /stop and send voice draft/i })).toBeVisible();
+    await terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }).click();
 
     const dialog = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(dialog).toBeVisible();
@@ -710,15 +715,11 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(terminalDialog.getByText("Connected")).toBeVisible();
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
-    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
-
-    const firstPopup = page.getByRole("dialog", { name: /confirm voice input/i });
-    await expect(firstPopup.getByRole("textbox")).toHaveValue("Check deployment status");
-    await firstPopup.getByRole("button", { name: /send voice draft/i }).click();
-    await expect(firstPopup).toBeHidden();
+    await terminalDialog.getByRole("button", { name: /stop and send voice draft/i }).click();
+    await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
-    await terminalDialog.getByRole("button", { name: /stop voice recording/i }).click();
+    await terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }).click();
 
     const secondPopup = page.getByRole("dialog", { name: /confirm voice input/i });
     await expect(secondPopup.getByRole("textbox")).toHaveValue("Open release notes");
