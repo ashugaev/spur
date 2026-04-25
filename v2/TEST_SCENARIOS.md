@@ -28,6 +28,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, outbound message attachments are written there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
@@ -54,6 +55,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
+- `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
 - `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; paused restore relaunches/resumes in place without sending any prompt, while unexpected-stop restore still delivers the restore prompt.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.

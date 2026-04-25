@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
@@ -464,6 +465,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -1136,6 +1138,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -1490,6 +1493,50 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+  });
+
+  it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
+    mockClaudeJsonlState("working");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+
+    await service.send("api-1", {
+      message: "inspect this",
+      queue: false,
+      interrupt: true,
+      attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-shot.png]\ninspect this",
+      {
+        interrupt: true,
+        agent: "claude",
+      },
+    );
+    const artifactPath = "/tmp/spur-data/session-artifacts/api-1/1773828300000-shot.png";
+    expect(existsSync(artifactPath)).toBe(true);
+    expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
@@ -2635,6 +2682,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3520,6 +3568,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3709,6 +3758,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3914,6 +3964,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",

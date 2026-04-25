@@ -238,6 +238,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Shows when session has links
 - Each link clickable, opens in new tab
 
+### S4b: Artifacts section
+
+- Shows when session has persisted artifacts
+- Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
+- Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- Clicking preview opens a full-screen artifact lightbox with close and download actions
+- Non-media artifacts render as file tiles with extension badge and download action only
+- Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
+
 ### S5: Runtime sidebar
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace

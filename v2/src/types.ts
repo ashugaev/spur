@@ -19,6 +19,17 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export type SessionArtifactKind = "image" | "video" | "download";
+
+export interface SessionArtifact {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: SessionArtifactKind;
+  createdAt: string;
+  updatedAt: string;
+}
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
 export interface SessionSlots {
@@ -238,6 +249,7 @@ export interface SessionView extends SessionRecord {
   state: SessionState;
   stateHistory?: SessionStateTransition[];
   lastActivityAt: string;
+  artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
 }
