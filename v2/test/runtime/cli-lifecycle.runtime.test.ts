@@ -130,6 +130,8 @@ async function processExists(pid: number): Promise<boolean> {
 async function runRestoreScenario(args: {
   agent?: "claude" | "codex";
   configName: string;
+  stopMode?: "exit" | "pause";
+  expectRestorePrompt?: boolean;
 }): Promise<{
   context: RuntimeTestContext;
   restored: SessionView[];
@@ -159,8 +161,21 @@ async function runRestoreScenario(args: {
   const spawned = JSON.parse((await context.execCli(spawnArgs)).stdout) as SessionView;
   const expectedResumeId =
     (args.agent ?? "claude") === "codex" ? `thread-${spawned.id}` : `fake-claude-${spawned.id}`;
+  const stopMode = args.stopMode ?? "exit";
+  const expectRestorePrompt = args.expectRestorePrompt ?? true;
+  const restorePrompt = "This session was restored after the agent exited.";
+  const readyMarker = (args.agent ?? "claude") === "codex" ? "›" : "❯";
 
-  await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  if (stopMode === "pause") {
+    const paused = JSON.parse(
+      (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(paused.status).toBe("paused");
+    expect(paused.runtimeAlive).toBe(false);
+    expect(paused.workspaceExists).toBe(true);
+  } else {
+    await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  }
 
   const exited = await pollUntil(
     async () =>
@@ -169,7 +184,10 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 15_000,
-      accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.state === "stopped" &&
+        value[0]?.runtimeAlive === (stopMode === "exit") &&
+        value[0]?.status === (stopMode === "pause" ? "paused" : "running"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -210,7 +228,10 @@ async function runRestoreScenario(args: {
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
-    accept: (value) => value.includes("This session was restored after the agent exited."),
+    accept: (value) =>
+      expectRestorePrompt
+        ? value.includes(restorePrompt)
+        : value.includes(readyMarker) && !value.includes(restorePrompt),
   });
 
   const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
@@ -221,7 +242,11 @@ async function runRestoreScenario(args: {
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
-  expect(pane).toContain("Original task:");
+  if (expectRestorePrompt) {
+    expect(pane).toContain("Original task:");
+  } else {
+    expect(pane).not.toContain(restorePrompt);
+  }
 
   return { context, restored, spawned, pane };
 }
@@ -2775,6 +2800,16 @@ projects:
   it("restores an exited session in place from the TTY list", async () => {
     const result = await runRestoreScenario({ configName: "restore.yaml" });
     expect(result.spawned.agent).toBe("claude");
+  });
+
+  it("restores a paused session in place without sending a restore prompt", async () => {
+    const result = await runRestoreScenario({
+      configName: "restore-paused.yaml",
+      stopMode: "pause",
+      expectRestorePrompt: false,
+    });
+    expect(result.spawned.agent).toBe("claude");
+    expect(result.pane).not.toContain("This session was restored after the agent exited.");
   });
 
   it("restores a codex session through the native resume command", async () => {

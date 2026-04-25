@@ -55,6 +55,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
+- `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; paused restore relaunches/resumes in place without sending any prompt, while unexpected-stop restore still delivers the restore prompt.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
@@ -147,7 +148,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, shows the `Ctrl+G detach` hint, and returns to the selector after detach.
 - TTY `list` can pause, complete, and kill the selected live session in place; `completed` or `killed` sessions disappear from the live list without silently retargeting another row, and a killed session is not restorable on `Enter` or `r`, with terminal metadata showing `runtimeAlive: false` and `workspaceExists: false`.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
-- TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
+- TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, deliver the restore prompt through `tmux` after an unexpected stop, and avoid sending any restore prompt after a manual pause.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
 - TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session id/worktree, and still delivers the restore prompt.
 - Codex restore throws on ack timeout instead of falling back to a fresh launch.
