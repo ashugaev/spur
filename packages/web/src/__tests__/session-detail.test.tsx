@@ -928,9 +928,8 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     const dialogSection = (await screen.findByRole("heading", { name: /dialog/i })).parentElement;
-    const queuedSection = (
-      await screen.findByRole("heading", { name: /queued messages/i })
-    ).parentElement;
+    const queuedSection = (await screen.findByRole("heading", { name: /queued messages/i }))
+      .parentElement;
     expect(dialogSection).not.toBeNull();
     expect(queuedSection).not.toBeNull();
 
