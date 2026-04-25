@@ -3,6 +3,9 @@ import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
 
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+
 const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
@@ -4489,12 +4492,12 @@ describe("SessionService", () => {
               {
                 label: "Cursor",
                 kind: "copy",
-                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
               },
               {
                 label: "Web VS Code",
                 kind: "link",
-                value: "https://code.example.com/?folder=${worktreePathUrl}",
+                value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
               },
             ],
           },
@@ -4550,7 +4553,7 @@ describe("SessionService", () => {
               {
                 label: "Cursor",
                 kind: "copy",
-                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
               },
             ],
           },
@@ -4592,7 +4595,7 @@ describe("SessionService", () => {
               {
                 label: "Cursor",
                 kind: "copy",
-                value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
               },
             ],
           },

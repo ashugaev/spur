@@ -568,7 +568,10 @@ test.describe("S5: Runtime sidebar", () => {
     ).toBeVisible();
   });
 
-  test("workspace access copy action writes the command to clipboard and shows a toast", async ({ page, context }) => {
+  test("workspace access copy action writes the command to clipboard and shows a toast", async ({
+    page,
+    context,
+  }) => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     const command = "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-4";
     const session = makeWorkingSession({
@@ -582,9 +585,7 @@ test.describe("S5: Runtime sidebar", () => {
 
     await page.getByRole("button", { name: /^copy cursor$/i }).click();
 
-    await expect
-      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-      .toBe(command);
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);
     await expect(page.getByText("Cursor copied")).toBeVisible();
   });
 });

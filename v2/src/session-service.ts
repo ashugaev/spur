@@ -142,6 +142,9 @@ const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
+const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 
 interface PrCheckTracker {
@@ -456,9 +459,9 @@ function buildWorkspaceAccess(
 
   const items = project.workspaceAccess.items.flatMap((item) => {
     const value = item.value
-      .replaceAll("${worktreePath}", worktreePath)
-      .replaceAll("${worktreePathShell}", shellEscape(worktreePath))
-      .replaceAll("${worktreePathUrl}", encodeURIComponent(worktreePath));
+      .replaceAll(WORKTREE_PATH_TOKEN, worktreePath)
+      .replaceAll(WORKTREE_PATH_SHELL_TOKEN, shellEscape(worktreePath))
+      .replaceAll(WORKTREE_PATH_URL_TOKEN, encodeURIComponent(worktreePath));
 
     if (item.kind === "link") {
       try {

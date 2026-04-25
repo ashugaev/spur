@@ -70,9 +70,18 @@ describe("isolated project config", () => {
       >;
     };
 
-    expect(parsed.projects.api.path).toBe(repoDir);
-    expect(parsed.projects.api.defaultBranch).toBe("feature/current-worktree");
-    expect(parsed.projects.api.symlinks).toEqual([
+    const apiProject = parsed.projects.api;
+    const otherProject = parsed.projects.other;
+
+    expect(apiProject).toBeDefined();
+    expect(otherProject).toBeDefined();
+    if (!apiProject || !otherProject) {
+      throw new Error("expected parsed projects");
+    }
+
+    expect(apiProject.path).toBe(repoDir);
+    expect(apiProject.defaultBranch).toBe("feature/current-worktree");
+    expect(apiProject.symlinks).toEqual([
       ".env",
       "spur.yaml",
       "spur.yml",
@@ -82,7 +91,7 @@ describe("isolated project config", () => {
       ".claude",
     ]);
 
-    expect(parsed.projects.other.path).toBe("/tmp/not-this-repo");
-    expect(parsed.projects.other.defaultBranch).toBe("release");
+    expect(otherProject.path).toBe("/tmp/not-this-repo");
+    expect(otherProject.defaultBranch).toBe("release");
   });
 });

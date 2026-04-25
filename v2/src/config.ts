@@ -39,6 +39,7 @@ const ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
 const ENV_NAME_RE = /\b([A-Z_][A-Z0-9_]*)\b/g;
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
 const PROJECT_ENV_FILE = ".env";
+const MISSING_ENV_SENTINEL = "__SPUR_MISSING_ENV__";
 
 type ConfigMode = "instance" | "project";
 
@@ -195,28 +196,18 @@ function readEnvValue(name: string, projectEnv: Record<string, string>): string 
 }
 
 function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
-  let missing = false;
   const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
     const value = readEnvValue(name, projectEnv);
-    if (value === undefined) {
-      missing = true;
-      return "";
-    }
-    return value;
+    return value ?? MISSING_ENV_SENTINEL;
   });
-  if (missing) {
+  if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
     return undefined;
   }
-  let missingBare = false;
   const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
     const value = readEnvValue(name, projectEnv);
-    if (value === undefined) {
-      missingBare = true;
-      return token;
-    }
-    return value;
+    return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
   });
-  return missingBare ? undefined : resolved;
+  return resolved.includes(MISSING_ENV_SENTINEL) ? undefined : resolved;
 }
 
 function resolveOptionalUrl(

@@ -89,7 +89,13 @@ function StopIcon() {
 
 function CopyIcon() {
   return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 16 16"
+    >
       <path
         d="M5.25 5.25V3.5A1.25 1.25 0 0 1 6.5 2.25h6A1.25 1.25 0 0 1 13.75 3.5v6a1.25 1.25 0 0 1-1.25 1.25H10.75"
         strokeLinecap="round"
@@ -149,6 +155,39 @@ interface ToastState {
   tone: "success" | "error";
   title: string;
   detail?: string;
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && typeof navigator.clipboard?.writeText === "function") {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  if (typeof document === "undefined") {
+    throw new Error("Clipboard is unavailable.");
+  }
+
+  const activeElement =
+    document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.append(textarea);
+  textarea.select();
+  textarea.setSelectionRange(0, value.length);
+
+  try {
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("Clipboard is unavailable.");
+    }
+  } finally {
+    textarea.remove();
+    activeElement?.focus();
+  }
 }
 
 function ToastBanner({ toast }: { toast: ToastState }) {
@@ -510,7 +549,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const copyWorkspaceAccessValue = useCallback(async (label: string, value: string) => {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyTextToClipboard(value);
       setToast({
         id: Date.now(),
         tone: "success",

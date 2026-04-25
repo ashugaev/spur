@@ -827,8 +827,7 @@ describe("SessionDetail voice input", () => {
                 {
                   label: "Cursor",
                   kind: "copy",
-                  value:
-                    "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+                  value: "cursor --remote ssh-remote+100.80.107.19 /tmp/intelas-b607",
                 },
               ],
             },
@@ -846,18 +845,81 @@ describe("SessionDetail voice input", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(
-          "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
-        ),
+        screen.getByText("cursor --remote ssh-remote+100.80.107.19 /tmp/intelas-b607"),
       ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /copy cursor/i }));
 
     expect(writeText).toHaveBeenCalledWith(
-      "cursor --remote ssh-remote+100.80.107.19 /home/alek/.spur/worktrees/int/intelas-b607",
+      "cursor --remote ssh-remote+100.80.107.19 /tmp/intelas-b607",
     );
     expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
+  });
+
+  it("falls back to execCommand copy when navigator.clipboard is unavailable", async () => {
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+    const execCommand = vi.fn().mockReturnValue(true);
+
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            workspaceAccess: {
+              items: [
+                {
+                  label: "Cursor",
+                  kind: "copy",
+                  value: "cursor --remote ssh-remote+100.80.107.19 /tmp/intelas-b607",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("cursor --remote ssh-remote+100.80.107.19 /tmp/intelas-b607"),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /copy cursor/i }));
+
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(await screen.findByText("Cursor copied")).toBeInTheDocument();
+
+    if (originalClipboard) {
+      Object.defineProperty(navigator, "clipboard", originalClipboard);
+    } else {
+      delete (navigator as Navigator & { clipboard?: Clipboard }).clipboard;
+    }
+
+    if (originalExecCommand) {
+      Object.defineProperty(document, "execCommand", originalExecCommand);
+    } else {
+      delete (document as Document & { execCommand?: (command: string) => boolean }).execCommand;
+    }
   });
 
   it("starts an offline sidecar from the icon button", async () => {

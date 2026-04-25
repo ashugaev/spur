@@ -8,6 +8,8 @@ import { createTempDir } from "../helpers/common.js";
 const tempDirs: string[] = [];
 const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -653,12 +655,12 @@ projects:
         {
           label: "Cursor",
           kind: "copy",
-          value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
         },
         {
           label: "Web VS Code",
           kind: "link",
-          value: "https://code.example.com/?folder=${worktreePathUrl}",
+          value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
         },
       ],
     });
@@ -689,12 +691,12 @@ projects:
           {
             label: "Cursor",
             kind: "copy",
-            value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+            value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
           },
           {
             label: "Web VS Code",
             kind: "link",
-            value: "http://100.80.107.19:9090/?folder=${worktreePathUrl}",
+            value: `http://100.80.107.19:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
           },
         ],
       });
@@ -720,7 +722,11 @@ projects:
 `);
     await writeProjectEnv(
       configPath,
-      ["SPUR_SIDECAR_PUBLIC_HOST=100.80.107.19", "SPUR_VSCODE_WEB_URL=http://code.example.com:9090", ""].join("\n"),
+      [
+        "SPUR_SIDECAR_PUBLIC_HOST=100.80.107.19",
+        "SPUR_VSCODE_WEB_URL=http://code.example.com:9090",
+        "",
+      ].join("\n"),
     );
 
     const config = loadConfig(configPath);
@@ -730,12 +736,12 @@ projects:
         {
           label: "Cursor",
           kind: "copy",
-          value: "cursor --remote ssh-remote+100.80.107.19 ${worktreePathShell}",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
         },
         {
           label: "Web VS Code",
           kind: "link",
-          value: "http://code.example.com:9090/?folder=${worktreePathUrl}",
+          value: `http://code.example.com:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
         },
       ],
     });

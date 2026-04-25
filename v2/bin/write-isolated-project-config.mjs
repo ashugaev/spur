@@ -2,7 +2,7 @@
 
 import { writeIsolatedProjectConfig } from "../dist/isolated-project-config.js";
 
-const args = process.argv.slice(2);
+const args = globalThis.process.argv.slice(2);
 
 function take(flag) {
   const index = args.indexOf(flag);
@@ -22,7 +22,9 @@ const currentWorktreePath = take("--worktree");
 const currentBranch = take("--branch");
 
 if (!inputPath || !outputPath || !currentWorktreePath) {
-  throw new Error("Usage: write-isolated-project-config --input <path> --output <path> --worktree <path> [--branch <name>]");
+  throw new Error(
+    "Usage: write-isolated-project-config --input <path> --output <path> --worktree <path> [--branch <name>]",
+  );
 }
 
 writeIsolatedProjectConfig({

@@ -27,11 +27,10 @@ interface RawProjectConfigDocument {
 
 function gitCommonDir(path: string): string | null {
   try {
-    return execFileSync(
-      "git",
-      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { cwd: path, encoding: "utf8" },
-    ).trim();
+    return execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+      cwd: path,
+      encoding: "utf8",
+    }).trim();
   } catch {
     return null;
   }
@@ -82,10 +81,7 @@ export function buildIsolatedProjectConfig(
         return [projectId, project];
       }
 
-      const symlinks = [
-        ...normalizeSymlinks(project.symlinks),
-        ...ISOLATED_WORKTREE_SYMLINKS,
-      ];
+      const symlinks = [...normalizeSymlinks(project.symlinks), ...ISOLATED_WORKTREE_SYMLINKS];
 
       return [
         projectId,
