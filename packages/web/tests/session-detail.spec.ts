@@ -183,7 +183,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await expect(page.getByText("Workspace Access")).toBeVisible();
-    await expect(page.getByRole("link", { name: /^open web vs code$/i })).toHaveAttribute(
+    await expect(page.getByRole("link", { name: /^open web ide$/i })).toHaveAttribute(
       "href",
       "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
     );
