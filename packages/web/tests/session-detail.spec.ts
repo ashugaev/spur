@@ -107,6 +107,24 @@ function mockSessionConversation(
   });
 }
 
+function mockSessionConversationPayload(
+  page: Page,
+  sessionId: string,
+  payload: {
+    messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
+    durationMs: number;
+    state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  },
+) {
+  return page.route(`**/api/sessions/${sessionId}/conversation`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  });
+}
+
 function mockVoiceStatus(page: Page) {
   return page.route("**/api/runtime/voice", (route) => {
     void route.fulfill({
@@ -269,6 +287,50 @@ test.describe("S2: Actions bar", () => {
       "href",
       "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
     );
+  });
+});
+
+// S2b: Conversation dialog
+test.describe("S2b: Conversation dialog", () => {
+  test("long unbroken dialog and queued tokens hard-wrap on mobile without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-1",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
 });
 

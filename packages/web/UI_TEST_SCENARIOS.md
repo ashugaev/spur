@@ -196,6 +196,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
@@ -206,6 +207,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Messages render the full send stack in FIFO order
 - Manual queued sends appear before future auto-step messages in the same stack
 - Each queued message is shown as its own stacked row with full wrapped text
+- Long unbroken queued tokens hard-wrap inside the row on mobile instead of widening the section
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
 

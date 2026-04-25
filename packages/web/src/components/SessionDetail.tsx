@@ -115,6 +115,7 @@ function CopyIcon() {
 
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
+const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -719,7 +720,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div
                         key={msg.key}
                         aria-label={msg.pending ? "Assistant is responding" : undefined}
-                        className={`max-w-[85%] px-3 py-2 text-sm ${
+                        className={`min-w-0 max-w-[85%] px-3 py-2 text-sm ${
                           msg.role === "user"
                             ? "ml-auto border border-[var(--color-accent)]/30 bg-[var(--color-accent)]/10 text-[var(--color-text-primary)]"
                             : msg.pending
@@ -728,7 +729,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         }`}
                       >
                         <div
-                          className={`whitespace-pre-wrap break-words ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
+                          className={`${HARD_WRAP_TEXT_CLASS} ${msg.pending ? "animate-pulse tracking-[0.3em]" : ""}`}
                         >
                           {msg.pending
                             ? msg.text
@@ -760,7 +761,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                             #{index + 1}
                           </div>
-                          <div className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--color-text-secondary)]">
+                          <div
+                            className={`mt-1 ${HARD_WRAP_TEXT_CLASS} text-sm text-[var(--color-text-secondary)]`}
+                          >
                             {queuedMessage}
                           </div>
                         </li>
