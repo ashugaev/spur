@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -26,6 +27,7 @@ import {
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteRuntimeLogCursorsForSession,
@@ -46,6 +48,7 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -406,6 +409,9 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
+    // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
+    // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
+    SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -451,6 +457,19 @@ function buildSidecarRuntimeEnv(
     [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
     ...sidecarPortEnv(session, sidecarName),
   };
+}
+
+const SIDECAR_STARTUP_VERIFY_MS = 600;
+const SIDECAR_STARTUP_TAIL_LINES = 40;
+
+async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
+  const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
+  await sleep(SIDECAR_STARTUP_VERIFY_MS);
+  if (!(await tmuxPaneDead(tmuxSession))) return;
+  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  await killTmuxSession(tmuxSession);
+  const detail = output ? `\nLast output:\n${output}` : "";
+  throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
 }
 
 function sessionSidecarNames(
@@ -928,11 +947,11 @@ export class SessionService {
     );
   }
 
-  private ensureSidecarReservation(
+  private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
-  ): SessionRecord {
+  ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       return session;
     }
@@ -966,15 +985,22 @@ export class SessionService {
       }
 
       let selectedPort: number | undefined;
+      const hostBusy: number[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
         if (unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) {
+          unavailable.add(candidate);
+          hostBusy.push(candidate);
+          continue;
+        }
         selectedPort = candidate;
         unavailable.add(candidate);
         break;
       }
       if (selectedPort === undefined) {
+        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
         throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
         );
       }
       reservedForSidecar[portConfig.env] = selectedPort;
@@ -1011,7 +1037,7 @@ export class SessionService {
       return args.session;
     }
 
-    const reservedSession = this.ensureSidecarReservation(
+    const reservedSession = await this.ensureSidecarReservation(
       args.session,
       args.sidecarName,
       args.sidecar,
@@ -1041,6 +1067,7 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
     } catch (error) {
       if (reservedSession !== args.session) {
         writeSession(this.config.dataDir, {
@@ -2115,6 +2142,7 @@ export class SessionService {
               ...sidecarPortEnv(runningRecord, name),
             },
           });
+          await verifySidecarStartup(sessionId, name);
           this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
