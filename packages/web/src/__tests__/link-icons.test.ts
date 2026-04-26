@@ -168,6 +168,14 @@ describe("extractLinkId", () => {
     expect(extractLinkId(link)).toBe("PR");
   });
 
+  it("extracts merge request number from GitLab MR URL", () => {
+    const link: SpurSessionLink = {
+      label: "pr",
+      url: "https://gitlab.com/org/repo/-/merge_requests/123",
+    };
+    expect(extractLinkId(link)).toBe("!123");
+  });
+
   it("extracts tracker ID from /browse/ URL", () => {
     const link: SpurSessionLink = {
       label: "tracker",

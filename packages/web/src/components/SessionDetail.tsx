@@ -22,8 +22,10 @@ import {
   ReviewCommentsBadge,
   extractLinkId,
   GithubIcon,
+  GitlabIcon,
   JiraIcon,
   prStateColor,
+  reviewProviderFromUrl,
   usePrInfo,
 } from "@/lib/link-icons";
 import {
@@ -50,6 +52,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
   const prUrl = link.label === "pr" ? link.url : undefined;
   const prInfo = usePrInfo(prUrl);
   const color = prStateColor(prInfo.state);
+  const provider = prUrl ? reviewProviderFromUrl(prUrl) : null;
 
   return (
     <a
@@ -58,7 +61,7 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       rel="noreferrer"
       target="_blank"
     >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      {link.label === "pr" ? provider === "gitlab" ? <GitlabIcon /> : <GithubIcon /> : <JiraIcon />}
       <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>

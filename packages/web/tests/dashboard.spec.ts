@@ -436,6 +436,35 @@ test.describe("D5: Tracker and PR links", () => {
     await expect(prLink).toBeVisible();
   });
 
+  test("session with GitLab MR link shows compact merge request id", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "gitlab-pr-row-1",
+      slots: {
+        title: "Session with GitLab MR",
+        links: [{ label: "pr", url: "https://gitlab.com/test/repo/-/merge_requests/42" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const prLink = page.locator("a[href*='gitlab.com']").first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink).toContainText("!42");
+    await expect(prLink.locator("svg")).toHaveCount(1);
+  });
+
   test("session without links has no tracker or PR icons", async ({ page }) => {
     const session = makeWorkingSession({ id: "no-links-1" });
     await mockSessions(page, [session]);

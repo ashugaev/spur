@@ -41,6 +41,13 @@ function displayPrId(url: URL): string | null {
       return `#${number}`;
     }
   }
+  const mergeRequestIndex = segments.lastIndexOf("merge_requests");
+  if (mergeRequestIndex >= 0) {
+    const number = segments[mergeRequestIndex + 1];
+    if (number) {
+      return `!${number}`;
+    }
+  }
   return fallbackSegment(url);
 }
 

@@ -5,7 +5,9 @@ import {
   CiStatusDot,
   fetchPrInfo,
   GithubIcon,
+  GitlabIcon,
   prStateColor,
+  reviewProviderFromUrl,
   useGitError,
   type CiStatus,
   type PrInfo,
@@ -36,11 +38,14 @@ interface PrEntry {
   url: string;
   label: string;
   info: PrInfo;
+  provider: "github" | "gitlab" | null;
 }
 
 function parsePrLabel(url: string): string | null {
-  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  return m ? `${m[1]}/${m[2]}#${m[3]}` : null;
+  const githubMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  if (githubMatch) return `${githubMatch[1]}/${githubMatch[2]}#${githubMatch[3]}`;
+  const gitlabMatch = url.match(/https?:\/\/([^/]+)\/(.+?)\/-\/merge_requests\/(\d+)/);
+  return gitlabMatch ? `${gitlabMatch[2]}!${gitlabMatch[3]}` : null;
 }
 
 function worstStatus(entries: PrEntry[]): CiStatus {
@@ -80,7 +85,7 @@ function useAggregatePr(sessions: SpurSessionView[]) {
         const label = parsePrLabel(url);
         if (!label) continue;
         const info = await fetchPrInfo(url);
-        results.push({ url, label, info });
+        results.push({ url, label, info, provider: reviewProviderFromUrl(url) });
       }
       if (!cancelled) setEntries(results);
     };
@@ -224,6 +229,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
   const gitError = useGitError();
   const prEntries = useAggregatePr(sessions);
   const aggregate = worstStatus(prEntries);
+  const reviewProviders = new Set(prEntries.map((entry) => entry.provider).filter(Boolean));
   const resourceMetrics = useResourceMetrics();
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
@@ -363,7 +369,11 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
 
         {prEntries.length > 0 && !gitError ? (
           <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
-            <GithubIcon />
+            {reviewProviders.size === 1 && reviewProviders.has("gitlab") ? (
+              <GitlabIcon />
+            ) : (
+              <GithubIcon />
+            )}
             <CiStatusDot status={aggregate} />
 
             {/* Tooltip */}

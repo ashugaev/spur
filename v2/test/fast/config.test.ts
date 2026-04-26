@@ -179,6 +179,37 @@ projects:
     });
   });
 
+  it("accepts gitlab source defaults and gitlab trigger events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: gitlab:comment
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["mr-watch"]).toEqual({
+      type: "gitlab",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "mr-watch",
+      event: "gitlab:comment",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
   it("parses service sources with rule defaults and matching trigger events", async () => {
     const configPath = await writeConfig(`
 projects:

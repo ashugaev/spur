@@ -124,7 +124,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
-import { gh } from "./gh.js";
+import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -876,22 +876,19 @@ export class SessionService {
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
-    const raw = await gh(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      session.branch,
-      "--json",
-      "url",
-      "--limit",
-      "1",
-    );
-    const prs: Array<{ url: string }> = JSON.parse(raw);
-    const pr = prs[0];
-    if (!pr?.url) {
-      return;
+    const project = this.config.projects[session.project];
+    const providerIds = await orderedReviewProviderIds(session.worktreePath, project);
+    let reviewUrl: string | null = null;
+    for (const providerId of providerIds) {
+      reviewUrl = await reviewProvider(providerId).findReviewUrlByBranch(
+        session.worktreePath,
+        session.branch,
+      );
+      if (reviewUrl) {
+        break;
+      }
     }
+    if (!reviewUrl) return;
 
     const tracker = this.prCheckTrackers.get(session.id);
     if (tracker) {
@@ -905,7 +902,7 @@ export class SessionService {
     }
 
     const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
+      links: [{ label: "pr", url: reviewUrl }],
     });
     const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
     writeSession(this.config.dataDir, updated);
@@ -914,7 +911,7 @@ export class SessionService {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      message: `Auto-detected PR for ${session.id}: ${reviewUrl}`,
     });
   }
 

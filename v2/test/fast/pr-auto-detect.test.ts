@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionRecord, SessionSlots } from "../../src/types.js";
 
 const ghMock = vi.fn();
+const glabMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -13,9 +14,15 @@ const getTmuxSessionActivityMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const buildMergedConfigMock = vi.fn();
+const upsertConfigRegistryPathMock = vi.fn();
+const writeConfigRegistryMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/glab.js", () => ({
+  glab: glabMock,
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -100,12 +107,9 @@ vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
 }));
 vi.mock("../../src/registry.js", () => ({
-  buildMergedConfig: vi.fn().mockReturnValue({
-    config: baseConfig(),
-    configPaths: ["/tmp/spur.yaml"],
-  }),
-  upsertConfigRegistryPath: vi.fn().mockReturnValue(["/tmp/spur.yaml"]),
-  writeConfigRegistry: vi.fn(),
+  buildMergedConfig: buildMergedConfigMock,
+  upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+  writeConfigRegistry: writeConfigRegistryMock,
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -138,6 +142,13 @@ function baseConfig() {
         sessionPrefix: "api",
         worktree: true,
         symlinks: [],
+        sources: {
+          review: {
+            type: "github",
+            runOnStart: false,
+            intervalMs: 60_000,
+          },
+        },
       },
     },
   };
@@ -182,6 +193,12 @@ describe("PR auto-detect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    buildMergedConfigMock.mockReset().mockReturnValue({
+      config: baseConfig(),
+      configPaths: ["/tmp/spur.yaml"],
+    });
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
+    writeConfigRegistryMock.mockReset();
   });
 
   afterEach(() => {
@@ -210,13 +227,78 @@ describe("PR auto-detect", () => {
       "list",
       "--head",
       session.branch,
+      "--state",
+      "all",
       "--json",
-      "url",
-      "--limit",
-      "1",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
     );
     expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
+    });
+    expect(writeSessionMock).toHaveBeenCalled();
+    expect(syncTmuxStatusMock).toHaveBeenCalled();
+
+    service.dispose();
+  });
+
+  it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([]));
+    glabMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          iid: 42,
+          title: "Support GitLab provider",
+          web_url: "https://gitlab.com/org/repo/-/merge_requests/42",
+        },
+      ]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    } satisfies SessionSlots);
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: {
+          api: {
+            ...baseConfig().projects.api,
+            sources: {
+              github: {
+                type: "github",
+                runOnStart: false,
+                intervalMs: 60_000,
+              },
+              gitlab: {
+                type: "gitlab",
+                runOnStart: false,
+                intervalMs: 60_000,
+              },
+            },
+          },
+        },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(glabMock).toHaveBeenCalledWith(
+      session.worktreePath,
+      "api",
+      "projects/:fullpath/merge_requests?source_branch=spur%2Fauto-detect-pr-slot&state=all&per_page=1",
+      "--output",
+      "json",
+    );
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
     });
     expect(writeSessionMock).toHaveBeenCalled();
     expect(syncTmuxStatusMock).toHaveBeenCalled();

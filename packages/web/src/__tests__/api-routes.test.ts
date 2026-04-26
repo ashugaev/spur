@@ -22,8 +22,21 @@ vi.mock("node:fs/promises", () => ({
   statfs: vi.fn(),
 }));
 
-// Prevent pr-status from shelling out to `gh auth token`
-vi.mock("node:child_process", () => ({ execSync: vi.fn(() => "") }));
+// Prevent pr-status from shelling out to auth CLIs
+vi.mock("node:child_process", () => ({
+  execSync: vi.fn(() => ""),
+  execFile: vi.fn(
+    (
+      _cmd: string,
+      _args: string[],
+      _opts: { timeout?: number; maxBuffer?: number } | ((error: Error | null, stdout: string, stderr: string) => void),
+      cb?: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const callback = typeof _opts === "function" ? _opts : cb;
+      callback?.(null, "", "");
+    },
+  ),
+}));
 
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
@@ -1021,7 +1034,7 @@ describe("Spur web API routes", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it("returns 400 for a non-GitHub URL", async () => {
+    it("returns 400 for a non-review URL", async () => {
       const response = await getPrStatus(
         new NextRequest(
           "http://localhost:3000/api/pr-status?url=https://gitlab.com/foo/bar/issues/1",
@@ -1029,6 +1042,45 @@ describe("Spur web API routes", () => {
       );
       expect(response.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns GitLab MR status when given a GitLab merge request URL", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "opened",
+            draft: false,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(
+          ghOk([
+            { notes: [{ resolvable: true, resolved: false }] },
+            { notes: [{ resolvable: true, resolved: true }] },
+          ]),
+        )
+        .mockResolvedValueOnce(ghOk([{ status: "running" }]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/42",
+        ),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        ciStatus: string | null;
+        totalThreads: number;
+        unresolvedThreads: number;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload).toEqual({
+        state: "open",
+        ciStatus: "pending",
+        totalThreads: 2,
+        unresolvedThreads: 1,
+      });
     });
 
     it("returns 400 for a GitHub URL without a PR number", async () => {

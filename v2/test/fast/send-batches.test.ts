@@ -8,6 +8,7 @@ import type { GitHubSignal } from "../../src/types.js";
 
 vi.mock("../../src/metadata.js", () => ({
   readGitHubSourceSnapshot: vi.fn(),
+  readReviewSourceSnapshot: vi.fn(),
 }));
 
 function githubEventData(overrides: Record<string, unknown> = {}) {
@@ -89,6 +90,20 @@ describe("createSendBatchParser", () => {
 
     it("returns null for non-github data", () => {
       const parse = createSendBatchParser("github", "proj", "src-1");
+      expect(parse(serviceEventData())).toBeNull();
+    });
+  });
+
+  describe("gitlab type", () => {
+    it("produces a batch from valid review data", () => {
+      const parse = createSendBatchParser("gitlab", "proj", "src-1");
+      const batch = parse(githubEventData());
+      expect(batch).not.toBeNull();
+      expect(requireBatch(batch, "expected gitlab batch").sessionId).toBe("api-1");
+    });
+
+    it("returns null for non-review data", () => {
+      const parse = createSendBatchParser("gitlab", "proj", "src-1");
       expect(parse(serviceEventData())).toBeNull();
     });
   });
@@ -212,6 +227,51 @@ describe("GitHub batch", () => {
     const formatted = batch.format();
     expect(formatted).toContain("Custom instruction");
     expect(formatted).not.toContain("Review the latest GitHub updates");
+  });
+});
+
+describe("GitLab batch", () => {
+  function makeBatch(overrides: Record<string, unknown> = {}) {
+    const parse = createSendBatchParser("gitlab", "proj", "src-1");
+    return requireBatch(parse(githubEventData(overrides)), "expected gitlab batch");
+  }
+
+  it("prune() uses the provider-specific snapshot reader", async () => {
+    const { readGitHubSourceSnapshot, readReviewSourceSnapshot } = await import(
+      "../../src/metadata.js"
+    );
+    vi.mocked(readGitHubSourceSnapshot).mockReset().mockReturnValue(null);
+    const snapshot = new Map<string, GitHubSignal>();
+    snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
+    vi.mocked(readReviewSourceSnapshot).mockReset().mockReturnValue(snapshot);
+
+    const batch = makeBatch({
+      signals: [
+        { key: "comment:1", kind: "comment", text: "comment one" },
+        { key: "ci_failed", kind: "ci_failed", text: "CI" },
+      ],
+    });
+
+    batch.prune("/data");
+    const formatted = batch.format();
+    expect(formatted).toContain("comment one");
+    expect(formatted).not.toContain("CI");
+    expect(readReviewSourceSnapshot).toHaveBeenCalledWith("/data", "gitlab", "proj", "src-1", "api-1");
+    expect(readGitHubSourceSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("format() uses GitLab-specific copy", () => {
+    const batch = makeBatch({
+      signals: [
+        { key: "changes_requested", kind: "changes_requested", text: "Changes requested" },
+        { key: "merge_conflict", kind: "merge_conflict", text: "Conflicts" },
+      ],
+    });
+    const formatted = batch.format();
+    expect(formatted).toContain('GitLab updates on merge request #42 "feat: add tests":');
+    expect(formatted).toContain("Review the latest GitLab updates on the active merge request");
+    expect(formatted).toContain("Resolve the active merge request merge conflicts");
+    expect(formatted).toContain("Use `glab mr view --comments` and `glab ci status`");
   });
 });
 

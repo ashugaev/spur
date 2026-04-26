@@ -8,8 +8,10 @@ import {
   ReviewCommentsBadge,
   extractLinkId,
   GithubIcon,
+  GitlabIcon,
   JiraIcon,
   prStateColor,
+  reviewProviderFromUrl,
   usePrInfo,
 } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -59,6 +61,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const prLink = session.links.find((l) => l.label === "pr");
   const trackerLink = session.links.find((l) => l.label === "tracker");
   const prInfo = usePrInfo(prLink?.url);
+  const prProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const showDone = prInfo.state === "merged" && canComplete(session);
   const [completing, setCompleting] = useState(false);
 
@@ -99,7 +102,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
           style={{ color: prStateColor(prInfo.state) ?? "var(--color-text-tertiary)" }}
           target="_blank"
         >
-          <GithubIcon />
+          {prProvider === "gitlab" ? <GitlabIcon /> : <GithubIcon />}
           <span className="text-[10px]">{extractLinkId(prLink)}</span>
           <CiStatusDot status={prInfo.ciStatus} />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />

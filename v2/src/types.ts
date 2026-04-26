@@ -26,16 +26,17 @@ export interface SessionSlots {
   links: SessionLink[];
 }
 
-export type SourceType = "cron" | "github" | "service";
+export type ReviewProviderId = "github" | "gitlab";
+export type SourceType = "cron" | ReviewProviderId | "service";
 
-export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
-export const GITHUB_SIGNAL_KINDS = [
+export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+export const REVIEW_SIGNAL_KINDS = [
   "changes_requested",
   "ci_failed",
   "comment",
   "merge_conflict",
 ] as const;
-export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
+export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
 interface BaseSourceConfig {
   runOnStart: boolean;
@@ -46,10 +47,14 @@ export interface CronSourceConfig extends BaseSourceConfig {
   schedule: string;
 }
 
-export interface GitHubSourceConfig extends BaseSourceConfig {
-  type: "github";
+interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
+  type: TType;
   intervalMs: number;
 }
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
+export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
 export interface ServiceRuleConfig {
   match: string;
@@ -65,7 +70,7 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
-export type SourceConfig = CronSourceConfig | GitHubSourceConfig | ServiceSourceConfig;
+export type SourceConfig = CronSourceConfig | ReviewSourceConfig | ServiceSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -133,18 +138,40 @@ export interface SendTriggerConfig {
 
 export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
-export interface GitHubSignal {
+export interface ReviewSignal {
   key: string;
-  kind: GitHubSignalKind;
+  kind: ReviewSignalKind;
   text: string;
 }
 
-export interface GitHubEventData {
+export interface ReviewEventData {
   sessionId: string;
   prNumber: number;
   prTitle: string;
-  signals: GitHubSignal[];
+  signals: ReviewSignal[];
 }
+
+export interface ReviewRequestSummary {
+  number: number;
+  title: string;
+  url: string;
+  reviewDecision: ReviewDecision;
+  repo: string;
+  mergeable: string;
+  mergeStateStatus: string;
+}
+
+export interface ReviewCheck {
+  name: string;
+  state: string;
+}
+
+export type GitHubReviewDecision = ReviewDecision;
+export type GitHubSignalKind = ReviewSignalKind;
+export type GitHubSignal = ReviewSignal;
+export type GitHubEventData = ReviewEventData;
+export type GitHubPrSummary = ReviewRequestSummary;
+export type GitHubCheck = ReviewCheck;
 
 export interface ServiceProblemEventData {
   sessionId: string;

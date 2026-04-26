@@ -10,6 +10,14 @@ describe("formatSessionLinkDisplay", () => {
     expect(display.text).toBe("pr #123");
   });
 
+  it("formats GitLab merge request links as pr !123", () => {
+    const display = formatSessionLinkDisplay({
+      label: "pr",
+      url: "https://gitlab.com/acme/api/-/merge_requests/123",
+    });
+    expect(display.text).toBe("pr !123");
+  });
+
   it("extracts Jira key from tracker URL", () => {
     const display = formatSessionLinkDisplay({
       label: "tracker",

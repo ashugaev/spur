@@ -3,14 +3,16 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
-  GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
+  REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
+  type GitLabSourceConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ReviewProviderId,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -291,7 +293,7 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
-  return VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
+  return VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
 }
 
 function derivePrefix(projectId: string): string {
@@ -313,17 +315,18 @@ function parseCronSource(
   };
 }
 
-function parseGitHubSource(
+function parseReviewSource<TProvider extends ReviewProviderId>(
+  provider: TProvider,
   projectId: string,
   sourceId: string,
   raw: Record<string, unknown>,
-): GitHubSourceConfig {
+): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   return {
-    type: "github",
+    type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
-  };
+  } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
 function parseServiceRule(
@@ -386,8 +389,8 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "cron") {
     return parseCronSource(projectId, sourceId, raw);
   }
-  if (type === "github") {
-    return parseGitHubSource(projectId, sourceId, raw);
+  if (type === "github" || type === "gitlab") {
+    return parseReviewSource(type, projectId, sourceId, raw);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
