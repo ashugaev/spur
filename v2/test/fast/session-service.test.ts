@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
@@ -73,6 +73,8 @@ const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDi
 const captureCodexRolloutBaselineMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
+const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
+const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -179,6 +181,20 @@ vi.mock("../../src/session-slots.js", () => ({
   ensureSessionSlotTool: ensureSessionSlotToolMock,
   removeSessionSlotTool: removeSessionSlotToolMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
+}));
+
+vi.mock("../../src/session-artifacts.js", () => ({
+  ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
+    const dir = artifactDirForSession(sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }),
+  deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
+    rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
+  }),
+  listSessionArtifacts: vi.fn(() => []),
+  readSessionArtifact: vi.fn(() => null),
+  withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
 vi.mock("../../src/workspace.js", () => ({
@@ -310,6 +326,7 @@ describe("SessionService", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
 
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
 
@@ -435,6 +452,7 @@ describe("SessionService", () => {
   });
 
   afterEach(() => {
+    rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -468,7 +486,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -1141,7 +1159,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -1537,7 +1555,7 @@ describe("SessionService", () => {
         agent: "claude",
       },
     );
-    const artifactPath = "/tmp/spur-data/session-artifacts/api-1/1773828300000-shot.png";
+    const artifactPath = `${artifactDirForSession("api-1")}/1773828300000-shot.png`;
     expect(existsSync(artifactPath)).toBe(true);
     expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
   });
@@ -2685,7 +2703,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3571,7 +3589,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3761,7 +3779,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
@@ -3967,7 +3985,7 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
-        SPUR_SESSION_ARTIFACTS_DIR: "/tmp/spur-data/session-artifacts/api-1",
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
