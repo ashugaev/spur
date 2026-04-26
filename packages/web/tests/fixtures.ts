@@ -1,72 +1,5 @@
 import type { Page } from "@playwright/test";
-import type { SpurSessionWorkspaceAccess } from "../src/lib/types";
-
-export interface SpurSessionLink {
-  label: string;
-  url: string;
-}
-
-export interface SpurServiceView {
-  serviceId: string;
-  status: "running" | "stopped" | "errored";
-  state: "running" | "problem" | "stopped" | "error";
-  command: string;
-  cwd: string;
-  lastActivityAt: string;
-  runtimeAlive: boolean;
-  port?: number;
-}
-
-export type SpurSessionStatus =
-  | "spawning"
-  | "running"
-  | "paused"
-  | "errored"
-  | "completed"
-  | "killed";
-
-export type SpurSessionState =
-  | "working"
-  | "waiting"
-  | "needs_input"
-  | "stopped"
-  | "error"
-  | "killed";
-
-export interface SpurSessionView {
-  id: string;
-  project: string;
-  agent: "claude" | "codex";
-  prompt: string;
-  branch: string;
-  worktree: boolean;
-  tmuxSession: string | null;
-  status: SpurSessionStatus;
-  state: SpurSessionState;
-  createdAt: string;
-  updatedAt: string;
-  lastActivityAt: string;
-  runtimeAlive: boolean;
-  workspaceExists: boolean;
-  worktreePath: string;
-  services: SpurServiceView[];
-  queuedMessages?: {
-    messages: string[];
-    awaitingPrompt: boolean;
-  };
-  sidecars?: { name: string; alive: boolean }[];
-  slots?: {
-    title?: string;
-    links: SpurSessionLink[];
-  };
-  workspaceAccess?: SpurSessionWorkspaceAccess;
-  error?: string;
-}
-
-export interface ProjectInfo {
-  id: string;
-  name: string;
-}
+import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
 
@@ -88,6 +21,7 @@ function baseSession(id: string): SpurSessionView {
     workspaceExists: true,
     worktreePath: `/tmp/worktrees/${id}`,
     services: [],
+    artifacts: [],
     queuedMessages: {
       messages: [],
       awaitingPrompt: false,

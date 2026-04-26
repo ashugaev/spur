@@ -75,6 +75,14 @@ import {
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
+import {
+  deleteSessionArtifactsDir,
+  ensureSessionArtifactsDir,
+  listSessionArtifacts,
+  readSessionArtifact,
+  type SessionArtifactFile,
+  withSessionArtifactInstructions,
+} from "./session-artifacts.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -157,6 +165,10 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+}
+
+export class SessionResourceNotFoundError extends Error {
+  readonly statusCode = 404;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -297,7 +309,7 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
-  const base = withSessionSlotInstructions(initialMessage);
+  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
@@ -411,6 +423,7 @@ function buildSessionEnv(args: {
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
+    SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.sessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
@@ -1168,6 +1181,18 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const artifact = readSessionArtifact(this.config.dataDir, sessionId, artifactId);
+    if (!artifact) {
+      throw new SessionResourceNotFoundError(`Artifact not found: ${sessionId}/${artifactId}`);
+    }
+    return artifact;
   }
 
   async getConversation(sessionId: string): Promise<ConversationResponse> {
@@ -2404,7 +2429,7 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "worktreePath">,
+    session: Pick<SessionRecord, "id">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
@@ -2417,8 +2442,7 @@ export class SessionService {
     if (attachments.length > MAX_ATTACHMENTS) {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
-    const attachDir = join(session.worktreePath, ".spur", "attachments");
-    mkdirSync(attachDir, { recursive: true });
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
     const prefixLines: string[] = [];
     for (const att of attachments) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
@@ -2438,7 +2462,7 @@ export class SessionService {
       const filename = `${Date.now()}-${att.name}`;
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
-      prefixLines.push(`[Attached file: ${filePath}]`);
+      prefixLines.push(`[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${filename}]`);
     }
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -2678,6 +2702,7 @@ export class SessionService {
   private removeSessionArtifacts(sessionId: string): void {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    deleteSessionArtifactsDir(this.config.dataDir, sessionId);
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
@@ -3813,6 +3838,7 @@ export class SessionService {
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
       lastActivityAt,
+      artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),

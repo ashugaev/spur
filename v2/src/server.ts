@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
@@ -7,7 +8,7 @@ import { writeStderr } from "./io.js";
 import { listSessions } from "./metadata.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
 import { tmuxSessionExists } from "./runtime-tmux.js";
-import { SessionService } from "./session-service.js";
+import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
@@ -298,6 +299,33 @@ export async function startServer(
         return;
       }
 
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
+        const artifact = service.getArtifact(
+          decodeURIComponent(artifactMatch[1]),
+          decodeURIComponent(artifactMatch[2]),
+        );
+        response.writeHead(200, {
+          "content-type": artifact.mimeType,
+          "content-length": String(artifact.size),
+          "content-disposition":
+            artifact.kind === "download"
+              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
+              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(artifact.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read artifact");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
         const body = await readJsonBody<SpawnSessionRequest>(request);
         sendJson(response, 201, await service.spawn(body));
@@ -427,6 +455,16 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SessionResourceNotFoundError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
       logEvent("http.request.failed", {
         level: "error",
         ...(method ? { method } : {}),

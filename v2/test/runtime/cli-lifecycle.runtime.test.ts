@@ -1725,6 +1725,119 @@ projects:
     );
   });
 
+  it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-artifacts-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "artifacts.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "artifact runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const artifactDir = join(context.dataDir, "session-artifacts", spawned.id);
+    const artifactPath = join(artifactDir, "capture.png");
+    await writeFile(artifactPath, "artifact-bytes", "utf8");
+
+    const sessionWithArtifact = await pollUntil(
+      async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.artifacts?.[0]?.id === "capture.png",
+      },
+    );
+    expect(sessionWithArtifact.artifacts?.[0]).toMatchObject({
+      id: "capture.png",
+      kind: "image",
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/capture.png`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toContain("inline");
+    await expect(response.text()).resolves.toBe("artifact-bytes");
+
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    expect(existsSync(artifactDir)).toBe(false);
+
+    const missing = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/capture.png`,
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  it("serves artifact files whose names require URL encoding", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-artifacts-encoded-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "artifacts-encoded.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "artifact encoded runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const artifactDir = join(context.dataDir, "session-artifacts", spawned.id);
+    await writeFile(join(artifactDir, "my screenshot.png"), "artifact-bytes", "utf8");
+
+    const sessionWithArtifact = await pollUntil(
+      async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
+      },
+    );
+    expect(
+      sessionWithArtifact.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
+    ).toBe(true);
+
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/my%20screenshot.png`,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("artifact-bytes");
+  });
+
   it("runs a session-bound service and opens the live session log view from the TTY list", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);

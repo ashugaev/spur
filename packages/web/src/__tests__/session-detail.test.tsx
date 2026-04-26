@@ -111,6 +111,7 @@ function sessionFixture(overrides?: Partial<SpurSessionView>) {
     workspaceExists: true,
     worktreePath: "/tmp/api-a1",
     services: [],
+    artifacts: [],
     queuedMessages: {
       messages: [],
       awaitingPrompt: false,
@@ -1344,6 +1345,88 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail artifacts", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders image, video, and download artifacts from the session payload", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "shot.png",
+                  name: "shot.png",
+                  size: 1200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "run.webm",
+                  name: "run.webm",
+                  size: 2200,
+                  mimeType: "video/webm",
+                  kind: "video",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "trace.log",
+                  name: "trace.log",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Artifacts")).toBeInTheDocument();
+    });
+
+    expect(screen.getByAltText("shot.png")).toHaveAttribute(
+      "src",
+      "/api/sessions/api-a1/artifacts/shot.png",
+    );
+    expect(screen.getByLabelText("run.webm preview")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: /download .*$/i })).toHaveLength(3);
+    expect(screen.getByText("trace.log")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Preview shot.png" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Artifact preview shot.png" })).toBeInTheDocument();
+    });
+
+    expect(screen.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/shot.png",
+    );
   });
 });
 

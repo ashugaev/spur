@@ -88,6 +88,24 @@ function StopIcon() {
   );
 }
 
+function ArtifactFileIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-5 w-5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.4"
+      viewBox="0 0 24 24"
+    >
+      <path d="M14 3H6v18h12V7z" />
+      <path d="M14 3v4h4" />
+    </svg>
+  );
+}
+
 function CopyIcon() {
   return (
     <svg
@@ -109,6 +127,70 @@ function CopyIcon() {
         strokeLinejoin="round"
         strokeWidth="1.5"
       />
+    </svg>
+  );
+}
+
+function ArtifactDownloadIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 24 24"
+    >
+      <path d="M12 4v12" />
+      <path d="m6 12 6 6 6-6" />
+      <path d="M4 20h16" />
+    </svg>
+  );
+}
+
+function ArtifactPreviewIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3.25v9.5L12 8 4 3.25Z" />
+    </svg>
+  );
+}
+
+function ArtifactImagePreviewIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.6"
+      viewBox="0 0 16 16"
+    >
+      <path d="M2.5 5V2.5H5" />
+      <path d="M11 2.5h2.5V5" />
+      <path d="M13.5 11v2.5H11" />
+      <path d="M5 13.5H2.5V11" />
+      <path d="M5.5 5.5h5v5h-5z" />
+    </svg>
+  );
+}
+
+function ArtifactCloseIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeWidth="2"
+      viewBox="0 0 16 16"
+    >
+      <path d="M3 3l10 10M13 3 3 13" />
     </svg>
   );
 }
@@ -143,6 +225,232 @@ interface LogEntry {
   level: string;
   message?: string;
   sessionId?: string;
+}
+
+type ArtifactPreviewState = "loading" | "ready" | "error";
+
+type SessionArtifact = DashboardSession["artifacts"][number];
+
+function artifactUrl(sessionId: string, artifactId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+}
+
+function artifactExtension(name: string): string {
+  const ext = name.split(".").pop();
+  return ext ? ext.toUpperCase() : "FILE";
+}
+
+function overlayButtonClass(primary = false): string {
+  return [
+    "inline-flex h-8 w-8 items-center justify-center border transition",
+    primary
+      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
+      : "border-[var(--color-border-strong)] bg-[var(--color-bg-base)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]",
+  ].join(" ");
+}
+
+function ArtifactCard({
+  artifact,
+  artifactHref,
+  previewState,
+  onPreview,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact;
+  artifactHref: string;
+  previewState: ArtifactPreviewState;
+  onPreview: (artifact: SessionArtifact) => void;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  const previewable = artifact.kind === "image" || artifact.kind === "video";
+  const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+
+  return (
+    <article className="group border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+      <div
+        className={`relative isolate h-32 overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
+          previewable ? "cursor-zoom-in" : ""
+        }`}
+        onClick={() => {
+          if (previewable) onPreview(artifact);
+        }}
+      >
+        {artifact.kind === "image" ? (
+          <>
+            <img
+              alt={artifact.name}
+              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              src={artifactHref}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind === "video" ? (
+          <>
+            <video
+              aria-label={`${artifact.name} preview`}
+              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              muted
+              onError={() => onPreviewError(artifact.id)}
+              onLoadedData={() => onPreviewReady(artifact.id)}
+              preload="metadata"
+              src={artifactHref}
+            />
+            {previewState !== "ready" ? (
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[var(--color-terminal-bg)] px-3 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+              </div>
+            ) : null}
+          </>
+        ) : null}
+        {artifact.kind === "download" ? (
+          <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
+            <ArtifactFileIcon />
+            <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {artifactExtension(artifact.name)}
+            </span>
+          </div>
+        ) : null}
+
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+          {previewable ? (
+            <button
+              aria-label={`Preview ${artifact.name}`}
+              className={overlayButtonClass(true)}
+              onClick={(event) => {
+                event.stopPropagation();
+                onPreview(artifact);
+              }}
+              type="button"
+            >
+              <PreviewIcon />
+            </button>
+          ) : null}
+          <a
+            aria-label={`Download ${artifact.name}`}
+            className={overlayButtonClass(false)}
+            download={artifact.name}
+            href={artifactHref}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ArtifactDownloadIcon />
+          </a>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1 px-3 py-2">
+        <div
+          className="overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[var(--color-text-primary)]"
+          title={artifact.name}
+        >
+          {artifact.name}
+        </div>
+        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+          {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function ArtifactLightbox({
+  artifact,
+  artifactHref,
+  previewState,
+  onClose,
+  onPreviewError,
+  onPreviewReady,
+}: {
+  artifact: SessionArtifact | null;
+  artifactHref: string | null;
+  previewState: ArtifactPreviewState;
+  onClose: () => void;
+  onPreviewError: (artifactId: string) => void;
+  onPreviewReady: (artifactId: string) => void;
+}) {
+  if (!artifact || !artifactHref) return null;
+
+  return (
+    <div
+      aria-label={`Artifact preview ${artifact.name}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[color:var(--color-modal-backdrop)] p-2 backdrop-blur-sm sm:p-3"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="dialog"
+    >
+      <div className="flex h-full w-full flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:p-5">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+              {artifact.name}
+            </h2>
+            <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+              {formatRelativeTime(artifact.updatedAt)}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              className="inline-flex items-center gap-2 border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              download={artifact.name}
+              href={artifactHref}
+            >
+              <ArtifactDownloadIcon />
+              Download
+            </a>
+            <button
+              aria-label="Close artifact preview"
+              className="inline-flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-tertiary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
+            >
+              <ArtifactCloseIcon />
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="relative flex min-h-0 flex-1 items-center justify-center border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
+          onClick={(event) => event.stopPropagation()}
+        >
+          {previewState !== "ready" ? (
+            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {previewState === "error" ? "Preview unavailable" : "Loading preview"}
+            </div>
+          ) : null}
+          {artifact.kind === "image" ? (
+            <img
+              alt={artifact.name}
+              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              src={artifactHref}
+            />
+          ) : (
+            <video
+              aria-label={`${artifact.name} player`}
+              autoPlay
+              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              controls
+              onError={() => onPreviewError(artifact.id)}
+              onLoadedData={() => onPreviewReady(artifact.id)}
+              preload="metadata"
+              src={artifactHref}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 interface DialogMessage {
@@ -239,6 +547,12 @@ function formatDuration(ms: number): string {
   return "<1m";
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 interface SessionDetailProps {
   sessionId: string;
   projectId?: string;
@@ -260,6 +574,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
+  const [artifactPreviewStates, setArtifactPreviewStates] = useState<
+    Record<string, ArtifactPreviewState>
+  >({});
+  const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
@@ -343,6 +661,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       window.removeEventListener("popstate", syncSearch);
     };
   }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    setArtifactPreviewStates((current) => {
+      const next: Record<string, ArtifactPreviewState> = {};
+      for (const artifact of session.artifacts) {
+        next[artifact.id] = current[artifact.id] ?? "loading";
+      }
+      return next;
+    });
+  }, [session]);
+
+  useEffect(() => {
+    if (!selectedArtifact) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedArtifact(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedArtifact]);
+
+  useEffect(() => {
+    if (!selectedArtifact || !session) return;
+    if (!session.artifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
+      setSelectedArtifact(null);
+    }
+  }, [selectedArtifact, session]);
 
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
@@ -501,6 +846,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
     [session],
   );
+  const selectedArtifactHref =
+    session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
   const visibleLinks = useMemo(
     () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
     [session],
@@ -898,6 +1245,45 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </section>
               ) : null}
 
+              {session.artifacts.length > 0 ? (
+                <section>
+                  <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
+                    Artifacts
+                    <span className="text-[var(--color-text-secondary)]">
+                      {session.artifacts.length}
+                    </span>
+                    <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
+                  </h2>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                    {session.artifacts.map((artifact) => {
+                      const artifactHref = artifactUrl(session.id, artifact.id);
+                      const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                      return (
+                        <ArtifactCard
+                          key={`${session.id}-${artifact.id}`}
+                          artifact={artifact}
+                          artifactHref={artifactHref}
+                          onPreview={setSelectedArtifact}
+                          onPreviewError={(artifactId) =>
+                            setArtifactPreviewStates((current) => ({
+                              ...current,
+                              [artifactId]: "error",
+                            }))
+                          }
+                          onPreviewReady={(artifactId) =>
+                            setArtifactPreviewStates((current) => ({
+                              ...current,
+                              [artifactId]: "ready",
+                            }))
+                          }
+                          previewState={previewState}
+                        />
+                      );
+                    })}
+                  </div>
+                </section>
+              ) : null}
+
               {/* Services */}
               {session.services.length > 0 ? (
                 <section>
@@ -1135,6 +1521,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
+          <ArtifactLightbox
+            artifact={selectedArtifact}
+            artifactHref={selectedArtifactHref}
+            onClose={() => setSelectedArtifact(null)}
+            onPreviewError={(artifactId) =>
+              setArtifactPreviewStates((current) => ({
+                ...current,
+                [artifactId]: "error",
+              }))
+            }
+            onPreviewReady={(artifactId) =>
+              setArtifactPreviewStates((current) => ({
+                ...current,
+                [artifactId]: "ready",
+              }))
+            }
+            previewState={
+              selectedArtifact
+                ? (artifactPreviewStates[selectedArtifact.id] ?? "loading")
+                : "loading"
+            }
+          />
         </>
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>

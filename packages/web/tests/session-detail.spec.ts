@@ -667,6 +667,59 @@ test.describe("S4: Links section", () => {
   });
 });
 
+test.describe("S4b: Artifacts section", () => {
+  test("renders artifact cards with preview and download actions", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-1",
+      artifacts: [
+        {
+          id: "screenshot.png",
+          name: "screenshot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "capture.webm",
+          name: "capture.webm",
+          size: 2048,
+          mimeType: "video/webm",
+          kind: "video",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await expect(page.getByAltText("screenshot.png")).toBeVisible();
+    await expect(page.getByLabel("capture.webm preview")).toBeVisible();
+    await expect(page.getByText("trace.log")).toBeVisible();
+
+    await page.getByText("screenshot.png").hover();
+    await page.getByRole("button", { name: "Preview screenshot.png" }).click();
+    const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
+    );
+  });
+});
+
 // S5: Runtime sidebar
 test.describe("S5: Runtime sidebar", () => {
   test("Created and Last activity fields visible", async ({ page }) => {

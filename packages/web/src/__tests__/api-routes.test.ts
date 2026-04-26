@@ -45,6 +45,7 @@ import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
+import { GET as getSessionArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 
@@ -74,6 +75,7 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
     workspaceExists: true,
     worktreePath: "/tmp/api-a1",
     services: [],
+    artifacts: [],
     ...overrides,
   };
 }
@@ -215,6 +217,41 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(502);
     expect(payload.error).toBe("Session not found");
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId proxies artifact content from the daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("artifact-bytes", {
+        status: 200,
+        headers: {
+          "content-type": "image/png",
+          "content-length": "13",
+          "content-disposition": 'inline; filename="shot.png"',
+        },
+      }),
+    );
+
+    const response = await getSessionArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("artifact-bytes");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/shot.png");
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId returns 502 on daemon error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("Artifact unavailable"));
+
+    const response = await getSessionArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Artifact unavailable");
   });
 
   // ── POST /api/spawn ────────────────────────────────────────────────────
