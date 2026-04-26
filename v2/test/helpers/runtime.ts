@@ -339,6 +339,17 @@ if (args[0] === "pr" && args[1] === "checks") {
   process.exit(0);
 }
 
+if (args[0] === "pr" && args[1] === "view") {
+  const prNumber = String(args[2] || "");
+  const pr = Object.values(state.prsByBranch || {}).find((value) => String(value?.number || "") === prNumber);
+  if (!pr) {
+    process.stderr.write("unknown fake gh pr view target: " + prNumber + "\\n");
+    process.exit(1);
+  }
+  print(pr);
+  process.exit(0);
+}
+
 if (args[0] === "api" && args[1] === "graphql") {
   const prNumber = argValue(args, "number=");
   print({

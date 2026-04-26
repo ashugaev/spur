@@ -5,14 +5,17 @@ import {
   deleteGitHubSourceSnapshot,
   listSessions,
   readGitHubSourceSnapshots,
+  writeSession,
   writeGitHubSourceSnapshot,
 } from "../metadata.js";
+import { resolveSessionPrBinding } from "../session-pr.js";
 import type {
   GitHubEventData,
   GitHubSignalKind,
   GitHubReviewDecision,
   GitHubSignal,
   GitHubSourceConfig,
+  SessionPrBinding,
   SessionRecord,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -93,68 +96,34 @@ export function hasMergeConflict(pr: GitHubPrSummary): boolean {
   );
 }
 
-export async function resolvePrSummary(
+export async function resolveBoundPrSummary(
   worktreePath: string,
-  branch: string,
-): Promise<GitHubPrSummary | null> {
+  pr: SessionPrBinding,
+): Promise<GitHubPrSummary> {
   const raw = await gh(
     worktreePath,
     "pr",
-    "list",
-    "--head",
-    branch,
-    "--state",
-    "all",
+    "view",
+    String(pr.number),
     "--json",
     "number,title,url,reviewDecision,mergeable,mergeStateStatus",
   );
-  const prs: Array<{
+  const summary = JSON.parse(raw) as {
     number: number;
     title: string;
-    url: string;
+    url?: string | null;
     reviewDecision?: string | null;
     mergeable?: string | null;
     mergeStateStatus?: string | null;
-  }> = JSON.parse(raw);
-  const pr = prs[0];
-  if (!pr) return null;
-
-  let mergeable = pr.mergeable ?? "";
-  let mergeStateStatus = pr.mergeStateStatus ?? "";
-  // `gh pr list` returns `UNKNOWN` until GitHub finishes computing mergeability;
-  // `gh pr view` forces the compute so merge_conflict signals are not silently dropped.
-  if (
-    normalizeGitHubState(mergeable) === "UNKNOWN" ||
-    normalizeGitHubState(mergeStateStatus) === "UNKNOWN"
-  ) {
-    try {
-      const rawView = await gh(
-        worktreePath,
-        "pr",
-        "view",
-        String(pr.number),
-        "--json",
-        "mergeable,mergeStateStatus",
-      );
-      const view = JSON.parse(rawView) as {
-        mergeable?: string | null;
-        mergeStateStatus?: string | null;
-      };
-      if (view.mergeable) mergeable = view.mergeable;
-      if (view.mergeStateStatus) mergeStateStatus = view.mergeStateStatus;
-    } catch {
-      // Leave UNKNOWN; next poll retries.
-    }
-  }
-
+  };
   return {
-    number: pr.number,
-    title: pr.title,
-    url: pr.url,
-    reviewDecision: normalizeReviewDecision(pr.reviewDecision),
-    repo: parseRepoFromUrl(pr.url),
-    mergeable,
-    mergeStateStatus,
+    number: summary.number,
+    title: summary.title,
+    url: summary.url ?? pr.url,
+    reviewDecision: normalizeReviewDecision(summary.reviewDecision),
+    repo: parseRepoFromUrl(summary.url ?? pr.url),
+    mergeable: summary.mergeable ?? "",
+    mergeStateStatus: summary.mergeStateStatus ?? "",
   };
 }
 
@@ -226,10 +195,15 @@ async function fetchIssueCommentSignals(
 }
 
 async function collectSignals(
+  dataDir: string,
   session: SessionRecord,
 ): Promise<{ data: GitHubEventData; snapshot: Map<string, GitHubSignal> } | null> {
-  const pr = await resolvePrSummary(session.worktreePath, session.branch);
-  if (!pr) return null;
+  const { binding, updatedSession } = await resolveSessionPrBinding(session);
+  if (updatedSession) {
+    writeSession(dataDir, updatedSession);
+  }
+  if (!binding) return null;
+  const pr = await resolveBoundPrSummary(session.worktreePath, binding);
 
   const [checks, reviewSignals, commentSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
@@ -322,7 +296,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       for (const session of sessions) {
         currentSessionIds.add(session.id);
         try {
-          const collected = await collectSignals(session);
+          const collected = await collectSignals(deps.dataDir, session);
           if (!collected) {
             snapshots.delete(session.id);
             deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id);

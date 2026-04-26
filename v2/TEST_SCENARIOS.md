@@ -96,7 +96,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
-- PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
+- PR auto-detect piggybacks on the attention monitor to discover a session PR from the live worktree branch first (falling back to persisted `session.branch`), persists the native session PR binding, projects the `pr` link for display, skips sessions that already have a PR binding or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
@@ -169,8 +169,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `cron` `runOnStart: true` emits on daemon boot and reaches the normal spawn flow without manual CLI input.
 - `cron` `runOnStart: true` can also reach `trigger.spawn.prompt` plus optional `trigger.spawn.steps` and deliver the same ordered pipeline behavior as manual spawn.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.
-- GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a matching PR branch.
-- GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR.
+- GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a bound PR.
+- GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the bound PR, even if the worktree branch later drifts.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.

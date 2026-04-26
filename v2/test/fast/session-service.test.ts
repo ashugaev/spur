@@ -176,6 +176,17 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
+  normalizeSlotsUpdate: vi.fn((request: {
+    title?: string;
+    clearTitle?: boolean;
+    links?: Array<{ label: string; url: string }>;
+    unlinkLabels?: string[];
+  }) => ({
+    ...(request.title !== undefined ? { title: request.title } : {}),
+    clearTitle: request.clearTitle === true,
+    links: request.links ?? [],
+    unlinkLabels: request.unlinkLabels ?? [],
+  })),
   removeSessionSlotTool: removeSessionSlotToolMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
@@ -3444,25 +3455,19 @@ describe("SessionService", () => {
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
     });
 
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(
-      {
-        title: "Existing title",
-        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
-      },
-      {
-        links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
-      },
-    );
+    expect(applySlotsUpdateMock).not.toHaveBeenCalled();
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
         updatedAt: "2026-03-18T10:01:00.000Z",
+        pr: {
+          number: 1,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/1",
+        },
         slots: {
           title: "Existing title",
-          links: [
-            { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "pr", url: "https://github.com/org/repo/pull/1" },
-          ],
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
         },
       }),
     );
@@ -3480,6 +3485,51 @@ describe("SessionService", () => {
         event: "session.slots.updated",
         sessionId: "api-1",
       }),
+    );
+  });
+
+  it("keeps non-GitHub pr links as generic slots", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        title: "Existing title",
+        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      links: [{ label: "pr", url: "https://example.com/claude/pull/1" }],
+    });
+
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        slots: {
+          title: "Existing title",
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "pr", url: "https://example.com/claude/pull/1" },
+          ],
+        },
+      }),
+    );
+    expect(result.pr).toBeUndefined();
+    expect(result.slots?.links).toEqual(
+      expect.arrayContaining([{ label: "pr", url: "https://example.com/claude/pull/1" }]),
     );
   });
 
