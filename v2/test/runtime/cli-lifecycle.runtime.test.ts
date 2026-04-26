@@ -1827,9 +1827,9 @@ projects:
         accept: (value) => value.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
       },
     );
-    expect(sessionWithArtifact.artifacts?.some((artifact) => artifact.id === "my screenshot.png")).toBe(
-      true,
-    );
+    expect(
+      sessionWithArtifact.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
+    ).toBe(true);
 
     const response = await fetch(
       `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/my%20screenshot.png`,

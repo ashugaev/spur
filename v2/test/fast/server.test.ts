@@ -105,6 +105,7 @@ describe("startServer", () => {
           createdAt: "2026-04-15T00:00:00.000Z",
           updatedAt: "2026-04-15T00:00:00.000Z",
           lastActivityAt: "2026-04-15T00:00:00.000Z",
+          artifacts: [],
           services: [],
           sidecars: [],
         },
@@ -176,6 +177,7 @@ describe("startServer", () => {
         createdAt: "2026-04-15T00:00:00.000Z",
         updatedAt: "2026-04-15T00:00:00.000Z",
         lastActivityAt: "2026-04-15T00:00:00.000Z",
+        artifacts: [],
         services: [],
         sidecars: [],
       };

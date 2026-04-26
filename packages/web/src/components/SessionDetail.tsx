@@ -393,7 +393,8 @@ function ArtifactLightbox({
               {artifact.name}
             </h2>
             <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
+              {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+              {formatRelativeTime(artifact.updatedAt)}
             </div>
           </div>
           <div className="flex items-center gap-2">

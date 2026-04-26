@@ -1,10 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { SessionArtifact, SessionArtifactKind } from "./types.js";
 
