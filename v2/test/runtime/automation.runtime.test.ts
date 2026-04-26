@@ -548,6 +548,124 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     },
   );
 
+  it("delivers github:ci_failed after the worktree branch diverges from persisted session metadata", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-gh-ci-branch-drift-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncAutomationTmuxEnvironment(context);
+    const configPath = await context.writeConfig(
+      "github-ci-branch-drift.yaml",
+      automationConfig(
+        context,
+        sessionPrefix,
+        `    sources:
+      pr-watch:
+        type: github
+        intervalMs: 1000
+        runOnStart: false
+    triggers:
+      pr-watch-ci-failed:
+        source: pr-watch
+        event: github:ci_failed
+        send:
+          interrupt: true
+          prompt: "Run $manager and $github. Check failing CI on the active PR, fix it, rerun relevant checks, then push."
+`,
+      ),
+    );
+
+    await context.writeGhState({
+      prsByBranch: {
+        "feature-runtime-ci-renamed": {
+          number: 43,
+          title: "Keep CI green after branch rename",
+          url: "https://github.com/acme/api/pull/43",
+          repo: "acme/api",
+          reviewDecision: null,
+        },
+      },
+    });
+
+    await withRuntimeEnv(context, async () => {
+      const service = new SessionService(configPath, "2026-03-18T10:00:00.000Z");
+      const session = await service.spawn({
+        project: "api",
+        agent: "claude",
+        branch: "feature-runtime-ci",
+        prompt: "initial github ci runtime prompt",
+      });
+
+      await execFileAsync("git", ["checkout", "-b", "feature-runtime-ci-renamed"], {
+        cwd: session.worktreePath,
+      });
+
+      const config = loadProjectConfig(configPath, loadConfig(configPath));
+      const bus = new EventBus();
+      const controller = startConfiguredTriggers({
+        config,
+        bus,
+        sessionService: service,
+        logger: {
+          warn: () => {},
+        },
+      });
+      const abortController = new AbortController();
+      const handle = await githubSourceModule.start({
+        sourceId: "pr-watch",
+        projectId: "api",
+        dataDir: context.dataDir,
+        config: config.projects["api"]?.sources["pr-watch"] as never,
+        emit(name, data) {
+          bus.emit({
+            name,
+            projectId: "api",
+            sourceId: "pr-watch",
+            data,
+          });
+        },
+        signal: abortController.signal,
+        logger: {
+          warn: () => {},
+        },
+      });
+
+      try {
+        await context.writeGhState({
+          prsByBranch: {
+            "feature-runtime-ci-renamed": {
+              number: 43,
+              title: "Keep CI green after branch rename",
+              url: "https://github.com/acme/api/pull/43",
+              repo: "acme/api",
+              reviewDecision: null,
+            },
+          },
+          checksByPr: {
+            "43": [
+              {
+                name: "runtime suite",
+                state: "FAILURE",
+              },
+            ],
+          },
+        });
+
+        const pane = await pollUntil(async () => captureTmuxPane(session.id), {
+          timeoutMs: 20_000,
+          accept: (value) => value.includes("CI is failing: runtime suite."),
+        });
+
+        expect(pane).toContain('GitHub updates on PR #43 "Keep CI green after branch rename":');
+        expect(pane).toContain("CI is failing: runtime suite.");
+      } finally {
+        abortController.abort();
+        handle.stop();
+        await controller.stop();
+      }
+    });
+  });
+
   it("emits GitHub merge conflict events only when the conflict appears and reappears after clear", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
