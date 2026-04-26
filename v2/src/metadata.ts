@@ -17,7 +17,7 @@ import type {
   SessionPipelineState,
   SessionRecord,
 } from "./types.js";
-import { normalizeSessionPrBinding } from "./session-pr.js";
+import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -65,8 +65,21 @@ function githubSnapshotFilePath(
   return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.json`);
 }
 
+function hasLegacyNativePrLink(session: SessionRecord): boolean {
+  return (
+    session.slots?.links.some(
+      (link) => link.label === "pr" && parseSessionPrBinding(link.url) !== null,
+    ) ?? false
+  );
+}
+
 function readSessionFile(path: string): SessionRecord {
-  return normalizeSessionPrBinding(JSON.parse(readFileSync(path, "utf-8")) as SessionRecord);
+  const rawSession = JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  const normalizedSession = normalizeSessionRecord(rawSession);
+  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
+    writeJsonFile(path, normalizedSession);
+  }
+  return normalizedSession;
 }
 
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
