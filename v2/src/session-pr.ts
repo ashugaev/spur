@@ -4,9 +4,7 @@ import { readCurrentBranch } from "./workspace.js";
 
 const GITHUB_PR_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
 
-export function parseSessionPrBinding(
-  url: string,
-): SessionPrBinding | null {
+export function parseSessionPrBinding(url: string): SessionPrBinding | null {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -57,7 +55,8 @@ function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | un
 export function normalizeSessionPrBinding(session: SessionRecord): SessionRecord {
   const legacyPrLink = session.slots?.links.find((link) => link.label === "pr");
   const pr =
-    session.pr ?? (legacyPrLink ? parseSessionPrBinding(legacyPrLink.url) ?? undefined : undefined);
+    session.pr ??
+    (legacyPrLink ? (parseSessionPrBinding(legacyPrLink.url) ?? undefined) : undefined);
   const slots = session.pr || pr ? removeNativePrLinks(session.slots) : session.slots;
   const normalized: SessionRecord = {
     ...session,

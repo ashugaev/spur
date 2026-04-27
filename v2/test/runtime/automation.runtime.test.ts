@@ -643,7 +643,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       try {
         const sessionPath = join(context.dataDir, "sessions", "api", `${session.id}.json`);
         await pollUntil(
-          async () => JSON.parse(readFileSync(sessionPath, "utf-8")) as { pr?: { number?: number } },
+          async () =>
+            JSON.parse(readFileSync(sessionPath, "utf-8")) as { pr?: { number?: number } },
           {
             timeoutMs: 20_000,
             accept: (value) => value.pr?.number === 42,

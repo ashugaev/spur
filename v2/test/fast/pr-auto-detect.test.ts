@@ -85,17 +85,19 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: vi.fn(),
-  normalizeSlotsUpdate: vi.fn((request: {
-    title?: string;
-    clearTitle?: boolean;
-    links?: Array<{ label: string; url: string }>;
-    unlinkLabels?: string[];
-  }) => ({
-    ...(request.title !== undefined ? { title: request.title } : {}),
-    clearTitle: request.clearTitle === true,
-    links: request.links ?? [],
-    unlinkLabels: request.unlinkLabels ?? [],
-  })),
+  normalizeSlotsUpdate: vi.fn(
+    (request: {
+      title?: string;
+      clearTitle?: boolean;
+      links?: Array<{ label: string; url: string }>;
+      unlinkLabels?: string[];
+    }) => ({
+      ...(request.title !== undefined ? { title: request.title } : {}),
+      clearTitle: request.clearTitle === true,
+      links: request.links ?? [],
+      unlinkLabels: request.unlinkLabels ?? [],
+    }),
+  ),
   removeSessionSlotTool: vi.fn(),
   withSessionSlotInstructions: vi.fn(),
 }));

@@ -152,7 +152,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     agent: normalizedSession.agent,
-    ...(normalizedSession.agentSessionId ? { agentSessionId: normalizedSession.agentSessionId } : {}),
+    ...(normalizedSession.agentSessionId
+      ? { agentSessionId: normalizedSession.agentSessionId }
+      : {}),
     prompt: normalizedSession.prompt,
     branch: normalizedSession.branch,
     ...(normalizedSession.branchSource ? { branchSource: normalizedSession.branchSource } : {}),
@@ -168,7 +170,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
     ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
     ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
-    ...(normalizedSession.pipeline ? { pipeline: normalizePipelineState(normalizedSession.pipeline) } : {}),
+    ...(normalizedSession.pipeline
+      ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
+      : {}),
     ...(normalizedSession.queuedMessages
       ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
       : {}),

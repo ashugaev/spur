@@ -70,9 +70,7 @@ describe("github source", () => {
         },
       ],
     ]);
-    readGitHubSourceSnapshotsMock.mockReturnValue(
-      new Map([["api-a1b2", existingSnapshot]]),
-    );
+    readGitHubSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existingSnapshot]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock.mockRejectedValueOnce(new Error("gh offline"));
     const logger = { info: vi.fn(), warn: vi.fn() };
