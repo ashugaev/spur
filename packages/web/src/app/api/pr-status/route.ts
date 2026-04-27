@@ -180,7 +180,9 @@ function normalizeGitlabState(mergeRequest: GitLabMergeRequestResponse): PrState
   return "open";
 }
 
-async function fetchGithubStatus(url: string): Promise<{ cacheKey: string; response: PrStatusResponse }> {
+async function fetchGithubStatus(
+  url: string,
+): Promise<{ cacheKey: string; response: PrStatusResponse }> {
   const coords = githubCoords(url);
   if (!coords) {
     throw new Error("invalid GitHub PR URL");
@@ -240,7 +242,9 @@ async function fetchGithubStatus(url: string): Promise<{ cacheKey: string; respo
   };
 }
 
-async function fetchGitlabStatus(url: string): Promise<{ cacheKey: string; response: PrStatusResponse }> {
+async function fetchGitlabStatus(
+  url: string,
+): Promise<{ cacheKey: string; response: PrStatusResponse }> {
   const coords = gitlabCoords(url);
   if (!coords) {
     throw new Error("invalid GitLab merge request URL");
@@ -306,7 +310,13 @@ export async function GET(request: NextRequest) {
     if (cached.error) {
       return NextResponse.json(
         { error: cached.error },
-        { status: cached.error.includes("not found") ? 404 : cached.error.includes("rate limit") ? 429 : 502 },
+        {
+          status: cached.error.includes("not found")
+            ? 404
+            : cached.error.includes("rate limit")
+              ? 429
+              : 502,
+        },
       );
     }
     return NextResponse.json(cached.response);

@@ -29,7 +29,9 @@ vi.mock("node:child_process", () => ({
     (
       _cmd: string,
       _args: string[],
-      _opts: { timeout?: number; maxBuffer?: number } | ((error: Error | null, stdout: string, stderr: string) => void),
+      _opts:
+        | { timeout?: number; maxBuffer?: number }
+        | ((error: Error | null, stdout: string, stderr: string) => void),
       cb?: (error: Error | null, stdout: string, stderr: string) => void,
     ) => {
       const callback = typeof _opts === "function" ? _opts : cb;

@@ -237,9 +237,8 @@ describe("GitLab batch", () => {
   }
 
   it("prune() uses the provider-specific snapshot reader", async () => {
-    const { readGitHubSourceSnapshot, readReviewSourceSnapshot } = await import(
-      "../../src/metadata.js"
-    );
+    const { readGitHubSourceSnapshot, readReviewSourceSnapshot } =
+      await import("../../src/metadata.js");
     vi.mocked(readGitHubSourceSnapshot).mockReset().mockReturnValue(null);
     const snapshot = new Map<string, GitHubSignal>();
     snapshot.set("comment:1", { key: "comment:1", kind: "comment", text: "comment one" });
@@ -256,7 +255,13 @@ describe("GitLab batch", () => {
     const formatted = batch.format();
     expect(formatted).toContain("comment one");
     expect(formatted).not.toContain("CI");
-    expect(readReviewSourceSnapshot).toHaveBeenCalledWith("/data", "gitlab", "proj", "src-1", "api-1");
+    expect(readReviewSourceSnapshot).toHaveBeenCalledWith(
+      "/data",
+      "gitlab",
+      "proj",
+      "src-1",
+      "api-1",
+    );
     expect(readGitHubSourceSnapshot).not.toHaveBeenCalled();
   });
 

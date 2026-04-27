@@ -154,7 +154,9 @@ async function collectCommentSignals(
       const line = note.position?.new_line ?? note.position?.old_line;
       const location = path ? ` on ${path}${line ? `:${String(line)}` : ""}` : "";
       signals.push({
-        key: discussion.individual_note ? `comment:${String(note.id)}` : `discussion:${discussion.id}:${String(note.id)}`,
+        key: discussion.individual_note
+          ? `comment:${String(note.id)}`
+          : `discussion:${discussion.id}:${String(note.id)}`,
         kind: "comment",
         text: `New merge request comment from ${author}${location}: "${shortText(note.body)}"`,
       });

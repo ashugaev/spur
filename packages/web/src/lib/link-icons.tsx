@@ -76,7 +76,9 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
     if (!res.ok) {
       const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
       setGitError(
-        typeof body["error"] === "string" ? body["error"] : `${providerErrorLabel(url)} ${res.status}`,
+        typeof body["error"] === "string"
+          ? body["error"]
+          : `${providerErrorLabel(url)} ${res.status}`,
       );
       return EMPTY_PR_INFO;
     }

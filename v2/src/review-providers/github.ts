@@ -7,10 +7,21 @@ import type {
   ReviewSignal,
   SessionRecord,
 } from "../types.js";
-import { hasMergeConflict, normalizeReviewDecision, normalizeReviewState, shortText, summarizeFailingCi } from "./shared.js";
+import {
+  hasMergeConflict,
+  normalizeReviewDecision,
+  normalizeReviewState,
+  shortText,
+  summarizeFailingCi,
+} from "./shared.js";
 import type { ReviewProvider } from "./types.js";
 
-export { hasMergeConflict, normalizeReviewDecision, shortText, summarizeFailingCi } from "./shared.js";
+export {
+  hasMergeConflict,
+  normalizeReviewDecision,
+  shortText,
+  summarizeFailingCi,
+} from "./shared.js";
 
 type IssueComment = {
   id: number;
@@ -192,7 +203,9 @@ async function collectSignals(
   const [checks, reviewSignals, commentSignals] = await Promise.all([
     fetchChecks(session.worktreePath, pr.number),
     pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
-    pr.repo ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
+    pr.repo
+      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
+      : Promise.resolve([]),
   ]);
 
   const ciText = summarizeFailingCi(checks);
@@ -240,7 +253,8 @@ export const githubReviewProvider: ReviewProvider = {
   requestLabel: "PR",
   requestLabelPlural: "PRs",
   instructionsLine: "Review the latest GitHub updates on the active PR and act on them.",
-  commandLine: "Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.",
+  commandLine:
+    "Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.",
   async findReviewUrlByBranch(worktreePath, branch) {
     const pr = await resolvePrSummary(worktreePath, branch);
     return pr?.url ?? null;

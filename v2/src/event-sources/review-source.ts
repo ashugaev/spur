@@ -40,7 +40,9 @@ function emitSignalsByKind(
   }
 }
 
-export function createReviewSourceModule(providerId: ReviewProviderId): SourceModule<ReviewSourceConfig> {
+export function createReviewSourceModule(
+  providerId: ReviewProviderId,
+): SourceModule<ReviewSourceConfig> {
   const provider = reviewProvider(providerId);
   return {
     type: providerId,
@@ -100,7 +102,12 @@ export function createReviewSourceModule(providerId: ReviewProviderId): SourceMo
                 next,
               );
               if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
-                emitSignalsByKind(providerId, deps, collected.data, previous ? changed : [...next.values()]);
+                emitSignalsByKind(
+                  providerId,
+                  deps,
+                  collected.data,
+                  previous ? changed : [...next.values()],
+                );
               }
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
