@@ -21,7 +21,7 @@ export function reviewProviders(): ReviewProvider[] {
 }
 
 function providerIdsFromProject(project?: Pick<ProjectConfig, "sources">): ReviewProviderId[] {
-  if (!project || !project.sources) return [];
+  if (!project) return [];
   const ids = new Set<ReviewProviderId>();
   for (const source of Object.values(project.sources)) {
     if (source.type === "github" || source.type === "gitlab") {
