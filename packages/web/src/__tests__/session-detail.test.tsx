@@ -528,7 +528,9 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
     await waitFor(() => {
       expect(screen.getByRole("menuitem", { name: /\/status/i })).toBeInTheDocument();
     });

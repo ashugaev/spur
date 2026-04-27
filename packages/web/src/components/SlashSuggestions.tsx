@@ -50,6 +50,7 @@ export function SlashSuggestions({
   return (
     <div className="relative" ref={containerRef}>
       <button
+        aria-label="Slash"
         aria-expanded={open}
         aria-haspopup="menu"
         className={cn(
@@ -59,7 +60,7 @@ export function SlashSuggestions({
         onClick={() => setOpen((current) => !current)}
         type="button"
       >
-        Slash
+        /
       </button>
       {open ? (
         <div

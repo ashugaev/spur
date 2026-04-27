@@ -705,7 +705,9 @@ describe("Dashboard", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
     await waitFor(() => {
       expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
     });

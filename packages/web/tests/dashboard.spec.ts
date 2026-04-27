@@ -783,6 +783,7 @@ test.describe("D7: Spawn modal", () => {
 
     await page.getByRole("button", { name: /spawn session/i }).click();
     await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await expect(page.getByRole("button", { name: "Slash", exact: true })).toHaveText("/");
     await page.getByRole("button", { name: "Slash", exact: true }).click();
     await page.getByRole("menuitem", { name: /\/compact/i }).click();
 

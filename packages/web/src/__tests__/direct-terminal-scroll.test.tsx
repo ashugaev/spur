@@ -312,7 +312,9 @@ describe("DirectTerminal scroll integration", () => {
   it("submits codex slash suggestions as bracketed paste plus enter", async () => {
     await mountTerminal("test-codex-hotkey-submit", "codex");
 
-    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
     await waitFor(() => {
       expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
     });
