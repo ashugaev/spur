@@ -632,6 +632,23 @@ function extractCodexRolloutStateLine(
             reason: "task_complete",
           };
     }
+    if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+          };
+    }
     if (payloadType === "input_required") {
       const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
       return turnId
