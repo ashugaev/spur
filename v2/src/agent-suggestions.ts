@@ -380,7 +380,10 @@ function parseFrontmatter(content: string): Record<string, string> {
       continue;
     }
     const key = line.slice(0, separator).trim();
-    const value = line.slice(separator + 1).trim().replace(/^"(.*)"$/, "$1");
+    const value = line
+      .slice(separator + 1)
+      .trim()
+      .replace(/^"(.*)"$/, "$1");
     if (key) {
       result[key] = value;
     }

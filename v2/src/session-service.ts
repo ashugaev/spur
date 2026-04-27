@@ -1217,7 +1217,9 @@ export class SessionService {
     requestedAgent?: string,
   ): Promise<AgentSuggestionsResponse> {
     const project = this.getProject(projectId);
-    const agent = parseAgentName(requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent);
+    const agent = parseAgentName(
+      requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
+    );
     return loadProjectSuggestions(agent, project.path);
   }
 
@@ -1230,7 +1232,11 @@ export class SessionService {
       agent: session.agent,
       worktreePath: session.worktreePath,
       ...(session.agent === "codex"
-        ? { codexHomePath: codexHookHomePath(join(this.config.dataDir, "session-tools", session.id)) }
+        ? {
+            codexHomePath: codexHookHomePath(
+              join(this.config.dataDir, "session-tools", session.id),
+            ),
+          }
         : {}),
     });
   }

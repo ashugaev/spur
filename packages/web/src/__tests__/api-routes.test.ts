@@ -224,7 +224,16 @@ describe("Spur web API routes", () => {
   it("GET /api/projects/:id/slash-commands proxies the daemon route", async () => {
     mockedSpurRequestJson.mockResolvedValue({
       agent: "claude",
-      commands: [{ id: "c1", label: "/compact", insertText: "/compact", detail: "Compact", source: "built-in", kind: "command" }],
+      commands: [
+        {
+          id: "c1",
+          label: "/compact",
+          insertText: "/compact",
+          detail: "Compact",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
       skills: [],
       agents: [],
     });
@@ -235,15 +244,22 @@ describe("Spur web API routes", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
-      "/projects/api/slash-commands?agent=claude",
-    );
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/api/slash-commands?agent=claude");
   });
 
   it("GET /api/sessions/:id/slash-commands proxies the daemon route", async () => {
     mockedSpurRequestJson.mockResolvedValue({
       agent: "codex",
-      commands: [{ id: "c1", label: "/permissions", insertText: "/permissions", detail: "Permissions", source: "built-in", kind: "command" }],
+      commands: [
+        {
+          id: "c1",
+          label: "/permissions",
+          insertText: "/permissions",
+          detail: "Permissions",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
       skills: [],
       agents: [],
     });

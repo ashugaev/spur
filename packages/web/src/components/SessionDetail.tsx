@@ -1219,7 +1219,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       <div className="flex items-center gap-2">
                         <SlashSuggestions
                           endpoint={
-                            session ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands` : null
+                            session
+                              ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+                              : null
                           }
                           onSelect={(entry) =>
                             insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
