@@ -30,6 +30,18 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export type SpurSessionArtifactKind = "image" | "video" | "download";
+
+export interface SpurSessionArtifact {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: SpurSessionArtifactKind;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SpurSessionWorkspaceAccess {
   items: Array<{
     label: string;
@@ -59,6 +71,7 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  artifacts: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -99,6 +112,7 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  artifacts: SpurSessionArtifact[];
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
@@ -139,6 +153,7 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    artifacts: session.artifacts,
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,

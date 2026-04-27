@@ -1,9 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const ghMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/workspace.js", () => ({
+  readCurrentBranch: readCurrentBranchMock,
 }));
 
 const {
@@ -13,6 +17,7 @@ const {
   summarizeFailingCi,
   hasMergeConflict,
   resolveBoundPrSummary,
+  resolveTrackedBranch,
 } = await import("../../src/event-sources/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
@@ -169,6 +174,10 @@ describe("resolveBoundPrSummary", () => {
   beforeEach(() => {
     ghMock.mockReset();
   });
+  afterEach(() => {
+    ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
+  });
 
   it("loads the tracked PR directly from the persisted binding", async () => {
     ghMock.mockResolvedValueOnce(
@@ -237,5 +246,30 @@ describe("resolveBoundPrSummary", () => {
         url: "https://github.com/o/r/pull/212",
       }),
     ).rejects.toThrow("gh offline");
+  });
+});
+
+describe("resolveTrackedBranch", () => {
+  beforeEach(() => {
+    readCurrentBranchMock.mockReset();
+  });
+
+  it("prefers the current worktree branch over stale session metadata", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+
+    await expect(resolveTrackedBranch("/wt", "stale-session-branch")).resolves.toBe("feature/live");
+    expect(readCurrentBranchMock).toHaveBeenCalledWith("/wt");
+  });
+
+  it("falls back to the persisted session branch when git reports detached HEAD", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("HEAD");
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+
+  it("falls back to the persisted session branch when the worktree lookup fails", async () => {
+    readCurrentBranchMock.mockRejectedValueOnce(new Error("missing worktree"));
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
   });
 });

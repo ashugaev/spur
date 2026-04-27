@@ -8,7 +8,7 @@ import {
   writeSession,
   writeGitHubSourceSnapshot,
 } from "../metadata.js";
-import { resolveSessionPrBinding } from "../session-pr.js";
+import { resolvePrDiscoveryBranch, resolveSessionPrBinding } from "../session-pr.js";
 import type {
   GitHubEventData,
   GitHubSignalKind,
@@ -125,6 +125,13 @@ export async function resolveBoundPrSummary(
     mergeable: summary.mergeable ?? "",
     mergeStateStatus: summary.mergeStateStatus ?? "",
   };
+}
+
+export async function resolveTrackedBranch(
+  worktreePath: string,
+  sessionBranch: string,
+): Promise<string> {
+  return resolvePrDiscoveryBranch(worktreePath, sessionBranch);
 }
 
 async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
