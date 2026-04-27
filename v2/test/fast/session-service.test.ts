@@ -1708,6 +1708,82 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
+  it("classifies the interrupted spur-00b0 UserPromptSubmit snapshot as waiting after turn_aborted", async () => {
+    readSessionMock.mockReturnValue({
+      id: "spur-00b0",
+      project: "sp",
+      agent: "codex",
+      prompt: "workflow audit",
+      branch: "feature/agent-workflow-research",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-00b0",
+      tmuxSession: "spur-00b0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-18T08:02:02.020Z",
+      updatedAt: "2026-04-26T16:14:42.805Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-26T16:14:42.761Z",
+      hookEvent: "UserPromptSubmit",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-26T16:14:44.371Z",
+      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+      filePath: "/tmp/spur-00b0/rollout.jsonl",
+      reason: "turn_aborted",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-18T08:02:02.020Z");
+
+    const result = await service.get("spur-00b0");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps a working UserPromptSubmit hook when interrupted turn_aborted is from a different turn", async () => {
+    readSessionMock.mockReturnValue({
+      id: "spur-00b0",
+      project: "sp",
+      agent: "codex",
+      prompt: "workflow audit",
+      branch: "feature/agent-workflow-research",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-00b0",
+      tmuxSession: "spur-00b0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-18T08:02:02.020Z",
+      updatedAt: "2026-04-26T16:14:42.805Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-26T16:14:42.761Z",
+      hookEvent: "UserPromptSubmit",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-26T16:14:44.371Z",
+      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+      filePath: "/tmp/spur-00b0/rollout.jsonl",
+      reason: "turn_aborted",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e3",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-18T08:02:02.020Z");
+
+    const result = await service.get("spur-00b0");
+
+    expect(result.state).toBe("working");
+  });
+
   it("Claude: defaults to working when no JSONL exists yet", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
