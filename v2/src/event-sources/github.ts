@@ -7,6 +7,7 @@ export {
   summarizeFailingCi,
   hasMergeConflict,
   resolvePrSummary,
+  resolveTrackedBranch,
 } from "../review-providers/github.js";
 
 export type { GitHubCheck, GitHubPrSummary } from "../types.js";

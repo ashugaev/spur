@@ -1,4 +1,5 @@
 import { gh } from "../gh.js";
+import { readCurrentBranch } from "../workspace.js";
 import type {
   GitHubCheck,
   GitHubPrSummary,
@@ -34,6 +35,21 @@ export function parseRepoFromUrl(url: string): string {
   } catch {
     return "";
   }
+}
+
+export async function resolveTrackedBranch(
+  worktreePath: string,
+  sessionBranch: string,
+): Promise<string> {
+  try {
+    const currentBranch = (await readCurrentBranch(worktreePath)).trim();
+    if (currentBranch && currentBranch !== "HEAD") {
+      return currentBranch;
+    }
+  } catch {
+    // Fall back to persisted metadata when the worktree is unavailable.
+  }
+  return sessionBranch;
 }
 
 export async function resolvePrSummary(
@@ -169,7 +185,8 @@ async function fetchIssueCommentSignals(
 async function collectSignals(
   session: SessionRecord,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
-  const pr = await resolvePrSummary(session.worktreePath, session.branch);
+  const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
+  const pr = await resolvePrSummary(session.worktreePath, branch);
   if (!pr) return null;
 
   const [checks, reviewSignals, commentSignals] = await Promise.all([
