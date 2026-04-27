@@ -1,9 +1,4 @@
-import type {
-  ReviewEventData,
-  ReviewProviderId,
-  ReviewSignal,
-  SessionRecord,
-} from "../types.js";
+import type { ReviewEventData, ReviewProviderId, ReviewSignal, SessionRecord } from "../types.js";
 
 export interface ReviewProvider {
   id: ReviewProviderId;
