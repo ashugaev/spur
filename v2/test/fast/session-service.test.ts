@@ -1734,7 +1734,7 @@ describe("SessionService", () => {
       timestamp: "2026-04-26T16:14:44.371Z",
       timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
       filePath: "/tmp/spur-00b0/rollout.jsonl",
-      reason: "task_complete",
+      reason: "turn_aborted",
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
     });
 
@@ -1772,7 +1772,7 @@ describe("SessionService", () => {
       timestamp: "2026-04-26T16:14:44.371Z",
       timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
       filePath: "/tmp/spur-00b0/rollout.jsonl",
-      reason: "task_complete",
+      reason: "turn_aborted",
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e3",
     });
 

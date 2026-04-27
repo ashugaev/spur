@@ -57,6 +57,7 @@ describe("readCodexRolloutState", () => {
 
     expect(result).toMatchObject({
       state: "waiting",
+      reason: "turn_aborted",
       turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
       timestamp: "2026-04-26T16:14:44.371Z",
     });
