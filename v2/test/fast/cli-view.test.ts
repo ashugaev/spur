@@ -25,6 +25,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    artifacts: [],
     services: [],
     sidecars: [],
     ...overrides,

@@ -579,7 +579,7 @@ export interface CodexRolloutStateRecord {
   timestamp: string;
   timestampMs: number;
   filePath: string;
-  reason: "task_complete" | "input_required" | "request_user_input";
+  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
   turnId?: string;
 }
 
@@ -630,6 +630,23 @@ function extractCodexRolloutStateLine(
             timestamp,
             timestampMs,
             reason: "task_complete",
+          };
+    }
+    if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
           };
     }
     if (payloadType === "input_required") {

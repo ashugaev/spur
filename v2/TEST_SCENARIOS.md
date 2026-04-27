@@ -24,10 +24,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
+- Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
 - Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
+- Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, outbound message attachments are written there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
 - Session service background spawn returns a persisted `spawning` placeholder first, then continues preflight, worktree, `tmux`, readiness, and initial prompt delivery in the background with up to 3 total attempts on the same session id.
 - Background spawn retries clean up failed `tmux`, sidecar, hook-state, and worktree artifacts before the next attempt so one spawn request never leaves duplicate live processes.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
@@ -55,14 +57,21 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `GET /projects/:id/slash-commands` and `GET /sessions/:id/slash-commands` return normalized command / skill / agent suggestions from daemon-owned filesystem discovery without changing the hot `/sessions` list payload.
+- `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
 - `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
+- `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; paused restore relaunches/resumes in place without sending any prompt, while unexpected-stop restore still delivers the restore prompt.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
 - `list` and `ls` surface persisted slot associations as compact PR / tracker ids instead of full URLs, and TTY selected-session details show the same compact ids.
+- Session view derives optional `workspaceAccess.items[]` from project config and live workspace state, rendering `${worktreePath}`, `${worktreePathShell}`, and `${worktreePathUrl}` placeholders per session and omitting invalid rendered links.
 - Session setup injects both `spur-slots` and a session-bound `spur` wrapper into the helper tool dir, so in-session commands can call `spur service run ...` against the right config.
 - `service run --port <n>` persists the port once, and `list` surfaces it in session details and one-shot summaries.
 - `readSessionEventLog` still supports filtering runtime-style `sidecar.output` and `service.output` entries by scope and name when such entries exist, but Spur no longer appends them from `tmux`.
+- `readEventLog` and `readSessionEventLog` stream the event log in chunks, so logs larger than Node's ~512 MiB single-string cap are read correctly, and `readSessionEventLog` with a `limit` bounds retained entries to the last N matches.
+- `isHostPortFree` reports true for an unused port and false when another listener already holds the same port, so sidecar port reservation rejects host-level conflicts before handing a port to a sidecar.
+- `startSidecar` fails loudly when the sidecar tmux pane dies immediately after launch, capturing the pane's last output in the error and killing the dead tmux session.
+- Session and sidecar env include `SPUR_REAL_HOME` resolved from `/etc/passwd`, so sidecar commands can source files under the real user home even when the parent agent sandbox remaps `$HOME`.
 - Service triggers batch by session, dedupe matched rule ids, and deliver only a problem notice plus the `spur list` log-view hint for the bound session.
 - Spawn failure after placeholder metadata cleans up `tmux` and worktree side effects and persists an errored record.
 - Repeated kill on an already cleaned session stays idempotent and does not rewrite terminal metadata.
@@ -73,12 +82,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Session state classification collapses public session status to `working`, `waiting`, `needs_input`, `stopped`, `error`, and `killed`, using JSONL-based classification for Claude and hook-primary classification plus structured rollout JSONL fallback for Codex.
 - Claude JSONL classifier: `classifyClaudeJsonlState` maps assistant+stop_reason→waiting, assistant+`AskUserQuestion` or `input.questions[]` metadata→immediate `needs_input`, user `tool_result` carrying a `tool_reference` to `AskUserQuestion`→immediate `needs_input`, assistant+other tool_use within the stale window→working, assistant+other tool_use past the stale window→needs_input, system/stop_hook_summary/file-history-snapshot→waiting, other user records→working, progress→working, empty→working. The stale window is `TOOL_USE_STALE_MS` (3s) by default, extended by `input.timeout` when the tool declares one, and the window is bypassed entirely when the tool sets `input.run_in_background: true`. The optional `fileMtimeMs` argument is treated as last-observed activity and keeps the classifier on `working` while the JSONL is still being written.
 - Claude JSONL reader: `readClaudeJsonlState` reads incrementally from the session JSONL file, skips re-read when mtime unchanged, and returns null when no JSONL file exists.
-- Codex hook-based state: hook state is used only for state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with `task_complete`→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`.
+- Codex hook-based state: hook state is used only for state classification (not for submit ack); explicit hook `state` values or structured question metadata may set `needs_input`, no hook state defaults to `waiting`, and rollout JSONL can override stale hook snapshots with terminal waiting markers (`task_complete`, interrupted `turn_aborted`)→`waiting` or structured question markers (`input_required`, `request_user_input`)→`needs_input`.
 - Claude sessions skip hook state scripts (`spur-agent-state-updater.mjs`, `spur-agent-state`) and hook settings during spawn and recovery.
 - State history records transitions per session in a ring buffer exposed via `SessionView.stateHistory`.
-- Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest, are read-only (mode 444), and are not writable by the test process.
+- Agent history fixture integrity: all Claude JSONL and Codex hook state fixtures match their SHA-256 manifest entries.
 - Claude JSONL fixture classification covers waiting reasons from real history (end_turn, stop_sequence, system, stop_hook_summary, file-history-snapshot), all working sources (progress, user message, user tool_result, assistant streaming, fresh generic tool_use), needs_input (stale generic tool_use), declared-timeout Bash on real tails (spur-052a 900s budget, spur-0190 60s budget) both inside and past the budget, `run_in_background: true` Bash staying working regardless of age, real `AskUserQuestion` tails (spur-6e9a and spur-36e9) mapping directly to `needs_input`, and the `fileMtimeMs` anchor keeping `working` when the JSONL is still being touched past the declared budget.
-- Codex hook state fixture classification covers real captured hook events: Stop→waiting, PreToolUse and PostToolUse→working, explicit `needs_input` hook payload support, structured question metadata mapping to `needs_input`, stale-hook recovery from a real `task_complete` tail, and `readAgentHookState` parsing from disk.
+- Codex hook state fixture classification covers real captured hook events: Stop→waiting, PreToolUse and PostToolUse→working, explicit `needs_input` hook payload support, structured question metadata mapping to `needs_input`, stale-hook recovery from real terminal waiting tails (`task_complete`, interrupted `turn_aborted`), and `readAgentHookState` parsing from disk.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.
@@ -144,7 +153,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` attaches in place on `Enter`, enables tmux mouse mode for scrollback, shows the `Ctrl+G detach` hint, and returns to the selector after detach.
 - TTY `list` can pause, complete, and kill the selected live session in place; `completed` or `killed` sessions disappear from the live list without silently retargeting another row, and a killed session is not restorable on `Enter` or `r`, with terminal metadata showing `runtimeAlive: false` and `workspaceExists: false`.
 - TTY `list` asks for confirmation before killing a session whose worktree has uncommitted changes or unpushed commits, and a second `k` forces the kill.
-- TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, and deliver the restore prompt through `tmux`.
+- TTY `list` can restore a stopped session in place, keep the same session id and worktree, use the agent CLI's native resume path when session state exists, deliver the restore prompt through `tmux` after an unexpected stop, and avoid sending any restore prompt after a manual pause.
 - Session-bound `respawn --json` returns the replacement session, then completes the live calling session only when respawn succeeds.
 - TTY `list` falls back to a fresh launch when the agent's native resume state is missing, keeps the same session id/worktree, and still delivers the restore prompt.
 - Codex restore throws on ack timeout instead of falling back to a fresh launch.
@@ -164,7 +173,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `cron` `runOnStart: true` can also reach `trigger.spawn.prompt` plus optional `trigger.spawn.steps` and deliver the same ordered pipeline behavior as manual spawn.
 - `cron` `runOnStart: true` can also reach the shared workspace path through `trigger.spawn.overrides.worktree: false`.
 - GitHub source polling emits `github:comment` only when the stored snapshot changes for a running session with a matching PR branch.
-- GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR.
+- GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR, even if the live worktree branch has drifted from persisted session metadata.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
 - Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.
@@ -215,9 +224,12 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 **Tier: fast**
 
 - `sidecars` config parsing: named sidecar entries with command, autoStart, env, reserved `ports`
+- `sidecars` config resolves `${VAR}` placeholders in `env` values and optional port `url`, omits unresolved values, and rejects invalid published URLs
+- `sidecars` config also resolves bare env names like `SPUR_SIDECAR_PUBLIC_URL` from the project's `.env` file or process env, and omits unresolved optional values instead of leaking placeholder strings
 - `devServer` backward compat: parsed as `sidecars.dev` with same command/autoStart
 - Both `devServer` and `sidecars` defined: throws error
 - Invalid sidecar reserved port ranges fail config validation
+- Optional `workspaceAccess.items[].value` resolves `${VAR}` placeholders and bare env names from project `.env` / process env, and drops unresolved items instead of emitting broken UI actions
 - Sidecar tmux session naming: `{sessionId}--{sidecarName}`
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`

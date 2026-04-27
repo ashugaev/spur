@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import {
@@ -72,12 +73,12 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
         {session.agent}
       </span>
 
-      <a
+      <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
         href={buildSessionPath(session.id, projectFilterId)}
       >
         {title}
-      </a>
+      </Link>
 
       {trackerLink ? (
         <a

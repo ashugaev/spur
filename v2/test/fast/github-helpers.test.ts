@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const ghMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/workspace.js", () => ({
+  readCurrentBranch: readCurrentBranchMock,
 }));
 
 const {
@@ -13,6 +17,7 @@ const {
   summarizeFailingCi,
   hasMergeConflict,
   resolvePrSummary,
+  resolveTrackedBranch,
 } = await import("../../src/event-sources/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
@@ -171,6 +176,7 @@ describe("resolvePrSummary", () => {
   });
   afterEach(() => {
     ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
   });
 
   const listPr = {
@@ -231,5 +237,30 @@ describe("resolvePrSummary", () => {
     const pr = await resolvePrSummary("/wt", "feature/x");
     expect(pr).toBeNull();
     expect(ghMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolveTrackedBranch", () => {
+  beforeEach(() => {
+    readCurrentBranchMock.mockReset();
+  });
+
+  it("prefers the current worktree branch over stale session metadata", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+
+    await expect(resolveTrackedBranch("/wt", "stale-session-branch")).resolves.toBe("feature/live");
+    expect(readCurrentBranchMock).toHaveBeenCalledWith("/wt");
+  });
+
+  it("falls back to the persisted session branch when git reports detached HEAD", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("HEAD");
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+
+  it("falls back to the persisted session branch when the worktree lookup fails", async () => {
+    readCurrentBranchMock.mockRejectedValueOnce(new Error("missing worktree"));
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
   });
 });

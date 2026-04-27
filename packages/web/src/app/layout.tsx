@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import { BG_BASE_HEX } from "@/design/colors";
+import Providers from "./providers";
 import "./globals.css";
 
 const jetbrainsMono = JetBrains_Mono({
@@ -42,7 +43,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning className={`dark ${jetbrainsMono.variable}`}>
       <body suppressHydrationWarning className="antialiased">
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

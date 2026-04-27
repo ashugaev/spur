@@ -1,10 +1,36 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+  type RenderOptions,
+} from "@testing-library/react";
 import { renderToString } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
 import { generateMetadata } from "@/app/layout";
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, refetchOnWindowFocus: false, staleTime: 0 },
+    },
+  });
+}
+
+function render(ui: ReactElement, options?: RenderOptions) {
+  const client = createTestQueryClient();
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  return rtlRender(ui, { wrapper: Wrapper, ...options });
+}
 
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
@@ -198,7 +224,10 @@ describe("Dashboard", () => {
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions?project=api",
+      expect.objectContaining({ cache: "no-store" }),
+    );
   });
 
   it("preserves the explicit project filter in session links", async () => {
@@ -493,7 +522,10 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/sessions", { cache: "no-store" });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions",
+        expect.objectContaining({ cache: "no-store" }),
+      );
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
 

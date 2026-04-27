@@ -157,6 +157,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7d: Sessions list cache on revisit
+
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- Background refetch on the 5s interval silently replaces the list only when the server response differs
+
 ## Session Detail
 
 ### S1: Header with white underline
@@ -173,6 +178,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- `Workspace Access` section appears only when daemon `workspaceAccess.items[]` is present, and link items open in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
@@ -191,6 +197,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
@@ -201,6 +208,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Messages render the full send stack in FIFO order
 - Manual queued sends appear before future auto-step messages in the same stack
 - Each queued message is shown as its own stacked row with full wrapped text
+- Long unbroken queued tokens hard-wrap inside the row on mobile instead of widening the section
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
 
@@ -236,10 +244,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Canonical `github-pr` links render as `github pr` in the raw link list
 - Each link clickable, opens in new tab
 
+### S4b: Artifacts section
+
+- Shows when session has persisted artifacts
+- Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
+- Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- Clicking preview opens a full-screen artifact lightbox with close and download actions
+- Non-media artifacts render as file tiles with extension badge and download action only
+- Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
+
 ### S5: Runtime sidebar
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace
 - Worktree path in bordered box
+- Copy workspace access items show the final text, use an interactive copy icon button, and show a styled success/error toast after copy attempts
 - Error shown in red box when present
 
 ### S6: Terminal modal (dashboard + detail page)
@@ -267,7 +285,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
-- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
+- If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ### S7: Display state override

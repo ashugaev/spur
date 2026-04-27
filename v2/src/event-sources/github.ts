@@ -15,6 +15,7 @@ import type {
   GitHubSourceConfig,
   SessionRecord,
 } from "../types.js";
+import { readCurrentBranch } from "../workspace.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
 
 export interface GitHubPrSummary {
@@ -158,6 +159,21 @@ export async function resolvePrSummary(
   };
 }
 
+export async function resolveTrackedBranch(
+  worktreePath: string,
+  sessionBranch: string,
+): Promise<string> {
+  try {
+    const currentBranch = (await readCurrentBranch(worktreePath)).trim();
+    if (currentBranch && currentBranch !== "HEAD") {
+      return currentBranch;
+    }
+  } catch {
+    // Fall back to persisted metadata when the worktree is unavailable.
+  }
+  return sessionBranch;
+}
+
 async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
   try {
     const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
@@ -228,7 +244,8 @@ async function fetchIssueCommentSignals(
 async function collectSignals(
   session: SessionRecord,
 ): Promise<{ data: GitHubEventData; snapshot: Map<string, GitHubSignal> } | null> {
-  const pr = await resolvePrSummary(session.worktreePath, session.branch);
+  const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
+  const pr = await resolvePrSummary(session.worktreePath, branch);
   if (!pr) return null;
 
   const [checks, reviewSignals, commentSignals] = await Promise.all([

@@ -33,7 +33,6 @@ interface DirectTerminalConfig {
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
 const RECONNECT_DELAY_MS = 1_000;
-const VISIBILITY_REFRESH_AFTER_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
@@ -286,7 +285,6 @@ export function DirectTerminal({
     let resizeHandler: (() => void) | null = null;
     let touchCleanup: (() => void) | null = null;
     let reconnectTimer: number | null = null;
-    let hiddenAt: number | null = null;
     let websocket: WebSocket | null = null;
     let closingForUnmount = false;
 
@@ -408,20 +406,11 @@ export function DirectTerminal({
           }, RECONNECT_DELAY_MS);
         };
 
-        const connect = async (force = false) => {
+        const connect = async () => {
           if (!mounted || !terminal) return;
           const readyState = websocket?.readyState;
-          if (!force && (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)) {
-            return;
-          }
+          if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
           clearReconnectTimer();
-          if (force && websocket && websocket.readyState < WebSocket.CLOSING) {
-            websocket.onopen = null;
-            websocket.onmessage = null;
-            websocket.onerror = null;
-            websocket.onclose = null;
-            websocket.close();
-          }
 
           setStatus((current) =>
             current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
@@ -509,18 +498,7 @@ export function DirectTerminal({
 
         const maybeRefreshConnection = () => {
           if (document.visibilityState === "hidden") return;
-          const wasHiddenLongEnough =
-            hiddenAt !== null && Date.now() - hiddenAt >= VISIBILITY_REFRESH_AFTER_MS;
-          hiddenAt = null;
-
-          if (wasHiddenLongEnough) {
-            connect(true);
-            return;
-          }
-
-          if (!websocket || websocket.readyState === WebSocket.CLOSED) {
-            connect();
-          }
+          connect();
         };
 
         inputDisposable = terminal.onData((data) => {
@@ -535,25 +513,17 @@ export function DirectTerminal({
           }
         });
 
-        const handleVisibilityChange = () => {
-          if (document.visibilityState === "hidden") {
-            hiddenAt = Date.now();
-            return;
-          }
-          maybeRefreshConnection();
-        };
-
         window.addEventListener("resize", resizeHandler);
         window.addEventListener("focus", maybeRefreshConnection);
         window.addEventListener("online", maybeRefreshConnection);
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", maybeRefreshConnection);
 
         touchCleanup = () => {
           touchTarget.removeEventListener("touchstart", onTouchStart);
           touchTarget.removeEventListener("touchmove", onTouchMove);
           window.removeEventListener("focus", maybeRefreshConnection);
           window.removeEventListener("online", maybeRefreshConnection);
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
+          document.removeEventListener("visibilitychange", maybeRefreshConnection);
         };
       })
       .catch(() => {

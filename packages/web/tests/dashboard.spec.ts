@@ -1385,3 +1385,41 @@ test.describe("D7c: Background spawn lifecycle", () => {
     expect(spawnCalls).toBe(2);
   });
 });
+
+// D7d: Sessions list cache on revisit
+test.describe("D7d: Sessions list cache on revisit", () => {
+  test("Dashboard sessions cache survives navigation", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "cache-survive-1",
+      prompt: "Cached session row",
+    });
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Loading sessions...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
+
+    // Delay any subsequent /api/sessions call so that, if the dashboard were to
+    // refetch on revisit, the loader would be visible long enough for the
+    // synchronous assertion below to catch it.
+    await page.route("**/api/sessions*", async (route) => {
+      await new Promise((r) => setTimeout(r, 800));
+      await route.fallback();
+    });
+
+    await page.getByRole("link", { name: session.prompt }).first().click();
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+
+    await page.getByRole("link", { name: /back/i }).click();
+
+    await expect(page.getByText("Loading sessions...")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
+  });
+});

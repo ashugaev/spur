@@ -87,11 +87,13 @@ spur service status api-a1b2
 If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
 Spur also collects sidecar and service output into the session event log, so `spur service logs` and `/sessions/:id/logs` can inspect those runtime lines alongside the normal session log stream.
 
-For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
+For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs. New isolated worktrees inherit the current worktree's `spur.yaml`, agent instructions, and `.env` through the isolated config overlay plus symlinks, so sidecar testing sees the same workspace-access settings as the active branch.
 
 `autoStart` applies only when the main session spawns. From inside a sidecar, starting another sidecar is always manual through the same helper, and nesting stops after one more level: `session -> sidecar -> nested sidecar`. Nested sidecars never auto-start.
 
-If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env, so sibling sessions cannot race onto the same sidecar port range before anything starts listening.
+If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env. Reservation also probes each candidate port on the host, so sibling sessions and unrelated host processes cannot race onto the same port range before anything starts listening.
+
+Spur commands run through `bash -lc`, so sidecar commands may start with `VAR=value other_cmd ...` and may rely on login-shell initialization. If the launching agent runs in a sandbox that remaps `$HOME` to a scratch directory (e.g. `/tmp/spur-runtime-*`), the sidecar inherits that `$HOME`. To reach the real user home from a sidecar command, use `$SPUR_REAL_HOME` — Spur resolves it from `/etc/passwd` and exports it into every session and sidecar env. For example: `source "$SPUR_REAL_HOME/.nvm/nvm.sh"` instead of `source "$HOME/.nvm/nvm.sh"`.
 
 ## Start
 

@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -9,6 +10,7 @@ import {
   parseAgentName,
   setupAgentHooks,
 } from "./agents/index.js";
+import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   codexHookHomePath,
@@ -28,6 +30,7 @@ import {
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteRuntimeLogCursorsForSession,
@@ -48,6 +51,7 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
   createTmuxSession,
@@ -73,6 +77,14 @@ import {
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
+import {
+  deleteSessionArtifactsDir,
+  ensureSessionArtifactsDir,
+  listSessionArtifacts,
+  readSessionArtifact,
+  type SessionArtifactFile,
+  withSessionArtifactInstructions,
+} from "./session-artifacts.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -98,6 +110,7 @@ import {
   type SessionState,
   type SessionView,
   type SessionStateTransition,
+  type SessionWorkspaceAccess,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -145,6 +158,9 @@ const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
+const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 
 interface PrCheckTracker {
@@ -152,6 +168,10 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+}
+
+export class SessionResourceNotFoundError extends Error {
+  readonly statusCode = 404;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -292,7 +312,7 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
-  const base = withSessionSlotInstructions(initialMessage);
+  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
@@ -406,9 +426,13 @@ function buildSessionEnv(args: {
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
+    SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.sessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
+    // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
+    // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
+    SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -456,11 +480,54 @@ function buildSidecarRuntimeEnv(
   };
 }
 
+const SIDECAR_STARTUP_VERIFY_MS = 600;
+const SIDECAR_STARTUP_TAIL_LINES = 40;
+
+async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
+  const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
+  await sleep(SIDECAR_STARTUP_VERIFY_MS);
+  if (!(await tmuxPaneDead(tmuxSession))) return;
+  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  await killTmuxSession(tmuxSession);
+  const detail = output ? `\nLast output:\n${output}` : "";
+  throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
+}
+
 function sessionSidecarNames(
   session: Pick<SessionRecord, "sidecarNames">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
   return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function buildWorkspaceAccess(
+  session: Pick<SessionRecord, "worktreePath">,
+  project?: Pick<ProjectConfig, "workspaceAccess">,
+  workspaceExistsForSession = true,
+): SessionWorkspaceAccess | undefined {
+  const worktreePath = session.worktreePath.trim();
+  if (!workspaceExistsForSession || !worktreePath || !project?.workspaceAccess) {
+    return undefined;
+  }
+
+  const items = project.workspaceAccess.items.flatMap((item) => {
+    const value = item.value
+      .replaceAll(WORKTREE_PATH_TOKEN, worktreePath)
+      .replaceAll(WORKTREE_PATH_SHELL_TOKEN, shellEscape(worktreePath))
+      .replaceAll(WORKTREE_PATH_URL_TOKEN, encodeURIComponent(worktreePath));
+
+    if (item.kind === "link") {
+      try {
+        return [{ ...item, value: new URL(value).toString() }];
+      } catch {
+        return [];
+      }
+    }
+
+    return [{ ...item, value }];
+  });
+
+  return items.length > 0 ? { items } : undefined;
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -931,11 +998,11 @@ export class SessionService {
     );
   }
 
-  private ensureSidecarReservation(
+  private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
-  ): SessionRecord {
+  ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       return session;
     }
@@ -969,15 +1036,22 @@ export class SessionService {
       }
 
       let selectedPort: number | undefined;
+      const hostBusy: number[] = [];
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
         if (unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) {
+          unavailable.add(candidate);
+          hostBusy.push(candidate);
+          continue;
+        }
         selectedPort = candidate;
         unavailable.add(candidate);
         break;
       }
       if (selectedPort === undefined) {
+        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
         throw new Error(
-          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
         );
       }
       reservedForSidecar[portConfig.env] = selectedPort;
@@ -1014,7 +1088,7 @@ export class SessionService {
       return args.session;
     }
 
-    const reservedSession = this.ensureSidecarReservation(
+    const reservedSession = await this.ensureSidecarReservation(
       args.session,
       args.sidecarName,
       args.sidecar,
@@ -1044,6 +1118,7 @@ export class SessionService {
           args.sidecarDepth,
         ),
       });
+      await verifySidecarStartup(reservedSession.id, args.sidecarName);
     } catch (error) {
       if (reservedSession !== args.session) {
         writeSession(this.config.dataDir, {
@@ -1109,6 +1184,18 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const artifact = readSessionArtifact(this.config.dataDir, sessionId, artifactId);
+    if (!artifact) {
+      throw new SessionResourceNotFoundError(`Artifact not found: ${sessionId}/${artifactId}`);
+    }
+    return artifact;
   }
 
   async getConversation(sessionId: string): Promise<ConversationResponse> {
@@ -2141,6 +2228,7 @@ export class SessionService {
               ...sidecarPortEnv(runningRecord, name),
             },
           });
+          await verifySidecarStartup(sessionId, name);
           this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
@@ -2367,7 +2455,7 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "worktreePath">,
+    session: Pick<SessionRecord, "id">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
@@ -2380,8 +2468,7 @@ export class SessionService {
     if (attachments.length > MAX_ATTACHMENTS) {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
-    const attachDir = join(session.worktreePath, ".spur", "attachments");
-    mkdirSync(attachDir, { recursive: true });
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
     const prefixLines: string[] = [];
     for (const att of attachments) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
@@ -2401,7 +2488,7 @@ export class SessionService {
       const filename = `${Date.now()}-${att.name}`;
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
-      prefixLines.push(`[Attached file: ${filePath}]`);
+      prefixLines.push(`[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${filename}]`);
     }
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -2641,6 +2728,7 @@ export class SessionService {
   private removeSessionArtifacts(sessionId: string): void {
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    deleteSessionArtifactsDir(this.config.dataDir, sessionId);
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
@@ -3023,7 +3111,8 @@ export class SessionService {
         sessionToolDir,
       });
       const planMode = resolvePlanMode(current);
-      const restorePrompt = buildRestorePrompt(current.prompt);
+      const shouldSendRestoreMessage = current.status !== "paused";
+      const restorePrompt = shouldSendRestoreMessage ? buildRestorePrompt(current.prompt) : "";
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, hookSetup),
@@ -3090,11 +3179,13 @@ export class SessionService {
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
-        restoreSidecarNames,
-      );
-      await this.sendAgentMessage(current, restoreInitialMessage);
+      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+        const restoreInitialMessage = buildInitialMessage(
+          effectivePlan.initialMessage,
+          restoreSidecarNames,
+        );
+        await this.sendAgentMessage(current, restoreInitialMessage);
+      }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -3763,6 +3854,7 @@ export class SessionService {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
     const queuedMessagesView = displayQueuedMessages(session);
+    const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
 
     return {
       ...session,
@@ -3772,8 +3864,10 @@ export class SessionService {
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
       lastActivityAt,
+      artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,
       sidecars,
+      ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }
