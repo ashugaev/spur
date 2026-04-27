@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord, SessionSlots } from "../../src/types.js";
+import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const ghMock = vi.fn();
 const glabMock = vi.fn();
@@ -126,7 +126,7 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-function baseConfig() {
+function baseConfig(): AppConfig {
   return {
     configPath: "/tmp/spur.yaml",
     server: { host: "127.0.0.1", port: 4310 },
@@ -135,6 +135,11 @@ function baseConfig() {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    voice: {
+      provider: "whisper_cpp",
+      language: "en",
+      model: "base",
+    },
     projects: {
       api: {
         path: "/repo/api",
@@ -142,6 +147,7 @@ function baseConfig() {
         sessionPrefix: "api",
         worktree: true,
         symlinks: [],
+        sidecars: {},
         sources: {
           review: {
             type: "github",
@@ -149,6 +155,7 @@ function baseConfig() {
             intervalMs: 60_000,
           },
         },
+        triggers: {},
       },
     },
   };
@@ -243,6 +250,31 @@ describe("PR auto-detect", () => {
 
   it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
     const { buildMergedConfig } = await import("../../src/registry.js");
+    const baseProject = baseConfig().projects.api;
+    if (!baseProject) {
+      throw new Error("Missing api project fixture");
+    }
+    const apiProject: ProjectConfig = {
+      path: baseProject.path,
+      defaultBranch: baseProject.defaultBranch,
+      sessionPrefix: baseProject.sessionPrefix,
+      worktree: baseProject.worktree,
+      symlinks: baseProject.symlinks,
+      sidecars: baseProject.sidecars,
+      triggers: baseProject.triggers,
+      sources: {
+        github: {
+          type: "github",
+          runOnStart: false,
+          intervalMs: 60_000,
+        },
+        gitlab: {
+          type: "gitlab",
+          runOnStart: false,
+          intervalMs: 60_000,
+        },
+      },
+    };
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
@@ -264,21 +296,7 @@ describe("PR auto-detect", () => {
       config: {
         ...baseConfig(),
         projects: {
-          api: {
-            ...baseConfig().projects.api,
-            sources: {
-              github: {
-                type: "github",
-                runOnStart: false,
-                intervalMs: 60_000,
-              },
-              gitlab: {
-                type: "gitlab",
-                runOnStart: false,
-                intervalMs: 60_000,
-              },
-            },
-          },
+          api: apiProject,
         },
       },
       configPaths: ["/tmp/spur.yaml"],
