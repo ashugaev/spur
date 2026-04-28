@@ -56,6 +56,7 @@ interface CacheEntry {
 }
 
 const prCache = new Map<string, CacheEntry>();
+const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
 function isPrState(value: unknown): value is PrState {
   return value === "draft" || value === "open" || value === "merged" || value === "closed";
@@ -66,28 +67,42 @@ function isCiStatus(value: unknown): value is CiStatus {
 }
 
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
-  try {
-    const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-      setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
+  const existing = pendingPrRequests.get(url);
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+        setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
+        return EMPTY_PR_INFO;
+      }
+      const data: unknown = await res.json();
+      if (typeof data !== "object" || data === null) {
+        setGitError(null);
+        return EMPTY_PR_INFO;
+      }
+      const obj = data as Record<string, unknown>;
+      const error = typeof obj["error"] === "string" ? obj["error"] : null;
+      setGitError(error);
+      return {
+        state: isPrState(obj["state"]) ? obj["state"] : null,
+        ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+        totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
+        unresolvedThreads:
+          typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
+      };
+    } catch {
+      setGitError("GitHub API unreachable");
       return EMPTY_PR_INFO;
+    } finally {
+      pendingPrRequests.delete(url);
     }
-    setGitError(null);
-    const data: unknown = await res.json();
-    if (typeof data !== "object" || data === null) return EMPTY_PR_INFO;
-    const obj = data as Record<string, unknown>;
-    return {
-      state: isPrState(obj["state"]) ? obj["state"] : null,
-      ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
-      totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
-      unresolvedThreads:
-        typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
-    };
-  } catch {
-    setGitError("GitHub API unreachable");
-    return EMPTY_PR_INFO;
-  }
+  })();
+
+  pendingPrRequests.set(url, request);
+  return request;
 }
 
 export function extractLinkId(link: SpurSessionLink): string {

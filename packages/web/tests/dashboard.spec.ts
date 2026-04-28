@@ -436,6 +436,56 @@ test.describe("D5: Tracker and PR links", () => {
     await expect(prLink).toBeVisible();
   });
 
+  test("stale PR payload does not show Git Error", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "pr-row-missing-1",
+      slots: {
+        title: "Missing PR",
+        links: [{ label: "pr", url: "https://github.com/test/repo/pull/999" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.locator("a[href*='github.com']").first()).toBeVisible();
+    await expect(page.getByText("Git Error")).toHaveCount(0);
+  });
+
+  test("soft PR status errors still surface Git Error without failing the request", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          error: "GitHub API 503",
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.getByText("Git Error")).toBeVisible();
+  });
+
   test("session without links has no tracker or PR icons", async ({ page }) => {
     const session = makeWorkingSession({ id: "no-links-1" });
     await mockSessions(page, [session]);

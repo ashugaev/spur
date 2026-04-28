@@ -79,6 +79,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- Stale/missing PR status payloads keep the PR link visible but do not show the footer `Git Error` badge
+- GitHub integration failures surfaced inside the PR payload show the footer `Git Error` badge without breaking the page
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
 
