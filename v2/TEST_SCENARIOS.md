@@ -247,6 +247,21 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
 
+### GitHub work-item triggers
+
+**Tier: fast**
+
+- `config.github.query` — `query` parses and is preserved on the github source.
+- `config.github.work_item_event_only_when_query_set` — rejects `github:work_item.new` triggers when `query` is unset.
+- `config.github.work_item_unique_per_source` — rejects two triggers on the same github source both subscribed to `github:work_item.new`.
+- `triggers.spawn.work_item_seeds_pr_link` — spawn payload carries `slots.links` with the `pr` label; malformed work-item payloads spawn without `slots`.
+- `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
+
+**Tier: runtime integration**
+
+- `github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.
+- `github.work_item.coexists_with_signal_branch` — when `query` is also set, the per-branch signal branch still fires `github:ci_failed` for an attached session alongside `github:work_item.new` from the query branch.
+
 ## Regression Rule
 
 - When a new Spur feature or failure mode is added, extend this file in the same change.

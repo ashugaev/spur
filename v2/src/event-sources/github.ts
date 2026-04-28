@@ -350,7 +350,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         number: number;
         title: string;
         url: string;
-        repository: { nameWithOwner: string };
+        repository?: { nameWithOwner?: string | null } | null;
       }>;
       for (const item of items) {
         const repo = item.repository?.nameWithOwner ?? "";
