@@ -68,6 +68,31 @@ function spawnConfig() {
   };
 }
 
+function workItemSpawnConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "pr-watch": {
+            type: "github",
+            query: "is:pr is:open",
+          },
+        },
+        triggers: {
+          "pick-up": {
+            source: "pr-watch",
+            event: "github:work_item.new",
+            spawn: {
+              prompt: "Take this work item.",
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
 function serviceConfig(options?: { prompt?: string }) {
   return {
     dataDir: "/tmp/spur-data",
@@ -716,6 +741,71 @@ describe("startConfiguredTriggers", () => {
         expect.stringContaining("A new comment arrived."),
         { interrupt: true },
       );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("seeds the pr slot link when a work-item event spawns a session", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit({
+        name: "github:work_item.new",
+        projectId: "api",
+        sourceId: "pr-watch",
+        data: {
+          externalId: "acme/api#42",
+          url: "https://github.com/acme/api/pull/42",
+          number: 42,
+          title: "Fix the bug",
+          repo: "acme/api",
+        },
+      });
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith({
+        project: "api",
+        prompt: "Take this work item.",
+        slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("ignores malformed work-item payloads when spawning", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit({
+        name: "github:work_item.new",
+        projectId: "api",
+        sourceId: "pr-watch",
+        data: { url: "https://github.com/acme/api/pull/42" },
+      });
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      const callArg = spawnMock.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+      expect(callArg?.["slots"]).toBeUndefined();
     } finally {
       await controller.stop();
     }
