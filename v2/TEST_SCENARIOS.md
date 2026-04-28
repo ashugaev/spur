@@ -241,7 +241,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Reserved sidecar ports are assigned when a sidecar starts, injected into sidecar env, and released after cleanup
 - Spawn continues when sidecar autostart cannot reserve a port; manual `sidecar start` fails fast until a port is released, then succeeds
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
-- `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup
+- After autostart or manual `sidecar start`, core probes `127.0.0.1:<reservedPort>/` and on the first HTTP response publishes a session slot link `{label: <sidecarName>, url: "<resolved port url>:<reservedPort>"}`; `complete` and `kill` abort the probe and unlink the slot
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
 - Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
