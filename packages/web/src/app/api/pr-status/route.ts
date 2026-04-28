@@ -4,10 +4,11 @@ type PrState = "draft" | "open" | "merged" | "closed";
 type CiStatus = "success" | "failure" | "pending" | null;
 
 interface PrStatusResponse {
-  state: PrState;
+  state: PrState | null;
   ciStatus: CiStatus;
   totalThreads: number;
   unresolvedThreads: number;
+  error?: string;
 }
 
 interface GithubGraphQLResponse {
@@ -22,11 +23,11 @@ interface GithubGraphQLResponse {
       };
     };
   };
+  errors?: Array<{ message?: string }>;
 }
 
 interface CacheEntry {
-  response: PrStatusResponse | null;
-  error?: string;
+  response: PrStatusResponse;
   expiresAt: number;
 }
 
@@ -45,6 +46,17 @@ const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
     }
   }
 }`;
+
+const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
+  state: null,
+  ciStatus: null,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
+
+function errorResponse(error: string): PrStatusResponse {
+  return { ...EMPTY_PR_STATUS, error };
+}
 
 function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
@@ -107,16 +119,13 @@ export async function GET(request: NextRequest) {
   const cacheKey = `${coords.owner}/${coords.repo}/${coords.number}`;
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    if (cached.error) {
-      return NextResponse.json({ error: cached.error }, { status: 502 });
-    }
     return NextResponse.json(cached.response);
   }
 
   // Rate limit backoff
   if (Date.now() < rateLimitResetAt) {
     const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
-    return NextResponse.json({ error: `GitHub rate limit — retry in ${wait}s` }, { status: 429 });
+    return NextResponse.json(errorResponse(`GitHub rate limit — retry in ${wait}s`));
   }
 
   const headers = ghHeaders();
@@ -134,24 +143,24 @@ export async function GET(request: NextRequest) {
 
     if (!ghResponse.ok) {
       handleRateLimit(ghResponse);
-      const errorMsg = `GitHub API ${ghResponse.status}`;
-      cache.set(cacheKey, {
-        response: null,
-        error: errorMsg,
-        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
-      });
-      return NextResponse.json({ error: errorMsg }, { status: 502 });
+      const response = errorResponse(`GitHub API ${ghResponse.status}`);
+      cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+      return NextResponse.json(response);
     }
 
     const gql = (await ghResponse.json()) as GithubGraphQLResponse;
     const pr = gql.data?.repository?.pullRequest;
+    const gqlError = gql.errors
+      ?.map((entry) => entry.message?.trim())
+      .filter(Boolean)
+      .join("; ");
     if (!pr) {
+      const response = gqlError ? errorResponse(gqlError) : EMPTY_PR_STATUS;
       cache.set(cacheKey, {
-        response: null,
-        error: "PR not found",
-        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
+        response,
+        expiresAt: Date.now() + (gqlError ? ERROR_CACHE_TTL_MS : CACHE_TTL_MS),
       });
-      return NextResponse.json({ error: "PR not found" }, { status: 404 });
+      return NextResponse.json(response);
     }
 
     let state: PrState;
@@ -174,11 +183,8 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
-    cache.set(cacheKey, {
-      response: null,
-      error: message,
-      expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
-    });
-    return NextResponse.json({ error: message }, { status: 502 });
+    const response = errorResponse(message);
+    cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+    return NextResponse.json(response);
   }
 }
