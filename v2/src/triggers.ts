@@ -4,6 +4,7 @@ import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import type {
   AgentName,
   AppConfig,
+  GitHubWorkItemEventData,
   SendTriggerConfig,
   SessionView,
   SpawnTriggerConfig,
@@ -46,6 +47,18 @@ const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
 
+function isWorkItemEventData(value: unknown): value is GitHubWorkItemEventData {
+  if (!value || typeof value !== "object") return false;
+  const d = value as Record<string, unknown>;
+  return (
+    typeof d["externalId"] === "string" &&
+    typeof d["url"] === "string" &&
+    typeof d["number"] === "number" &&
+    typeof d["title"] === "string" &&
+    typeof d["repo"] === "string"
+  );
+}
+
 async function runSpawnTrigger(
   dataDir: string,
   service: SessionService,
@@ -58,6 +71,7 @@ async function runSpawnTrigger(
   agent: AgentName | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
+  eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
@@ -86,6 +100,9 @@ async function runSpawnTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(isWorkItemEventData(eventData)
+        ? { slots: { links: [{ label: "pr", url: eventData.url }] } }
+        : {}),
     });
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
       level: "info",
@@ -517,6 +534,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           trigger.spawn.agent,
           trigger.spawn.branch,
           trigger.spawn.overrides,
+          event.data,
           logger,
         );
         inFlight.add(spawnPromise);

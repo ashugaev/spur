@@ -5,15 +5,19 @@ import {
   deleteGitHubSourceSnapshot,
   listSessions,
   readGitHubSourceSnapshots,
+  readWorkItemRegistry,
+  recordWorkItem,
   writeGitHubSourceSnapshot,
 } from "../metadata.js";
-import type {
-  GitHubEventData,
-  GitHubSignalKind,
-  GitHubReviewDecision,
-  GitHubSignal,
-  GitHubSourceConfig,
-  SessionRecord,
+import {
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  type GitHubEventData,
+  type GitHubSignalKind,
+  type GitHubReviewDecision,
+  type GitHubSignal,
+  type GitHubSourceConfig,
+  type GitHubWorkItemEventData,
+  type SessionRecord,
 } from "../types.js";
 import { readCurrentBranch } from "../workspace.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
@@ -320,8 +324,58 @@ function emitSignalsByKind(
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
   const snapshots = readGitHubSourceSnapshots(deps.dataDir, deps.projectId, deps.sourceId);
+  const seenWorkItems = deps.config.query
+    ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
+    : null;
   let stopped = false;
   let polling = false;
+  let pollingWorkItems = false;
+
+  const pollWorkItems = async (): Promise<void> => {
+    if (!deps.config.query || stopped || deps.signal.aborted || !seenWorkItems) return;
+    if (pollingWorkItems) return;
+    pollingWorkItems = true;
+    try {
+      const raw = await gh(
+        process.cwd(),
+        "search",
+        "prs",
+        deps.config.query,
+        "--json",
+        "number,title,url,repository",
+        "--limit",
+        "100",
+      );
+      const items = JSON.parse(raw) as Array<{
+        number: number;
+        title: string;
+        url: string;
+        repository: { nameWithOwner: string };
+      }>;
+      for (const item of items) {
+        const repo = item.repository?.nameWithOwner ?? "";
+        if (!repo) continue;
+        const externalId = `${repo}#${item.number}`;
+        if (seenWorkItems.has(externalId)) continue;
+        recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
+        seenWorkItems.add(externalId);
+        deps.emit<GitHubWorkItemEventData>(GITHUB_WORK_ITEM_NEW_EVENT, {
+          externalId,
+          url: item.url,
+          number: item.number,
+          title: item.title,
+          repo,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
+      );
+    } finally {
+      pollingWorkItems = false;
+    }
+  };
 
   const poll = async (emitInitial: boolean): Promise<void> => {
     if (stopped || deps.signal.aborted || polling) return;
@@ -379,18 +433,21 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
   const timer = startInterval(() => {
     void poll(false);
+    void pollWorkItems();
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
       void poll(false);
+      void pollWorkItems();
     } else {
       await poll(false);
+      await pollWorkItems();
     }
   }
 
   deps.logger.info?.(
-    `[source:${deps.projectId}/${deps.sourceId}] github started: intervalMs=${deps.config.intervalMs}, events="github:*", runOnStart=${deps.config.runOnStart}`,
+    `[source:${deps.projectId}/${deps.sourceId}] github started: intervalMs=${deps.config.intervalMs}, events="github:*", runOnStart=${deps.config.runOnStart}, query=${deps.config.query ? "set" : "unset"}`,
   );
 
   return {
@@ -402,6 +459,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       ? {
           runOnStart(): void {
             void poll(true);
+            void pollWorkItems();
           },
         }
       : {}),
