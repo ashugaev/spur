@@ -19,6 +19,12 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export interface SessionPrBinding {
+  number: number;
+  repo: string;
+  url: string;
+}
+
 export type SessionArtifactKind = "image" | "video" | "download";
 
 export interface SessionArtifact {
@@ -227,6 +233,7 @@ export interface SessionRecord {
   prompt: string;
   branch: string;
   branchSource?: BranchSource;
+  pr?: SessionPrBinding;
   worktree: boolean;
   worktreePath: string;
   tmuxSession: string;

@@ -1204,7 +1204,9 @@ describe("SessionDetail voice input", () => {
         body: JSON.stringify({ message: "Queued follow up", queue: true }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    });
   });
 
   it("sends immediately without queue when clicking Send now", async () => {

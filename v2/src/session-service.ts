@@ -72,6 +72,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
@@ -83,6 +84,11 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import {
+  deriveSessionSlots,
+  discoverSessionPrBinding,
+  parseSessionPrBinding,
+} from "./session-pr.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -132,7 +138,6 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
-import { gh } from "./gh.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -827,8 +832,7 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    // Skip if PR slot already exists
-    if (session.slots?.links.some((link) => link.label === "pr")) {
+    if (session.pr) {
       return;
     }
     // Skip terminal states
@@ -889,20 +893,8 @@ export class SessionService {
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
-    const raw = await gh(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      session.branch,
-      "--json",
-      "url",
-      "--limit",
-      "1",
-    );
-    const prs: Array<{ url: string }> = JSON.parse(raw);
-    const pr = prs[0];
-    if (!pr?.url) {
+    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+    if (!binding) {
       return;
     }
 
@@ -913,21 +905,21 @@ export class SessionService {
 
     // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
-    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+    if (!current?.worktreePath || current.pr) {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
-    });
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
+    const updated: SessionRecord = {
+      ...current,
+      pr: binding,
+    };
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      message: `Auto-detected PR for ${session.id}: ${binding.url}`,
     });
   }
 
@@ -1629,7 +1621,7 @@ export class SessionService {
       });
 
       stage = "tmux.status";
-      await syncTmuxStatus(tmuxSession, runningRecord.slots);
+      await syncTmuxStatus(tmuxSession, deriveSessionSlots(runningRecord));
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
       this.logEvent("session.spawn.ready", {
@@ -2152,7 +2144,7 @@ export class SessionService {
       });
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
-      await syncTmuxStatus(sessionId, runningRecord.slots);
+      await syncTmuxStatus(sessionId, deriveSessionSlots(runningRecord));
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
       await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
       this.logEvent("session.spawn.ready", {
@@ -2543,28 +2535,59 @@ export class SessionService {
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const slots = applySlotsUpdate(session.slots, request);
+    const session = currentSession;
+    const normalized = normalizeSlotsUpdate(request);
+    const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
+    const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
+    const genericLinks = normalized.links.filter(
+      (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
+    );
+    const genericUnlinks = normalized.unlinkLabels;
+    const hasGenericChanges =
+      normalized.title !== undefined ||
+      normalized.clearTitle ||
+      genericLinks.length > 0 ||
+      genericUnlinks.length > 0;
+    const slots = hasGenericChanges
+      ? applySlotsUpdate(session.slots, {
+          ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+          ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
+          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
+        })
+      : session.slots;
     const updated: SessionRecord = {
       ...session,
       ...(slots ? { slots } : {}),
+      ...(nativePr
+        ? { pr: nativePr }
+        : normalized.unlinkLabels.includes("pr")
+          ? {}
+          : session.pr
+            ? { pr: session.pr }
+            : {}),
     };
     if (!slots) {
       delete updated.slots;
     }
+    if (prLink === undefined && normalized.unlinkLabels.includes("pr")) {
+      delete updated.pr;
+    }
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    const displaySlots = deriveSessionSlots(updated);
+    await syncTmuxStatus(updated.tmuxSession, displaySlots);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Updated session slots for ${sessionId}`,
       details: {
-        title: updated.slots?.title ?? null,
-        linkCount: updated.slots?.links.length ?? 0,
+        title: displaySlots?.title ?? null,
+        linkCount: displaySlots?.links.length ?? 0,
       },
     });
     return this.enrich(updated);
@@ -2974,7 +2997,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
@@ -3009,7 +3032,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
       if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -3148,7 +3171,7 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await syncTmuxStatus(current.tmuxSession, current.slots);
+      await syncTmuxStatus(current.tmuxSession, deriveSessionSlots(current));
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
@@ -3829,10 +3852,12 @@ export class SessionService {
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
+    const displaySlots = deriveSessionSlots(session);
 
     return {
       ...session,
       planMode: resolvePlanMode(session),
+      ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,
