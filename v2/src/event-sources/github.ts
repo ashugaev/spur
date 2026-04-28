@@ -350,11 +350,10 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         number: number;
         title: string;
         url: string;
-        repository?: { nameWithOwner?: string | null } | null;
+        repository: { nameWithOwner: string };
       }>;
       for (const item of items) {
-        const repo = item.repository?.nameWithOwner ?? "";
-        if (!repo) continue;
+        const repo = item.repository.nameWithOwner;
         const externalId = `${repo}#${item.number}`;
         if (seenWorkItems.has(externalId)) continue;
         recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);

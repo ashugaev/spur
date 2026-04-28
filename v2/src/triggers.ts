@@ -1,13 +1,14 @@
 import { writeStderr } from "./io.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
-import type {
-  AgentName,
-  AppConfig,
-  GitHubWorkItemEventData,
-  SendTriggerConfig,
-  SessionView,
-  SpawnTriggerConfig,
+import {
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  type AgentName,
+  type AppConfig,
+  type GitHubWorkItemEventData,
+  type SendTriggerConfig,
+  type SessionView,
+  type SpawnTriggerConfig,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionService } from "./session-service.js";
@@ -46,18 +47,6 @@ const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
 };
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
-
-function isWorkItemEventData(value: unknown): value is GitHubWorkItemEventData {
-  if (!value || typeof value !== "object") return false;
-  const d = value as Record<string, unknown>;
-  return (
-    typeof d["externalId"] === "string" &&
-    typeof d["url"] === "string" &&
-    typeof d["number"] === "number" &&
-    typeof d["title"] === "string" &&
-    typeof d["repo"] === "string"
-  );
-}
 
 async function runSpawnTrigger(
   dataDir: string,
@@ -100,8 +89,8 @@ async function runSpawnTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
-      ...(isWorkItemEventData(eventData)
-        ? { slots: { links: [{ label: "pr", url: eventData.url }] } }
+      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
+        ? { slots: { links: [{ label: "pr", url: (eventData as GitHubWorkItemEventData).url }] } }
         : {}),
     });
     logTriggerEvent(dataDir, "trigger.spawn.completed", {

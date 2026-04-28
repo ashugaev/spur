@@ -782,32 +782,4 @@ describe("startConfiguredTriggers", () => {
       await controller.stop();
     }
   });
-
-  it("ignores malformed work-item payloads when spawning", async () => {
-    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
-    const { startConfiguredTriggers } = await loadTriggersModule();
-    const bus = new EventBus();
-    const controller = startConfiguredTriggers({
-      config: workItemSpawnConfig() as never,
-      bus,
-      sessionService: { spawn: spawnMock } as never,
-      logger: { warn: vi.fn() },
-    });
-
-    try {
-      bus.emit({
-        name: "github:work_item.new",
-        projectId: "api",
-        sourceId: "pr-watch",
-        data: { url: "https://github.com/acme/api/pull/42" },
-      });
-      await vi.waitFor(() => {
-        expect(spawnMock).toHaveBeenCalledTimes(1);
-      });
-      const callArg = spawnMock.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
-      expect(callArg?.["slots"]).toBeUndefined();
-    } finally {
-      await controller.stop();
-    }
-  });
 });
