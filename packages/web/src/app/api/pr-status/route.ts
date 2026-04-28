@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
 
 type PrState = "draft" | "open" | "merged" | "closed";
 type CiStatus = "success" | "failure" | "pending" | null;
@@ -35,8 +36,6 @@ const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 120_000;
 const ERROR_CACHE_TTL_MS = 60_000;
 
-let rateLimitResetAt = 0;
-
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
     pullRequest(number:$number) {
@@ -64,47 +63,6 @@ function extractPrCoords(url: string): { owner: string; repo: string; number: st
   return { owner: match[1], repo: match[2], number: match[3] };
 }
 
-let resolvedToken: string | null = null;
-let tokenResolved = false;
-
-function resolveGhToken(): string | null {
-  if (tokenResolved) return resolvedToken;
-  tokenResolved = true;
-  resolvedToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"] ?? null;
-  if (resolvedToken) return resolvedToken;
-  // Fallback: read from gh CLI auth
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const cp = require("node:child_process") as {
-      execSync: (cmd: string, opts: { encoding: string }) => string;
-    };
-    resolvedToken = cp.execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
-  } catch {
-    resolvedToken = null;
-  }
-  return resolvedToken;
-}
-
-function ghHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { accept: "application/vnd.github+json" };
-  const token = resolveGhToken();
-  if (token) {
-    headers["authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
-
-function handleRateLimit(response: Response): void {
-  if (response.status === 403 || response.status === 429) {
-    const reset = response.headers.get("x-ratelimit-reset");
-    if (reset) {
-      rateLimitResetAt = Number(reset) * 1000;
-    } else {
-      rateLimitResetAt = Date.now() + 60_000;
-    }
-  }
-}
-
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
@@ -123,9 +81,9 @@ export async function GET(request: NextRequest) {
   }
 
   // Rate limit backoff
-  if (Date.now() < rateLimitResetAt) {
-    const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
-    return NextResponse.json(errorResponse(`GitHub rate limit — retry in ${wait}s`));
+  const rateLimitError = getGitHubRateLimitError();
+  if (rateLimitError) {
+    return NextResponse.json(errorResponse(rateLimitError));
   }
 
   const headers = ghHeaders();
@@ -142,7 +100,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!ghResponse.ok) {
-      handleRateLimit(ghResponse);
+      handleGitHubRateLimit(ghResponse);
       const response = errorResponse(`GitHub API ${ghResponse.status}`);
       cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(response);

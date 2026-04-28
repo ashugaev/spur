@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
+const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
 
 function baseSession(id: string): SpurSessionView {
   return {
@@ -170,6 +171,14 @@ export async function mockSessions(
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ available: false, daemonAlive: true }),
+    });
+  });
+
+  await page.route("/api/github-status", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(DEFAULT_GITHUB_STATUS),
     });
   });
 }

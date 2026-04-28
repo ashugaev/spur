@@ -29,27 +29,6 @@ const EMPTY_PR_INFO: PrInfo = {
 const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
 
-let gitErrorMessage: string | null = null;
-const gitErrorListeners = new Set<() => void>();
-
-function setGitError(msg: string | null) {
-  gitErrorMessage = msg;
-  for (const cb of gitErrorListeners) cb();
-}
-
-/** Subscribe to GitHub integration error state. */
-export function useGitError(): string | null {
-  const [err, setErr] = useState(gitErrorMessage);
-  useEffect(() => {
-    const cb = () => setErr(gitErrorMessage);
-    gitErrorListeners.add(cb);
-    return () => {
-      gitErrorListeners.delete(cb);
-    };
-  }, []);
-  return err;
-}
-
 interface CacheEntry {
   data: PrInfo;
   fetchedAt: number;
@@ -74,18 +53,13 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
     try {
       const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
       if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
         return EMPTY_PR_INFO;
       }
       const data: unknown = await res.json();
       if (typeof data !== "object" || data === null) {
-        setGitError(null);
         return EMPTY_PR_INFO;
       }
       const obj = data as Record<string, unknown>;
-      const error = typeof obj["error"] === "string" ? obj["error"] : null;
-      setGitError(error);
       return {
         state: isPrState(obj["state"]) ? obj["state"] : null,
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
@@ -94,7 +68,6 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
       };
     } catch {
-      setGitError("GitHub API unreachable");
       return EMPTY_PR_INFO;
     } finally {
       pendingPrRequests.delete(url);
