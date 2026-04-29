@@ -151,7 +151,7 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
     // Stop daemon, restart with same dataDir, same gh fixture: still no new sessions.
     await context.stopDaemon(daemon.child);
     const slotAfterStop = activeContexts[activeContexts.length - 1];
-    if (slotAfterStop) slotAfterStop.daemonPid = undefined;
+    if (slotAfterStop) delete slotAfterStop.daemonPid;
 
     const daemon2 = await context.startDaemon(configPath);
     const slotAfterRestart = activeContexts[activeContexts.length - 1];
