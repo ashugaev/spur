@@ -72,6 +72,7 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
@@ -83,6 +84,11 @@ import {
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
+import {
+  deriveSessionSlots,
+  discoverSessionPrBinding,
+  parseSessionPrBinding,
+} from "./session-pr.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -132,7 +138,6 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
-import { gh } from "./gh.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -183,6 +188,14 @@ interface SessionCleanupContext {
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
+}
+
+const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
+const SIDECAR_PROBE_INTERVAL_MS = 1_000;
+const SIDECAR_PROBE_REQUEST_TIMEOUT_MS = 2_000;
+
+function sidecarProbeKey(sessionId: string, sidecarName: string): string {
+  return `${sessionId}::${sidecarName}`;
 }
 
 function isRestorableStatus(status: SessionStatus): boolean {
@@ -649,6 +662,7 @@ export class SessionService {
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
+  private readonly sidecarProbes = new Map<string, AbortController>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
@@ -827,8 +841,7 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    // Skip if PR slot already exists
-    if (session.slots?.links.some((link) => link.label === "pr")) {
+    if (session.pr) {
       return;
     }
     // Skip terminal states
@@ -889,20 +902,8 @@ export class SessionService {
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
-    const raw = await gh(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      session.branch,
-      "--json",
-      "url",
-      "--limit",
-      "1",
-    );
-    const prs: Array<{ url: string }> = JSON.parse(raw);
-    const pr = prs[0];
-    if (!pr?.url) {
+    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+    if (!binding) {
       return;
     }
 
@@ -913,21 +914,21 @@ export class SessionService {
 
     // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
-    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+    if (!current?.worktreePath || current.pr) {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
-    });
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
+    const updated: SessionRecord = {
+      ...current,
+      pr: binding,
+    };
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      message: `Auto-detected PR for ${session.id}: ${binding.url}`,
     });
   }
 
@@ -1136,6 +1137,109 @@ export class SessionService {
     };
     writeSession(this.config.dataDir, updated);
     return updated;
+  }
+
+  private maybeStartSidecarUrlProbe(
+    sessionId: string,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+    record: SessionRecord,
+  ): void {
+    const urlPort = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
+    if (!urlPort || urlPort.url === undefined) return;
+    const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
+    if (typeof reservedPort !== "number") return;
+    this.startSidecarProbe(sessionId, sidecarName, reservedPort, urlPort.url);
+  }
+
+  private startSidecarProbe(
+    sessionId: string,
+    sidecarName: string,
+    reservedPort: number,
+    url: string,
+  ): void {
+    const key = sidecarProbeKey(sessionId, sidecarName);
+    this.sidecarProbes.get(key)?.abort();
+    const controller = new AbortController();
+    this.sidecarProbes.set(key, controller);
+    void this.publishSidecarLinkWhenReady({
+      sessionId,
+      sidecarName,
+      reservedPort,
+      url,
+      signal: controller.signal,
+    }).finally(() => {
+      if (this.sidecarProbes.get(key) === controller) {
+        this.sidecarProbes.delete(key);
+      }
+    });
+  }
+
+  private stopSidecarProbe(sessionId: string, sidecarName: string): void {
+    const key = sidecarProbeKey(sessionId, sidecarName);
+    const controller = this.sidecarProbes.get(key);
+    if (!controller) return;
+    controller.abort();
+    this.sidecarProbes.delete(key);
+  }
+
+  private async publishSidecarLinkWhenReady(args: {
+    sessionId: string;
+    sidecarName: string;
+    reservedPort: number;
+    url: string;
+    signal: AbortSignal;
+  }): Promise<void> {
+    const { sessionId, sidecarName, reservedPort, url, signal } = args;
+    const targetUrl = `http://127.0.0.1:${reservedPort}/`;
+    const linkUrl = `${url}:${reservedPort}`;
+    for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
+      if (signal.aborted) return;
+      const perRequest = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
+      ]);
+      let responded: boolean;
+      try {
+        await fetch(targetUrl, { signal: perRequest, redirect: "manual" });
+        responded = true;
+      } catch {
+        responded = false;
+      }
+      if (responded) {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest) return;
+        if (isTerminalSessionStatus(latest.status)) return;
+        if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+        const slots = applySlotsUpdate(latest.slots, {
+          links: [{ label: sidecarName, url: linkUrl }],
+          unlinkLabels: [],
+        });
+        const updated: SessionRecord = slots
+          ? { ...latest, slots }
+          : (() => {
+              const { slots: _drop, ...rest } = latest;
+              return rest;
+            })();
+        writeSession(this.config.dataDir, updated);
+        await syncTmuxStatus(updated.tmuxSession, updated.slots);
+        this.logEvent("session.sidecar.link.published", {
+          level: "info",
+          sessionId,
+          projectId: latest.project,
+          message: `Published sidecar link ${sidecarName} for ${sessionId}`,
+          details: { sidecarName, url: linkUrl },
+        });
+        return;
+      }
+      await sleep(SIDECAR_PROBE_INTERVAL_MS);
+    }
+    this.logEvent("session.sidecar.link.timeout", {
+      level: "warn",
+      sessionId,
+      message: `Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`,
+      details: { sidecarName, reservedPort },
+    });
   }
 
   private async resolveCleanupContext(session: SessionRecord): Promise<SessionCleanupContext> {
@@ -1632,7 +1736,7 @@ export class SessionService {
       });
 
       stage = "tmux.status";
-      await syncTmuxStatus(tmuxSession, runningRecord.slots);
+      await syncTmuxStatus(tmuxSession, deriveSessionSlots(runningRecord));
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers);
       this.logEvent("session.spawn.ready", {
@@ -1689,6 +1793,7 @@ export class SessionService {
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
+          this.maybeStartSidecarUrlProbe(sessionId, name, sidecar, persistedRecord);
         } catch (sidecarError) {
           const sidecarMessage =
             sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
@@ -2155,7 +2260,7 @@ export class SessionService {
       });
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
-      await syncTmuxStatus(sessionId, runningRecord.slots);
+      await syncTmuxStatus(sessionId, deriveSessionSlots(runningRecord));
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
       await waitForTmuxReady(sessionId, launchPlan.readyMarkers);
       this.logEvent("session.spawn.ready", {
@@ -2546,28 +2651,59 @@ export class SessionService {
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const slots = applySlotsUpdate(session.slots, request);
+    const session = currentSession;
+    const normalized = normalizeSlotsUpdate(request);
+    const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
+    const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
+    const genericLinks = normalized.links.filter(
+      (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
+    );
+    const genericUnlinks = normalized.unlinkLabels;
+    const hasGenericChanges =
+      normalized.title !== undefined ||
+      normalized.clearTitle ||
+      genericLinks.length > 0 ||
+      genericUnlinks.length > 0;
+    const slots = hasGenericChanges
+      ? applySlotsUpdate(session.slots, {
+          ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+          ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
+          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
+        })
+      : session.slots;
     const updated: SessionRecord = {
       ...session,
       ...(slots ? { slots } : {}),
+      ...(nativePr
+        ? { pr: nativePr }
+        : normalized.unlinkLabels.includes("pr")
+          ? {}
+          : session.pr
+            ? { pr: session.pr }
+            : {}),
     };
     if (!slots) {
       delete updated.slots;
     }
+    if (prLink === undefined && normalized.unlinkLabels.includes("pr")) {
+      delete updated.pr;
+    }
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    const displaySlots = deriveSessionSlots(updated);
+    await syncTmuxStatus(updated.tmuxSession, displaySlots);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Updated session slots for ${sessionId}`,
       details: {
-        title: updated.slots?.title ?? null,
-        linkCount: updated.slots?.links.length ?? 0,
+        title: displaySlots?.title ?? null,
+        linkCount: displaySlots?.links.length ?? 0,
       },
     });
     return this.enrich(updated);
@@ -2640,6 +2776,7 @@ export class SessionService {
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
+    this.maybeStartSidecarUrlProbe(sessionId, sidecarName, sidecar, updated);
     return this.enrich(updated);
   }
 
@@ -2661,13 +2798,28 @@ export class SessionService {
       return this.enrich(session);
     }
 
+    this.stopSidecarProbe(sessionId, sidecarName);
     await killSidecarTmux(sessionId, sidecarName);
 
+    const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
+    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
+    const baseRecord: SessionRecord =
+      nextSlots !== afterKill.slots
+        ? nextSlots
+          ? { ...afterKill, slots: nextSlots }
+          : (() => {
+              const { slots: _drop, ...rest } = afterKill;
+              return rest;
+            })()
+        : afterKill;
     const updated: SessionRecord = {
-      ...session,
+      ...baseRecord,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
+    if (nextSlots !== afterKill.slots) {
+      await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    }
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -2684,6 +2836,21 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
+      this.stopSidecarProbe(session.id, scName);
+      const record = readSession(this.config.dataDir, session.id);
+      if (record) {
+        const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
+        if (next !== record.slots) {
+          const updated: SessionRecord = next
+            ? { ...record, slots: next }
+            : (() => {
+                const { slots: _drop, ...rest } = record;
+                return rest;
+              })();
+          writeSession(this.config.dataDir, updated);
+          await syncTmuxStatus(updated.tmuxSession, updated.slots);
+        }
+      }
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -2977,7 +3144,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
@@ -3012,7 +3179,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers);
       if (!(await isProcessRunningInTmux(session.tmuxSession, session.agent))) {
         throw new Error(`Agent ${session.agent} exited before recovery became ready`, {
@@ -3151,7 +3318,7 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await syncTmuxStatus(current.tmuxSession, current.slots);
+      await syncTmuxStatus(current.tmuxSession, deriveSessionSlots(current));
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers);
       if (!(await isProcessRunningInTmux(current.tmuxSession, current.agent))) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
@@ -3832,10 +3999,12 @@ export class SessionService {
     }
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
+    const displaySlots = deriveSessionSlots(session);
 
     return {
       ...session,
       planMode: resolvePlanMode(session),
+      ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,

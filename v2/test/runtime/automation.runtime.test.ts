@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readEventLog } from "../../src/event-log.js";
@@ -548,14 +548,14 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
     },
   );
 
-  it("delivers github:ci_failed after the worktree branch diverges from persisted session metadata", async () => {
+  it("keeps github:ci_failed bound to the persisted PR after the worktree branch drifts", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
-    const sessionPrefix = `rt-gh-ci-branch-drift-${port}`;
+    const sessionPrefix = `rt-gh-ci-drift-${port}`;
     activeContexts.push({ context, sessionPrefix });
     await syncAutomationTmuxEnvironment(context);
     const configPath = await context.writeConfig(
-      "github-ci-branch-drift.yaml",
+      "github-ci-drift.yaml",
       automationConfig(
         context,
         sessionPrefix,
@@ -577,10 +577,19 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
     await context.writeGhState({
       prsByBranch: {
-        "feature-runtime-ci-renamed": {
-          number: 43,
-          title: "Keep CI green after branch rename",
-          url: "https://github.com/acme/api/pull/43",
+        "feature-runtime-ci": {
+          number: 42,
+          title: "Keep CI green",
+          url: "https://github.com/acme/api/pull/42",
+          repo: "acme/api",
+          reviewDecision: null,
+        },
+      },
+      prsByNumber: {
+        "42": {
+          number: 42,
+          title: "Keep CI green",
+          url: "https://github.com/acme/api/pull/42",
           repo: "acme/api",
           reviewDecision: null,
         },
@@ -596,8 +605,9 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
         prompt: "initial github ci runtime prompt",
       });
 
-      await execFileAsync("git", ["checkout", "-b", "feature-runtime-ci-renamed"], {
-        cwd: session.worktreePath,
+      await pollUntil(async () => captureTmuxPane(session.id), {
+        timeoutMs: 15_000,
+        accept: (value) => value.includes("initial github ci runtime prompt"),
       });
 
       const config = loadProjectConfig(configPath, loadConfig(configPath));
@@ -631,20 +641,33 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
       });
 
       try {
+        const sessionPath = join(context.dataDir, "sessions", "api", `${session.id}.json`);
+        await pollUntil(
+          async () =>
+            JSON.parse(readFileSync(sessionPath, "utf-8")) as { pr?: { number?: number } },
+          {
+            timeoutMs: 20_000,
+            accept: (value) => value.pr?.number === 42,
+          },
+        );
+
+        await execFileAsync("git", ["-C", session.worktreePath, "switch", "-c", "feature-drifted"]);
+
         await context.writeGhState({
-          prsByBranch: {
-            "feature-runtime-ci-renamed": {
-              number: 43,
-              title: "Keep CI green after branch rename",
-              url: "https://github.com/acme/api/pull/43",
+          prsByBranch: {},
+          prsByNumber: {
+            "42": {
+              number: 42,
+              title: "Keep CI green",
+              url: "https://github.com/acme/api/pull/42",
               repo: "acme/api",
               reviewDecision: null,
             },
           },
           checksByPr: {
-            "43": [
+            "42": [
               {
-                name: "runtime suite",
+                name: "test suite",
                 state: "FAILURE",
               },
             ],
@@ -653,11 +676,11 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
 
         const pane = await pollUntil(async () => captureTmuxPane(session.id), {
           timeoutMs: 20_000,
-          accept: (value) => value.includes("CI is failing: runtime suite."),
+          accept: (value) => value.includes("CI is failing: test suite."),
         });
 
-        expect(pane).toContain('GitHub updates on PR #43 "Keep CI green after branch rename":');
-        expect(pane).toContain("CI is failing: runtime suite.");
+        expect(pane).toContain('GitHub updates on PR #42 "Keep CI green":');
+        expect(pane).toContain("CI is failing: test suite.");
       } finally {
         abortController.abort();
         handle.stop();

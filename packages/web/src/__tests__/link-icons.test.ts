@@ -10,10 +10,16 @@ import {
 import type { SpurSessionLink } from "@/lib/types";
 
 const mockFetch = vi.fn<typeof fetch>();
+let resetCounter = 0;
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.useFakeTimers();
   vi.stubGlobal("fetch", mockFetch);
+  mockFetch.mockReset();
+  mockFetch.mockResolvedValueOnce(
+    jsonResponse({ state: "open", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
+  );
+  await fetchPrInfo(`https://github.com/org/repo/pull/reset-${resetCounter++}`);
   mockFetch.mockReset();
 });
 
@@ -154,6 +160,90 @@ describe("fetchPrInfo", () => {
     const result = await fetchPrInfo("https://github.com/org/repo/pull/8");
     expect(result.totalThreads).toBe(0);
     expect(result.unresolvedThreads).toBe(0);
+  });
+
+  it("returns EMPTY_PR_INFO and clears Git error for soft missing PR payloads", async () => {
+    const { result: gitError } = renderHook(() => useGitError());
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    );
+
+    await act(async () => {
+      const result = await fetchPrInfo("https://github.com/org/repo/pull/soft-missing");
+      expect(result).toEqual({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+    });
+
+    expect(gitError.current).toBeNull();
+  });
+
+  it("reads error from a successful payload and sets Git error", async () => {
+    const { result: gitError } = renderHook(() => useGitError());
+
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+        error: "GitHub API 503",
+      }),
+    );
+
+    await act(async () => {
+      const result = await fetchPrInfo("https://github.com/org/repo/pull/soft-error");
+      expect(result.state).toBeNull();
+    });
+
+    expect(gitError.current).toBe("GitHub API 503");
+  });
+
+  it("deduplicates concurrent in-flight requests for the same PR", async () => {
+    let resolveFetch!: (value: Response) => void;
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    mockFetch.mockReturnValueOnce(fetchPromise);
+
+    const url = "https://github.com/org/repo/pull/in-flight-dedupe";
+    const first = fetchPrInfo(url);
+    const second = fetchPrInfo(url);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      jsonResponse({
+        state: "open",
+        ciStatus: null,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      }),
+    );
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      {
+        state: "open",
+        ciStatus: null,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      },
+      {
+        state: "open",
+        ciStatus: null,
+        totalThreads: 1,
+        unresolvedThreads: 0,
+      },
+    ]);
   });
 });
 

@@ -1212,34 +1212,53 @@ describe("Spur web API routes", () => {
       expect(payload.unresolvedThreads).toBe(2);
     });
 
-    it("returns 404 when PR is not found in GraphQL response", async () => {
+    it("returns an empty payload when PR is not found in GraphQL response", async () => {
       fetchMock.mockResolvedValue(ghOk({ data: { repository: { pullRequest: null } } }));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as {
+        state: null;
+        ciStatus: null;
+        totalThreads: number;
+        unresolvedThreads: number;
+        error?: string;
+      };
 
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(200);
+      expect(payload).toEqual({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
     });
 
-    it("returns 502 when GitHub API responds with a server error", async () => {
+    it("returns an error payload when GitHub API responds with a server error", async () => {
       fetchMock.mockResolvedValue(ghErr(503));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("GitHub API 503");
     });
 
-    it("returns 502 on network-level error", async () => {
+    it("returns an error payload on network-level error", async () => {
       fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("ECONNREFUSED");
     });
 
     it("returns cached response on second identical request", async () => {
@@ -1255,8 +1274,46 @@ describe("Spur web API routes", () => {
       expect(response2.status).toBe(200);
     });
 
+    it("preserves upstream error details from cache on repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const url = nextPrUrl();
+      const response1 = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const response2 = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const payload1 = (await response1.json()) as { error: string };
+      const payload2 = (await response2.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response1.status).toBe(200);
+      expect(response2.status).toBe(200);
+      expect(payload1.error).toBe("GitHub API 503");
+      expect(payload2.error).toBe("GitHub API 503");
+    });
+
+    it("returns GraphQL errors as a soft error payload", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "Resource not accessible by integration" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: null; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("Resource not accessible by integration");
+    });
+
     // Rate-limit tests must run last: they set module-level rateLimitResetAt
-    it("returns 429 while rate-limit window is active", async () => {
+    it("returns a soft error while rate-limit window is active", async () => {
       const resetAt = Math.floor((Date.now() + 30_000) / 1000);
       fetchMock.mockResolvedValueOnce({
         ok: false,
@@ -1273,9 +1330,12 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(429);
+      expect(response.status).toBe(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toContain("GitHub rate limit");
     });
   });
 });

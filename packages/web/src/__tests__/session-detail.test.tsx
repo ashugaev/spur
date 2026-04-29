@@ -718,7 +718,7 @@ describe("SessionDetail voice input", () => {
             ...sessionFixture(),
             sidecars: [{ name: "isolated-ui", alive: true }],
             slots: {
-              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
             },
           }),
           { status: 200 },
@@ -735,9 +735,38 @@ describe("SessionDetail voice input", () => {
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute(
         "href",
-        "http://openclaw-dev.tail90e846.ts.net:5601",
+        "http://example.com:5601",
       );
     });
+  });
+
+  it("does not render an Open link when no slot link matches the sidecar name", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-daemon", alive: true }],
+            slots: {
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("isolated-daemon")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Open" })).not.toBeInTheDocument();
   });
 
   it("keeps the start or stop sidecar action at the far right of the sidecar actions", async () => {
@@ -749,7 +778,7 @@ describe("SessionDetail voice input", () => {
             ...sessionFixture(),
             sidecars: [{ name: "isolated-ui", alive: true }],
             slots: {
-              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
             },
           }),
           { status: 200 },
@@ -1204,7 +1233,9 @@ describe("SessionDetail voice input", () => {
         body: JSON.stringify({ message: "Queued follow up", queue: true }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    });
   });
 
   it("sends immediately without queue when clicking Send now", async () => {

@@ -40,6 +40,18 @@ export interface FakeGhState {
       repo?: string;
     }
   >;
+  prsByNumber?: Record<
+    string,
+    {
+      number: number;
+      title: string;
+      url: string;
+      reviewDecision?: string | null;
+      mergeable?: string | null;
+      mergeStateStatus?: string | null;
+      repo?: string;
+    }
+  >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
   commentsByPr?: Record<
     string,
@@ -347,6 +359,19 @@ if (args[0] === "pr" && args[1] === "list") {
 
 if (args[0] === "pr" && args[1] === "checks") {
   print(state.checksByPr?.[String(args[2] || "")] || []);
+  process.exit(0);
+}
+
+if (args[0] === "pr" && args[1] === "view") {
+  const prNumber = String(args[2] || "");
+  const pr =
+    state.prsByNumber?.[prNumber] ||
+    Object.values(state.prsByBranch || {}).find((value) => String(value?.number || "") === prNumber);
+  if (!pr) {
+    process.stderr.write("unknown fake gh pr view target: " + prNumber + "\\n");
+    process.exit(1);
+  }
+  print(pr);
   process.exit(0);
 }
 
