@@ -1038,7 +1038,9 @@ describe("Spur web API routes", () => {
     it("returns a healthy payload with the request timestamp", async () => {
       fetchMock.mockResolvedValue(ghOk());
 
-      const response = await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
       const payload = (await response.json()) as { ok: boolean; requestedAt: string };
 
       expect(response.status).toBe(200);
@@ -1053,8 +1055,14 @@ describe("Spur web API routes", () => {
     it("returns an error payload when GitHub responds with an error", async () => {
       fetchMock.mockResolvedValue(ghErr(503));
 
-      const response = await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
-      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: string };
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: string;
+      };
 
       expect(response.status).toBe(200);
       expect(payload.ok).toBe(false);
@@ -1102,7 +1110,9 @@ describe("Spur web API routes", () => {
     it("returns a network error payload when the request throws", async () => {
       fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
 
-      const response = await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
       const payload = (await response.json()) as { ok: boolean; error: string };
 
       expect(response.status).toBe(200);
@@ -1114,7 +1124,9 @@ describe("Spur web API routes", () => {
       fetchMock.mockResolvedValue(ghOk());
 
       await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
-      const response = await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
       const payload = (await response.json()) as { ok: boolean };
 
       expect(fetchMock).toHaveBeenCalledTimes(1);

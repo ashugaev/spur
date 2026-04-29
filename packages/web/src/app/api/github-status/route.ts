@@ -76,9 +76,9 @@ export async function GET() {
       const error =
         response.status === 401
           ? "GitHub auth failed"
-          : getGitHubRateLimitError() ??
+          : (getGitHubRateLimitError() ??
             message ??
-            (response.status === 403 ? "GitHub auth failed" : `GitHub API ${response.status}`);
+            (response.status === 403 ? "GitHub auth failed" : `GitHub API ${response.status}`));
       const payload = errorResponse(error, requestedAt);
       writeGitHubStatusCache({ response: payload, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(payload);

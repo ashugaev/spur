@@ -1173,7 +1173,9 @@ describe("StatusBar", () => {
         return new Response(JSON.stringify(resources));
       }
       if (url === "/api/github-status") {
-        return new Response(JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+        return new Response(
+          JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+        );
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });

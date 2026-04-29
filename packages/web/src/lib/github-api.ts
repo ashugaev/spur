@@ -42,7 +42,8 @@ export function ghHeaders(): Record<string, string> {
 export function handleGitHubRateLimit(response: Response): void {
   const remaining = response.headers.get("x-ratelimit-remaining");
   const isRateLimited =
-    response.status === 429 || ((response.status === 403 || response.status === 401) && remaining === "0");
+    response.status === 429 ||
+    ((response.status === 403 || response.status === 401) && remaining === "0");
   if (!isRateLimited) return;
 
   const reset = response.headers.get("x-ratelimit-reset");

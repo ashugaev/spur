@@ -1,11 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  fetchPrInfo,
-  extractLinkId,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons.js";
+import { fetchPrInfo, extractLinkId, prStateColor, usePrInfo } from "@/lib/link-icons.js";
 import type { SpurSessionLink } from "@/lib/types";
 
 const mockFetch = vi.fn<typeof fetch>();

@@ -206,7 +206,7 @@ export function StatusBar() {
         ? "Warning"
         : onlineLevel === "ready"
           ? "Healthy"
-        : "Unavailable";
+          : "Unavailable";
   const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
   const githubOpen = !githubDismissed && (githubHovered || githubPinned);
 

@@ -635,7 +635,9 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText("GitHub API 503")).toBeVisible();
   });
 
-  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({ page }) => {
+  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, {
