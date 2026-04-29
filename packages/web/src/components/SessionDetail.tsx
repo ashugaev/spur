@@ -842,15 +842,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const sidecarUiLink = useMemo(
-    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+  const sidecarLinkLabels = useMemo(
+    () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
     [session],
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
   const visibleLinks = useMemo(
-    () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
-    [session],
+    () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
+    [session, sidecarLinkLabels],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1409,54 +1409,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
                 <div className="space-y-2">
-                  {session.sidecars.map((sc) => (
-                    <div
-                      key={sc.name}
-                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                        />
-                        <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                        <span className="text-[var(--color-text-tertiary)]">
-                          {sc.alive ? "alive" : "offline"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {sc.alive && canAttach ? (
+                  {session.sidecars.map((sc) => {
+                    const sidecarOpenUrl = sc.alive
+                      ? session.links.find((link) => link.label === sc.name)?.url
+                      : undefined;
+                    return (
+                      <div
+                        key={sc.name}
+                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                          />
+                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                          <span className="text-[var(--color-text-tertiary)]">
+                            {sc.alive ? "alive" : "offline"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {sc.alive && canAttach ? (
+                            <button
+                              type="button"
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                            >
+                              Terminal
+                            </button>
+                          ) : null}
+                          {sidecarOpenUrl ? (
+                            <a
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={sidecarOpenUrl}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : null}
                           <button
+                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyAction !== null}
+                            onClick={() =>
+                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                            }
                             type="button"
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                           >
-                            Terminal
+                            {sc.alive ? <StopIcon /> : <PlayIcon />}
                           </button>
-                        ) : null}
-                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
-                          <a
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                            href={sidecarUiLink}
-                            rel="noreferrer"
-                            target="_blank"
-                          >
-                            Open
-                          </a>
-                        ) : null}
-                        <button
-                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={busyAction !== null}
-                          onClick={() =>
-                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                          }
-                          type="button"
-                        >
-                          {sc.alive ? <StopIcon /> : <PlayIcon />}
-                        </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             ) : null}
