@@ -3985,7 +3985,7 @@ export class SessionService {
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
     let runtime = await this.readRuntimeSnapshot(session);
     let effectiveSession = session;
-    let state = statusFallbackState(effectiveSession.status);
+    let state: SessionState;
     let source: StateSource = "status";
 
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
