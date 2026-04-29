@@ -3,12 +3,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import {
-  type CiStatus,
-  type PrInfo,
-  type PrState,
-  isPrInfoShape,
-} from "@/lib/pr-status-shape";
+import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
 
 interface PrStatusResponse extends PrInfo {
   error?: string;
