@@ -187,7 +187,7 @@ async function runRestoreScenario(args: {
       accept: (value) =>
         value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === (stopMode === "pause" ? "paused" : "running"),
+        value[0]?.status === (stopMode === "pause" ? "paused" : "stopped"),
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);

@@ -185,6 +185,17 @@ interface SessionCleanupContext {
   repoPath: string;
   symlinks: string[];
 }
+interface SessionRuntimeSnapshot {
+  runtimeAlive: boolean;
+  processAlive: boolean;
+  tmuxActivityAt: Date | null;
+}
+interface SessionStateResult {
+  session: SessionRecord;
+  runtime: SessionRuntimeSnapshot;
+  state: SessionState;
+  source: StateSource;
+}
 
 function isTerminalSessionStatus(status: SessionStatus): status is "completed" | "killed" {
   return status === "completed" || status === "killed";
@@ -199,13 +210,13 @@ function sidecarProbeKey(sessionId: string, sidecarName: string): string {
 }
 
 function isRestorableStatus(status: SessionStatus): boolean {
-  return status === "running" || status === "paused";
+  return status === "running" || status === "stopped" || status === "paused";
 }
 
 function statusFallbackState(status: SessionStatus): SessionState {
   if (status === "killed") return "killed";
   if (status === "errored") return "error";
-  if (status === "paused" || status === "completed") return "stopped";
+  if (status === "stopped" || status === "paused" || status === "completed") return "stopped";
   return "working"; // running, spawning
 }
 
@@ -1311,6 +1322,26 @@ export class SessionService {
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
+  }
+
+  async reconcileStoppedSessions(): Promise<{ scanned: number; alive: number; drifted: number }> {
+    const candidates = listSessions(this.config.dataDir).filter(
+      (session) => session.status === "running" || session.status === "spawning",
+    );
+    let alive = 0;
+    let drifted = 0;
+
+    for (const session of candidates) {
+      const runtime = await this.readRuntimeSnapshot(session);
+      const reconciled = await this.reconcileUnexpectedStop(session, runtime, "boot");
+      if (reconciled.session.status === "stopped") {
+        drifted += 1;
+      } else {
+        alive += 1;
+      }
+    }
+
+    return { scanned: candidates.length, alive, drifted };
   }
 
   async listServices(sessionId: string): Promise<ServiceInstanceView[]> {
@@ -3877,84 +3908,179 @@ export class SessionService {
     };
   }
 
-  private async enrich(session: SessionRecord): Promise<SessionView> {
-    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+  private async readRuntimeSnapshot(
+    session: Pick<SessionRecord, "tmuxSession" | "agent">,
+  ): Promise<SessionRuntimeSnapshot> {
     const runtimeAlive = await tmuxSessionExists(session.tmuxSession);
-    const updatedAt = new Date(session.updatedAt);
     const tmuxActivityAt = runtimeAlive ? await getTmuxSessionActivity(session.tmuxSession) : null;
     const processAlive = runtimeAlive
       ? await isProcessRunningInTmux(session.tmuxSession, session.agent)
       : false;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
+    return {
+      runtimeAlive,
+      processAlive,
+      tmuxActivityAt,
+    };
+  }
 
-    let state: SessionState;
-    let stateSource: StateSource = "status";
-    if (session.status === "killed") {
-      state = "killed";
-    } else if (session.status === "paused" || session.status === "completed") {
-      state = "stopped";
-    } else if (session.status === "errored") {
-      state = "error";
-    } else if (session.status === "spawning") {
+  private async reconcileUnexpectedStop(
+    session: SessionRecord,
+    runtime: SessionRuntimeSnapshot,
+    reason: "boot" | "runtime_check",
+  ): Promise<{ session: SessionRecord; runtime: SessionRuntimeSnapshot }> {
+    if (session.status !== "running" && session.status !== "spawning") {
+      return { session, runtime };
+    }
+    if (reason === "runtime_check" && session.status === "spawning") {
+      return { session, runtime };
+    }
+    if (runtime.runtimeAlive && runtime.processAlive) {
+      return { session, runtime };
+    }
+    if (!(await this.confirmAgentExited(session))) {
+      return {
+        session,
+        runtime: await this.readRuntimeSnapshot(session),
+      };
+    }
+
+    const latest = readSession(this.config.dataDir, session.id);
+    if (!latest) {
+      return { session, runtime };
+    }
+    if (latest.status !== session.status) {
+      return { session: latest, runtime };
+    }
+
+    const updated: SessionRecord = {
+      ...latest,
+      status: "stopped",
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    this.stateCache.delete(session.id);
+    this.logEvent(reason === "boot" ? "session.reconcile.drift" : "session.runtime.stopped", {
+      level: reason === "boot" ? "warn" : "info",
+      sessionId: session.id,
+      projectId: session.project,
+      message:
+        reason === "boot"
+          ? `Drift: ${session.id} status=${session.status} but runtime is no longer alive`
+          : `Marked ${session.id} stopped after runtime exit`,
+      details: {
+        previousStatus: session.status,
+        tmuxSession: session.tmuxSession,
+        agent: session.agent,
+        runtimeAlive: runtime.runtimeAlive,
+        processAlive: runtime.processAlive,
+        reason,
+      },
+    });
+    return {
+      session: updated,
+      runtime,
+    };
+  }
+
+  private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
+    let runtime = await this.readRuntimeSnapshot(session);
+    let effectiveSession = session;
+    let state = statusFallbackState(effectiveSession.status);
+    let source: StateSource = "status";
+
+    if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
+      const reconciled = await this.reconcileUnexpectedStop(
+        effectiveSession,
+        runtime,
+        "runtime_check",
+      );
+      effectiveSession = reconciled.session;
+      runtime = reconciled.runtime;
+    }
+
+    if (
+      effectiveSession.status === "killed" ||
+      effectiveSession.status === "stopped" ||
+      effectiveSession.status === "paused" ||
+      effectiveSession.status === "completed" ||
+      effectiveSession.status === "errored"
+    ) {
+      state = statusFallbackState(effectiveSession.status);
+    } else if (effectiveSession.status === "spawning") {
       state = "working";
-    } else if (!runtimeAlive || !processAlive) {
+    } else if (!runtime.runtimeAlive || !runtime.processAlive) {
       state = "stopped";
-    } else if (session.agent === "claude") {
-      // Claude: JSONL-based state classification.
+    } else if (effectiveSession.agent === "claude") {
       const jsonlResult = await readClaudeJsonlState(
-        session.worktreePath,
-        this.claudeJsonlReaders.get(session.id),
+        effectiveSession.worktreePath,
+        this.claudeJsonlReaders.get(effectiveSession.id),
       );
       if (jsonlResult) {
-        this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
+        this.claudeJsonlReaders.set(effectiveSession.id, jsonlResult.reader);
         state = jsonlResult.state;
-        stateSource = "jsonl";
+        source = "jsonl";
         this.logEvent("session.state.classified", {
           level: "info",
-          sessionId: session.id,
-          projectId: session.project,
+          sessionId: effectiveSession.id,
+          projectId: effectiveSession.project,
           message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
         });
       } else {
-        // No JSONL file yet (agent just started). Default to working.
         state = "working";
         this.logEvent("session.state.classified", {
           level: "info",
-          sessionId: session.id,
-          projectId: session.project,
+          sessionId: effectiveSession.id,
+          projectId: effectiveSession.project,
           message: `State: ${state} (no jsonl)`,
         });
       }
     } else {
-      // Codex: hook-primary classification with structured rollout JSONL fallback.
-      const codexState = await this.classifyCodexState(session.id);
+      const codexState = await this.classifyCodexState(effectiveSession.id);
       state = codexState.state;
-      stateSource = codexState.source;
-      if (stateSource === "jsonl" && codexState.rolloutState) {
+      source = codexState.source;
+      if (source === "jsonl" && codexState.rolloutState) {
         this.logEvent("session.state.classified", {
           level: "info",
-          sessionId: session.id,
-          projectId: session.project,
+          sessionId: effectiveSession.id,
+          projectId: effectiveSession.project,
           message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
         });
       } else if (codexState.hookState) {
         const hookState = codexState.hookState;
         this.logEvent("session.state.classified", {
           level: "info",
-          sessionId: session.id,
-          projectId: session.project,
+          sessionId: effectiveSession.id,
+          projectId: effectiveSession.project,
           message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
         });
       } else {
         state = "waiting";
         this.logEvent("session.state.classified", {
           level: "info",
-          sessionId: session.id,
-          projectId: session.project,
+          sessionId: effectiveSession.id,
+          projectId: effectiveSession.project,
           message: `State: ${state} (no hook)`,
         });
       }
     }
+
+    return {
+      session: effectiveSession,
+      runtime,
+      state,
+      source,
+    };
+  }
+
+  private async enrich(session: SessionRecord): Promise<SessionView> {
+    const classified = await this.classifySessionRecord(session);
+    session = classified.session;
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const updatedAt = new Date(session.updatedAt);
+    const tmuxActivityAt = classified.runtime.tmuxActivityAt;
+    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
+    let state = classified.state;
+    const stateSource = classified.source;
 
     // State debounce: suppress single-poll flicker for running sessions.
     const cached = this.stateCache.get(session.id);
@@ -4002,7 +4128,7 @@ export class SessionService {
       ...session,
       planMode: resolvePlanMode(session),
       ...(displaySlots ? { slots: displaySlots } : {}),
-      runtimeAlive,
+      runtimeAlive: classified.runtime.runtimeAlive,
       workspaceExists: workspacePresent,
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
@@ -4015,22 +4141,8 @@ export class SessionService {
     };
   }
 
-  private async classifySessionState(
-    session: Pick<SessionRecord, "id" | "agent" | "tmuxSession" | "worktreePath">,
-  ): Promise<SessionState> {
-    if (session.agent === "claude") {
-      const jsonlResult = await readClaudeJsonlState(
-        session.worktreePath,
-        this.claudeJsonlReaders.get(session.id),
-      );
-      if (jsonlResult) {
-        this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
-        return jsonlResult.state;
-      }
-      return "working";
-    }
-
-    return (await this.classifyCodexState(session.id)).state;
+  private async classifySessionState(session: SessionRecord): Promise<SessionState> {
+    return (await this.classifySessionRecord(session)).state;
   }
 }
 

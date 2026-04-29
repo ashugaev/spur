@@ -185,6 +185,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
     const view = await waitForState(port, session.id, "stopped");
     expect(view.state).toBe("stopped");
+    expect(view.status).toBe("stopped");
   });
 
   it("Claude: state history records transitions", async () => {
@@ -298,5 +299,6 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
     const view = await waitForState(port, session.id, "stopped");
     expect(view.state).toBe("stopped");
+    expect(view.status).toBe("stopped");
   });
 });
