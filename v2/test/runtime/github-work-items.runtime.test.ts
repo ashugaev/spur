@@ -259,10 +259,10 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
 
       try {
         // Wait for the work-item emit and first per-branch snapshot.
-        await pollUntil(
-          async () => events.some((event) => event.name === "github:work_item.new"),
-          { timeoutMs: 15_000, accept: Boolean },
-        );
+        await pollUntil(async () => events.some((event) => event.name === "github:work_item.new"), {
+          timeoutMs: 15_000,
+          accept: Boolean,
+        });
 
         // Now introduce a failing check so the next poll diff emits ci_failed.
         await context.writeGhState({
@@ -288,10 +288,10 @@ describe.skipIf(!tmuxOk)("github work-item runtime flow", () => {
           ],
         });
 
-        await pollUntil(
-          async () => events.some((event) => event.name === "github:ci_failed"),
-          { timeoutMs: 20_000, accept: Boolean },
-        );
+        await pollUntil(async () => events.some((event) => event.name === "github:ci_failed"), {
+          timeoutMs: 20_000,
+          accept: Boolean,
+        });
         expect(events.map((event) => event.name)).toEqual(
           expect.arrayContaining(["github:ci_failed", "github:work_item.new"]),
         );

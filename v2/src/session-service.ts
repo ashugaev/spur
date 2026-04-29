@@ -1633,9 +1633,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
-        ...(request.slots?.links?.length
-          ? { slots: { links: request.slots.links } }
-          : {}),
+        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;

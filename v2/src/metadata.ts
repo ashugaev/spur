@@ -27,11 +27,7 @@ function githubSnapshotDir(dataDir: string, projectId: string, sourceId: string)
   return join(dataDir, "source-state", "github", projectId, sourceId);
 }
 
-function workItemRegistryFilePath(
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
-): string {
+function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
