@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -103,19 +104,13 @@ function loadPersistedLastGood(): void {
   if (persistLoaded) return;
   persistLoaded = true;
   try {
-    const raw = readFileSync(persistFilePath(), "utf-8");
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return;
-    }
+    const parsed: unknown = JSON.parse(readFileSync(persistFilePath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return;
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (isLastGoodEntry(value)) lastGoodCache.set(key, value);
     }
   } catch {
-    // file missing or unreadable — silent
+    // file missing, unreadable, or malformed — silent
   }
 }
 
@@ -145,23 +140,20 @@ function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">)
   return entry;
 }
 
-function staleFromLastGood(key: string, error: string): PrStatusResponse | null {
-  const last = lastGoodCache.get(key);
-  if (!last) return null;
+function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
   return {
-    state: last.state,
-    ciStatus: last.ciStatus,
-    totalThreads: last.totalThreads,
-    unresolvedThreads: last.unresolvedThreads,
-    fetchedAt: last.fetchedAt,
-    stale: true,
-    error,
+    state: entry.state,
+    ciStatus: entry.ciStatus,
+    totalThreads: entry.totalThreads,
+    unresolvedThreads: entry.unresolvedThreads,
+    fetchedAt: entry.fetchedAt,
+    stale: false,
   };
 }
 
 function errorResponse(key: string, error: string): PrStatusResponse {
-  const stale = staleFromLastGood(key, error);
-  if (stale) return stale;
+  const last = lastGoodCache.get(key);
+  if (last) return { ...freshFromEntry(last), stale: true, error };
   return { ...EMPTY_PR_STATUS, stale: false, error };
 }
 
@@ -181,11 +173,7 @@ function resolveGhToken(): string | null {
   if (resolvedToken) return resolvedToken;
   // Fallback: read from gh CLI auth
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const cp = require("node:child_process") as {
-      execSync: (cmd: string, opts: { encoding: string }) => string;
-    };
-    resolvedToken = cp.execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
+    resolvedToken = execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
   } catch {
     resolvedToken = null;
   }
@@ -270,15 +258,8 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(response);
       }
       // Successful "no PR" — record empty as last-good
-      const entry = recordLastGood(cacheKey, { ...EMPTY_PR_STATUS });
-      const response: PrStatusResponse = {
-        state: entry.state,
-        ciStatus: entry.ciStatus,
-        totalThreads: entry.totalThreads,
-        unresolvedThreads: entry.unresolvedThreads,
-        fetchedAt: entry.fetchedAt,
-        stale: false,
-      };
+      const entry = recordLastGood(cacheKey, EMPTY_PR_STATUS);
+      const response = freshFromEntry(entry);
       cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
       return NextResponse.json(response);
     }
@@ -299,14 +280,7 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
     const entry = recordLastGood(cacheKey, { state, ciStatus, totalThreads, unresolvedThreads });
-    const response: PrStatusResponse = {
-      state,
-      ciStatus,
-      totalThreads,
-      unresolvedThreads,
-      fetchedAt: entry.fetchedAt,
-      stale: false,
-    };
+    const response = freshFromEntry(entry);
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);
   } catch (error) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
 
 export type PrState = "draft" | "open" | "merged" | "closed";
@@ -84,12 +84,7 @@ function hydratePrCacheFromStorage(): void {
   try {
     const raw = window.localStorage.getItem(PR_CACHE_STORAGE_KEY);
     if (!raw) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return;
-    }
+    const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return;
     for (const [url, value] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof value !== "object" || value === null) continue;
@@ -100,7 +95,7 @@ function hydratePrCacheFromStorage(): void {
       prCache.set(url, { data, fetchedAt });
     }
   } catch {
-    // ignore storage failures
+    // storage unavailable or malformed JSON — silent
   }
 }
 
@@ -209,33 +204,26 @@ export function extractLinkId(link: SpurSessionLink): string {
 }
 
 export function usePrInfo(url: string | undefined): PrInfo {
-  const [info, setInfo] = useState<PrInfo>(() => {
-    if (!url) return EMPTY_PR_INFO;
-    const cached = prCache.get(url);
-    return cached ? cached.data : EMPTY_PR_INFO;
-  });
-
-  const doFetch = useCallback(async (target: string) => {
-    const result = await fetchPrInfo(target);
-    setPrCache(target, result);
-    setInfo(result);
-  }, []);
+  const [info, setInfo] = useState<PrInfo>(() => (url ? cachedOrEmpty(url) : EMPTY_PR_INFO));
 
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
 
-    const run = () => {
-      if (!cancelled) void doFetch(url);
+    const run = async () => {
+      const result = await fetchPrInfo(url);
+      if (cancelled) return;
+      setPrCache(url, result);
+      setInfo(result);
     };
 
-    run();
-    const timer = setInterval(run, POLL_MS);
+    void run();
+    const timer = setInterval(() => void run(), POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [url, doFetch]);
+  }, [url]);
 
   return info;
 }
