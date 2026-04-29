@@ -174,11 +174,19 @@ export async function mockSessions(
     });
   });
 
+  await mockGitHubStatus(page, DEFAULT_GITHUB_STATUS);
+}
+
+export async function mockGitHubStatus(
+  page: Page,
+  body: Record<string, unknown>,
+  options?: { status?: number },
+): Promise<void> {
   await page.route("/api/github-status", (route) => {
     void route.fulfill({
-      status: 200,
+      status: options?.status ?? 200,
       contentType: "application/json",
-      body: JSON.stringify(DEFAULT_GITHUB_STATUS),
+      body: JSON.stringify(body),
     });
   });
 }

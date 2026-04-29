@@ -98,9 +98,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
 - Footer shows a separate GitHub connection indicator that is independent from PR status rows
+- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
 - Healthy GitHub status renders as a green check next to the GitHub icon
-- Hovering or focusing the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
 - GitHub connection/auth/API failures render the error text directly in the footer
+- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
 
 ### D6c: Footer resource metrics
 

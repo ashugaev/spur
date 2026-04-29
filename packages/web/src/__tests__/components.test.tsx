@@ -1306,6 +1306,43 @@ describe("StatusBar", () => {
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
+  it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    fireEvent.click(githubStatus);
+    fireEvent.mouseLeave(githubStatus);
+
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+
+    fireEvent.click(githubStatus);
+
+    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
+  });
+
+  it("shows the temporary checking state before the GitHub request resolves", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(screen.getByText("Checking")).toBeInTheDocument();
+  });
+
   it("shows the GitHub error text in the footer when the health check fails", async () => {
     mockStatusBarFetch({
       resources: { available: false, daemonAlive: true },
@@ -1315,5 +1352,22 @@ describe("StatusBar", () => {
     render(<StatusBar />);
 
     expect(await screen.findByText("GitHub API 503")).toBeInTheDocument();
+  });
+
+  it("shows a synthesized footer error when the GitHub status endpoint returns a non-200 response", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(await screen.findByText("GitHub status unavailable (503)")).toBeInTheDocument();
   });
 });

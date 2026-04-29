@@ -8,6 +8,7 @@ import {
   makeWaitingSession,
   makeSessionWithPR,
   makeSessionWithTracker,
+  mockGitHubStatus,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -589,14 +590,8 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     page,
   }) => {
     await mockSessions(page, []);
-    await page.unroute("**/api/github-status");
-    await page.route("**/api/github-status", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
-      });
-    });
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
     await page.goto("/");
 
     const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
@@ -607,19 +602,56 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText(/Last request:/)).toBeVisible();
   });
 
+  test("footer keeps the GitHub tooltip pinned after clicking the healthy icon", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+    await expect(page.getByText(/Last request:/)).not.toBeVisible();
+  });
+
   test("footer shows the GitHub error text when the health check fails", async ({ page }) => {
     await mockSessions(page, []);
-    await page.unroute("**/api/github-status");
-    await page.route("**/api/github-status", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" }),
-      });
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub API 503",
+      requestedAt: "2026-04-28T10:00:00.000Z",
     });
     await page.goto("/");
 
     await expect(page.getByText("GitHub API 503")).toBeVisible();
+  });
+
+  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub auth unavailable",
+      requestedAt: null,
+    });
+    await page.goto("/");
+
+    await expect(page.getByText("GitHub auth unavailable")).toBeVisible();
+
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { error: "ignored" }, { status: 503 });
+    await page.reload();
+
+    await expect(page.getByText("GitHub status unavailable (503)")).toBeVisible();
   });
 
   test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
@@ -760,6 +792,21 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("System")).toBeVisible();
     await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap on the GitHub icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitHub connection healthy" }).tap();
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitHub")).not.toBeVisible();
   });
 });
 

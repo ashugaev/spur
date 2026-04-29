@@ -192,7 +192,11 @@ export function StatusBar() {
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
   const [onlineDismissed, setOnlineDismissed] = useState(false);
+  const [githubHovered, setGitHubHovered] = useState(false);
+  const [githubPinned, setGitHubPinned] = useState(false);
+  const [githubDismissed, setGitHubDismissed] = useState(false);
   const onlineContainerRef = useRef<HTMLDivElement | null>(null);
+  const githubContainerRef = useRef<HTMLDivElement | null>(null);
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
   const onlineLabel =
@@ -202,8 +206,9 @@ export function StatusBar() {
         ? "Warning"
         : onlineLevel === "ready"
           ? "Healthy"
-          : "Unavailable";
+        : "Unavailable";
   const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
+  const githubOpen = !githubDismissed && (githubHovered || githubPinned);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -225,6 +230,27 @@ export function StatusBar() {
       document.removeEventListener("pointerdown", onPointerDown);
     };
   }, [onlineOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !githubOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (githubContainerRef.current?.contains(target)) return;
+      setGitHubDismissed(true);
+      setGitHubPinned(false);
+      setGitHubHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [githubOpen]);
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
@@ -325,24 +351,48 @@ export function StatusBar() {
             <span>Checking</span>
           </div>
         ) : githubStatus.ok === true ? (
-          <div className="group/github relative">
+          <div
+            ref={githubContainerRef}
+            className="relative"
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setGitHubPinned(false);
+                setGitHubDismissed(false);
+              }
+            }}
+            onMouseEnter={() => {
+              setGitHubDismissed(false);
+              setGitHubHovered(true);
+            }}
+            onMouseLeave={() => {
+              setGitHubDismissed(false);
+              setGitHubHovered(false);
+            }}
+          >
             <button
+              aria-expanded={githubOpen}
               aria-label="GitHub connection healthy"
               className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
               type="button"
+              onClick={() => {
+                setGitHubDismissed(false);
+                setGitHubPinned((current) => !current);
+              }}
             >
               <GithubIcon />
               <CiStatusDot status="success" />
             </button>
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)] group-focus-within/github:block group-hover/github:block">
-              <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
-                <span className="text-[var(--color-text-secondary)]">GitHub</span>
-                <span className="font-bold text-[var(--color-status-ready)]">Healthy</span>
+            {githubOpen ? (
+              <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+                <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
+                  <span className="text-[var(--color-text-secondary)]">GitHub</span>
+                  <span className="font-bold text-[var(--color-status-ready)]">Healthy</span>
+                </div>
+                <div className="normal-case tracking-normal text-[var(--color-text-secondary)]">
+                  Last request: {formatAbsoluteTime(githubStatus.requestedAt)}
+                </div>
               </div>
-              <div className="normal-case tracking-normal text-[var(--color-text-secondary)]">
-                Last request: {formatAbsoluteTime(githubStatus.requestedAt)}
-              </div>
-            </div>
+            ) : null}
           </div>
         ) : githubStatus.ok === false ? (
           <div className="flex min-w-0 items-center gap-1.5">
