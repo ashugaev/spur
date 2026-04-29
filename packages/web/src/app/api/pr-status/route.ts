@@ -3,17 +3,14 @@ import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import {
+  type CiStatus,
+  type PrInfo,
+  type PrState,
+  isPrInfoShape,
+} from "@/lib/pr-status-shape";
 
-type PrState = "draft" | "open" | "merged" | "closed";
-type CiStatus = "success" | "failure" | "pending" | null;
-
-interface PrStatusResponse {
-  state: PrState | null;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
-  fetchedAt?: number;
-  stale?: boolean;
+interface PrStatusResponse extends PrInfo {
   error?: string;
 }
 
@@ -37,13 +34,7 @@ interface CacheEntry {
   expiresAt: number;
 }
 
-interface LastGoodEntry {
-  state: PrState | null;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
-  fetchedAt: number;
-}
+type LastGoodEntry = Omit<PrInfo, "stale"> & { fetchedAt: number };
 
 const cache = new Map<string, CacheEntry>();
 const lastGoodCache = new Map<string, LastGoodEntry>();
@@ -78,31 +69,13 @@ function persistFilePath(): string {
   return path.join(os.tmpdir(), "spur-pr-status-cache.json");
 }
 
-let persistLoaded = false;
 let persistTimer: NodeJS.Timeout | null = null;
 
 function isLastGoodEntry(value: unknown): value is LastGoodEntry {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    (v["state"] === null ||
-      v["state"] === "draft" ||
-      v["state"] === "open" ||
-      v["state"] === "merged" ||
-      v["state"] === "closed") &&
-    (v["ciStatus"] === null ||
-      v["ciStatus"] === "success" ||
-      v["ciStatus"] === "failure" ||
-      v["ciStatus"] === "pending") &&
-    typeof v["totalThreads"] === "number" &&
-    typeof v["unresolvedThreads"] === "number" &&
-    typeof v["fetchedAt"] === "number"
-  );
+  return isPrInfoShape(value) && typeof (value as { fetchedAt?: unknown }).fetchedAt === "number";
 }
 
 function loadPersistedLastGood(): void {
-  if (persistLoaded) return;
-  persistLoaded = true;
   try {
     const parsed: unknown = JSON.parse(readFileSync(persistFilePath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return;
@@ -110,7 +83,7 @@ function loadPersistedLastGood(): void {
       if (isLastGoodEntry(value)) lastGoodCache.set(key, value);
     }
   } catch {
-    // file missing, unreadable, or malformed — silent
+    /* file missing, unreadable, or malformed */
   }
 }
 
@@ -126,12 +99,13 @@ function schedulePersist(): void {
       writeFileSync(tmp, JSON.stringify(data), "utf-8");
       renameSync(tmp, filePath);
     } catch {
-      // best-effort persistence
+      /* best-effort */
     }
   }, PERSIST_DEBOUNCE_MS);
-  // Don't keep the event loop alive for this debounce
   if (persistTimer && typeof persistTimer.unref === "function") persistTimer.unref();
 }
+
+loadPersistedLastGood();
 
 function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">): LastGoodEntry {
   const entry: LastGoodEntry = { ...snapshot, fetchedAt: Date.now() };
@@ -201,7 +175,6 @@ function handleRateLimit(response: Response): void {
 }
 
 export async function GET(request: NextRequest) {
-  loadPersistedLastGood();
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
     return NextResponse.json({ error: "url parameter is required" }, { status: 400 });
@@ -257,7 +230,6 @@ export async function GET(request: NextRequest) {
         cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
         return NextResponse.json(response);
       }
-      // Successful "no PR" — record empty as last-good
       const entry = recordLastGood(cacheKey, EMPTY_PR_STATUS);
       const response = freshFromEntry(entry);
       cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
@@ -291,14 +263,11 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// Test-only reset: attached to globalThis so unit tests can clear module state
-// without needing a non-handler export from this route file.
 if (process.env["NODE_ENV"] === "test") {
   (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
     cache.clear();
     lastGoodCache.clear();
     rateLimitResetAt = 0;
-    persistLoaded = true;
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;

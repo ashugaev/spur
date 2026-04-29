@@ -2,18 +2,17 @@
 
 import { useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
+import {
+  type CiStatus,
+  type PrInfo,
+  type PrState,
+  isCiStatus,
+  isPrInfoShape,
+  isPrState,
+  prInfosEqual,
+} from "@/lib/pr-status-shape";
 
-export type PrState = "draft" | "open" | "merged" | "closed";
-export type CiStatus = "success" | "failure" | "pending" | null;
-
-export interface PrInfo {
-  state: PrState | null;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
-  fetchedAt?: number;
-  stale?: boolean;
-}
+export type { CiStatus, PrInfo, PrState };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -28,7 +27,8 @@ const EMPTY_PR_INFO: PrInfo = {
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-const POLL_MS = 120_000; // poll every 2 min, not 30s
+const POLL_MS = 120_000;
+const FRESH_TTL_MS = 120_000;
 const PR_CACHE_STORAGE_KEY = "spur:pr-status-cache:v1";
 const PR_CACHE_MAX_ENTRIES = 200;
 
@@ -61,24 +61,6 @@ interface CacheEntry {
 const prCache = new Map<string, CacheEntry>();
 const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
-function isPrInfoShape(value: unknown): value is PrInfo {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    (v["state"] === null ||
-      v["state"] === "draft" ||
-      v["state"] === "open" ||
-      v["state"] === "merged" ||
-      v["state"] === "closed") &&
-    (v["ciStatus"] === null ||
-      v["ciStatus"] === "success" ||
-      v["ciStatus"] === "failure" ||
-      v["ciStatus"] === "pending") &&
-    typeof v["totalThreads"] === "number" &&
-    typeof v["unresolvedThreads"] === "number"
-  );
-}
-
 function hydratePrCacheFromStorage(): void {
   if (typeof window === "undefined") return;
   try {
@@ -95,7 +77,7 @@ function hydratePrCacheFromStorage(): void {
       prCache.set(url, { data, fetchedAt });
     }
   } catch {
-    // storage unavailable or malformed JSON — silent
+    /* storage unavailable or malformed */
   }
 }
 
@@ -106,7 +88,6 @@ function persistPrCache(): void {
   storageWriteTimer = setTimeout(() => {
     storageWriteTimer = null;
     try {
-      // Cap entries to PR_CACHE_MAX_ENTRIES, dropping oldest by fetchedAt.
       if (prCache.size > PR_CACHE_MAX_ENTRIES) {
         const sorted = [...prCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
         const drop = sorted.length - PR_CACHE_MAX_ENTRIES;
@@ -118,7 +99,7 @@ function persistPrCache(): void {
       const obj = Object.fromEntries(prCache.entries());
       window.localStorage.setItem(PR_CACHE_STORAGE_KEY, JSON.stringify(obj));
     } catch {
-      // ignore quota / serialization errors
+      /* quota / serialization */
     }
   }, 250);
 }
@@ -128,16 +109,7 @@ function setPrCache(url: string, data: PrInfo): void {
   persistPrCache();
 }
 
-// Hydrate once at module load on the client.
 hydratePrCacheFromStorage();
-
-function isPrState(value: unknown): value is PrState {
-  return value === "draft" || value === "open" || value === "merged" || value === "closed";
-}
-
-function isCiStatus(value: unknown): value is CiStatus {
-  return value === "success" || value === "failure" || value === "pending" || value === null;
-}
 
 function cachedOrEmpty(url: string): PrInfo {
   const cached = prCache.get(url);
@@ -173,7 +145,6 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
         fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
         stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
       };
-      // Don't clobber a known good cached value with an empty error payload.
       if (error && parsed.state === null) {
         return cachedOrEmpty(url);
       }
@@ -211,8 +182,12 @@ export function usePrInfo(url: string | undefined): PrInfo {
     let cancelled = false;
 
     const run = async () => {
+      const cached = prCache.get(url);
+      if (cached && Date.now() - cached.fetchedAt < FRESH_TTL_MS && !cached.data.stale) return;
       const result = await fetchPrInfo(url);
       if (cancelled) return;
+      const prev = prCache.get(url)?.data;
+      if (prev && prInfosEqual(prev, result)) return;
       setPrCache(url, result);
       setInfo(result);
     };
