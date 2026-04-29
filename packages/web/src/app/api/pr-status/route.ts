@@ -1,4 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 type PrState = "draft" | "open" | "merged" | "closed";
 type CiStatus = "success" | "failure" | "pending" | null;
@@ -8,6 +11,8 @@ interface PrStatusResponse {
   ciStatus: CiStatus;
   totalThreads: number;
   unresolvedThreads: number;
+  fetchedAt?: number;
+  stale?: boolean;
   error?: string;
 }
 
@@ -31,9 +36,19 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+interface LastGoodEntry {
+  state: PrState | null;
+  ciStatus: CiStatus;
+  totalThreads: number;
+  unresolvedThreads: number;
+  fetchedAt: number;
+}
+
 const cache = new Map<string, CacheEntry>();
+const lastGoodCache = new Map<string, LastGoodEntry>();
 const CACHE_TTL_MS = 120_000;
 const ERROR_CACHE_TTL_MS = 60_000;
+const PERSIST_DEBOUNCE_MS = 1_000;
 
 let rateLimitResetAt = 0;
 
@@ -54,8 +69,100 @@ const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
   unresolvedThreads: 0,
 };
 
-function errorResponse(error: string): PrStatusResponse {
-  return { ...EMPTY_PR_STATUS, error };
+function persistFilePath(): string {
+  const stateDir = process.env["SPUR_STATE_DIR"];
+  if (stateDir) {
+    return path.join(stateDir, "spur-pr-status-cache.json");
+  }
+  return path.join(os.tmpdir(), "spur-pr-status-cache.json");
+}
+
+let persistLoaded = false;
+let persistTimer: NodeJS.Timeout | null = null;
+
+function isLastGoodEntry(value: unknown): value is LastGoodEntry {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    (v["state"] === null ||
+      v["state"] === "draft" ||
+      v["state"] === "open" ||
+      v["state"] === "merged" ||
+      v["state"] === "closed") &&
+    (v["ciStatus"] === null ||
+      v["ciStatus"] === "success" ||
+      v["ciStatus"] === "failure" ||
+      v["ciStatus"] === "pending") &&
+    typeof v["totalThreads"] === "number" &&
+    typeof v["unresolvedThreads"] === "number" &&
+    typeof v["fetchedAt"] === "number"
+  );
+}
+
+function loadPersistedLastGood(): void {
+  if (persistLoaded) return;
+  persistLoaded = true;
+  try {
+    const raw = readFileSync(persistFilePath(), "utf-8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null) return;
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isLastGoodEntry(value)) lastGoodCache.set(key, value);
+    }
+  } catch {
+    // file missing or unreadable — silent
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      const filePath = persistFilePath();
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmp = `${filePath}.${process.pid}.tmp`;
+      const data = Object.fromEntries(lastGoodCache.entries());
+      writeFileSync(tmp, JSON.stringify(data), "utf-8");
+      renameSync(tmp, filePath);
+    } catch {
+      // best-effort persistence
+    }
+  }, PERSIST_DEBOUNCE_MS);
+  // Don't keep the event loop alive for this debounce
+  if (persistTimer && typeof persistTimer.unref === "function") persistTimer.unref();
+}
+
+function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">): LastGoodEntry {
+  const entry: LastGoodEntry = { ...snapshot, fetchedAt: Date.now() };
+  lastGoodCache.set(key, entry);
+  schedulePersist();
+  return entry;
+}
+
+function staleFromLastGood(key: string, error: string): PrStatusResponse | null {
+  const last = lastGoodCache.get(key);
+  if (!last) return null;
+  return {
+    state: last.state,
+    ciStatus: last.ciStatus,
+    totalThreads: last.totalThreads,
+    unresolvedThreads: last.unresolvedThreads,
+    fetchedAt: last.fetchedAt,
+    stale: true,
+    error,
+  };
+}
+
+function errorResponse(key: string, error: string): PrStatusResponse {
+  const stale = staleFromLastGood(key, error);
+  if (stale) return stale;
+  return { ...EMPTY_PR_STATUS, stale: false, error };
 }
 
 function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
@@ -106,6 +213,7 @@ function handleRateLimit(response: Response): void {
 }
 
 export async function GET(request: NextRequest) {
+  loadPersistedLastGood();
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
     return NextResponse.json({ error: "url parameter is required" }, { status: 400 });
@@ -125,7 +233,8 @@ export async function GET(request: NextRequest) {
   // Rate limit backoff
   if (Date.now() < rateLimitResetAt) {
     const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
-    return NextResponse.json(errorResponse(`GitHub rate limit — retry in ${wait}s`));
+    const response = errorResponse(cacheKey, `GitHub rate limit — retry in ${wait}s`);
+    return NextResponse.json(response);
   }
 
   const headers = ghHeaders();
@@ -143,7 +252,7 @@ export async function GET(request: NextRequest) {
 
     if (!ghResponse.ok) {
       handleRateLimit(ghResponse);
-      const response = errorResponse(`GitHub API ${ghResponse.status}`);
+      const response = errorResponse(cacheKey, `GitHub API ${ghResponse.status}`);
       cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(response);
     }
@@ -155,11 +264,22 @@ export async function GET(request: NextRequest) {
       .filter(Boolean)
       .join("; ");
     if (!pr) {
-      const response = gqlError ? errorResponse(gqlError) : EMPTY_PR_STATUS;
-      cache.set(cacheKey, {
-        response,
-        expiresAt: Date.now() + (gqlError ? ERROR_CACHE_TTL_MS : CACHE_TTL_MS),
-      });
+      if (gqlError) {
+        const response = errorResponse(cacheKey, gqlError);
+        cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+        return NextResponse.json(response);
+      }
+      // Successful "no PR" — record empty as last-good
+      const entry = recordLastGood(cacheKey, { ...EMPTY_PR_STATUS });
+      const response: PrStatusResponse = {
+        state: entry.state,
+        ciStatus: entry.ciStatus,
+        totalThreads: entry.totalThreads,
+        unresolvedThreads: entry.unresolvedThreads,
+        fetchedAt: entry.fetchedAt,
+        stale: false,
+      };
+      cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
       return NextResponse.json(response);
     }
 
@@ -178,13 +298,36 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
-    const response: PrStatusResponse = { state, ciStatus, totalThreads, unresolvedThreads };
+    const entry = recordLastGood(cacheKey, { state, ciStatus, totalThreads, unresolvedThreads });
+    const response: PrStatusResponse = {
+      state,
+      ciStatus,
+      totalThreads,
+      unresolvedThreads,
+      fetchedAt: entry.fetchedAt,
+      stale: false,
+    };
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
-    const response = errorResponse(message);
+    const response = errorResponse(cacheKey, message);
     cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
     return NextResponse.json(response);
   }
+}
+
+// Test-only reset: attached to globalThis so unit tests can clear module state
+// without needing a non-handler export from this route file.
+if (process.env["NODE_ENV"] === "test") {
+  (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
+    cache.clear();
+    lastGoodCache.clear();
+    rateLimitResetAt = 0;
+    persistLoaded = true;
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+  };
 }

@@ -11,6 +11,8 @@ export interface PrInfo {
   ciStatus: CiStatus;
   totalThreads: number;
   unresolvedThreads: number;
+  fetchedAt?: number;
+  stale?: boolean;
 }
 
 const PR_STATE_COLORS: Record<PrState, string> = {
@@ -26,8 +28,9 @@ const EMPTY_PR_INFO: PrInfo = {
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-const CACHE_TTL_MS = 120_000; // match server cache
 const POLL_MS = 120_000; // poll every 2 min, not 30s
+const PR_CACHE_STORAGE_KEY = "spur:pr-status-cache:v1";
+const PR_CACHE_MAX_ENTRIES = 200;
 
 let gitErrorMessage: string | null = null;
 const gitErrorListeners = new Set<() => void>();
@@ -58,12 +61,92 @@ interface CacheEntry {
 const prCache = new Map<string, CacheEntry>();
 const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
+function isPrInfoShape(value: unknown): value is PrInfo {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    (v["state"] === null ||
+      v["state"] === "draft" ||
+      v["state"] === "open" ||
+      v["state"] === "merged" ||
+      v["state"] === "closed") &&
+    (v["ciStatus"] === null ||
+      v["ciStatus"] === "success" ||
+      v["ciStatus"] === "failure" ||
+      v["ciStatus"] === "pending") &&
+    typeof v["totalThreads"] === "number" &&
+    typeof v["unresolvedThreads"] === "number"
+  );
+}
+
+function hydratePrCacheFromStorage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(PR_CACHE_STORAGE_KEY);
+    if (!raw) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null) return;
+    for (const [url, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== "object" || value === null) continue;
+      const entry = value as Record<string, unknown>;
+      const data = entry["data"];
+      const fetchedAt = entry["fetchedAt"];
+      if (typeof fetchedAt !== "number" || !isPrInfoShape(data)) continue;
+      prCache.set(url, { data, fetchedAt });
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
+
+let storageWriteTimer: ReturnType<typeof setTimeout> | null = null;
+function persistPrCache(): void {
+  if (typeof window === "undefined") return;
+  if (storageWriteTimer) return;
+  storageWriteTimer = setTimeout(() => {
+    storageWriteTimer = null;
+    try {
+      // Cap entries to PR_CACHE_MAX_ENTRIES, dropping oldest by fetchedAt.
+      if (prCache.size > PR_CACHE_MAX_ENTRIES) {
+        const sorted = [...prCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+        const drop = sorted.length - PR_CACHE_MAX_ENTRIES;
+        for (let i = 0; i < drop; i++) {
+          const item = sorted[i];
+          if (item) prCache.delete(item[0]);
+        }
+      }
+      const obj = Object.fromEntries(prCache.entries());
+      window.localStorage.setItem(PR_CACHE_STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      // ignore quota / serialization errors
+    }
+  }, 250);
+}
+
+function setPrCache(url: string, data: PrInfo): void {
+  prCache.set(url, { data, fetchedAt: Date.now() });
+  persistPrCache();
+}
+
+// Hydrate once at module load on the client.
+hydratePrCacheFromStorage();
+
 function isPrState(value: unknown): value is PrState {
   return value === "draft" || value === "open" || value === "merged" || value === "closed";
 }
 
 function isCiStatus(value: unknown): value is CiStatus {
   return value === "success" || value === "failure" || value === "pending" || value === null;
+}
+
+function cachedOrEmpty(url: string): PrInfo {
+  const cached = prCache.get(url);
+  return cached ? cached.data : EMPTY_PR_INFO;
 }
 
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
@@ -76,26 +159,33 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
         setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
-        return EMPTY_PR_INFO;
+        return cachedOrEmpty(url);
       }
       const data: unknown = await res.json();
       if (typeof data !== "object" || data === null) {
         setGitError(null);
-        return EMPTY_PR_INFO;
+        return cachedOrEmpty(url);
       }
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
       setGitError(error);
-      return {
+      const parsed: PrInfo = {
         state: isPrState(obj["state"]) ? obj["state"] : null,
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
+        fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
+        stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
       };
+      // Don't clobber a known good cached value with an empty error payload.
+      if (error && parsed.state === null) {
+        return cachedOrEmpty(url);
+      }
+      return parsed;
     } catch {
       setGitError("GitHub API unreachable");
-      return EMPTY_PR_INFO;
+      return cachedOrEmpty(url);
     } finally {
       pendingPrRequests.delete(url);
     }
@@ -122,17 +212,12 @@ export function usePrInfo(url: string | undefined): PrInfo {
   const [info, setInfo] = useState<PrInfo>(() => {
     if (!url) return EMPTY_PR_INFO;
     const cached = prCache.get(url);
-    return cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS ? cached.data : EMPTY_PR_INFO;
+    return cached ? cached.data : EMPTY_PR_INFO;
   });
 
   const doFetch = useCallback(async (target: string) => {
-    const cached = prCache.get(target);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      setInfo(cached.data);
-      return;
-    }
     const result = await fetchPrInfo(target);
-    prCache.set(target, { data: result, fetchedAt: Date.now() });
+    setPrCache(target, result);
     setInfo(result);
   }, []);
 

@@ -245,6 +245,48 @@ describe("fetchPrInfo", () => {
       },
     ]);
   });
+
+  it("does not clobber a known good cached value when a later request errors", async () => {
+    const url = "https://github.com/org/repo/pull/dont-clobber";
+
+    // Seed the in-memory client cache by mounting usePrInfo, which writes through
+    // setPrCache after a successful fetch.
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        ciStatus: "success",
+        totalThreads: 3,
+        unresolvedThreads: 1,
+      }),
+    );
+    const { result: hook } = renderHook(() => usePrInfo(url));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.current.state).toBe("open");
+    expect(hook.current.ciStatus).toBe("success");
+
+    // Now a non-ok response on the same URL: don't clobber the cached value.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "GitHub API 503" }, false, 503));
+    const errResult = await fetchPrInfo(url);
+    expect(errResult.state).toBe("open");
+    expect(errResult.ciStatus).toBe("success");
+
+    // And a soft-error payload (200 with error field, empty body) also keeps cached.
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+        error: "GitHub API 503",
+      }),
+    );
+    const softResult = await fetchPrInfo(url);
+    expect(softResult.state).toBe("open");
+    expect(softResult.ciStatus).toBe("success");
+  });
 });
 
 describe("extractLinkId", () => {

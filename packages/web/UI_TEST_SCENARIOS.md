@@ -84,6 +84,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
 
+### D5b: PR status survives reload and GitHub errors
+
+- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
+- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
+- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+
 ### D6: Attention zone sections
 
 - Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
