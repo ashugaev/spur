@@ -104,6 +104,12 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("tab title is Spur", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+    await expect(page).toHaveTitle("Spur");
+  });
+
   test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");

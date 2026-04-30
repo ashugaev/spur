@@ -183,6 +183,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Codex agent status detection: spawn produces `waiting` (Stop hook), `send` produces `working` (UserPromptSubmit hook), `show-waiting-menu` produces `needs_input` from structured hook/rollout state, stale `PreToolUse` snapshots are cleared by `task_complete`, and normal message exchange cycles waiting→working→waiting.
 - Session-level states for both Claude and Codex: `pause`→stopped, `complete`→stopped, `kill`→killed, agent exit→stopped (runtime not alive).
 - State history records transitions during a Claude session lifecycle.
+- Session state transitions append `session.state.transition` events once per real change, include `fromState`, `toState`, and detection `source`, and snapshot the latest agent history JSONL into session artifacts when available.
 - Sidecar auto-starts only on session spawn when `autoStart: true`; nested sidecars remain manual-only.
 - Multiple sidecars per session get separate tmux panes.
 - Sidecar cleanup on kill/complete/pause and failed spawn rollback.

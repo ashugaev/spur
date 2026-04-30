@@ -1450,6 +1450,75 @@ describe("SessionDetail voice input", () => {
   });
 });
 
+describe("SessionDetail logs", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("renders state transition logs with a history snapshot link", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ messages: [] })), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/logs") {
+        return new Response(
+          JSON.stringify([
+            {
+              timestamp: "2026-04-02T10:01:00.000Z",
+              event: "session.state.transition",
+              level: "info",
+              message: "Status changed from waiting to needs_input",
+              details: {
+                fromState: "waiting",
+                toState: "needs_input",
+                source: "jsonl",
+                historyArtifactId:
+                  "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+              },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^logs$/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+
+    expect(await screen.findByText("Status transition")).toBeInTheDocument();
+    expect(screen.getByText("waiting")).toBeInTheDocument();
+    expect(screen.getByText("needs input")).toBeInTheDocument();
+    expect(screen.getByText("source jsonl")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+    );
+  });
+});
+
 describe("SessionDetail artifacts", () => {
   beforeEach(() => {
     vi.restoreAllMocks();

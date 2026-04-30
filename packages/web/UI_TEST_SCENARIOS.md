@@ -33,6 +33,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D1: Header renders correctly
 
 - 𖤓 icon + large project title visible at the same size as before
+- Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
@@ -186,6 +187,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
@@ -204,6 +206,17 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Kill shows confirm dialog
 - Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
 - `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
+
+### S2a: Logs modal
+
+- `Logs` opens a full-screen modal for the current session
+- Modal subtitle reads as Spur orchestrator events plus runtime output, not agent chat history
+- Empty state shows a bordered placeholder instead of raw empty text
+- `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
+- Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
+- Transition rows show a `History snapshot` download link when `historyArtifactId` is present
+- Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
+- Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
 ### S2b: Conversation dialog (Claude only)
 

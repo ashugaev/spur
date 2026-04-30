@@ -125,6 +125,16 @@ function mockSessionConversationPayload(
   });
 }
 
+function mockSessionLogs(page: Page, sessionId: string, payload: Array<Record<string, unknown>>) {
+  return page.route(`**/api/sessions/${sessionId}/logs`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  });
+}
+
 function mockVoiceStatus(page: Page) {
   return page.route("**/api/runtime/voice", (route) => {
     void route.fulfill({
@@ -187,6 +197,14 @@ test.describe("S1: Session detail header", () => {
     const classList = await title.getAttribute("class");
     expect(classList).toContain("uppercase");
     expect(classList).toContain("font-bold");
+  });
+
+  test("tab title shows only the session id", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s1-title" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page).toHaveTitle(session.id);
   });
 
   test("activity dot visible", async ({ page }) => {
@@ -350,6 +368,41 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("link", { name: /^open web ide$/i })).toHaveAttribute(
       "href",
       "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+    );
+  });
+});
+
+// S2a: Logs modal
+test.describe("S2a: Logs modal", () => {
+  test("shows status transition entries with history snapshot download", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2a-1" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await mockSessionLogs(page, session.id, [
+      {
+        timestamp: "2026-04-02T10:01:00.000Z",
+        event: "session.state.transition",
+        level: "info",
+        message: "Status changed from waiting to needs_input",
+        details: {
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+        },
+      },
+    ]);
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^logs$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
+    await expect(page.getByText("Status transition")).toBeVisible();
+    await expect(page.getByText("waiting")).toBeVisible();
+    await expect(page.getByText("needs input")).toBeVisible();
+    await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
+      "href",
+      `/api/sessions/${session.id}/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl`,
     );
   });
 });
