@@ -5,7 +5,6 @@ This repository has two supported product surfaces:
 - `v2/` is the Spur daemon and CLI.
 - `packages/web/` is an optional web UI that proxies to Spur's HTTP API.
 
-
 ## Quick Start
 
 ```bash

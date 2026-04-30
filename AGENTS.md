@@ -14,31 +14,31 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 
 Autonomous workers invoked via the `Task` tool. Source: [.agents/agents/](.agents/agents/).
 
-| Agent | Use when |
-|---|---|
-| [`researcher`](.agents/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence |
-| [`critic`](.agents/agents/critic.md) | Verify researcher claims, score options, select winner |
-| [`architect`](.agents/agents/architect.md) | Produce a concrete plan: touched files, steps, criteria, risks |
-| [`developer`](.agents/agents/developer.md) | Implement, fix-after-review, fix-after-test |
-| [`reviewer`](.agents/agents/reviewer.md) | Static diff analysis plus build/lint/test gate |
-| [`designer`](.agents/agents/designer.md) | UI review for visible web changes |
-| [`tester`](.agents/agents/tester.md) | Validation gate at the cheapest crossing tier |
+| Agent                                        | Use when                                                       |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| [`researcher`](.agents/agents/researcher.md) | Generate 2-3 implementation options with codebase evidence     |
+| [`critic`](.agents/agents/critic.md)         | Verify researcher claims, score options, select winner         |
+| [`architect`](.agents/agents/architect.md)   | Produce a concrete plan: touched files, steps, criteria, risks |
+| [`developer`](.agents/agents/developer.md)   | Implement, fix-after-review, fix-after-test                    |
+| [`reviewer`](.agents/agents/reviewer.md)     | Static diff analysis plus build/lint/test gate                 |
+| [`designer`](.agents/agents/designer.md)     | UI review for visible web changes                              |
+| [`tester`](.agents/agents/tester.md)         | Validation gate at the cheapest crossing tier                  |
 
 ## Skills
 
 Capabilities loaded by description match. Source: [.agents/skills/](.agents/skills/).
 
-| Skill | Load when |
-|---|---|
-| [`manager`](.agents/skills/manager/SKILL.md) | Mandatory orchestrator for every repo task |
-| [`spur`](.agents/skills/spur/SKILL.md) | Task touches Spur runtime, CLI, config, or interface |
-| [`frontend-codestyle`](.agents/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web` |
-| [`skill-writer`](.agents/skills/skill-writer/SKILL.md) | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
-| [`code-simplifier`](.agents/skills/code-simplifier/SKILL.md) | Reduce diff overhead before review |
-| [`github`](.agents/skills/github/SKILL.md) | Use `gh` CLI for PRs, issues, checks, or releases |
-| [`shallow-scoring`](.agents/skills/shallow-scoring/SKILL.md) | Score task complexity 1-5 |
-| [`self-verify`](.agents/skills/self-verify/SKILL.md) | Final close-out gate validation |
-| [`telegram`](.agents/skills/telegram/SKILL.md) | Send Telegram notification or fetch updates |
+| Skill                                                              | Load when                                                        |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| [`manager`](.agents/skills/manager/SKILL.md)                       | Mandatory orchestrator for every repo task                       |
+| [`spur`](.agents/skills/spur/SKILL.md)                             | Task touches Spur runtime, CLI, config, or interface             |
+| [`frontend-codestyle`](.agents/skills/frontend-codestyle/SKILL.md) | Task touches `packages/web`                                      |
+| [`skill-writer`](.agents/skills/skill-writer/SKILL.md)             | Edit `SKILL.md`, agent definitions, or orchestrator instructions |
+| [`code-simplifier`](.agents/skills/code-simplifier/SKILL.md)       | Reduce diff overhead before review                               |
+| [`github`](.agents/skills/github/SKILL.md)                         | Use `gh` CLI for PRs, issues, checks, or releases                |
+| [`shallow-scoring`](.agents/skills/shallow-scoring/SKILL.md)       | Score task complexity 1-5                                        |
+| [`self-verify`](.agents/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
+| [`telegram`](.agents/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
 
 ## Response style
 
