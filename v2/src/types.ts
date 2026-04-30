@@ -54,6 +54,16 @@ export const GITHUB_SIGNAL_KINDS = [
 ] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
+export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
+
+export interface GitHubWorkItemEventData {
+  externalId: string;
+  url: string;
+  number: number;
+  title: string;
+  repo: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -66,6 +76,7 @@ export interface CronSourceConfig extends BaseSourceConfig {
 export interface GitHubSourceConfig extends BaseSourceConfig {
   type: "github";
   intervalMs: number;
+  query?: string;
 }
 
 export interface ServiceRuleConfig {
@@ -313,6 +324,7 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;
+  slots?: { links?: SessionLink[] };
 }
 
 export interface SendMessageAttachment {

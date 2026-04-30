@@ -27,6 +27,10 @@ function githubSnapshotDir(dataDir: string, projectId: string, sourceId: string)
   return join(dataDir, "source-state", "github", projectId, sourceId);
 }
 
+function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+}
+
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
   return join(dataDir, "services", sessionId);
 }
@@ -385,6 +389,38 @@ export function deleteGitHubSourceSnapshot(
 ): void {
   rmSync(githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
+  });
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return new Set();
+    const ids = (parsed as { ids?: unknown }).ids;
+    if (!Array.isArray(ids)) return new Set();
+    return new Set(ids.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function recordWorkItem(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalId: string,
+): void {
+  const ids = readWorkItemRegistry(dataDir, projectId, sourceId);
+  if (ids.has(externalId)) return;
+  ids.add(externalId);
+  writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
   });
 }
 

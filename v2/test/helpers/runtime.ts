@@ -68,6 +68,12 @@ export interface FakeGhState {
     }>
   >;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
+  searchPrs?: Array<{
+    number: number;
+    title: string;
+    url: string;
+    repository: { nameWithOwner: string };
+  }>;
 }
 
 export interface RuntimeTestContext {
@@ -337,6 +343,11 @@ function argValue(args, prefix) {
 
 const state = readState();
 const args = process.argv.slice(2);
+
+if (args[0] === "search" && args[1] === "prs") {
+  print(state.searchPrs || []);
+  process.exit(0);
+}
 
 if (args[0] === "pr" && args[1] === "list") {
   const headIndex = args.indexOf("--head");
