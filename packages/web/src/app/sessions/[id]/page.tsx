@@ -9,7 +9,9 @@ interface SessionPageProps {
   searchParams: Promise<{ project?: string }>;
 }
 
-export async function generateMetadata({ params }: Pick<SessionPageProps, "params">): Promise<Metadata> {
+export async function generateMetadata({
+  params,
+}: Pick<SessionPageProps, "params">): Promise<Metadata> {
   const resolvedParams = await params;
 
   return {
