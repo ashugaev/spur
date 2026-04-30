@@ -2658,11 +2658,12 @@ describe("SessionService", () => {
       "/tmp/spur-data",
       expect.objectContaining({
         id: "api-1",
-        status: "paused",
+        status: "stopped",
+        stopReason: "manual_pause",
       }),
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
-    expect(result.status).toBe("paused");
+    expect(result.status).toBe("stopped");
     expect(result.state).toBe("stopped");
     expect(result.workspaceExists).toBe(true);
     expect(logSpurEventMock).toHaveBeenCalledWith(
@@ -2793,7 +2794,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("completed");
   });
 
-  it("resumes a paused session on send and marks it running again", async () => {
+  it("resumes a manually stopped session on send and marks it running again", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -2807,7 +2808,8 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -2897,7 +2899,8 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -2938,7 +2941,8 @@ describe("SessionService", () => {
       tmuxSession: "api-1",
       launchCommand:
         "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -3868,7 +3872,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("restores a paused session without sending a restore prompt", async () => {
+  it("restores a manually stopped session without sending a restore prompt", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -3879,7 +3883,8 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -4014,7 +4019,7 @@ describe("SessionService", () => {
     ).toBe(true);
   });
 
-  it("falls back to a fresh launch for a paused session without sending a prompt", async () => {
+  it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
     // This test uses real timers because waitForRestorePlan polls with
     // node:timers/promises setTimeout which fake timers do not intercept.
     vi.useRealTimers();
@@ -4030,7 +4035,8 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -5523,7 +5529,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("rejects respawn of a paused session", async () => {
+    it("rejects respawn of a manually stopped session", async () => {
       readSessionMock.mockReturnValue({
         id: "api-1",
         project: "api",
@@ -5534,7 +5540,8 @@ describe("SessionService", () => {
         worktreePath: "/tmp/spur-worktrees/api/api-1",
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
-        status: "paused",
+        status: "stopped",
+        stopReason: "manual_pause",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
       });

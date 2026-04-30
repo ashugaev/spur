@@ -1,6 +1,7 @@
 export type SpurSessionStatus =
   | "spawning"
   | "running"
+  | "stopped"
   | "paused"
   | "errored"
   | "completed"
@@ -178,7 +179,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
-  if (session.status === "paused") return true;
+  if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
 }
 
@@ -236,7 +237,12 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "working";
   }
 
-  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.state === "waiting" ||
+    session.state === "stopped"
+  ) {
     return "pending";
   }
 

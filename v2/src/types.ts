@@ -246,6 +246,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
+  stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
   retainInList?: boolean;

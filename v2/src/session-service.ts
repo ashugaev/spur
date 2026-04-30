@@ -178,7 +178,7 @@ export class SessionResourceNotFoundError extends Error {
 
 const RESTORE_PROMPT_PREFIX =
   "This session was restored after the agent exited. You are back in the same worktree and branch. First check whether the original task is already complete, then continue only if it is still incomplete. Original task:";
-type ManualSessionStatus = "paused" | "completed";
+type ManualSessionStatus = "stopped" | "completed";
 type AttentionState = "needs_input" | "error";
 type BackgroundSpawnAttemptResult = "completed" | "retry";
 interface SessionCleanupContext {
@@ -2604,7 +2604,7 @@ export class SessionService {
   }
 
   async pause(sessionId: string): Promise<SessionView> {
-    return this.applyManualStatus(sessionId, "paused");
+    return this.applyManualStatus(sessionId, "stopped");
   }
 
   private async sendAgentMessage(
@@ -2913,13 +2913,28 @@ export class SessionService {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
+    if (targetStatus === "stopped" && session.status === "paused") {
+      const migrated: SessionRecord = {
+        ...copySessionWithoutSidecarPorts(session),
+        status: "stopped",
+        stopReason: "manual_pause",
+        updatedAt: nowIso(),
+        ...(options?.retainInList ? { retainInList: true } : {}),
+      };
+      if (!options?.retainInList) {
+        delete migrated.retainInList;
+      }
+      writeSession(this.config.dataDir, migrated);
+      this.stateCache.delete(sessionId);
+      return this.enrich(migrated);
+    }
     if (session.status === targetStatus) {
       return this.enrich(session);
     }
     if (isTerminalSessionStatus(session.status)) {
       throw new Error(`Session ${sessionId} is already ${session.status}`);
     }
-    const eventAction = targetStatus === "paused" ? "pause" : "complete";
+    const eventAction = targetStatus === "stopped" ? "pause" : "complete";
 
     try {
       await killTmuxSession(session.tmuxSession);
@@ -2946,9 +2961,13 @@ export class SessionService {
     const record: SessionRecord = {
       ...copySessionWithoutSidecarPorts(session),
       status: targetStatus,
+      ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
       updatedAt: nowIso(),
       ...(options?.retainInList ? { retainInList: true } : {}),
     };
+    if (targetStatus !== "stopped") {
+      delete record.stopReason;
+    }
     if (!options?.retainInList) {
       delete record.retainInList;
     }
@@ -2957,7 +2976,7 @@ export class SessionService {
       level: "info",
       sessionId,
       projectId: session.project,
-      message: `${targetStatus === "paused" ? "Paused" : "Completed"} ${sessionId}`,
+      message: `${targetStatus === "stopped" ? "Stopped" : "Completed"} ${sessionId}`,
       details: {
         worktree: session.worktree,
       },
@@ -3283,7 +3302,8 @@ export class SessionService {
         sessionToolDir,
       });
       const planMode = resolvePlanMode(current);
-      const shouldSendRestoreMessage = current.status !== "paused";
+      const shouldSendRestoreMessage =
+        current.status !== "paused" && current.stopReason !== "manual_pause";
       const restorePrompt = shouldSendRestoreMessage ? buildRestorePrompt(current.prompt) : "";
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
@@ -3378,6 +3398,7 @@ export class SessionService {
       status: "running",
       updatedAt: nowIso(),
     };
+    delete restored.stopReason;
     const persistedRestored = await this.captureAgentSessionId(
       restored,
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
@@ -3633,13 +3654,21 @@ export class SessionService {
         }
 
         if (session.pipeline.nextStepIndex >= session.pipeline.steps.length) {
+          const latest = readSession(this.config.dataDir, sessionId);
+          if (
+            !latest?.pipeline ||
+            latest.status !== "running" ||
+            latest.pipeline.status !== "running"
+          ) {
+            return;
+          }
           const {
             awaitingStepIndex: _awaitingStepIndex,
             error: _pipelineError,
             ...pipelineBase
-          } = session.pipeline;
+          } = latest.pipeline;
           writeSession(this.config.dataDir, {
-            ...session,
+            ...latest,
             updatedAt: nowIso(),
             pipeline: {
               ...pipelineBase,
@@ -3649,7 +3678,7 @@ export class SessionService {
           this.logEvent("session.pipeline.completed", {
             level: "info",
             sessionId,
-            projectId: session.project,
+            projectId: latest.project,
             message: `Pipeline completed for ${sessionId}`,
           });
           return;
@@ -3661,9 +3690,17 @@ export class SessionService {
           continue;
         }
         if (session.pipeline.nextStepNotBefore !== undefined) {
-          const { nextStepNotBefore: _nextStepNotBefore, ...pipelineBase } = session.pipeline;
+          const latest = readSession(this.config.dataDir, sessionId);
+          if (
+            !latest?.pipeline ||
+            latest.status !== "running" ||
+            latest.pipeline.status !== "running"
+          ) {
+            return;
+          }
+          const { nextStepNotBefore: _nextStepNotBefore, ...pipelineBase } = latest.pipeline;
           writeSession(this.config.dataDir, {
-            ...session,
+            ...latest,
             updatedAt: nowIso(),
             pipeline: pipelineBase,
           });

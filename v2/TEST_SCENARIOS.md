@@ -57,8 +57,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
 - `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
-- `pause` stops tmux, keeps the worktree, persists `paused`, and leaves slot metadata intact.
-- `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; paused restore relaunches/resumes in place without sending any prompt, while persisted `stopped` sessions from unexpected interruption still deliver the restore prompt.
+- `pause` stops tmux, keeps the worktree, persists `stopped`, and leaves slot metadata intact.
+- `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; a manually paused `stopped` session relaunches/resumes in place without sending any prompt, while `stopped` sessions from unexpected interruption still deliver the restore prompt.
 - `complete` stops tmux, removes owned artifacts, persists `completed`, and keeps the record available for later filtering.
 - `kill` and `complete` still close an existing worktree-backed session after its project id is renamed in config, as long as the worktree still resolves back to the same repo, and `complete` also tears down any sidecar tmux/process cleanup owned by that session.
 - Session slot updates keep one merge path: hidden CLI/API updates `title` plus named links, preserve session timestamps, expose the helper command inside the session env, and keep hidden commands out of `spur --help`.
