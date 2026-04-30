@@ -11,7 +11,7 @@ Constraints:
 - Wrap JSON.parse in try/catch
 - No user input interpolation in shell commands
 
-Loop:
+Process:
 1. Verify branch: git branch --show-current && git log --oneline -3
 2. Implement one logical chunk
 3. Verify: pnpm typecheck && pnpm lint

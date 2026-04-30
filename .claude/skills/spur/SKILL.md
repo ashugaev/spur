@@ -1,6 +1,6 @@
 ---
 name: spur
-description: "Use when working on Spur — its CLI, daemon, tmux/worktree session flow, cron sources/triggers, config shape, and validation rules."
+description: Use when working on Spur — its CLI, daemon, tmux/worktree session flow, cron sources/triggers, config shape, and validation rules.
 ---
 
 # Spur
@@ -98,6 +98,9 @@ cron source
 - Do not add speculative fields or helper layers.
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
+- Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
+- Detect agent state and `Needs Input` only from hook state and agent history JSONL. Never infer from `tmux` pane capture, terminal text, or other screen-content heuristics.
+- Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention
 

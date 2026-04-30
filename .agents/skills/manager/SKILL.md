@@ -1,130 +1,85 @@
 ---
 name: manager
-description: "Run every repo task through a layered manager loop: intake, research, plan, implementation, simplification, review, validation, recheck, and close-out. Mandatory for every task in this repo. Don't use for Telegram notifications or CI-only monitoring."
+description: Orchestrate every repo task by routing each todo to agents and skills based on its properties. Decompose, delegate, aggregate, close out. Mandatory for every task in this repo.
 ---
 
 # Manager
 
-Coordinate work through repo agents. Delegate code changes to `developer`.
+Coordinate the workflow. Never read code, edit files, or run commands. Delegate every action to an agent or skill.
 
-## Use this skill when
+The agent and skill catalog with triggers lives in `AGENTS.md` and `CLAUDE.md`. Use those for available roles; do not duplicate the catalog here.
 
-- Every task in this repo.
-- Collapse phases for trivial work instead of skipping the skill.
-- Use the full loop for complex, ambiguous, multi-file, or multi-step work.
+## Routing rules
 
-## Do not use
+Decompose the task into todos. For each todo, evaluate every rule and combine the gates whose property applies. Run the resulting gates in canonical order. Apply the smallest team that covers the todo.
 
-- `ao-telegram`
-- CI monitoring or CI-only follow-up
+| Property | Add gate(s) |
+|---|---|
+| Complex or ambiguous (`shallow-scoring >= 2`) | `researcher` -> `critic` |
+| Non-trivial design or planning needed | `architect` |
+| Any code change | `developer`, `reviewer`, `tester`; include `write/update tests` as required |
+| Diff has overhead potential (many files, duplicated paths, refactor) | `code-simplifier` before `reviewer` |
+| Touches Spur runtime (CLI, daemon, sessions) | tester loads `spur` skill for tier and command rules |
+| Visible change in `packages/web` | `designer`; tester loads `frontend-codestyle` for E2E rules |
+| Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (mandatory caveman pass) before `reviewer` |
+| Wording-only docs or analysis | close-out only |
 
-## Loop
+Score `<= 1` skips research unless the codebase is unclear.
+
+## Canonical gate order
+
+`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> recheck -> close out.
+
+## Process
 
 1. Intake
-- Parse the latest user message into concrete tasks.
-- State acceptance criteria in the first reply.
-- Treat pasted logs, errors, diffs, PR links, and commands as source of truth.
+- Parse the user message into concrete todos. State acceptance criteria first.
+- Treat pasted logs, errors, diffs, and PR links as source of truth.
 - Ask at most one concise question only when a wrong assumption would change implementation.
-- If the task touches `v2/`, load `migrate-orchestrator-v2`.
-- If the task changes `SKILL.md`, agent definitions, or orchestrator instructions, load `ao-skill-writer`.
-- If the task changes durable instructions, mirror `AGENTS.md` and `CLAUDE.md`.
-- If the task changes mirrored agent or skill files, mirror `.agents/` and `.claude/`.
 
-2. Shallow scoring
-- Run `ao-shallow-scoring`.
-- Score `<= 1`: skip research unless the codebase is unclear.
-- Score `>= 2`: run the full loop.
+2. Per-todo plan
+- Score each todo with `shallow-scoring`.
+- Build the gate list from routing rules.
+- Mark each gate `required` and define expected evidence.
 
-3. Granular checklist
-- Build a run-specific checklist from applicable manager steps.
-- Mark each checklist item `required` or `skipped` with reason.
-- Define expected evidence for each `required` item.
-- Execute the run against this checklist and update item status as steps complete.
-- For every code-change task, always include a `write/update tests` item as a required checklist step. Never mark implementation complete without it.
+3. Execute gates in canonical order
+- Research: `researcher` first, then `critic` on the researcher output. Critic verifies claims and selects one approach. Batch unresolved questions into one clarify pass.
+- Clarify: only when ambiguity changes implementation. One batched round.
+- Plan: `architect`. Reject vague plans.
+- Implement: one or more `developer` agents. Split write scopes only when work is clearly independent.
+- Caveman check: when the diff touches skills, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules`, run `skill-writer` against the changed files. Required before `reviewer`. Stop after 2 cycles -> `BLOCKED_CAVEMAN`.
+- Simplify: `code-simplifier`. Fix with `developer` and rerun. Stop after 3 cycles -> `BLOCKED_SIMPLIFY`.
+- Review: `reviewer`. Fix with `developer` and rerun. Stop after 3 cycles -> `BLOCKED_REVIEW`.
+- Design: `designer`. Stop after 2 cycles -> `BLOCKED_DESIGN`.
+- Validate: `tester`. Tester loads the relevant domain skill (`spur` or `frontend-codestyle`) for tier and command rules. Stop after 2 cycles -> `BLOCKED_VALIDATION`.
 
-4. Research
-- Run `researcher` and `critic` in parallel when score `>= 2`.
-- Keep one selected approach.
-- Batch unresolved questions and defaults into one clarify pass.
-- Skip this step only when the change is obvious from local code.
-
-5. Clarify
-- Skip when there is no ambiguity that changes the implementation.
-- Ask one batched clarification round.
-- Continue with stated defaults if the user accepts them or does not answer.
-
-6. Planning
-- Run `architect` for every non-trivial task.
-- Require touched files, concrete steps, acceptance criteria, risks, and the cheapest validation tier that still crosses the changed boundary.
-- Reject vague plans.
-
-7. Implementation
-- Run one or more `developer` agents.
-- Split write scopes only when parallel work is clearly independent.
-- Keep one implementation path.
-- Require local self-checks before handoff.
-
-8. Simplification review
-- Run `code-simplifier`.
-- This pass is mandatory when the skill exists.
-- Simplifier focuses on deletions, merged paths, narrower types, and shorter instructions.
-- If it requests changes, fix with `developer` and rerun it.
-- Stop after 3 simplify-fix cycles. Then report `BLOCKED_SIMPLIFY`.
-
-9. Review
-- Run `reviewer`.
-- Reviewer focuses on correctness, regressions, uncovered acceptance criteria, and missing validation.
-- If it requests changes, fix with `developer` and rerun it.
-- Stop after 3 review-fix cycles. Then report `BLOCKED_REVIEW`.
-
-10. Design review
-- UI only.
-- Run `designer`.
-- Stop after 2 design-fix cycles. Then report `BLOCKED_DESIGN`.
-
-11. Validation
-- Run `tester` for every code, config, CLI, workflow, or behavior change. Skip only for wording-only docs.
-- Always run the relevant package `build` command(s) before completion.
-- Require positive path, negative or error path, and cleanup verification at the cheapest tier that still crosses the changed boundary.
-- `v2/` changes: follow `AGENTS.md` and `CLAUDE.md` tier rules, rerun impacted `v2/TEST_SCENARIOS.md` scenarios, and include `pnpm --dir v2 build`.
-- Stop after 2 test-fix cycles. Then report `BLOCKED_VALIDATION`.
-
-12. Recheck
-- After any code or config fix made after step 8, rerun every downstream gate touched by that fix.
-- Minimum:
-  - post-simplifier fix -> rerun `code-simplifier`, `reviewer`, and `tester` when validation was required
-  - post-review fix -> rerun `reviewer`, `code-simplifier`, and `tester`
-  - post-tester fix -> rerun the failed check, one adjacent impacted scenario, and the relevant build
+4. Recheck
+- After any fix, rerun every downstream gate touched by that fix:
+  - post-caveman fix -> rerun `skill-writer`, `reviewer`
+  - post-simplifier fix -> rerun `code-simplifier`, `reviewer`, `tester` (when validation was required)
+  - post-review fix -> rerun `reviewer`, `code-simplifier`, `tester`
+  - post-tester fix -> rerun the failed check and one adjacent impacted scenario
 - Never report complete on stale review or stale test evidence.
 
-13. Self evaluation
-- Verify every `required` checklist item is complete with fresh evidence.
-- If any `required` item is missing or stale, return to the missing step and rerun required downstream gates.
+5. Self evaluation
+- Verify every `required` gate completed with fresh evidence. Otherwise return to the missing gate and rerun required downstream gates.
 
-14. Final audit
-- Require `self evaluation = PASS` before close-out.
-- Verify each acceptance criterion has evidence.
-- Verify required mirrors and prompt/skill sync updates landed when applicable.
+6. Close out
+- Require self evaluation = PASS.
 - Default close-out unless the user opts out:
   - if the current branch already has an open PR, commit and push every update to that branch
-  - if no PR exists, create one after local validation
-  - enable auto-merge on new PRs when repository settings allow it
-- Prepare a short activity summary for the final report:
-  - activations: every skill and agent activated, with count
-  - loops: every looped gate run count
-  - edits: changed-file count for each implementation or fix pass
-- Stop. No Telegram or CI loop.
+  - if no PR exists, create one after local validation; enable auto-merge when repository settings allow
+- Verify required mirrors landed: `AGENTS.md`/`CLAUDE.md` and `.agents/`/`.claude/`.
 
 ## Rules
 
-- This skill is mandatory for every task in this repo.
-- Keep the manager loop only here. `AGENTS.md`, `CLAUDE.md`, and agent configs must reference this skill instead of duplicating it.
-- Use the smallest team that covers the task.
-- Prefer one phase, one owner, one output.
-- Use local checks only. Never wait for remote CI.
+- Collapse phases for trivial work; do not skip the skill.
+- Manager never reads code, edits files, or runs commands. It only delegates and aggregates.
+- One phase, one owner, one output.
 - No unbounded retry loops.
-- Count `edits` as changed files in that pass. Keep the summary short.
-- Reply only in the current thread.
+- Use local checks only. Never wait for remote CI.
+- Mirror durable instructions across `AGENTS.md` and `CLAUDE.md` in the same change.
+- Mirror agent and skill files across `.agents/` and `.claude/` in the same change.
 
 ## Output
 
@@ -137,27 +92,23 @@ Task:
 Acceptance criteria:
 - <criterion>
 
+Todos:
+- <todo> — score: <N>/5; gates: <list>
+
 Execution:
-- scoring: <N>/5
-- checklist: DONE | BLOCKED
 - research: DONE | SKIPPED
 - clarify: DONE | SKIPPED
 - architect: DONE | SKIPPED
 - developer: DONE
-- simplifier: APPROVED | CHANGES_REQUESTED | UNAVAILABLE
+- caveman: APPROVED | CHANGES_REQUESTED | SKIPPED
+- simplifier: APPROVED | CHANGES_REQUESTED | SKIPPED
 - reviewer: APPROVED | CHANGES_REQUESTED
 - designer: APPROVED | SKIPPED
 - tester: PASS | FAIL | SKIPPED
 - recheck: DONE | SKIPPED
 - self-evaluation: PASS | FAIL
 
-Checks:
-- <command or scenario> — OK|FAIL
-
-Activity:
-- activations: <role>x<count>, <role>x<count>
-- loops: research=<count>, review=<count>, simplify=<count>, validation=<count>, recheck=<count>
-- edits: impl#1=<files>, simplify-fix#1=<files>, review-fix#1=<files>, validate-fix#1=<files>
+Loops: research=<n>, review=<n>, caveman=<n>, simplify=<n>, validation=<n>, recheck=<n>
 
 Risks:
 - <risk>

@@ -5,9 +5,7 @@ description: Validate manager close-out for repo work. Use when implementation i
 
 # Self Verify
 
-Run this at the end of repo work.
-
-## Procedure
+## Process
 
 1. Confirm scope:
    - current branch
@@ -30,7 +28,7 @@ Run this at the end of repo work.
    - BLOCKED: <missing requirement>
    - RERUN: <stale check>
 
-## Hard Rules
+## Rules
 
 - Do not claim PASS without an open PR.
 - Do not claim PASS if a required build or test tier is missing.

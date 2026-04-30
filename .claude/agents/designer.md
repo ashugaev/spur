@@ -1,7 +1,7 @@
 ---
 name: designer
 description: UI review gate. Verify layout, visual consistency, and UI states for frontend changes. Use after UI implementation. Skip backend-only changes.
-model: sonet
+model: sonnet
 tools: Read, Grep, Glob
 ---
 
