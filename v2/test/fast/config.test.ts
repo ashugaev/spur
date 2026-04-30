@@ -310,25 +310,6 @@ projects:
     });
   });
 
-  it("keeps legacy voice configs backwards compatible", async () => {
-    const configPath = await writeConfig(`
-voice:
-  modelPath: ~/models/ggml-base.bin
-  language: ru
-
-projects:
-  backend:
-    path: $REPO_PATH
-`);
-
-    const config = loadConfig(configPath);
-
-    expect(config.voice.provider).toBe("whisper_cpp");
-    expect(config.voice.model).toBe("base");
-    expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
-    expect(config.voice.language).toBe("ru");
-  });
-
   it("rejects unsupported voice providers", async () => {
     const configPath = await writeConfig(`
 voice:
@@ -458,23 +439,6 @@ projects:
     );
   });
 
-  it("parses devServer as sidecar backward compat", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    devServer:
-      command: "pnpm dev"
-      autoStart: true
-`);
-
-    const config = loadConfig(configPath);
-
-    expect(config.projects["backend"]?.sidecars).toEqual({
-      dev: { command: "pnpm dev", autoStart: true },
-    });
-  });
-
   it("parses sidecars block", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -529,22 +493,7 @@ projects:
     );
   });
 
-  it("rejects both devServer and sidecars", async () => {
-    const configPath = await writeConfig(`
-projects:
-  backend:
-    path: $REPO_PATH
-    devServer:
-      command: "pnpm dev"
-    sidecars:
-      dev:
-        command: "pnpm dev"
-`);
-
-    expect(() => loadConfig(configPath)).toThrow('defines both "devServer" and "sidecars"');
-  });
-
-  it("returns empty sidecars when no sidecar or devServer key present", async () => {
+  it("returns empty sidecars when no sidecar key present", async () => {
     const configPath = await writeConfig(`
 projects:
   backend:

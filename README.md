@@ -5,7 +5,6 @@ This repository has two supported product surfaces:
 - `v2/` is the Spur daemon and CLI.
 - `packages/web/` is an optional web UI that proxies to Spur's HTTP API.
 
-The old AO/v1 backend, mobile app, plugin tree, example configs, and parallel docs have been removed from the repo. Runtime behavior lives in `v2/`. The web package stays a thin view layer over that daemon.
 
 ## Quick Start
 
@@ -72,7 +71,6 @@ pnpm --dir v2 test:smoke
 - [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — current failure modes and fixes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution scope and required checks
-- [docs/architecture-v2.md](docs/architecture-v2.md) — high-level architecture intent
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
 
 ## License

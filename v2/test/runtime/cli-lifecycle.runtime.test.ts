@@ -2816,8 +2816,9 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
 `,
     );
     const daemon = await context.startDaemon(configPath);
@@ -2874,9 +2875,10 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
-      autoStart: true
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
 `,
     );
     const daemon = await context.startDaemon(configPath);
@@ -3077,9 +3079,10 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
-      autoStart: true
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
 `,
     );
     const daemon = await context.startDaemon(configPath);

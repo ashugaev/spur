@@ -316,25 +316,6 @@ function parseProjectPreflight(
   };
 }
 
-/** Backward-compat shape for the legacy `devServer` YAML key. */
-interface DevServerConfig {
-  command: string;
-  autoStart: boolean;
-}
-
-function parseDevServer(projectId: string, value: unknown): DevServerConfig | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const label = `projects.${projectId}.devServer`;
-  const raw = asObject(value, label);
-  return {
-    command: asString(raw["command"], `${label}.command`),
-    autoStart: asOptionalBoolean(raw["autoStart"], `${label}.autoStart`) ?? false,
-  };
-}
-
 function parseSidecars(projectId: string, value: unknown): Record<string, SidecarConfig> {
   if (value === undefined) return {};
   const label = `projects.${projectId}.sidecars`;
@@ -387,15 +368,6 @@ function parseSidecars(projectId: string, value: unknown): Record<string, Sideca
     result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
   }
   return result;
-}
-
-function parseDevServerAsSidecar(devServer: DevServerConfig): Record<string, SidecarConfig> {
-  return {
-    dev: {
-      command: devServer.command,
-      autoStart: devServer.autoStart,
-    },
-  };
 }
 
 function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfig | undefined {
@@ -485,17 +457,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const symlinks = asOptionalStringArray(raw["symlinks"], `${label}.symlinks`) ?? [];
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
-  const devServer = parseDevServer(projectId, raw["devServer"]);
-  const hasDevServerKey = raw["devServer"] !== undefined;
-  const hasSidecarsKey = raw["sidecars"] !== undefined;
-  if (hasDevServerKey && hasSidecarsKey) {
-    throw new Error(`projects.${projectId} defines both "devServer" and "sidecars"; pick one`);
-  }
-  const sidecars = hasSidecarsKey
-    ? parseSidecars(projectId, raw["sidecars"])
-    : devServer
-      ? parseDevServerAsSidecar(devServer)
-      : {};
+  const sidecars = parseSidecars(projectId, raw["sidecars"]);
   const defaultAgent = asOptionalAgent(raw["defaultAgent"], `${label}.defaultAgent`);
   const sourcesRaw = raw["sources"] ? asObject(raw["sources"], `${label}.sources`) : {};
   const sources: Record<string, SourceConfig> = {};
