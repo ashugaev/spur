@@ -37,7 +37,7 @@ projects:
         runOnStart: false
       pr-review-queue:
         type: github
-        intervalMs: 60000
+        intervalMs: 600000
         runOnStart: false
         # `gh search prs` query. One Spur session per matched PR, ever
         # (append-only registry under <dataDir>/source-state/github-work-items).
