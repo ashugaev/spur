@@ -225,6 +225,7 @@ interface LogEntry {
   level: string;
   message?: string;
   sessionId?: string;
+  details?: Record<string, unknown>;
 }
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
@@ -523,13 +524,114 @@ function ToastBanner({ toast }: { toast: ToastState }) {
   );
 }
 
-function formatLogTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return iso;
+function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
+  const value = details?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function formatLogEventLabel(event: string): string {
+  return event.replaceAll(".", " ");
+}
+
+function formatStateLabel(state: string): string {
+  return state.replaceAll("_", " ");
+}
+
+function logRowAccent(level: string): string {
+  if (level === "error") return "border-l-[var(--color-status-error)]";
+  if (level === "warn") return "border-l-[var(--color-status-attention)]";
+  return "border-l-[var(--color-status-working)]";
+}
+
+function logBadgeClass(level: string): string {
+  if (level === "error") {
+    return "border-[var(--color-status-error)] text-[var(--color-status-error)]";
   }
+  if (level === "warn") {
+    return "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
+  }
+  return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
+}
+
+function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string }) {
+  const fromState = readLogDetail(entry.details, "fromState");
+  const toState = readLogDetail(entry.details, "toState");
+  const source = readLogDetail(entry.details, "source");
+  const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
+  const serviceId = readLogDetail(entry.details, "serviceId");
+  const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const isStateTransition =
+    entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const runtimeLabel =
+    entry.event === "service.output"
+      ? serviceId
+        ? `service ${serviceId}`
+        : "service"
+      : entry.event === "sidecar.output"
+        ? sidecarName
+          ? `sidecar ${sidecarName}`
+          : "sidecar"
+        : null;
+
+  return (
+    <article
+      className={`border-l-2 border-y border-r border-[var(--color-border-default)] bg-[var(--color-bg-surface)] ${logRowAccent(entry.level)}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span>{formatAbsoluteTime(entry.timestamp)}</span>
+        <span className={`border px-2 py-0.5 ${logBadgeClass(entry.level)}`}>{entry.level}</span>
+        <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+          {runtimeLabel ?? formatLogEventLabel(entry.event)}
+        </span>
+        {source ? (
+          <span className="border border-[var(--color-border-default)] px-2 py-0.5">
+            source {source}
+          </span>
+        ) : null}
+      </div>
+
+      {isStateTransition ? (
+        <div className="flex flex-wrap items-center gap-3 px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            Status transition
+          </div>
+          <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
+            <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
+              {formatStateLabel(fromState ?? "")}
+            </span>
+            <span className="text-[var(--color-status-working)]">-&gt;</span>
+            <span className="border border-[var(--color-status-working)] px-2 py-1">
+              {formatStateLabel(toState ?? "")}
+            </span>
+          </div>
+          {historyArtifactId ? (
+            <a
+              className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              download={historyArtifactId}
+              href={artifactUrl(sessionId, historyArtifactId)}
+            >
+              History snapshot
+            </a>
+          ) : null}
+        </div>
+      ) : (
+        <div className="px-3 py-3">
+          {entry.message ? (
+            <pre
+              className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5"
+              style={{
+                color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-primary)",
+              }}
+            >
+              {entry.message}
+            </pre>
+          ) : (
+            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+          )}
+        </div>
+      )}
+    </article>
+  );
 }
 
 const LOG_LEVEL_COLORS: Record<string, string> = {
@@ -1473,10 +1575,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               role="dialog"
               aria-label={`Logs ${session.id}`}
             >
-              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                  Logs — {session.id}
-                </span>
+              <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border-default)] px-4 py-3">
+                <div>
+                  <div className="font-bold uppercase text-[var(--color-text-primary)]">
+                    Logs {session.id}
+                  </div>
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Spur orchestrator events and runtime output
+                  </div>
+                </div>
                 <button
                   type="button"
                   className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
@@ -1485,24 +1592,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-4">
                 {logEntries.length === 0 ? (
-                  <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
+                  <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-center text-[var(--color-text-tertiary)]">
+                    No Spur log entries yet.
+                  </div>
                 ) : (
-                  logEntries.map((entry, i) => (
-                    <div
-                      key={`${entry.timestamp}-${i}`}
-                      style={{
-                        color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)",
-                      }}
-                    >
-                      <span className="text-[var(--color-text-tertiary)]">
-                        [{formatLogTime(entry.timestamp)}]
-                      </span>{" "}
-                      <span className="uppercase">{entry.event}</span>
-                      {entry.message ? ` — ${entry.message}` : ""}
-                    </div>
-                  ))
+                  <div className="flex flex-col gap-3">
+                    {logEntries.map((entry, i) => (
+                      <LogEntryRow
+                        key={`${entry.timestamp}-${entry.event}-${i}`}
+                        entry={entry}
+                        sessionId={session.id}
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
