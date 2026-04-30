@@ -848,7 +848,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
   const startupArtifacts = useMemo(
     () =>
-      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ?? [],
+      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ??
+      [],
     [session],
   );
   const visibleLinks = useMemo(

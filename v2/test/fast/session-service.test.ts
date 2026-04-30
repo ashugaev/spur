@@ -514,11 +514,7 @@ describe("SessionService", () => {
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
-      "claude",
-      "slot-instructions\nhello",
-      {},
-    );
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {});
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
@@ -853,13 +849,9 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
-      "claude",
-      "slot-instructions\nhello",
-      {
-        planMode: true,
-      },
-    );
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {
+      planMode: true,
+    });
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
@@ -895,13 +887,9 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
-      "codex",
-      "slot-instructions\nhello",
-      {
-        planMode: true,
-      },
-    );
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
+      planMode: true,
+    });
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
@@ -936,13 +924,9 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
-      "codex",
-      "slot-instructions\nhello",
-      {
-        codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
-      },
-    );
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
   });
 
   it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
@@ -5567,9 +5551,9 @@ describe("SessionService", () => {
         ].join("\n"),
         {},
       );
-      expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8")).toBe(
-        "startup-bytes",
-      );
+      expect(
+        readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8"),
+      ).toBe("startup-bytes");
       expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
         "new-bytes",
       );

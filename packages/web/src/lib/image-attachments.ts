@@ -18,7 +18,9 @@ export async function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
-export async function imageAttachmentsFromFiles(files: FileList | null): Promise<ImageAttachment[]> {
+export async function imageAttachmentsFromFiles(
+  files: FileList | null,
+): Promise<ImageAttachment[]> {
   if (!files) {
     return [];
   }
@@ -31,7 +33,9 @@ export async function imageAttachmentsFromFiles(files: FileList | null): Promise
   );
 }
 
-export function encodeImageAttachments(attachments: ImageAttachment[]): Array<{ name: string; data: string }> {
+export function encodeImageAttachments(
+  attachments: ImageAttachment[],
+): Array<{ name: string; data: string }> {
   return attachments.map((attachment) => ({
     name: sanitizeAttachmentFilename(attachment.file.name),
     data: attachment.preview.split(",")[1] ?? "",

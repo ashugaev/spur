@@ -611,13 +611,13 @@ describe("Spur web API routes", () => {
         method: "POST",
       }),
     );
-    expect(
-      JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body),
-    ).toEqual({
-      prompt: "Retry with screenshot",
-      startupAttachmentIds: ["1715000000000-source.png"],
-      attachments: [{ name: "shot.png", data: "cG5n" }],
-    });
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        prompt: "Retry with screenshot",
+        startupAttachmentIds: ["1715000000000-source.png"],
+        attachments: [{ name: "shot.png", data: "cG5n" }],
+      },
+    );
   });
 
   it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {

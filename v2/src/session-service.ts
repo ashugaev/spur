@@ -332,7 +332,9 @@ function buildInitialMessage(initialMessage: string, sidecarNames: string[]): st
 }
 
 function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
-  return attachmentIds.map((attachmentId) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${attachmentId}]`);
+  return attachmentIds.map(
+    (attachmentId) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${attachmentId}]`,
+  );
 }
 
 function baseAttachmentName(artifactId: string): string {
@@ -1703,7 +1705,9 @@ export class SessionService {
           : prompt;
       const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
       const startupAttachmentLines =
-        agent === "codex" ? [] : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -2258,7 +2262,9 @@ export class SessionService {
           : prompt;
       const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
       const startupAttachmentLines =
-        agent === "codex" ? [] : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
       const sidecarNames = Object.keys(project.sidecars);
       const spawnInitialMessage = buildInitialMessage(
         [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
@@ -3497,7 +3503,11 @@ export class SessionService {
 
   async respawn(
     sessionId: string,
-    request: { prompt?: string; attachments?: SendMessageAttachment[]; startupAttachmentIds?: string[] } = {},
+    request: {
+      prompt?: string;
+      attachments?: SendMessageAttachment[];
+      startupAttachmentIds?: string[];
+    } = {},
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -3520,14 +3530,18 @@ export class SessionService {
       message: `Respawning ${sessionId}`,
       details: { agent: session.agent },
     });
-    const requestedStartupAttachmentIds = request.startupAttachmentIds ?? session.startupAttachmentIds ?? [];
+    const requestedStartupAttachmentIds =
+      request.startupAttachmentIds ?? session.startupAttachmentIds ?? [];
     const allowedStartupIds = new Set(session.startupAttachmentIds ?? []);
     for (const attachmentId of requestedStartupAttachmentIds) {
       if (!allowedStartupIds.has(attachmentId)) {
         throw new Error(`Unknown startup attachment id: ${attachmentId}`);
       }
     }
-    const clonedAttachments = this.cloneStartupAttachments(session.id, requestedStartupAttachmentIds);
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      requestedStartupAttachmentIds,
+    );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
     return this.spawn(
       resolveRespawnRequest(session, {
