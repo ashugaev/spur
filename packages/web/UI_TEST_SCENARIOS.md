@@ -33,6 +33,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D1: Header renders correctly
 
 - 𖤓 icon + large project title visible at the same size as before
+- Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
@@ -79,10 +80,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
-- Stale/missing PR status payloads keep the PR link visible but do not show the footer `Git Error` badge
-- GitHub integration failures surfaced inside the PR payload show the footer `Git Error` badge without breaking the page
+- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
+
+### D5b: PR status survives reload and GitHub errors
+
+- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
+- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
+- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
 
 ### D6: Attention zone sections
 
@@ -97,6 +104,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
+- Footer shows a separate GitHub connection indicator that is independent from PR status rows
+- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
+- Healthy GitHub status renders as a green check next to the GitHub icon
+- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
+- GitHub connection/auth/API failures render the error text directly in the footer
+- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
 
 ### D6c: Footer resource metrics
 
@@ -107,7 +121,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, tapping anywhere outside the open system health tooltip closes it
 - On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
-- Git / PR aggregate stays outside the `HEALTHY` tooltip
+- GitHub connection status stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
@@ -170,6 +184,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
@@ -186,6 +201,17 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+
+### S2a: Logs modal
+
+- `Logs` opens a full-screen modal for the current session
+- Modal subtitle reads as Spur orchestrator events plus runtime output, not agent chat history
+- Empty state shows a bordered placeholder instead of raw empty text
+- `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
+- Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
+- Transition rows show a `History snapshot` download link when `historyArtifactId` is present
+- Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
+- Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
 ### S2b: Conversation dialog (Claude only)
 

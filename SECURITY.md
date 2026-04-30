@@ -18,8 +18,6 @@ This repo's live product surfaces are:
 - `v2/`
 - `packages/web/`
 
-Security fixes should assume that no legacy AO/v1 backend or plugin path remains in-tree.
-
 ## Secrets
 
 - Do not commit secrets in Spur configs or env files.

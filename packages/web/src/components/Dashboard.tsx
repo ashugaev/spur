@@ -857,7 +857,7 @@ export function Dashboard() {
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
-      <StatusBar sessions={rawSessions} />
+      <StatusBar />
     </>
   );
 }

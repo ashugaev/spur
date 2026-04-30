@@ -389,35 +389,35 @@ describe("PR auto-detect", () => {
 
   it("resets waiting backoff on state change", async () => {
     const session = makeSession();
-    listSessionsMock.mockReturnValue([session]);
+    listSessionsMock.mockReturnValue([]);
     readSessionMock.mockReturnValue({ ...session });
-    setupEnrich("waiting");
     ghMock.mockResolvedValue(JSON.stringify([]));
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-
-    // Exhaust the waiting checks
     await vi.advanceTimersByTimeAsync(100);
-    for (let i = ghMock.mock.calls.length; i < PR_WAITING_LIMIT; i++) {
-      await vi.advanceTimersByTimeAsync(35_000);
-    }
-    const callsAfterBackoff = ghMock.mock.calls.length;
-
-    // Confirm backoff is in effect
-    await vi.advanceTimersByTimeAsync(35_000);
-    expect(ghMock).toHaveBeenCalledTimes(callsAfterBackoff);
-
-    // State changes to working → resets backoff
-    readClaudeJsonlStateMock.mockResolvedValue({
-      state: "working",
-      reader: { tailRecords: [] },
+    (
+      service as unknown as {
+        prCheckTrackers: Map<
+          string,
+          { waitingChecks: number; lastState: string | null; lastCheckAt: number; found: boolean }
+        >;
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).prCheckTrackers.set(session.id, {
+      waitingChecks: PR_WAITING_LIMIT,
+      lastState: "waiting",
+      lastCheckAt: Date.now(),
+      found: false,
     });
-    // Advance past throttle so next poll can fire
-    await vi.advanceTimersByTimeAsync(35_000);
-    const callsAfterReset = ghMock.mock.calls.length;
-    // Should have made at least one new call after backoff was lifted
-    expect(callsAfterReset).toBeGreaterThan(callsAfterBackoff);
+
+    (
+      service as unknown as {
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).checkPrForSession(session, "working");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
   });

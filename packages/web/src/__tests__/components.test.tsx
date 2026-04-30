@@ -14,7 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
-import { generateMetadata } from "@/app/layout";
+import { metadata } from "@/app/layout";
+import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -1118,9 +1119,9 @@ describe("Dashboard", () => {
   });
 
   it("exposes install metadata for PWA installability", async () => {
-    const metadata = await generateMetadata();
     const appManifest = manifest();
 
+    expect(metadata.title).toBe("Spur");
     expect(metadata.manifest).toBe("/manifest.webmanifest");
     expect(metadata.applicationName).toBe("Spur");
     expect(metadata.appleWebApp).toMatchObject({
@@ -1153,6 +1154,14 @@ describe("Dashboard", () => {
       ]),
     );
   });
+
+  it("uses the decoded session id as the session page title", async () => {
+    const metadata = await generateSessionMetadata({
+      params: Promise.resolve({ id: "feature%2Ftest-123" }),
+    });
+
+    expect(metadata.title).toBe("feature/test-123");
+  });
 });
 
 describe("StatusBar", () => {
@@ -1160,25 +1169,44 @@ describe("StatusBar", () => {
     vi.restoreAllMocks();
   });
 
+  function mockStatusBarFetch({
+    resources,
+    github,
+  }: {
+    resources: Record<string, unknown>;
+    github?: Record<string, unknown>;
+  }) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify(resources));
+      }
+      if (url === "/api/github-status") {
+        return new Response(
+          JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
   it("renders build version without hydration mismatch", () => {
-    const html = renderToString(<StatusBar sessions={[]} />);
+    const html = renderToString(<StatusBar />);
     expect(html).toContain("dev");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 12,
-          memoryPercent: 34,
-          diskPercent: 56,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 12,
+        memoryPercent: 34,
+        diskPercent: 56,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1196,11 +1224,11 @@ describe("StatusBar", () => {
   });
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ available: false, daemonAlive: true })),
-    );
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(screen.queryByText(/CPU \d+%/)).not.toBeInTheDocument();
@@ -1217,19 +1245,17 @@ describe("StatusBar", () => {
   });
 
   it("shows warning and error states in the online tooltip", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 88,
-          memoryPercent: 86,
-          diskPercent: 91,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 88,
+        memoryPercent: 86,
+        diskPercent: 91,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1246,19 +1272,17 @@ describe("StatusBar", () => {
   });
 
   it("syncs warning status text in the footer and closes the tooltip when its content is clicked", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 86,
-          memoryPercent: 48,
-          diskPercent: 41,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 86,
+        memoryPercent: 48,
+        diskPercent: 41,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1275,5 +1299,86 @@ describe("StatusBar", () => {
     fireEvent.click(tooltipHeader!);
 
     expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    fireEvent.mouseEnter(githubStatus);
+
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getAllByText("Healthy")).toHaveLength(2);
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+  });
+
+  it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    fireEvent.click(githubStatus);
+    fireEvent.mouseLeave(githubStatus);
+
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+
+    fireEvent.click(githubStatus);
+
+    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
+  });
+
+  it("shows the temporary checking state before the GitHub request resolves", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(screen.getByText("Checking")).toBeInTheDocument();
+  });
+
+  it("shows the GitHub error text in the footer when the health check fails", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    expect(await screen.findByText("GitHub API 503")).toBeInTheDocument();
+  });
+
+  it("shows a synthesized footer error when the GitHub status endpoint returns a non-200 response", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(await screen.findByText("GitHub status unavailable (503)")).toBeInTheDocument();
   });
 });
