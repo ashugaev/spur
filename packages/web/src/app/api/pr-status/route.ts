@@ -1,8 +1,8 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { execSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
 import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
 
 interface PrStatusResponse extends PrInfo {
@@ -36,8 +36,6 @@ const lastGoodCache = new Map<string, LastGoodEntry>();
 const CACHE_TTL_MS = 120_000;
 const ERROR_CACHE_TTL_MS = 60_000;
 const PERSIST_DEBOUNCE_MS = 1_000;
-
-let rateLimitResetAt = 0;
 
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
@@ -132,43 +130,6 @@ function extractPrCoords(url: string): { owner: string; repo: string; number: st
   return { owner: match[1], repo: match[2], number: match[3] };
 }
 
-let resolvedToken: string | null = null;
-let tokenResolved = false;
-
-function resolveGhToken(): string | null {
-  if (tokenResolved) return resolvedToken;
-  tokenResolved = true;
-  resolvedToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"] ?? null;
-  if (resolvedToken) return resolvedToken;
-  // Fallback: read from gh CLI auth
-  try {
-    resolvedToken = execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
-  } catch {
-    resolvedToken = null;
-  }
-  return resolvedToken;
-}
-
-function ghHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { accept: "application/vnd.github+json" };
-  const token = resolveGhToken();
-  if (token) {
-    headers["authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
-
-function handleRateLimit(response: Response): void {
-  if (response.status === 403 || response.status === 429) {
-    const reset = response.headers.get("x-ratelimit-reset");
-    if (reset) {
-      rateLimitResetAt = Number(reset) * 1000;
-    } else {
-      rateLimitResetAt = Date.now() + 60_000;
-    }
-  }
-}
-
 export async function GET(request: NextRequest) {
   const url = request.nextUrl.searchParams.get("url");
   if (!url) {
@@ -186,11 +147,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(cached.response);
   }
 
-  // Rate limit backoff
-  if (Date.now() < rateLimitResetAt) {
-    const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
-    const response = errorResponse(cacheKey, `GitHub rate limit — retry in ${wait}s`);
-    return NextResponse.json(response);
+  const rateLimitError = getGitHubRateLimitError();
+  if (rateLimitError) {
+    return NextResponse.json(errorResponse(cacheKey, rateLimitError));
   }
 
   const headers = ghHeaders();
@@ -207,7 +166,7 @@ export async function GET(request: NextRequest) {
     });
 
     if (!ghResponse.ok) {
-      handleRateLimit(ghResponse);
+      handleGitHubRateLimit(ghResponse);
       const response = errorResponse(cacheKey, `GitHub API ${ghResponse.status}`);
       cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
       return NextResponse.json(response);
@@ -262,7 +221,6 @@ if (process.env["NODE_ENV"] === "test") {
   (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
     cache.clear();
     lastGoodCache.clear();
-    rateLimitResetAt = 0;
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;

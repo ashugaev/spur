@@ -213,11 +213,13 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 ## Automation
 
 - `cron` emits `cron:tick`
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and — when `query` is set on the source — `github:work_item.new` (one event per matching PR, ever)
 - `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
+
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). The PR URL is seeded into `slots.links` (`label: "pr"`) on the spawned session.
 
 `send.interrupt`:
 
@@ -278,6 +280,12 @@ projects:
         type: github
         intervalMs: 60000
         runOnStart: false
+      pr-review-queue:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        # `gh search prs` query. One Spur session per matched PR, ever.
+        query: "is:pr is:open repo:acme/backend-api label:needs-review"
       web-watch:
         type: service
         service: web
@@ -324,6 +332,12 @@ projects:
         send:
           interrupt: false # queued, deduped, flushed as one batch
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      pr-review-queue-spawn:
+        source: pr-review-queue
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "Run /code-review on this pull request and post findings."
       web-watch-crash:
         source: web-watch
         event: service:crash

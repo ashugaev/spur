@@ -32,27 +32,6 @@ const FRESH_TTL_MS = 120_000;
 const PR_CACHE_STORAGE_KEY = "spur:pr-status-cache:v1";
 const PR_CACHE_MAX_ENTRIES = 200;
 
-let gitErrorMessage: string | null = null;
-const gitErrorListeners = new Set<() => void>();
-
-function setGitError(msg: string | null) {
-  gitErrorMessage = msg;
-  for (const cb of gitErrorListeners) cb();
-}
-
-/** Subscribe to GitHub integration error state. */
-export function useGitError(): string | null {
-  const [err, setErr] = useState(gitErrorMessage);
-  useEffect(() => {
-    const cb = () => setErr(gitErrorMessage);
-    gitErrorListeners.add(cb);
-    return () => {
-      gitErrorListeners.delete(cb);
-    };
-  }, []);
-  return err;
-}
-
 interface CacheEntry {
   data: PrInfo;
   fetchedAt: number;
@@ -123,19 +102,11 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
   const request = (async () => {
     try {
       const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-      if (!res.ok) {
-        const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-        setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
-        return cachedOrEmpty(url);
-      }
+      if (!res.ok) return cachedOrEmpty(url);
       const data: unknown = await res.json();
-      if (typeof data !== "object" || data === null) {
-        setGitError(null);
-        return cachedOrEmpty(url);
-      }
+      if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
       const obj = data as Record<string, unknown>;
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
-      setGitError(error);
       const parsed: PrInfo = {
         state: isPrState(obj["state"]) ? obj["state"] : null,
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
@@ -145,12 +116,9 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
         fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
         stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
       };
-      if (error && parsed.state === null) {
-        return cachedOrEmpty(url);
-      }
+      if (error && parsed.state === null) return cachedOrEmpty(url);
       return parsed;
     } catch {
-      setGitError("GitHub API unreachable");
       return cachedOrEmpty(url);
     } finally {
       pendingPrRequests.delete(url);
