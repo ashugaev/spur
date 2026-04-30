@@ -454,4 +454,14 @@ describe("DirectTerminal scroll integration", () => {
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
+
+  it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
+    await mountTerminal("test-terminal-voice-hint");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
+  });
 });

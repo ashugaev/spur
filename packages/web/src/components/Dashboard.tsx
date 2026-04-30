@@ -7,12 +7,17 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { voicePlaceholder, VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -650,7 +655,20 @@ export function Dashboard() {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div
+              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+              onKeyDown={(event) => {
+                if (isVoiceToggleHotkey(event)) {
+                  event.preventDefault();
+                  voice.toggleRecording();
+                  return;
+                }
+                if (isPrimarySubmitHotkey(event)) {
+                  event.preventDefault();
+                  void handleSpawn();
+                }
+              }}
+            >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -760,11 +778,7 @@ export function Dashboard() {
                   <textarea
                     className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
                     onChange={(event) => setSpawnPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                        void handleSpawn();
-                    }}
-                    placeholder="Prompt for the new session..."
+                    placeholder={voicePlaceholder("Prompt for the new session...", voice)}
                     value={spawnPrompt}
                   />
                   <VoiceButton voice={voice} />
@@ -792,7 +806,7 @@ export function Dashboard() {
                           aria-hidden="true"
                           className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                         >
-                          CMD + ⏎
+                          {PRIMARY_SUBMIT_HINT}
                         </span>
                       ) : null}
                     </button>

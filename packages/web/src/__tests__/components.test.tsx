@@ -82,12 +82,53 @@ function sessionsPayload() {
 }
 
 const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
+const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt for the new session... Voice ⌘ + .";
+
+class MockMediaRecorder {
+  mimeType = "audio/webm";
+  state = "inactive";
+  private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+  addEventListener(type: string, listener: (event?: unknown) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  start() {
+    this.state = "recording";
+  }
+
+  stop() {
+    this.state = "inactive";
+    this.emit(
+      "dataavailable",
+      new Blob(["voice-audio"], {
+        type: this.mimeType,
+      }),
+    );
+    this.emit("stop");
+  }
+
+  private emit(type: string, data?: Blob) {
+    for (const listener of this.listeners.get(type) ?? []) {
+      listener(data ? { data } : undefined);
+    }
+  }
+}
 
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+    vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn() }],
+        }),
+      },
+    });
   });
 
   it("renders Spur dashboard sessions from API", async () => {
@@ -640,7 +681,7 @@ describe("Dashboard", () => {
     const spawnButton = screen.getByRole("button", { name: "Spawn" });
     expect(spawnButton).toBeEnabled();
     expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toBeInTheDocument();
-    expect(screen.getByText("CMD + ⏎")).toBeInTheDocument();
+    expect(screen.getByText("⌘ + ⏎")).toBeInTheDocument();
     expect(screen.queryByText("⌘/Ctrl+Enter")).not.toBeInTheDocument();
 
     fireEvent.click(spawnButton);
@@ -697,13 +738,8 @@ describe("Dashboard", () => {
 
   it.each([
     {
-      label: "Ctrl+Enter",
-      prompt: "Ship hotkey",
-      keydown: { key: "Enter", ctrlKey: true },
-    },
-    {
       label: "Cmd+Enter",
-      prompt: "Ship cmd hotkey",
+      prompt: "Ship hotkey",
       keydown: { key: "Enter", metaKey: true },
     },
   ])(
@@ -751,6 +787,48 @@ describe("Dashboard", () => {
       });
     },
   );
+
+  it("toggles voice recording from the spawn prompt with Cmd+.", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin", language: "" }),
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Spawn voice transcript" }), { status: 200 });
+      }
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_VOICE_PLACEHOLDER);
+
+    fireEvent.keyDown(prompt, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(prompt, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Spawn voice transcript")).toBeInTheDocument();
+    });
+  });
 
   it("does not submit spawn on plain Enter in prompt textarea", async () => {
     let spawnCalls = 0;

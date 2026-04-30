@@ -4,6 +4,12 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+  VOICE_TOGGLE_HINT,
+} from "@/lib/submit-hotkeys";
 
 const MicIcon = () => (
   <svg
@@ -53,9 +59,11 @@ export function VoiceButton({ voice, className }: { voice: UseVoiceInput; classN
   return (
     <button
       aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
+      aria-keyshortcuts="Meta+."
       className={`${baseClass} transition ${active ? ACTIVE_STYLE : ""} disabled:cursor-not-allowed disabled:opacity-50`}
       disabled={voice.voiceBusy === "transcribing"}
       onClick={voice.toggleRecording}
+      title={`${voice.recording ? "Stop" : "Start"} voice recording (${VOICE_TOGGLE_HINT})`}
       type="button"
     >
       <MicOrSpinner voice={voice} />
@@ -66,8 +74,15 @@ export function VoiceButton({ voice, className }: { voice: UseVoiceInput; classN
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
   if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
-  if (voice.recording) return <>Recording... click the mic to stop</>;
+  if (voice.recording) return <>Recording... {VOICE_TOGGLE_HINT} to stop</>;
   return null;
+}
+
+export function voicePlaceholder(base: string, voice: UseVoiceInput) {
+  if (voice.canUseVoice && !voice.recording && !voice.voiceBusy) {
+    return `${base} Voice ${VOICE_TOGGLE_HINT}`;
+  }
+  return base;
 }
 
 export function VoiceConfirmModal({
@@ -85,6 +100,22 @@ export function VoiceConfirmModal({
       aria-label="Confirm voice input"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          voice.dismissModal();
+          return;
+        }
+        if (isVoiceToggleHotkey(event)) {
+          event.preventDefault();
+          voice.toggleRecording();
+          return;
+        }
+        if (isPrimarySubmitHotkey(event)) {
+          event.preventDefault();
+          voice.confirmDraft(onInsert);
+        }
+      }}
       role="dialog"
     >
       <div className="w-full max-w-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
@@ -108,6 +139,7 @@ export function VoiceConfirmModal({
             <textarea
               className={`min-h-40 w-full resize-y ${INPUT_CLASS}`}
               onChange={(event) => voice.setVoiceDraft(event.target.value)}
+              placeholder={voicePlaceholder("Review the transcription before inserting...", voice)}
               value={voice.voiceDraft}
             />
             <VoiceButton
@@ -133,11 +165,17 @@ export function VoiceConfirmModal({
             </button>
             <button
               type="button"
-              className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+              className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
               disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
               onClick={() => voice.confirmDraft(onInsert)}
             >
-              Insert
+              <span>Insert</span>
+              <span
+                aria-hidden="true"
+                className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+              >
+                {PRIMARY_SUBMIT_HINT}
+              </span>
             </button>
           </div>
         </div>

@@ -187,7 +187,7 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
@@ -471,10 +471,10 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Message to the running agent...")).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toBeInTheDocument();
     });
 
-    fireEvent.change(screen.getByPlaceholderText("Message to the running agent..."), {
+    fireEvent.change(screen.getByPlaceholderText(/^Message to the running agent\.\.\./), {
       target: { value: "Save this follow-up" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
@@ -1193,7 +1193,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText("Message to the running agent...");
+    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
     fireEvent.change(textarea, { target: { value: "Queued follow up" } });
     fireEvent.click(screen.getByRole("button", { name: "Queue" }));
 
@@ -1204,7 +1204,135 @@ describe("SessionDetail voice input", () => {
         body: JSON.stringify({ message: "Queued follow up", queue: true }),
       });
     });
-    expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+    expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
+  });
+
+  it("shows the primary composer hotkey hint only on Send now", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    expect(screen.getByRole("button", { name: /^send now$/i })).toHaveTextContent("⌘ + ⏎");
+    expect(screen.getByRole("button", { name: /^queue$/i })).not.toHaveTextContent("⌘ + ⏎");
+    expect(screen.queryByText("⌘/Ctrl + Enter")).not.toBeInTheDocument();
+  });
+
+  it("sends immediately on Cmd+Enter from the composer textarea", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    fireEvent.change(textarea, { target: { value: "Immediate hotkey send" } });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-a1/send", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          message: "Immediate hotkey send",
+          queue: false,
+          interrupt: true,
+        }),
+      });
+    });
+  });
+
+  it("toggles voice recording from the composer with Cmd+.", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice/transcribe" && init?.method === "POST") {
+        return new Response(JSON.stringify({ text: "Voice hotkey transcript" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText("Message to the running agent... Voice ⌘ + .");
+
+    fireEvent.keyDown(textarea, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.keyDown(textarea, { key: ".", metaKey: true });
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Voice hotkey transcript")).toBeInTheDocument();
+    });
+  });
+
+  it("does not submit the composer on plain Enter", async () => {
+    let sendCalls = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/send" && init?.method === "POST") {
+        sendCalls += 1;
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
+    fireEvent.change(textarea, { target: { value: "First line" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    expect(sendCalls).toBe(0);
+    expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue(
+      "First line",
+    );
   });
 
   it("sends immediately without queue when clicking Send now", async () => {
@@ -1227,7 +1355,7 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText("Message to the running agent...");
+    const textarea = await screen.findByPlaceholderText(/^Message to the running agent\.\.\./);
     fireEvent.change(textarea, { target: { value: "Send immediately" } });
     fireEvent.click(screen.getByRole("button", { name: "Send now" }));
 
@@ -1243,7 +1371,7 @@ describe("SessionDetail voice input", () => {
       });
     });
     await waitFor(() => {
-      expect(screen.getByPlaceholderText("Message to the running agent...")).toHaveValue("");
+      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
     });
   });
 

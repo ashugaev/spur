@@ -123,14 +123,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
-- Ctrl/Cmd+Enter submits
-- Prompt textarea placeholder is "Prompt for the new session..."
+- Cmd+Enter submits
+- Cmd+. toggles voice recording on/off inside the modal
+- Prompt textarea placeholder is "Prompt for the new session..." without voice support, and appends `Voice ⌘ + .` when voice is available and idle
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
-- Spawn button shows inline muted hotkey hint "CMD + ⏎" on the same line as the label
+- Spawn button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
 - Click outside modal (backdrop) closes it
 - ✕ button closes modal
 - Spawn button disabled only when project is empty
@@ -217,16 +219,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
 - First microphone click starts recording; button switches to stop state
 - Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
-- Ctrl/Cmd+Enter submits
-- `Queue` button adds the message to the queued stack and is the default composer action
+- `Queue` button adds the message to the queued stack
 - `Send now` button bypasses the queue and sends immediately
-- Ctrl/Cmd+Enter triggers the queued send path
+- `Queue` button has no inline hotkey hint
+- `Send now` button shows inline muted hotkey hint "⌘ + ⏎" on the same line as the label
+- Cmd+Enter triggers the immediate send path
+- Cmd+. toggles voice recording on/off from the textarea
+- Enter in the message textarea creates a newline instead of submitting
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
 - Cmd+V paste with image on clipboard adds thumbnail preview below textarea
@@ -267,12 +273,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
 - Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
 - Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
+- `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
+- Cmd+. toggles popup voice recording on/off
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly

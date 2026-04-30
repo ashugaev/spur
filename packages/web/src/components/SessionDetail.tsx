@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { voicePlaceholder, VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -32,6 +32,11 @@ import {
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   canComplete,
   canPause,
@@ -790,7 +795,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
-    if (!trimmed && attachments.length === 0) return;
+    if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
     const encoded = attachments.map((att) => ({
       name: sanitizeFilename(att.file.name),
       data: att.preview.split(",")[1] ?? "",
@@ -1139,8 +1144,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
                         onChange={(event) => setMessage(event.target.value)}
                         onKeyDown={(event) => {
-                          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend({ queue: true });
+                          if (isVoiceToggleHotkey(event)) {
+                            event.preventDefault();
+                            voice.toggleRecording();
+                            return;
+                          }
+                          if (isPrimarySubmitHotkey(event)) {
+                            event.preventDefault();
+                            void doSend({ queue: false, interrupt: true });
                           }
                         }}
                         onPaste={(e) => {
@@ -1155,7 +1166,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           addImageFiles(e.dataTransfer.files);
                         }}
                         onDragOver={(e) => e.preventDefault()}
-                        placeholder="Message to the running agent..."
+                        placeholder={voicePlaceholder("Message to the running agent...", voice)}
                         value={message}
                       />
                       <VoiceButton voice={voice} />
@@ -1182,12 +1193,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         ))}
                       </div>
                     )}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />{" "}
-                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                        <VoiceStatusHint voice={voice} />
                       </span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
                         <InputHistoryButton
                           entries={messageHistory.entries}
                           onSelect={setMessage}
@@ -1198,9 +1208,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Queueing..." : "Queue"}
+                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
                           type="button"
@@ -1208,9 +1218,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Sending..." : "Send now"}
+                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
+                          {busyAction !== "send" ? (
+                            <span
+                              aria-hidden="true"
+                              className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                            >
+                              {PRIMARY_SUBMIT_HINT}
+                            </span>
+                          ) : null}
                         </button>
                       </div>
                     </div>

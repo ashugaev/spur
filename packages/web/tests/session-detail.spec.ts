@@ -446,6 +446,66 @@ test.describe("S3: Message section", () => {
     expect(body).toEqual({ message: "Queued follow up", queue: true });
   });
 
+  test("composer buttons show inline hotkey hints", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("button", { name: /^queue$/i })).not.toContainText("⌘ + ⏎");
+    await expect(page.getByRole("button", { name: /^send now$/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Cmd+Enter posts the direct-send payload", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-2", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByRole("textbox");
+    await textarea.fill("Direct with hotkey");
+    await textarea.press("Meta+Enter");
+
+    await expect.poll(() => body).not.toBeNull();
+    expect(body).toEqual({
+      message: "Direct with hotkey",
+      queue: false,
+      interrupt: true,
+    });
+  });
+
+  test("plain Enter keeps the newline and does not submit", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-3", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let sendCalls = 0;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      sendCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByRole("textbox");
+    await textarea.fill("first line");
+    await textarea.press("Enter");
+    await textarea.type("second line");
+
+    await expect(textarea).toHaveValue("first line\nsecond line");
+    expect(sendCalls).toBe(0);
+  });
+
   test("Send now posts a direct-send payload", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s3-8", runtimeAlive: true });
     await mockSessionDetail(page, session);
