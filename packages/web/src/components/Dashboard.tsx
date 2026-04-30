@@ -12,6 +12,11 @@ import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import {
   getAttentionLevel,
@@ -190,6 +195,7 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
+  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -469,6 +475,8 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      const encodedAttachments = encodeImageAttachments(spawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
@@ -495,6 +503,7 @@ export function Dashboard() {
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
+      setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
@@ -514,8 +523,18 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
     setSpawnOpen(true);
   };
+
+  const addSpawnImages = useCallback((files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setSpawnAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -760,6 +779,18 @@ export function Dashboard() {
                   <textarea
                     className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
                     onChange={(event) => setSpawnPrompt(event.target.value)}
+                    onPaste={(event) => {
+                      const files = event.clipboardData.files;
+                      if (files.length > 0) {
+                        event.preventDefault();
+                        addSpawnImages(files);
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      addSpawnImages(event.dataTransfer.files);
+                    }}
+                    onDragOver={(event) => event.preventDefault()}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
                         void handleSpawn();
@@ -769,6 +800,30 @@ export function Dashboard() {
                   />
                   <VoiceButton voice={voice} />
                 </div>
+                {spawnAttachments.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {spawnAttachments.map((attachment, index) => (
+                      <div key={`${attachment.file.name}-${index}`} className="group relative">
+                        <img
+                          alt={attachment.file.name}
+                          className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
+                          src={attachment.preview}
+                        />
+                        <button
+                          className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
+                          onClick={() =>
+                            setSpawnAttachments((current) =>
+                              current.filter((_, currentIndex) => currentIndex !== index),
+                            )
+                          }
+                          type="button"
+                        >
+                          x
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}

@@ -20,6 +20,7 @@ interface AgentPlanOptions {
   codexHomePath?: string;
   codexArgs?: string[];
   planMode?: boolean;
+  startupImagePaths?: string[];
 }
 
 function claudePlanOptions(options?: AgentPlanOptions): {
@@ -35,10 +36,12 @@ function claudePlanOptions(options?: AgentPlanOptions): {
 function codexPlanOptions(options?: AgentPlanOptions): {
   codexHomePath?: string;
   codexArgs?: string[];
+  startupImagePaths?: string[];
 } {
   return {
     ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
     ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
+    ...(options?.startupImagePaths ? { startupImagePaths: options.startupImagePaths } : {}),
   };
 }
 

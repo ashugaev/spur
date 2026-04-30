@@ -242,6 +242,7 @@ export interface SessionRecord {
   planMode?: boolean;
   agentSessionId?: string;
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
   pr?: SessionPrBinding;
@@ -318,6 +319,7 @@ export interface PreflightResponse {
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
@@ -355,6 +357,9 @@ export interface KillSessionRequest {
 }
 
 export interface RespawnSessionRequest {
+  prompt?: string;
+  attachments?: SendMessageAttachment[];
+  startupAttachmentIds?: string[];
   terminateSessionId?: string;
 }
 

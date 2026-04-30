@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
@@ -64,6 +64,9 @@ const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const deleteSessionArtifactsExceptMock = vi.fn();
+const listSessionArtifactsMock = vi.fn();
+const readSessionArtifactMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
@@ -202,11 +205,12 @@ vi.mock("../../src/session-artifacts.js", () => ({
     mkdirSync(dir, { recursive: true });
     return dir;
   }),
+  deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
   deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
     rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
   }),
-  listSessionArtifacts: vi.fn(() => []),
-  readSessionArtifact: vi.fn(() => null),
+  listSessionArtifacts: listSessionArtifactsMock,
+  readSessionArtifact: readSessionArtifactMock,
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
@@ -436,6 +440,9 @@ describe("SessionService", () => {
     readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
+    deleteSessionArtifactsExceptMock.mockReset();
+    listSessionArtifactsMock.mockReset().mockReturnValue([]);
+    readSessionArtifactMock.mockReset().mockReturnValue(null);
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
@@ -507,7 +514,11 @@ describe("SessionService", () => {
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {});
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      "slot-instructions\nhello",
+      {},
+    );
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
@@ -842,9 +853,13 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {
-      planMode: true,
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "claude",
+      "slot-instructions\nhello",
+      {
+        planMode: true,
+      },
+    );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
@@ -880,9 +895,13 @@ describe("SessionService", () => {
       planMode: true,
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
-      planMode: true,
-    });
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      "slot-instructions\nhello",
+      {
+        planMode: true,
+      },
+    );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
@@ -917,9 +936,45 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
-      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      "slot-instructions\nhello",
+      {
+        codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+      },
+    );
+  });
+
+  it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
+    buildAgentLaunchPlanMock.mockImplementationOnce(
+      (_agent: string, _initialMessage: string, _options?: { startupImagePaths?: string[] }) => ({
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox --image /tmp/fake.png",
+        initialMessage: "",
+        readyMarkers: ["OpenAI Codex", "›"],
+      }),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "describe this image",
+      attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
     });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      "slot-instructions\ndescribe this image",
+      {
+        startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
+      },
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-shot.png`, "utf8")).toBe(
+      "png-bytes",
+    );
   });
 
   it("starts a pipelined session by sending only the first step immediately", async () => {
@@ -5251,7 +5306,11 @@ describe("SessionService", () => {
       expect(result.status).toBe("running");
       expect(createWorktreeMock).toHaveBeenCalled();
       expect(createTmuxSessionMock).toHaveBeenCalled();
-      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "fix the bug", {});
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+        "claude",
+        "slot-instructions\nfix the bug",
+        {},
+      );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.respawn.started",
       );
@@ -5455,6 +5514,92 @@ describe("SessionService", () => {
       await expect(service.respawn("api-1")).rejects.toThrow(
         "Session api-1 is not in a terminal state",
       );
+    });
+
+    it("reuses selected startup images and appends new ones on respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const startupArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "source-startup.png");
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      rmSync(startupArtifactPath, { force: true });
+      writeFileSync(startupArtifactPath, "startup-bytes");
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-source.png",
+        path: startupArtifactPath,
+        name: "1773828300000-source.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["1773828300000-source.png"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1", {
+        prompt: "edited prompt",
+        startupAttachmentIds: ["1773828300000-source.png"],
+        attachments: [{ name: "new.png", data: Buffer.from("new-bytes").toString("base64") }],
+      });
+
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+        "claude",
+        [
+          "slot-instructions",
+          "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-source.png]",
+          "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
+          "edited prompt",
+        ].join("\n"),
+        {},
+      );
+      expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8")).toBe(
+        "startup-bytes",
+      );
+      expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
+        "new-bytes",
+      );
+    });
+
+    it("rejects unknown startup attachment ids on respawn", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["known.png"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.respawn("api-1", {
+          startupAttachmentIds: ["unknown.png"],
+        }),
+      ).rejects.toThrow("Unknown startup attachment id: unknown.png");
     });
   });
 

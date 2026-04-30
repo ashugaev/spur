@@ -1,5 +1,5 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
+import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -264,6 +264,69 @@ test.describe("S2: Actions bar", () => {
     // canAttach = runtimeAlive && !isTerminalSession && tmuxSession
     // completed → isTerminalSession = true → no terminal button
     await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+  });
+
+  test("Edit & Respawn accepts pasted images and forwards startup image selections", async ({
+    page,
+  }) => {
+    let respawnBody: Record<string, unknown> | null = null;
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-1",
+      prompt: "Retry with screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      artifacts: [
+        {
+          id: "1715000000000-source.png",
+          name: "1715000000000-source.png",
+          size: 12,
+          mimeType: "image/png",
+          kind: "image",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, makeSpawningSession({ id: "detail-s2-respawn-next" }));
+    await page.route(`**/api/sessions/${session.id}/respawn`, async (route) => {
+      respawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "detail-s2-respawn-next" })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    const textarea = page.getByPlaceholder("Edit the initial message...");
+    await expect(textarea).toHaveValue("Retry with screenshot");
+    await textarea.fill("Retry with a fresh screenshot");
+    await page.evaluate(() => {
+      const textarea = document.querySelector(
+        'textarea[placeholder="Edit the initial message..."]',
+      );
+      if (!textarea) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "respawn.png", { type: "image/png" }));
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await expect(page.locator('img[alt="respawn.png"]')).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: /^respawn$/i }).click();
+    await page.waitForURL("**/sessions/detail-s2-respawn-next");
+
+    expect(respawnBody).toMatchObject({
+      prompt: "Retry with a fresh screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      attachments: [{ name: "respawn.png", data: expect.any(String) }],
+    });
   });
 
   test("link workspace access entries are visible when configured", async ({ page }) => {

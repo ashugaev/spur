@@ -33,6 +33,11 @@ import {
   withTerminalQuery,
 } from "@/lib/project-routes";
 import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
+import {
   canComplete,
   canPause,
   canRespawn,
@@ -198,26 +203,6 @@ function ArtifactCloseIcon() {
 const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
-
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-
-function sanitizeFilename(name: string): string {
-  return name.replace(/[^\w.-]/g, "_");
-}
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
-interface Attachment {
-  file: File;
-  preview: string;
-}
 
 interface LogEntry {
   timestamp: string;
@@ -572,7 +557,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnOpen, setRespawnOpen] = useState(false);
+  const [respawnPrompt, setRespawnPrompt] = useState("");
+  const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -728,11 +717,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRespawn = async () => {
     setBusyAction("respawn");
     try {
+      const payload: Record<string, unknown> = {
+        prompt: respawnPrompt.trim(),
+        startupAttachmentIds: respawnStartupAttachmentIds,
+      };
+      const encodedAttachments = encodeImageAttachments(respawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
@@ -780,21 +778,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const addImageFiles = (files: FileList | null) => {
-    if (!files) return;
-    const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
-    if (images.length === 0) return;
-    void Promise.all(images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })))
+    void imageAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addRespawnImageFiles = (files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
-    const encoded = attachments.map((att) => ({
-      name: sanitizeFilename(att.file.name),
-      data: att.preview.split(",")[1] ?? "",
-    }));
+    const encoded = encodeImageAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     if (options?.queue !== undefined) body.queue = options.queue;
@@ -848,6 +846,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const startupArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ?? [],
+    [session],
+  );
   const visibleLinks = useMemo(
     () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
     [session, sidecarLinkLabels],
@@ -863,6 +866,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
+
+  const openRespawnEditor = useCallback(() => {
+    if (!session) return;
+    setRespawnPrompt(session.prompt);
+    setRespawnStartupAttachmentIds(session.startupAttachmentIds);
+    setRespawnAttachments([]);
+    setRespawnOpen(true);
+  }, [session]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -1029,10 +1040,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 disabled={busyAction !== null}
-                onClick={() => void handleRespawn()}
+                onClick={openRespawnEditor}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
               </button>
             ) : null}
             <button
@@ -1525,6 +1536,131 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   : undefined
               }
             />
+          ) : null}
+          {respawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction !== "respawn") {
+                  setRespawnOpen(false);
+                }
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Edit & Respawn
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={busyAction === "respawn"}
+                    onClick={() => setRespawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <textarea
+                    className={`min-h-[10rem] w-full resize-y ${INPUT_CLASS}`}
+                    onChange={(event) => setRespawnPrompt(event.target.value)}
+                    onPaste={(event) => {
+                      const files = event.clipboardData.files;
+                      if (files.length > 0) {
+                        event.preventDefault();
+                        addRespawnImageFiles(files);
+                      }
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      addRespawnImageFiles(event.dataTransfer.files);
+                    }}
+                    onDragOver={(event) => event.preventDefault()}
+                    placeholder="Edit the initial message..."
+                    value={respawnPrompt}
+                  />
+                  {startupArtifacts.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Keep existing images
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {startupArtifacts.map((artifact) => {
+                          const selected = respawnStartupAttachmentIds.includes(artifact.id);
+                          return (
+                            <button
+                              key={artifact.id}
+                              className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
+                              onClick={() =>
+                                setRespawnStartupAttachmentIds((current) =>
+                                  current.includes(artifact.id)
+                                    ? current.filter((id) => id !== artifact.id)
+                                    : [...current, artifact.id],
+                                )
+                              }
+                              type="button"
+                            >
+                              <img
+                                alt={artifact.name}
+                                className="h-12 w-12 object-cover"
+                                src={artifactUrl(session.id, artifact.id)}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  {respawnAttachments.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {respawnAttachments.map((attachment, index) => (
+                        <div key={`${attachment.file.name}-${index}`} className="group relative">
+                          <img
+                            alt={attachment.file.name}
+                            className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
+                            src={attachment.preview}
+                          />
+                          <button
+                            className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
+                            onClick={() =>
+                              setRespawnAttachments((current) =>
+                                current.filter((_, currentIndex) => currentIndex !== index),
+                              )
+                            }
+                            type="button"
+                          >
+                            x
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      disabled={busyAction === "respawn"}
+                      onClick={() => setRespawnOpen(false)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={
+                        busyAction === "respawn" ||
+                        (!respawnPrompt.trim() &&
+                          respawnStartupAttachmentIds.length === 0 &&
+                          respawnAttachments.length === 0)
+                      }
+                      onClick={() => void handleRespawn()}
+                      type="button"
+                    >
+                      {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : null}
           <ArtifactLightbox
             artifact={selectedArtifact}

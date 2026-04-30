@@ -349,18 +349,36 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
+  if (!imagePaths || imagePaths.length === 0) {
+    return command;
+  }
+  return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
 ): AgentLaunchPlan {
-  return {
-    launchCommand: withCodexHome(
+  const command = withCodexHome(
+    appendCodexImages(
       appendCodexArgs(
         `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
         options?.codexArgs,
       ),
-      options?.codexHomePath,
+      options?.startupImagePaths,
     ),
+    options?.codexHomePath,
+  );
+  if (options?.startupImagePaths?.length) {
+    return {
+      launchCommand: prompt.trim() ? `${command} ${shellEscape(prompt)}` : command,
+      initialMessage: "",
+      readyMarkers: ["OpenAI Codex", "›"],
+    };
+  }
+  return {
+    launchCommand: command,
     initialMessage: prompt,
     readyMarkers: ["OpenAI Codex", "›"],
   };

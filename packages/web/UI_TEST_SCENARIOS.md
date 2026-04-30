@@ -136,6 +136,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
+- Pasting or dropping an image onto the spawn prompt adds a thumbnail attachment preview under the textarea
+- Spawn payload includes those image attachments, and successful spawn clears the preview list
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
@@ -193,6 +195,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
+- `Edit & Respawn` allows keeping previously attached startup images, pasting or dropping new images, and respawning with image-only input when text is empty
 
 ### S2b: Conversation dialog (Claude only)
 
