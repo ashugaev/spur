@@ -30,7 +30,7 @@ if [ $? -ne 0 ]; then
   echo "  1. Remove the secret from the file"
   echo "  2. Use environment variables instead: \${SECRET_NAME}"
   echo "  3. Add to .env.local (which is in .gitignore)"
-  echo "  4. Update agent-orchestrator.yaml.example with placeholder values"
+  echo "  4. Update spur.yaml.example with placeholder values"
   echo ""
   echo "If this is a false positive, update .gitleaks.toml allowlist"
   echo ""

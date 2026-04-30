@@ -1,12 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  fetchPrInfo,
-  extractLinkId,
-  prStateColor,
-  usePrInfo,
-  useGitError,
-} from "@/lib/link-icons.js";
+import { fetchPrInfo, extractLinkId, prStateColor, usePrInfo } from "@/lib/link-icons.js";
 import type { SpurSessionLink } from "@/lib/types";
 
 const mockFetch = vi.fn<typeof fetch>();
@@ -127,28 +121,6 @@ describe("fetchPrInfo", () => {
     expect(result.totalThreads).toBe(0);
   });
 
-  it("clears git error on success after an error was set", async () => {
-    // First call fails
-    mockFetch.mockRejectedValueOnce(new Error("Network error"));
-    await fetchPrInfo("https://github.com/org/repo/pull/6");
-
-    // Second call succeeds with a different URL (unique to avoid cache)
-    mockFetch.mockResolvedValueOnce(
-      jsonResponse({
-        state: "open",
-        ciStatus: null,
-        totalThreads: 0,
-        unresolvedThreads: 0,
-      }),
-    );
-
-    const { result } = renderHook(() => useGitError());
-    await act(async () => {
-      await fetchPrInfo("https://github.com/org/repo/pull/7");
-    });
-    expect(result.current).toBeNull();
-  });
-
   it("defaults numeric fields to 0 when missing from response", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
@@ -163,8 +135,6 @@ describe("fetchPrInfo", () => {
   });
 
   it("returns EMPTY_PR_INFO and clears Git error for soft missing PR payloads", async () => {
-    const { result: gitError } = renderHook(() => useGitError());
-
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: null,
@@ -183,29 +153,6 @@ describe("fetchPrInfo", () => {
         unresolvedThreads: 0,
       });
     });
-
-    expect(gitError.current).toBeNull();
-  });
-
-  it("reads error from a successful payload and sets Git error", async () => {
-    const { result: gitError } = renderHook(() => useGitError());
-
-    mockFetch.mockResolvedValueOnce(
-      jsonResponse({
-        state: null,
-        ciStatus: null,
-        totalThreads: 0,
-        unresolvedThreads: 0,
-        error: "GitHub API 503",
-      }),
-    );
-
-    await act(async () => {
-      const result = await fetchPrInfo("https://github.com/org/repo/pull/soft-error");
-      expect(result.state).toBeNull();
-    });
-
-    expect(gitError.current).toBe("GitHub API 503");
   });
 
   it("deduplicates concurrent in-flight requests for the same PR", async () => {
@@ -244,6 +191,48 @@ describe("fetchPrInfo", () => {
         unresolvedThreads: 0,
       },
     ]);
+  });
+
+  it("does not clobber a known good cached value when a later request errors", async () => {
+    const url = "https://github.com/org/repo/pull/dont-clobber";
+
+    // Seed the in-memory client cache by mounting usePrInfo, which writes through
+    // setPrCache after a successful fetch.
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        ciStatus: "success",
+        totalThreads: 3,
+        unresolvedThreads: 1,
+      }),
+    );
+    const { result: hook } = renderHook(() => usePrInfo(url));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(hook.current.state).toBe("open");
+    expect(hook.current.ciStatus).toBe("success");
+
+    // Now a non-ok response on the same URL: don't clobber the cached value.
+    mockFetch.mockResolvedValueOnce(jsonResponse({ error: "GitHub API 503" }, false, 503));
+    const errResult = await fetchPrInfo(url);
+    expect(errResult.state).toBe("open");
+    expect(errResult.ciStatus).toBe("success");
+
+    // And a soft-error payload (200 with error field, empty body) also keeps cached.
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+        error: "GitHub API 503",
+      }),
+    );
+    const softResult = await fetchPrInfo(url);
+    expect(softResult.state).toBe("open");
+    expect(softResult.ciStatus).toBe("success");
   });
 });
 
@@ -307,44 +296,6 @@ describe("prStateColor", () => {
 
   it("returns undefined for null", () => {
     expect(prStateColor(null)).toBeUndefined();
-  });
-});
-
-describe("useGitError hook", () => {
-  it("returns null initially", () => {
-    const { result } = renderHook(() => useGitError());
-    expect(result.current).toBeNull();
-  });
-
-  it("returns error string after fetchPrInfo fails with network error", async () => {
-    const { result } = renderHook(() => useGitError());
-
-    mockFetch.mockRejectedValueOnce(new Error("Network error"));
-    await act(async () => {
-      await fetchPrInfo("https://github.com/org/repo/pull/error-test-1");
-    });
-
-    expect(result.current).toBe("GitHub API unreachable");
-  });
-
-  it("returns null after successful fetchPrInfo clears the error", async () => {
-    const { result } = renderHook(() => useGitError());
-
-    // First trigger an error
-    mockFetch.mockRejectedValueOnce(new Error("Network error"));
-    await act(async () => {
-      await fetchPrInfo("https://github.com/org/repo/pull/error-test-2");
-    });
-    expect(result.current).toBe("GitHub API unreachable");
-
-    // Then succeed (unique URL to bypass cache)
-    mockFetch.mockResolvedValueOnce(
-      jsonResponse({ state: "open", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
-    );
-    await act(async () => {
-      await fetchPrInfo("https://github.com/org/repo/pull/clear-error-test");
-    });
-    expect(result.current).toBeNull();
   });
 });
 

@@ -1,12 +1,14 @@
 import { writeStderr } from "./io.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
-import type {
-  AgentName,
-  AppConfig,
-  SendTriggerConfig,
-  SessionView,
-  SpawnTriggerConfig,
+import {
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  type AgentName,
+  type AppConfig,
+  type GitHubWorkItemEventData,
+  type SendTriggerConfig,
+  type SessionView,
+  type SpawnTriggerConfig,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionService } from "./session-service.js";
@@ -58,6 +60,7 @@ async function runSpawnTrigger(
   agent: AgentName | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
+  eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
   logTriggerEvent(dataDir, "trigger.spawn.matched", {
@@ -86,6 +89,9 @@ async function runSpawnTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
+        ? { slots: { links: [{ label: "pr", url: (eventData as GitHubWorkItemEventData).url }] } }
+        : {}),
     });
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
       level: "info",
@@ -517,6 +523,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           trigger.spawn.agent,
           trigger.spawn.branch,
           trigger.spawn.overrides,
+          event.data,
           logger,
         );
         inFlight.add(spawnPromise);

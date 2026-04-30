@@ -10,7 +10,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `runtime integration` = `pnpm --dir v2 test:runtime`
   Uses the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
 - `real-agent smoke` = `pnpm --dir v2 test:smoke`
-  Uses real `claude` and `codex` in Spur worktrees created from the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
+  Uses real `claude` and `codex` in Spur worktrees created from this repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
 - Put each scenario in one tier only. If the boundary changes, move the scenario instead of duplicating it.
 
 ## Fast
@@ -26,7 +26,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
 - Isolated sidecar project config rewrites matching project `path` and `defaultBranch` to the current worktree, and ensures new isolated worktrees symlink `.env`, `spur.yaml`, `AGENTS.md`, `CLAUDE.md`, `.agents`, and `.claude` from that source worktree.
 - Config applies service-source defaults once at the parse boundary for `intervalMs`, `tailLines`, and `rules.*.cooldownMs`, and validates `service:<ruleId>` trigger events against declared rule ids.
-- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, and `github:merge_conflict`.
+- Config rejects removed GitHub event names so the live GitHub surface stays `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and `github:work_item.new` (the last only when `query` is set on the source).
 - Config rejects duplicate `sessionPrefix` values across projects.
 - Session service spawn follows one path: optional worktree spawn preflight, reserve id, resolve branch, create worktree, create `tmux`, wait for agent readiness, send the initial prompt, then persist the running record.
 - Session-owned artifacts live under `dataDir/session-artifacts/<sessionId>`, are exposed on `SessionView.artifacts`, outbound message attachments are written there instead of the worktree, and cleanup removes them on failed spawn rollback, `complete`, and `kill`.
@@ -190,8 +190,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Real-Agent Smoke
 
-- `claude` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
-- `codex` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- `claude` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- `codex` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
 - Real `claude` and `codex` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
 - Real `claude` and `codex` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
@@ -247,6 +247,21 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Manual sidecar start/stop via `spur sidecar start|stop --session <id> --name <name>`
 - Nested sidecars are manual-only through `spur-sidecar`, nesting stops after one extra level, and rejected depth overruns are logged
 - Sidecar status reported in session view
+
+### GitHub work-item triggers
+
+**Tier: fast**
+
+- `config.github.query` — `query` parses and is preserved on the github source.
+- `config.github.work_item_event_only_when_query_set` — rejects `github:work_item.new` triggers when `query` is unset.
+- `config.github.work_item_unique_per_source` — rejects two triggers on the same github source both subscribed to `github:work_item.new`.
+- `triggers.spawn.work_item_seeds_pr_link` — spawn payload carries `slots.links` with the `pr` label; malformed work-item payloads spawn without `slots`.
+- `metadata.work_item_registry` — `recordWorkItem` round-trips through `readWorkItemRegistry`; missing or corrupt files return an empty set.
+
+**Tier: runtime integration**
+
+- `github.work_item.poll_emits_once_per_external_id` — two-PR fixture, single emit per `externalId`, idempotent across daemon restart and across repeated polls on the same fixture.
+- `github.work_item.coexists_with_signal_branch` — when `query` is also set, the per-branch signal branch still fires `github:ci_failed` for an attached session alongside `github:work_item.new` from the query branch.
 
 ## Regression Rule
 

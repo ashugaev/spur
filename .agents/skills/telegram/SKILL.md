@@ -1,54 +1,16 @@
 ---
 name: telegram
-description: Send messages and get updates from Telegram via Bot API. Use for human-in-the-loop communication, notifications, and async collaboration.
+description: Send messages and read updates from Telegram via Bot API.
 ---
 
 # Telegram Bot Skill
 
-Use this skill when you need to communicate with a human via Telegram.
-
-## Requirements
-
-Environment variables in shell:
-- `TELEGRAM_BOT_TOKEN` - bot token from @BotFather
-- `TELEGRAM_CHAT_ID` - target chat ID
-
-## Scripts
-
-### Send Message
+Env: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 ```bash
-bash ./.agents/skills/telegram/scripts/send_message.sh "Your message here"
-```
+# Send (MarkdownV2 supported)
+bash ./.agents/skills/telegram/scripts/send_message.sh "<text>"
 
-Supports markdown formatting (MarkdownV2).
-
-### Get Updates
-
-```bash
+# Read last N messages (default 5). Format: [timestamp] from_user: message_text
 bash ./.agents/skills/telegram/scripts/get_updates.sh [limit]
-```
-
-Returns last N messages (default: 5). Output format:
-```
-[timestamp] from_user: message_text
-```
-
-## Usage Patterns
-
-### Notify human about completion
-```bash
-bash ./.agents/skills/telegram/scripts/send_message.sh "Task completed: $TASK_NAME"
-```
-
-### Ask question and wait for response
-```bash
-bash ./.agents/skills/telegram/scripts/send_message.sh "Need clarification: which approach to use?"
-# Wait some time...
-bash ./.agents/skills/telegram/scripts/get_updates.sh 1
-```
-
-### Report error
-```bash
-bash ./.agents/skills/telegram/scripts/send_message.sh "❌ Build failed: $ERROR_MSG"
 ```
