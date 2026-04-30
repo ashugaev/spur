@@ -1190,6 +1190,8 @@ describe("Spur web API routes", () => {
       vi.stubGlobal("fetch", fetchMock);
       fetchMock.mockReset();
       process.env["GITHUB_TOKEN"] = "test-token";
+      const reset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof reset === "function") (reset as () => void)();
     });
 
     afterEach(() => {
@@ -1389,12 +1391,13 @@ describe("Spur web API routes", () => {
       };
 
       expect(response.status).toBe(200);
-      expect(payload).toEqual({
+      expect(payload).toMatchObject({
         state: null,
         ciStatus: null,
         totalThreads: 0,
         unresolvedThreads: 0,
       });
+      expect(payload.error).toBeUndefined();
     });
 
     it("returns an error payload when GitHub API responds with a server error", async () => {
@@ -1499,6 +1502,95 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
       expect(payload.state).toBeNull();
       expect(payload.error).toBe("Resource not accessible by integration");
+    });
+
+    it("fresh successful response includes stale:false and a recent fetchedAt", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql()));
+      const before = Date.now();
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        stale: boolean;
+        fetchedAt: number;
+      };
+
+      expect(payload.state).toBe("open");
+      expect(payload.stale).toBe(false);
+      expect(typeof payload.fetchedAt).toBe("number");
+      expect(payload.fetchedAt).toBeGreaterThanOrEqual(before);
+    });
+
+    it("after a successful fetch, a subsequent error returns the prior snapshot with stale:true", async () => {
+      const doReset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof doReset === "function") (doReset as () => void)();
+
+      const url = nextPrUrl();
+
+      // 1) Success populates lastGoodCache and short-TTL cache.
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+          }),
+        ),
+      );
+      const okResp = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const okPayload = (await okResp.json()) as { fetchedAt: number; ciStatus: string };
+      expect(okPayload.ciStatus).toBe("success");
+
+      // 2) Clear the short-TTL response cache only by reaching into lastGoodCache via a
+      // fresh module reset of `cache` is not exposed. Instead, we trigger a network
+      // re-fetch by invalidating the short-TTL entry. The cleanest way without new
+      // exports: monkey-patch Date.now to advance past CACHE_TTL_MS.
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 200_000;
+        fetchMock.mockResolvedValueOnce(ghErr(503));
+        const errResp = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+        );
+        const errPayload = (await errResp.json()) as {
+          state: string;
+          ciStatus: string;
+          stale: boolean;
+          fetchedAt: number;
+          error: string;
+        };
+        expect(errResp.status).toBe(200);
+        expect(errPayload.stale).toBe(true);
+        expect(errPayload.state).toBe("open");
+        expect(errPayload.ciStatus).toBe("success");
+        expect(errPayload.error).toBe("GitHub API 503");
+        expect(errPayload.fetchedAt).toBe(okPayload.fetchedAt);
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    it("with no prior success, an error returns EMPTY_PR_STATUS with error and stale:false", async () => {
+      const doReset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof doReset === "function") (doReset as () => void)();
+
+      fetchMock.mockResolvedValueOnce(ghErr(503));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: null;
+        error: string;
+        stale: boolean;
+        fetchedAt?: number;
+      };
+
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("GitHub API 503");
+      expect(payload.stale).toBe(false);
+      expect(payload.fetchedAt).toBeUndefined();
     });
 
     // Rate-limit tests must run last: they set module-level rateLimitResetAt

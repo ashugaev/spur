@@ -299,6 +299,7 @@ test.describe("S2: Actions bar", () => {
     await page.goto(`/sessions/${session.id}`);
 
     await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");

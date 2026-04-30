@@ -650,6 +650,42 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { container } = render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+
+    const fileInputs = container.querySelectorAll('input[type="file"]');
+    const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;
+    expect(fileInput).toBeDefined();
+    fireEvent.change(fileInput!, {
+      target: { files: [new File(["png"], "picker-edit.png", { type: "image/png" })] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("picker-edit.png")).toBeInTheDocument();
+    });
+  });
+
   it("syncs terminal modal with query params", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

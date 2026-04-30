@@ -1,4 +1,5 @@
 export const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+export const IMAGE_ACCEPT = Array.from(IMAGE_TYPES).join(",");
 
 export interface ImageAttachment {
   file: File;

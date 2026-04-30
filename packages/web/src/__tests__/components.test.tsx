@@ -717,6 +717,40 @@ describe("Dashboard", () => {
     });
   });
 
+  it("shows an add-image picker inside the spawn prompt and accepts files from it", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { container } = render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+
+    const fileInput = container.querySelector('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    fireEvent.change(fileInput as HTMLInputElement, {
+      target: { files: [new File(["png"], "picker.png", { type: "image/png" })] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("picker.png")).toBeInTheDocument();
+    });
+  });
+
   it("restores a saved spawn prompt from history with its timestamp", async () => {
     window.localStorage.setItem(
       "spur:input-history:spawn-prompt",

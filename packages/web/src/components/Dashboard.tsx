@@ -5,9 +5,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -775,55 +776,25 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <div className="relative flex min-h-0 flex-1 flex-col">
-                  <textarea
-                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
-                    onPaste={(event) => {
-                      const files = event.clipboardData.files;
-                      if (files.length > 0) {
-                        event.preventDefault();
-                        addSpawnImages(files);
-                      }
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      addSpawnImages(event.dataTransfer.files);
-                    }}
-                    onDragOver={(event) => event.preventDefault()}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                        void handleSpawn();
-                    }}
-                    placeholder="Prompt for the new session..."
-                    value={spawnPrompt}
-                  />
-                  <VoiceButton voice={voice} />
-                </div>
-                {spawnAttachments.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {spawnAttachments.map((attachment, index) => (
-                      <div key={`${attachment.file.name}-${index}`} className="group relative">
-                        <img
-                          alt={attachment.file.name}
-                          className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
-                          src={attachment.preview}
-                        />
-                        <button
-                          className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
-                          onClick={() =>
-                            setSpawnAttachments((current) =>
-                              current.filter((_, currentIndex) => currentIndex !== index),
-                            )
-                          }
-                          type="button"
-                        >
-                          x
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
+                <ImageAttachmentTextarea
+                  ariaLabel="Prompt for the new session..."
+                  attachments={spawnAttachments}
+                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                  onAddFiles={addSpawnImages}
+                  onChange={setSpawnPrompt}
+                  onKeyDown={(event) => {
+                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                      void handleSpawn();
+                  }}
+                  onRemoveAttachment={(index) =>
+                    setSpawnAttachments((current) =>
+                      current.filter((_, currentIndex) => currentIndex !== index),
+                    )
+                  }
+                  placeholder="Prompt for the new session..."
+                  value={spawnPrompt}
+                  voice={voice}
+                />
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}

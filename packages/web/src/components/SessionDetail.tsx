@@ -3,13 +3,13 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
-import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -1146,54 +1146,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <div className="relative">
-                      <textarea
-                        className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
-                        onChange={(event) => setMessage(event.target.value)}
-                        onKeyDown={(event) => {
-                          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend({ queue: true });
-                          }
-                        }}
-                        onPaste={(e) => {
-                          const files = e.clipboardData.files;
-                          if (files.length > 0) {
-                            e.preventDefault();
-                            addImageFiles(files);
-                          }
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          addImageFiles(e.dataTransfer.files);
-                        }}
-                        onDragOver={(e) => e.preventDefault()}
-                        placeholder="Message to the running agent..."
-                        value={message}
-                      />
-                      <VoiceButton voice={voice} />
-                    </div>
-                    {attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {attachments.map((att, i) => (
-                          <div key={`${att.file.name}-${i}`} className="group relative">
-                            <img
-                              src={att.preview}
-                              alt={att.file.name}
-                              className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setAttachments((prev) => prev.filter((_, j) => j !== i))
-                              }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
-                            >
-                              x
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <ImageAttachmentTextarea
+                      attachments={attachments}
+                      minHeightClass="min-h-24"
+                      onAddFiles={addImageFiles}
+                      onChange={setMessage}
+                      onKeyDown={(event) => {
+                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                          void doSend({ queue: true });
+                        }
+                      }}
+                      onRemoveAttachment={(index) =>
+                        setAttachments((current) =>
+                          current.filter((_, currentIndex) => currentIndex !== index),
+                        )
+                      }
+                      placeholder="Message to the running agent..."
+                      value={message}
+                      voice={voice}
+                    />
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         <VoiceStatusHint voice={voice} />{" "}
@@ -1562,21 +1533,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </button>
                 </div>
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-                  <textarea
-                    className={`min-h-[10rem] w-full resize-y ${INPUT_CLASS}`}
-                    onChange={(event) => setRespawnPrompt(event.target.value)}
-                    onPaste={(event) => {
-                      const files = event.clipboardData.files;
-                      if (files.length > 0) {
-                        event.preventDefault();
-                        addRespawnImageFiles(files);
-                      }
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      addRespawnImageFiles(event.dataTransfer.files);
-                    }}
-                    onDragOver={(event) => event.preventDefault()}
+                  <ImageAttachmentTextarea
+                    attachments={respawnAttachments}
+                    minHeightClass="min-h-[10rem]"
+                    onAddFiles={addRespawnImageFiles}
+                    onChange={setRespawnPrompt}
+                    onRemoveAttachment={(index) =>
+                      setRespawnAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
                     placeholder="Edit the initial message..."
                     value={respawnPrompt}
                   />
@@ -1603,37 +1569,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             >
                               <img
                                 alt={artifact.name}
-                                className="h-12 w-12 object-cover"
+                                className="h-9 w-9 object-cover"
                                 src={artifactUrl(session.id, artifact.id)}
                               />
                             </button>
                           );
                         })}
                       </div>
-                    </div>
-                  ) : null}
-                  {respawnAttachments.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {respawnAttachments.map((attachment, index) => (
-                        <div key={`${attachment.file.name}-${index}`} className="group relative">
-                          <img
-                            alt={attachment.file.name}
-                            className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
-                            src={attachment.preview}
-                          />
-                          <button
-                            className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
-                            onClick={() =>
-                              setRespawnAttachments((current) =>
-                                current.filter((_, currentIndex) => currentIndex !== index),
-                              )
-                            }
-                            type="button"
-                          >
-                            x
-                          </button>
-                        </div>
-                      ))}
                     </div>
                   ) : null}
                   <div className="flex items-center justify-end gap-2">
