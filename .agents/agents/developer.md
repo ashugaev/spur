@@ -19,8 +19,9 @@ Implement the plan. Small chunks, verify after each, commit when green.
 1. Verify branch: `git branch --show-current && git log --oneline -3`.
 2. Implement one logical chunk.
 3. Verify: `pnpm typecheck && pnpm lint`. Fix all errors before moving on.
-4. Commit: `git add <files> && git commit -m "feat(<scope>): <description>"`.
-5. Repeat until plan complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
+4. Tests: when the architect plan includes test lists, implement those tests in the same chunk. Run them. Fix failures inline. Move on once green. Create test data fixtures next to the test file when a manual check needs them.
+5. Commit: `git add <files> && git commit -m "feat(<scope>): <description>"`.
+6. Repeat until plan complete; final pass `pnpm typecheck && pnpm lint && pnpm test`.
 
 On review feedback: fix MUST FIX items, rerun checks, commit.
 

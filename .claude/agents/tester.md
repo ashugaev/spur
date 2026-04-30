@@ -34,6 +34,15 @@ Spur CLI scenarios: [v2/TEST_SCENARIOS.md](v2/TEST_SCENARIOS.md)
 - Use accessibility snapshot as primary signal
 - Test expected interactions and console errors
 - Check loading, empty, and error states when applicable
+- Capture a screenshot per affected state. Save under `${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/`. Fail closed when `SPUR_SESSION_TOOL_DIR` is unset (running outside Spur) — print the error and stop.
+- Login: when a scenario requires auth, perform login via the test fixture user; never store creds in the repo.
+- Compare current vs prior screenshot when the same UI was updated more than once in this run; flag visual regressions.
+- Self-analyze each captured screenshot before forwarding to `designer`: overflow/clipping, broken alignment, missing required states (loading/empty/error), contrast, density mismatch with surrounding screens. Findings go into the report.
+
+### 5. Manual checks (UI tasks only)
+- Run the manual check list from the architect plan in the browser.
+- Mark each `PASS` or `FAIL` with one-line evidence.
+- Update `v2/TEST_SCENARIOS.md` (Spur CLI) or `packages/web/UI_TEST_SCENARIOS.md` (web UI) when new behavior or degradation paths are not yet covered.
 
 ## Output
 ```
@@ -44,6 +53,17 @@ Checks: build: OK|FAIL  test: OK|FAIL  cli: OK|FAIL|SKIPPED  scenarios: OK|FAIL|
 Lean findings:
 - none
 - <file:line>: <issue>
+
+Artifacts: ${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/
+
+Screenshot self-analysis:
+- clean
+- <file>: <issue>
+
+Manual checks:
+- <scenario>: PASS|FAIL
+
+TEST_SCENARIOS updated: yes|no
 
 Evidence:
 - <command> — OK|FAIL
@@ -58,8 +78,7 @@ Verdict: PASS | FAIL
 - Never PASS when an impacted `real-agent smoke` scenario was not run and the suite did not explicitly skip it for missing `tmux`, binaries, or agent auth
 - Never PASS when lean findings leave hanging logic, stray fallbacks, or type bloat in touched Spur or core paths
 - Browser only when UI changed
-- Accessibility tree as primary observation, not screenshots
+- Accessibility tree as primary observation; screenshots are evidence, not the primary signal
 - Elements by role/name/text, never CSS selectors
-- Screenshots only on failures
 - Don't stop on first failure — run all scenarios
-- After 2 cycles → return the summary
+- Fail closed if `SPUR_SESSION_TOOL_DIR` is unset on UI tasks; never write artifacts to the repo

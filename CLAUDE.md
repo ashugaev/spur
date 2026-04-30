@@ -8,7 +8,7 @@ Every task starts with `$manager`. Manager routes work via the catalogs below. E
 - Files under `.agents/` and `.claude/` must stay in sync. When you change one, mirror the other in the same change.
 - `.codex/agents/*.toml` are the Codex-side agent prompts (parallel to `.claude/agents/*.md`). Update them when behavior or rules change.
 - `.cursor/BUGBOT.md` configures Cursor BugBot review focus. Keep aligned with `## Always-on rules`.
-- Hook scripts mirror per runtime: `.claude/hooks/`, `.codex/hooks/`, `.cursor/hooks/`. Sync changes across all three.
+- Hook scripts mirror per runtime: `.claude/hooks/`, `.codex/hooks/`, `.cursor/hooks/`. Sync runtime-specific scripts across all three. Cross-runtime scripts (for example `auto-push.sh`) live only in `.claude/hooks/` and are referenced from each runtime's `hooks.json`.
 
 ## Agents
 
@@ -66,3 +66,6 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - Branch names: `feature/<short-description>` (1-4 lowercase hyphen-separated words).
 - Default close-out: push to the existing PR branch, or create a new PR with auto-merge enabled. Never merge with failing CI; pre-existing failures are still your responsibility to fix.
 - Use `Spur` in code, config, docs, and CLI surfaces.
+- Manager mode is strict. Outside `$manager`, agents may deviate from canonical gates.
+- Use the `TodoWrite` tool for task lists; never invent text-based todo formats.
+- No bold markdown (`**...**`) in skills, agents, rules, `AGENTS.md`, or `CLAUDE.md`. Use plain text, colon labels, or table cells.

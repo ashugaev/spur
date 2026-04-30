@@ -30,11 +30,11 @@ description: Visual codestyle and design system rules for packages/web. Use when
 
 ### Typography
 
-- **Font**: JetBrains Mono everywhere (monospace-first)
-- **Body size**: 12px set on `<body>`, components inherit
-- **Letter-spacing**: `0.02em` base, `0.06em`–`0.14em` for uppercase labels
-- **Uppercase**: all labels, headers, button text, stat items
-- **Tracking**: tighter on large headings (`-0.02em`), wider on small labels
+- Font: JetBrains Mono everywhere (monospace-first)
+- Body size: 12px set on `<body>`, components inherit
+- Letter-spacing: `0.02em` base, `0.06em`–`0.14em` for uppercase labels
+- Uppercase: all labels, headers, button text, stat items
+- Tracking: tighter on large headings (`-0.02em`), wider on small labels
 
 ### Spacing
 
@@ -44,18 +44,18 @@ description: Visual codestyle and design system rules for packages/web. Use when
 
 ### Borders and corners
 
-- **All border-radius is 0px** (set in theme). No rounded corners anywhere.
+- All border-radius is 0px (set in theme). No rounded corners anywhere.
 - Use `border-[var(--color-border-default)]` for structural borders
 - Use `border-[var(--color-border-subtle)]` for row separators
 
 ### Components
 
-- **Buttons**: square, uppercase, bold. Primary = white bg + dark text. Secondary = bordered + text color. Danger = red border + red text.
-- **Inputs/selects**: dark surface bg, default border, accent border on focus.
-- **Session rows**: flat flex rows with `data-row` class for hover. Columns hide responsively (`hidden sm:inline`, `hidden md:inline`, `hidden lg:inline`).
-- **Section headers**: colored dot + uppercase label + `border-t` divider line + count.
-- **Stats bar**: horizontal, `border-y`, SVG icon per stat, secondary label, bold primary value. Colored when non-zero.
-- **Modals**: fixed overlay `bg-black/60`, centered content box, ✕ close button.
+- Buttons: square, uppercase, bold. Primary = white bg + dark text. Secondary = bordered + text color. Danger = red border + red text.
+- Inputs/selects: dark surface bg, default border, accent border on focus.
+- Session rows: flat flex rows with `data-row` class for hover. Columns hide responsively (`hidden sm:inline`, `hidden md:inline`, `hidden lg:inline`).
+- Section headers: colored dot + uppercase label + `border-t` divider line + count.
+- Stats bar: horizontal, `border-y`, SVG icon per stat, secondary label, bold primary value. Colored when non-zero.
+- Modals: fixed overlay `bg-black/60`, centered content box, ✕ close button.
 
 ### Icons
 

@@ -46,6 +46,13 @@ Ground every decision in what the codebase already does. Never assume.
 ### Risks
 - <what could go wrong> — <mitigation>
 
+### Test coverage
+- Unit tests to add: `<file>` — <scenario>
+- E2E tests to add: `<file>` — <scenario>
+
+### Manual checks (UI tasks only)
+- <browser scenario>
+
 ### Open questions (omit if unambiguous)
 - <tech | product>: <question> — <what you already considered>
 ```

@@ -12,6 +12,24 @@ allowed-tools: Read, Grep, Glob, Bash
 - Existing PR on the current branch -> commit and push to it.
 - No PR -> create one after local validation unless the user opts out.
 
+## Auto-push gate
+
+Detect uncommitted state and push to the working branch. Never close a session with uncommitted changes on a tracked branch.
+
+1. `git status --porcelain` empty -> exit, return `SKIPPED`.
+2. Current branch is `main`/`master` -> exit, return `SKIPPED` (refuse to auto-commit on protected branches).
+3. Stage and commit:
+   ```bash
+   git add -A
+   git commit -m "chore: auto-push wip on $(git branch --show-current)"
+   ```
+4. Push:
+   ```bash
+   git push -u origin "$(git branch --show-current)"
+   ```
+5. PR exists -> add a one-line comment with the new HEAD SHA. No PR -> open a draft via the "Create draft PR" template above.
+6. Return `PUSHED` with the commit SHA.
+
 ## PR title
 
 Format `<type>: <description>`. Types: `feat`, `fix`, `refactor`, `style`, `docs`, `chore`, `test`. Prefix with `AO_ISSUE_ID` when set: `<ISSUE-ID>: <type>: <description>`.
