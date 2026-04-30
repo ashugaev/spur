@@ -1,18 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  CiStatusDot,
-  fetchPrInfo,
-  GithubIcon,
-  prStateColor,
-  useGitError,
-  type CiStatus,
-  type PrInfo,
-} from "@/lib/link-icons";
-import type { SpurSessionView } from "@/lib/types";
+import { useEffect, useRef, useState } from "react";
+import { CiStatusDot, GithubIcon } from "@/lib/link-icons";
+import { formatAbsoluteTime } from "@/lib/format";
+import type { GitHubStatusResponse } from "@/lib/github-status";
 
-const AGGREGATE_POLL_MS = 120_000;
+const GITHUB_STATUS_POLL_MS = 120_000;
 const RESOURCE_POLL_MS = 15_000;
 const CPU_RAM_ATTENTION_THRESHOLD = 85;
 const DISK_ERROR_THRESHOLD = 85;
@@ -32,68 +25,50 @@ type ResourceMetrics =
       diskPercent: number;
     };
 
-interface PrEntry {
-  url: string;
-  label: string;
-  info: PrInfo;
-}
-
-function parsePrLabel(url: string): string | null {
-  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  return m ? `${m[1]}/${m[2]}#${m[3]}` : null;
-}
-
-function worstStatus(entries: PrEntry[]): CiStatus {
-  let worst: CiStatus = null;
-  for (const e of entries) {
-    if (e.info.ciStatus === "failure") return "failure";
-    if (e.info.ciStatus === "pending") worst = "pending";
-    if (e.info.ciStatus === "success" && worst === null) worst = "success";
-  }
-  return worst;
-}
-
-function useAggregatePr(sessions: SpurSessionView[]) {
-  const prUrls = useMemo(() => {
-    const urls = new Set<string>();
-    for (const s of sessions) {
-      for (const link of s.slots?.links ?? []) {
-        if (link.label === "pr") urls.add(link.url);
-      }
-    }
-    return [...urls];
-  }, [sessions]);
-
-  const [entries, setEntries] = useState<PrEntry[]>([]);
+function useGitHubStatus() {
+  const [status, setStatus] = useState<GitHubStatusResponse | null>(null);
 
   useEffect(() => {
-    if (prUrls.length === 0) {
-      setEntries([]);
-      return;
-    }
-
     let cancelled = false;
 
     const run = async () => {
-      const results: PrEntry[] = [];
-      for (const url of prUrls) {
-        const label = parsePrLabel(url);
-        if (!label) continue;
-        const info = await fetchPrInfo(url);
-        results.push({ url, label, info });
+      try {
+        const response = await fetch("/api/github-status", { cache: "no-store" });
+        if (!response.ok) {
+          if (!cancelled) {
+            setStatus({
+              ok: false,
+              error: `GitHub status unavailable (${response.status})`,
+              requestedAt: null,
+            });
+          }
+          return;
+        }
+
+        const payload = (await response.json()) as GitHubStatusResponse;
+        if (!cancelled) {
+          setStatus(payload);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setStatus({
+            ok: false,
+            error: error instanceof Error ? error.message : "GitHub status unavailable",
+            requestedAt: null,
+          });
+        }
       }
-      if (!cancelled) setEntries(results);
     };
 
     void run();
-    const timer = setInterval(() => void run(), AGGREGATE_POLL_MS);
+    const timer = setInterval(() => void run(), GITHUB_STATUS_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [prUrls]);
+  }, []);
 
-  return entries;
+  return status;
 }
 
 function useResourceMetrics() {
@@ -211,24 +186,17 @@ function ResourceStatusRow({
   );
 }
 
-function PrStateLabel({ state }: { state: PrInfo["state"] }) {
-  if (!state) return null;
-  return (
-    <span className="uppercase" style={{ color: prStateColor(state) }}>
-      {state}
-    </span>
-  );
-}
-
-export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
-  const gitError = useGitError();
-  const prEntries = useAggregatePr(sessions);
-  const aggregate = worstStatus(prEntries);
+export function StatusBar() {
+  const githubStatus = useGitHubStatus();
   const resourceMetrics = useResourceMetrics();
   const [onlineHovered, setOnlineHovered] = useState(false);
   const [onlinePinned, setOnlinePinned] = useState(false);
   const [onlineDismissed, setOnlineDismissed] = useState(false);
+  const [githubHovered, setGitHubHovered] = useState(false);
+  const [githubPinned, setGitHubPinned] = useState(false);
+  const [githubDismissed, setGitHubDismissed] = useState(false);
   const onlineContainerRef = useRef<HTMLDivElement | null>(null);
+  const githubContainerRef = useRef<HTMLDivElement | null>(null);
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
   const onlineLabel =
@@ -240,6 +208,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
           ? "Healthy"
           : "Unavailable";
   const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
+  const githubOpen = !githubDismissed && (githubHovered || githubPinned);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -261,6 +230,27 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
       document.removeEventListener("pointerdown", onPointerDown);
     };
   }, [onlineOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !githubOpen) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (githubContainerRef.current?.contains(target)) return;
+      setGitHubDismissed(true);
+      setGitHubPinned(false);
+      setGitHubHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [githubOpen]);
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
@@ -299,7 +289,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
 
           {onlineOpen ? (
             <div
-              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
               onClick={() => {
                 setOnlineDismissed(true);
                 setOnlinePinned(false);
@@ -355,32 +345,64 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
           ) : null}
         </div>
 
-        {gitError ? (
-          <span className="font-bold text-[var(--color-status-error)]" title={gitError}>
-            Git Error
-          </span>
-        ) : null}
-
-        {prEntries.length > 0 && !gitError ? (
-          <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
+        {githubStatus === null ? (
+          <div className="flex items-center gap-1.5 text-[var(--color-text-tertiary)]">
             <GithubIcon />
-            <CiStatusDot status={aggregate} />
-
-            {/* Tooltip */}
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
-              {prEntries.slice(0, 8).map((entry) => (
-                <div key={entry.url} className="flex items-center gap-2 py-0.5">
-                  <span className="truncate text-[var(--color-text-secondary)]">{entry.label}</span>
-                  <CiStatusDot status={entry.info.ciStatus} />
-                  <PrStateLabel state={entry.info.state} />
+            <span>Checking</span>
+          </div>
+        ) : githubStatus.ok === true ? (
+          <div
+            ref={githubContainerRef}
+            className="relative"
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                setGitHubPinned(false);
+                setGitHubDismissed(false);
+              }
+            }}
+            onMouseEnter={() => {
+              setGitHubDismissed(false);
+              setGitHubHovered(true);
+            }}
+            onMouseLeave={() => {
+              setGitHubDismissed(false);
+              setGitHubHovered(false);
+            }}
+          >
+            <button
+              aria-expanded={githubOpen}
+              aria-label="GitHub connection healthy"
+              className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+              type="button"
+              onClick={() => {
+                setGitHubDismissed(false);
+                setGitHubPinned((current) => !current);
+              }}
+            >
+              <GithubIcon />
+              <CiStatusDot status="success" />
+            </button>
+            {githubOpen ? (
+              <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+                <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
+                  <span className="text-[var(--color-text-secondary)]">GitHub</span>
+                  <span className="font-bold text-[var(--color-status-ready)]">Healthy</span>
                 </div>
-              ))}
-              {prEntries.length > 8 ? (
-                <div className="pt-0.5 text-[var(--color-text-tertiary)]">
-                  +{prEntries.length - 8} more
+                <div className="normal-case tracking-normal text-[var(--color-text-secondary)]">
+                  Last request: {formatAbsoluteTime(githubStatus.requestedAt)}
                 </div>
-              ) : null}
-            </div>
+              </div>
+            ) : null}
+          </div>
+        ) : githubStatus.ok === false ? (
+          <div className="flex min-w-0 items-center gap-1.5">
+            <GithubIcon />
+            <span
+              className="max-w-[min(24rem,50vw)] truncate font-bold normal-case tracking-normal text-[var(--color-status-error)]"
+              title={githubStatus.error}
+            >
+              {githubStatus.error}
+            </span>
           </div>
         ) : null}
       </div>

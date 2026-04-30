@@ -1,13 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
+import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
 
-type PrState = "draft" | "open" | "merged" | "closed";
-type CiStatus = "success" | "failure" | "pending" | null;
-
-interface PrStatusResponse {
-  state: PrState;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
+interface PrStatusResponse extends PrInfo {
+  error?: string;
 }
 
 interface GithubGraphQLResponse {
@@ -22,19 +21,21 @@ interface GithubGraphQLResponse {
       };
     };
   };
+  errors?: Array<{ message?: string }>;
 }
 
 interface CacheEntry {
-  response: PrStatusResponse | null;
-  error?: string;
+  response: PrStatusResponse;
   expiresAt: number;
 }
 
+type LastGoodEntry = Omit<PrInfo, "stale"> & { fetchedAt: number };
+
 const cache = new Map<string, CacheEntry>();
+const lastGoodCache = new Map<string, LastGoodEntry>();
 const CACHE_TTL_MS = 120_000;
 const ERROR_CACHE_TTL_MS = 60_000;
-
-let rateLimitResetAt = 0;
+const PERSIST_DEBOUNCE_MS = 1_000;
 
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
@@ -46,51 +47,87 @@ const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   }
 }`;
 
+const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
+  state: null,
+  ciStatus: null,
+  totalThreads: 0,
+  unresolvedThreads: 0,
+};
+
+function persistFilePath(): string {
+  const stateDir = process.env["SPUR_STATE_DIR"];
+  if (stateDir) {
+    return path.join(stateDir, "spur-pr-status-cache.json");
+  }
+  return path.join(os.tmpdir(), "spur-pr-status-cache.json");
+}
+
+let persistTimer: NodeJS.Timeout | null = null;
+
+function isLastGoodEntry(value: unknown): value is LastGoodEntry {
+  return isPrInfoShape(value) && typeof (value as { fetchedAt?: unknown }).fetchedAt === "number";
+}
+
+function loadPersistedLastGood(): void {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(persistFilePath(), "utf-8"));
+    if (typeof parsed !== "object" || parsed === null) return;
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (isLastGoodEntry(value)) lastGoodCache.set(key, value);
+    }
+  } catch {
+    /* file missing, unreadable, or malformed */
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      const filePath = persistFilePath();
+      mkdirSync(path.dirname(filePath), { recursive: true });
+      const tmp = `${filePath}.${process.pid}.tmp`;
+      const data = Object.fromEntries(lastGoodCache.entries());
+      writeFileSync(tmp, JSON.stringify(data), "utf-8");
+      renameSync(tmp, filePath);
+    } catch {
+      /* best-effort */
+    }
+  }, PERSIST_DEBOUNCE_MS);
+  if (persistTimer && typeof persistTimer.unref === "function") persistTimer.unref();
+}
+
+loadPersistedLastGood();
+
+function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">): LastGoodEntry {
+  const entry: LastGoodEntry = { ...snapshot, fetchedAt: Date.now() };
+  lastGoodCache.set(key, entry);
+  schedulePersist();
+  return entry;
+}
+
+function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
+  return {
+    state: entry.state,
+    ciStatus: entry.ciStatus,
+    totalThreads: entry.totalThreads,
+    unresolvedThreads: entry.unresolvedThreads,
+    fetchedAt: entry.fetchedAt,
+    stale: false,
+  };
+}
+
+function errorResponse(key: string, error: string): PrStatusResponse {
+  const last = lastGoodCache.get(key);
+  if (last) return { ...freshFromEntry(last), stale: true, error };
+  return { ...EMPTY_PR_STATUS, stale: false, error };
+}
+
 function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
   if (!match || !match[1] || !match[2] || !match[3]) return null;
   return { owner: match[1], repo: match[2], number: match[3] };
-}
-
-let resolvedToken: string | null = null;
-let tokenResolved = false;
-
-function resolveGhToken(): string | null {
-  if (tokenResolved) return resolvedToken;
-  tokenResolved = true;
-  resolvedToken = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"] ?? null;
-  if (resolvedToken) return resolvedToken;
-  // Fallback: read from gh CLI auth
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const cp = require("node:child_process") as {
-      execSync: (cmd: string, opts: { encoding: string }) => string;
-    };
-    resolvedToken = cp.execSync("gh auth token 2>/dev/null", { encoding: "utf-8" }).trim() || null;
-  } catch {
-    resolvedToken = null;
-  }
-  return resolvedToken;
-}
-
-function ghHeaders(): Record<string, string> {
-  const headers: Record<string, string> = { accept: "application/vnd.github+json" };
-  const token = resolveGhToken();
-  if (token) {
-    headers["authorization"] = `Bearer ${token}`;
-  }
-  return headers;
-}
-
-function handleRateLimit(response: Response): void {
-  if (response.status === 403 || response.status === 429) {
-    const reset = response.headers.get("x-ratelimit-reset");
-    if (reset) {
-      rateLimitResetAt = Number(reset) * 1000;
-    } else {
-      rateLimitResetAt = Date.now() + 60_000;
-    }
-  }
 }
 
 export async function GET(request: NextRequest) {
@@ -107,16 +144,12 @@ export async function GET(request: NextRequest) {
   const cacheKey = `${coords.owner}/${coords.repo}/${coords.number}`;
   const cached = cache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
-    if (cached.error) {
-      return NextResponse.json({ error: cached.error }, { status: 502 });
-    }
     return NextResponse.json(cached.response);
   }
 
-  // Rate limit backoff
-  if (Date.now() < rateLimitResetAt) {
-    const wait = Math.ceil((rateLimitResetAt - Date.now()) / 1000);
-    return NextResponse.json({ error: `GitHub rate limit — retry in ${wait}s` }, { status: 429 });
+  const rateLimitError = getGitHubRateLimitError();
+  if (rateLimitError) {
+    return NextResponse.json(errorResponse(cacheKey, rateLimitError));
   }
 
   const headers = ghHeaders();
@@ -133,25 +166,28 @@ export async function GET(request: NextRequest) {
     });
 
     if (!ghResponse.ok) {
-      handleRateLimit(ghResponse);
-      const errorMsg = `GitHub API ${ghResponse.status}`;
-      cache.set(cacheKey, {
-        response: null,
-        error: errorMsg,
-        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
-      });
-      return NextResponse.json({ error: errorMsg }, { status: 502 });
+      handleGitHubRateLimit(ghResponse);
+      const response = errorResponse(cacheKey, `GitHub API ${ghResponse.status}`);
+      cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+      return NextResponse.json(response);
     }
 
     const gql = (await ghResponse.json()) as GithubGraphQLResponse;
     const pr = gql.data?.repository?.pullRequest;
+    const gqlError = gql.errors
+      ?.map((entry) => entry.message?.trim())
+      .filter(Boolean)
+      .join("; ");
     if (!pr) {
-      cache.set(cacheKey, {
-        response: null,
-        error: "PR not found",
-        expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
-      });
-      return NextResponse.json({ error: "PR not found" }, { status: 404 });
+      if (gqlError) {
+        const response = errorResponse(cacheKey, gqlError);
+        cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+        return NextResponse.json(response);
+      }
+      const entry = recordLastGood(cacheKey, EMPTY_PR_STATUS);
+      const response = freshFromEntry(entry);
+      cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
+      return NextResponse.json(response);
     }
 
     let state: PrState;
@@ -169,16 +205,25 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
-    const response: PrStatusResponse = { state, ciStatus, totalThreads, unresolvedThreads };
+    const entry = recordLastGood(cacheKey, { state, ciStatus, totalThreads, unresolvedThreads });
+    const response = freshFromEntry(entry);
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
-    cache.set(cacheKey, {
-      response: null,
-      error: message,
-      expiresAt: Date.now() + ERROR_CACHE_TTL_MS,
-    });
-    return NextResponse.json({ error: message }, { status: 502 });
+    const response = errorResponse(cacheKey, message);
+    cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+    return NextResponse.json(response);
   }
+}
+
+if (process.env["NODE_ENV"] === "test") {
+  (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
+    cache.clear();
+    lastGoodCache.clear();
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+  };
 }

@@ -304,6 +304,18 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
+  it("submits claude slash hotkeys as bracketed paste plus enter", async () => {
+    await mountTerminal("test-claude-hotkey-submit", "claude");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
+
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~/compact\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("/compact\r");
+    });
+  });
+
   it("shows a visible error when codex slash hotkey submit fails", async () => {
     await mountTerminal("test-codex-hotkey-submit-error", "codex");
 
@@ -346,7 +358,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByText("Connected")).toBeInTheDocument();
   });
 
-  it("refreshes the websocket after returning from a hidden tab", async () => {
+  it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
     await mountTerminal("test-visibility");
 
     await waitFor(() => {
@@ -361,8 +373,36 @@ describe("DirectTerminal scroll integration", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("reconnects after returning from a hidden tab when the websocket is already closed", async () => {
+    await mountTerminal("test-visibility-closed");
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    act(() => {
+      wsInstances[0].readyState = 3;
     });
 
     act(() => {

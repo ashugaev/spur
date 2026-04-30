@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
-const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");
@@ -187,7 +187,8 @@ exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${
     join(toolDir, SLOT_TOOL_NAME),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} slots --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );
@@ -230,10 +231,56 @@ function mapHookEventToState(eventName) {
   if (normalized === "userpromptsubmit" || normalized === "pretooluse" || normalized === "posttooluse") {
     return "working";
   }
+  if (
+    normalized === "needsinput" ||
+    normalized === "needs_input" ||
+    normalized === "inputrequired" ||
+    normalized === "requestuserinput" ||
+    normalized === "request_user_input"
+  ) {
+    return "needs_input";
+  }
   if (normalized === "sessionstart" || normalized === "stop") {
     return "waiting";
   }
   return null;
+}
+
+function readExplicitState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  const rawState =
+    typeof hookPayload.state === "string"
+      ? hookPayload.state
+      : typeof hookPayload.session_state === "string"
+        ? hookPayload.session_state
+        : typeof hookPayload.sessionState === "string"
+          ? hookPayload.sessionState
+          : typeof hookPayload.agent_state === "string"
+            ? hookPayload.agent_state
+            : typeof hookPayload.agentState === "string"
+              ? hookPayload.agentState
+              : null;
+  if (!rawState) {
+    return null;
+  }
+  const normalized = String(rawState).toLowerCase();
+  return normalized === "working" || normalized === "waiting" || normalized === "needs_input"
+    ? normalized
+    : null;
+}
+
+function readQuestionMetadataState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  if (Array.isArray(hookPayload.questions) && hookPayload.questions.length > 0) {
+    return "needs_input";
+  }
+  return typeof hookPayload.question === "string" && hookPayload.question.trim().length > 0
+    ? "needs_input"
+    : null;
 }
 
 const stateFilePath = process.argv[2];
@@ -247,7 +294,10 @@ const eventName = isRecord(hookPayload) && typeof hookPayload.hook_event_name ==
   : isRecord(hookPayload) && typeof hookPayload.hookEventName === "string"
     ? hookPayload.hookEventName
     : null;
-const state = mapHookEventToState(eventName);
+const state =
+  readExplicitState(hookPayload) ??
+  readQuestionMetadataState(hookPayload) ??
+  mapHookEventToState(eventName);
 if (!state) {
   process.exit(0);
 }
@@ -289,7 +339,13 @@ exec ${shellEscape(process.execPath)} ${shellEscape(join(toolDir, AGENT_STATE_UP
     join(toolDir, "spur-sidecar"),
     `#!/usr/bin/env bash
 set -euo pipefail
-exec ${shellEscape(process.execPath)} ${shellEscape(CLI_ENTRYPOINT)} --config ${shellEscape(args.configPath)} sidecar start --session ${shellEscape(args.sessionId)} "$@"
+SCRIPT_DIR=$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)
+action="start"
+if [[ "\${1-}" == "start" || "\${1-}" == "stop" ]]; then
+  action="$1"
+  shift
+fi
+exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" sidecar "$action" --session ${shellEscape(args.sessionId)} "$@"
 `,
     { encoding: "utf8", mode: 0o755 },
   );

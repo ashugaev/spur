@@ -3,7 +3,7 @@ export const SPUR_DAEMON_API_VERSION = 2;
 
 export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "pane" | "status";
+export type StateSource = "jsonl" | "hook" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -18,6 +18,23 @@ export type SessionLogScope = "all" | "runtime" | "service" | "sidecar";
 export interface SessionLink {
   label: string;
   url: string;
+}
+export interface SessionPrBinding {
+  number: number;
+  repo: string;
+  url: string;
+}
+
+export type SessionArtifactKind = "image" | "video" | "download";
+
+export interface SessionArtifact {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: SessionArtifactKind;
+  createdAt: string;
+  updatedAt: string;
 }
 export type SessionPipelineStatus = "running" | "completed" | "errored";
 
@@ -37,6 +54,16 @@ export const GITHUB_SIGNAL_KINDS = [
 ] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
+export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
+
+export interface GitHubWorkItemEventData {
+  externalId: string;
+  url: string;
+  number: number;
+  title: string;
+  repo: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -49,6 +76,7 @@ export interface CronSourceConfig extends BaseSourceConfig {
 export interface GitHubSourceConfig extends BaseSourceConfig {
   type: "github";
   intervalMs: number;
+  query?: string;
 }
 
 export interface ServiceRuleConfig {
@@ -87,6 +115,19 @@ export interface SidecarPortConfig {
   env: string;
   start: number;
   end: number;
+  url?: string;
+}
+
+export type WorkspaceAccessItemKind = "copy" | "link";
+
+export interface WorkspaceAccessItemConfig {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
+}
+
+export interface WorkspaceAccessConfig {
+  items: WorkspaceAccessItemConfig[];
 }
 
 export interface ProjectSpawnConfig {
@@ -146,9 +187,11 @@ export interface ProjectConfig {
   sessionPrefix: string;
   worktree: boolean;
   symlinks: string[];
+  codexArgs?: string[];
   spawn?: ProjectSpawnConfig;
   preflight?: ProjectPreflightConfig;
   defaultAgent?: AgentName;
+  workspaceAccess?: WorkspaceAccessConfig;
   sidecars: Record<string, SidecarConfig>;
   sources: Record<string, SourceConfig>;
   triggers: Record<string, TriggerConfig>;
@@ -201,6 +244,7 @@ export interface SessionRecord {
   prompt: string;
   branch: string;
   branchSource?: BranchSource;
+  pr?: SessionPrBinding;
   worktree: boolean;
   worktreePath: string;
   tmuxSession: string;
@@ -237,8 +281,20 @@ export interface SessionView extends SessionRecord {
   state: SessionState;
   stateHistory?: SessionStateTransition[];
   lastActivityAt: string;
+  artifacts: SessionArtifact[];
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
+  workspaceAccess?: SessionWorkspaceAccess;
+}
+
+export interface SessionWorkspaceAccessItem {
+  label: string;
+  kind: WorkspaceAccessItemKind;
+  value: string;
+}
+
+export interface SessionWorkspaceAccess {
+  items: SessionWorkspaceAccessItem[];
 }
 
 export interface ServiceInstanceView extends ServiceInstanceRecord {
@@ -268,6 +324,7 @@ export interface SpawnSessionRequest {
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;
+  slots?: { links?: SessionLink[] };
 }
 
 export interface SendMessageAttachment {
@@ -286,6 +343,11 @@ export interface RunServiceRequest {
   command: string;
   cwd: string;
   port?: number;
+}
+
+export interface StartSidecarRequest {
+  callerSidecarName?: string;
+  callerSidecarDepth?: number;
 }
 
 export interface KillSessionRequest {

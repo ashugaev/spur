@@ -110,7 +110,15 @@ async function fetchOrigin(repoPath: string): Promise<void> {
   }
 }
 
-async function resolveFreshBranchRef(repoPath: string, branch: string): Promise<string> {
+interface ResolveFreshBranchRefOptions {
+  useRemoteWhenCheckedOutDirty?: boolean;
+}
+
+async function resolveFreshBranchRef(
+  repoPath: string,
+  branch: string,
+  options?: ResolveFreshBranchRefOptions,
+): Promise<string> {
   const remoteBranch = `origin/${branch}`;
   if (!(await refExists(repoPath, `refs/remotes/origin/${branch}`))) {
     return branch;
@@ -129,6 +137,9 @@ async function resolveFreshBranchRef(repoPath: string, branch: string): Promise<
 
   try {
     if ((await readCurrentBranch(repoPath)) === branch) {
+      if (options?.useRemoteWhenCheckedOutDirty && (await hasUncommittedChanges(repoPath))) {
+        return remoteBranch;
+      }
       await git(repoPath, "merge", "--ff-only", remoteBranch);
       return branch;
     }
@@ -162,7 +173,9 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   mkdirSync(projectDir, { recursive: true });
   await pruneWorktrees(input.repoPath);
   await fetchOrigin(input.repoPath);
-  const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch);
+  const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch, {
+    useRemoteWhenCheckedOutDirty: true,
+  });
   const branchExistsLocally = await refExists(input.repoPath, `refs/heads/${input.branch}`);
 
   if (branchExistsLocally) {

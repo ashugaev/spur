@@ -1,5 +1,87 @@
-import { test, expect, type Page } from "playwright/test";
+import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
+
+async function mockTerminalWebSocket(page: Page) {
+  await page.addInitScript(() => {
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      readyState = MockWebSocket.CONNECTING;
+      binaryType: BinaryType = "blob";
+      bufferedAmount = 0;
+      extensions = "";
+      protocol = "";
+      url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+
+      constructor(url: string | URL) {
+        this.url = String(url);
+        state.sockets.push(this);
+        queueMicrotask(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.(new Event("open"));
+        });
+      }
+
+      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView) {}
+
+      close(code?: number, reason?: string) {
+        if (this.readyState >= MockWebSocket.CLOSING) return;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.(
+          new CloseEvent("close", {
+            code: code ?? 1000,
+            reason: reason ?? "Closed",
+            wasClean: true,
+          }),
+        );
+      }
+
+      addEventListener() {}
+
+      removeEventListener() {}
+
+      dispatchEvent() {
+        return true;
+      }
+    }
+
+    const state = {
+      sockets: [] as MockWebSocket[],
+    };
+
+    Object.defineProperty(window, "__directTerminalWsState", {
+      configurable: true,
+      value: state,
+    });
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: MockWebSocket,
+    });
+  });
+}
+
+async function getTerminalSocketCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const windowWithState = window as unknown as {
+      __directTerminalWsState?: {
+        sockets: Array<{ url?: string }>;
+      };
+    };
+    return (
+      windowWithState.__directTerminalWsState?.sockets.filter((socket) =>
+        socket.url?.includes("/ws?session="),
+      ).length ?? 0
+    );
+  });
+}
 
 function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSession>) {
   return page.route(`**/api/sessions/${session.id}`, (route) => {
@@ -7,6 +89,59 @@ function mockSessionDetail(page: Page, session: ReturnType<typeof makeWorkingSes
       status: 200,
       contentType: "application/json",
       body: JSON.stringify(session),
+    });
+  });
+}
+
+function mockSessionConversation(
+  page: Page,
+  sessionId: string,
+  state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed",
+) {
+  return page.route(`**/api/sessions/${sessionId}/conversation`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ messages: [], durationMs: 0, state }),
+    });
+  });
+}
+
+function mockSessionConversationPayload(
+  page: Page,
+  sessionId: string,
+  payload: {
+    messages: Array<{ role: "user" | "assistant"; text: string; timestampMs: number }>;
+    durationMs: number;
+    state: "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
+  },
+) {
+  return page.route(`**/api/sessions/${sessionId}/conversation`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  });
+}
+
+function mockVoiceStatus(page: Page) {
+  return page.route("**/api/runtime/voice", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+    });
+  });
+}
+
+function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
+  return page.route("**/api/runtime/voice/transcribe", async (route) => {
+    onRequest?.();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ text }),
     });
   });
 }
@@ -129,6 +264,73 @@ test.describe("S2: Actions bar", () => {
     // canAttach = runtimeAlive && !isTerminalSession && tmuxSession
     // completed → isTerminalSession = true → no terminal button
     await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
+  });
+
+  test("link workspace access entries are visible when configured", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2-7",
+      workspaceAccess: {
+        items: [
+          {
+            label: "Web IDE",
+            kind: "link",
+            value: "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+          },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Workspace Access")).toBeVisible();
+    await expect(page.getByRole("link", { name: /^open web ide$/i })).toHaveAttribute(
+      "href",
+      "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+    );
+  });
+});
+
+// S2b: Conversation dialog
+test.describe("S2b: Conversation dialog", () => {
+  test("long unbroken dialog and queued tokens hard-wrap on mobile without horizontal overflow", async ({
+    page,
+  }) => {
+    const longToken = "supercalifragilisticexpialidocious".repeat(12);
+    const session = makeWorkingSession({
+      id: "detail-s2b-1",
+      queuedMessages: {
+        messages: [longToken],
+        awaitingPrompt: false,
+      },
+    });
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockSessionDetail(page, session);
+    await mockSessionConversationPayload(page, session.id, {
+      messages: [
+        { role: "user", text: "Prompt", timestampMs: 1 },
+        { role: "assistant", text: longToken, timestampMs: 2 },
+      ],
+      durationMs: 60_000,
+      state: "waiting",
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /dialog/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /queued messages/i })).toBeVisible();
+
+    const layout = await page.evaluate(() => {
+      const main = document.querySelector("main");
+      return {
+        bodyScrollWidth: document.body.scrollWidth,
+        bodyClientWidth: document.body.clientWidth,
+        mainScrollWidth: main?.scrollWidth ?? null,
+        mainClientWidth: main?.clientWidth ?? null,
+      };
+    });
+
+    expect(layout.bodyScrollWidth).toBe(layout.bodyClientWidth);
+    expect(layout.mainScrollWidth).toBe(layout.mainClientWidth);
   });
 });
 
@@ -293,6 +495,99 @@ test.describe("S3: Message section", () => {
   });
 });
 
+test.describe("S3 mobile voice", () => {
+  test("mobile voice input does not surface a spurious no-audio error in standalone-style flows", async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ ...devices["iPhone 13"] });
+    const page = await context.newPage();
+    const session = makeWorkingSession({ id: "detail-s3-mobile-voice-1", runtimeAlive: true });
+    let transcribeCalls = 0;
+
+    try {
+      await page.addInitScript(() => {
+        class MobilePwaMediaRecorder {
+          mimeType = "audio/webm";
+          state = "inactive";
+          private listeners = new Map<string, Array<(event?: unknown) => void>>();
+          private requestedFlush = false;
+
+          addEventListener(type: string, listener: (event?: unknown) => void) {
+            this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+          }
+
+          start() {
+            this.state = "recording";
+          }
+
+          requestData() {
+            this.requestedFlush = true;
+          }
+
+          stop() {
+            this.state = "inactive";
+            const blob = new Blob(["voice-audio"], { type: this.mimeType });
+            if (this.requestedFlush) {
+              this.emit("stop");
+              queueMicrotask(() => {
+                this.emit("dataavailable", blob);
+              });
+              return;
+            }
+            this.emit("dataavailable", blob);
+            this.emit("stop");
+          }
+
+          private emit(type: string, data?: Blob) {
+            for (const listener of this.listeners.get(type) ?? []) {
+              listener(data ? { data } : undefined);
+            }
+          }
+        }
+
+        Object.defineProperty(window, "MediaRecorder", {
+          configurable: true,
+          writable: true,
+          value: MobilePwaMediaRecorder,
+        });
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            getUserMedia: async () => ({
+              getTracks: () => [{ stop() {} }],
+            }),
+          },
+        });
+      });
+
+      await mockSessionDetail(page, session);
+      await mockSessionConversation(page, session.id, "waiting");
+      await mockVoiceStatus(page);
+      await mockVoiceTranscribe(page, "Mobile PWA voice still works", () => {
+        transcribeCalls += 1;
+      });
+
+      await page.goto(`/sessions/${session.id}`);
+
+      await page.getByRole("button", { name: /start voice recording/i }).click();
+      await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+      await page.getByRole("button", { name: /stop voice recording/i }).click();
+
+      await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
+        "Mobile PWA voice still works",
+      );
+      await expect(
+        page.getByText(
+          "Voice recording captured no audio. Check your microphone input and try again.",
+        ),
+      ).toHaveCount(0);
+      expect(transcribeCalls).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+});
+
 // S3b: Queued messages section
 test.describe("S3b: Queued messages section", () => {
   test("shows the full queued stack in FIFO order", async ({ page }) => {
@@ -372,6 +667,59 @@ test.describe("S4: Links section", () => {
   });
 });
 
+test.describe("S4b: Artifacts section", () => {
+  test("renders artifact cards with preview and download actions", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-1",
+      artifacts: [
+        {
+          id: "screenshot.png",
+          name: "screenshot.png",
+          size: 1024,
+          mimeType: "image/png",
+          kind: "image",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "capture.webm",
+          name: "capture.webm",
+          size: 2048,
+          mimeType: "video/webm",
+          kind: "video",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "trace.log",
+          name: "trace.log",
+          size: 4096,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Artifacts")).toBeVisible();
+    await expect(page.getByAltText("screenshot.png")).toBeVisible();
+    await expect(page.getByLabel("capture.webm preview")).toBeVisible();
+    await expect(page.getByText("trace.log")).toBeVisible();
+
+    await page.getByText("screenshot.png").hover();
+    await page.getByRole("button", { name: "Preview screenshot.png" }).click();
+    const dialog = page.getByRole("dialog", { name: "Artifact preview screenshot.png" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("link", { name: "Download" })).toHaveAttribute(
+      "href",
+      "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
+    );
+  });
+});
+
 // S5: Runtime sidebar
 test.describe("S5: Runtime sidebar", () => {
   test("Created and Last activity fields visible", async ({ page }) => {
@@ -393,6 +741,49 @@ test.describe("S5: Runtime sidebar", () => {
 
     await expect(page.getByText("Worktree path")).toBeVisible();
     await expect(page.getByText(/worktrees\/detail-s5-2/)).toBeVisible();
+  });
+
+  test("copy workspace access entries are visible when configured", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s5-3",
+      workspaceAccess: {
+        items: [
+          {
+            label: "Cursor",
+            kind: "copy",
+            value: "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3",
+          },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("Cursor", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-3"),
+    ).toBeVisible();
+  });
+
+  test("workspace access copy action writes the command to clipboard and shows a toast", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    const command = "cursor --remote ssh-remote+100.80.107.19 /tmp/worktrees/detail-s5-4";
+    const session = makeWorkingSession({
+      id: "detail-s5-4",
+      workspaceAccess: {
+        items: [{ label: "Cursor", kind: "copy", value: command }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /^copy cursor$/i }).click();
+
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(command);
+    await expect(page.getByText("Cursor copied")).toBeVisible();
   });
 });
 
@@ -453,5 +844,90 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.getByRole("button", { name: /close terminal/i }).click();
     const overflowRestored = await page.evaluate(() => document.body.style.overflow);
     expect(overflowRestored).not.toBe("hidden");
+  });
+
+  test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-4" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+    await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await page.waitForTimeout(1_100);
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
+  });
+});
+
+// S7: Display state preserves terminal states over claude JSONL "working"
+test.describe("S7: Display state override", () => {
+  test("errored session shows error, not working, even when conversation reports working", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s7-1",
+      status: "errored",
+      state: "error",
+      runtimeAlive: false,
+      error: "Failed to fast-forward local branch",
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("error", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("working", { exact: true })).toHaveCount(0);
+  });
+
+  test("completed session shows paused label (stopped state), not working", async ({ page }) => {
+    const session = makeCompletedSession({ id: "detail-s7-2" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("paused", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("working", { exact: true })).toHaveCount(0);
+  });
+
+  test("working session still shows working when conversation reports working", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s7-3" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "working");
+    await page.goto(`/sessions/${session.id}`);
+
+    const header = page.locator("header").first();
+    await expect(header.getByText("working", { exact: true }).first()).toBeVisible();
   });
 });

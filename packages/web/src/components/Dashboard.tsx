@@ -1,12 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -23,7 +25,7 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 
-const POLL_INTERVAL_MS = 5_000;
+const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
@@ -124,6 +126,21 @@ function IconBolt() {
     </svg>
   );
 }
+function IconCheck() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -142,16 +159,25 @@ function buildSpawnOverrides(
   return undefined;
 }
 
+function upsertSession(
+  sessions: SpurSessionView[],
+  nextSession: SpurSessionView,
+  activeProjectId: string,
+): SpurSessionView[] {
+  const filtered = sessions.filter((session) => session.id !== nextSession.id);
+  if (activeProjectId && nextSession.project !== activeProjectId) {
+    return filtered;
+  }
+  return [nextSession, ...filtered];
+}
+
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(() => {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -165,6 +191,7 @@ export function Dashboard() {
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
   const [spawning, setSpawning] = useState(false);
+  const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
@@ -204,50 +231,30 @@ export function Dashboard() {
     [locationSearch],
   );
 
-  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-
-    try {
-      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = (await response.json()) as SpurSessionsResponse;
-      setRawSessions(payload.sessions);
-      setProjects(payload.projects ?? []);
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, []);
-
   useEffect(() => {
     setProjectId(requestedProject);
   }, [requestedProject]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async (silent = false) => {
-      if (cancelled) return;
-      await fetchSessions(projectId, silent);
-    };
-
-    void run(false);
-    const timer = setInterval(() => {
-      void run(true);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchSessions, projectId]);
+  const queryClient = useQueryClient();
+  const sessionsQueryKey = ["sessions", projectId] as const;
+  const {
+    data,
+    isPending,
+    error: sessionsError,
+  } = useQuery<SpurSessionsResponse>({
+    queryKey: sessionsQueryKey,
+    queryFn: async ({ signal }) => {
+      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(`sessions ${response.status}`);
+      return (await response.json()) as SpurSessionsResponse;
+    },
+    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+  const rawSessions = data?.sessions ?? [];
+  const projects = data?.projects ?? [];
+  const loading = isPending;
 
   const filterProjectOptions = useMemo(() => {
     const merged = new Map(projects.map((project) => [project.id, project]));
@@ -308,6 +315,7 @@ export function Dashboard() {
       respond: grouped.respond.length,
       pending: grouped.pending.length,
       working: grouped.working.length,
+      done: grouped.done.length,
     }),
     [grouped],
   );
@@ -316,7 +324,8 @@ export function Dashboard() {
     () =>
       LANE_ORDER.filter(
         (level) =>
-          grouped[level].length > 0 && (activeStatFilter === null || level === activeStatFilter),
+          grouped[level].length > 0 &&
+          (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
       ),
     [activeStatFilter, grouped],
   );
@@ -324,10 +333,14 @@ export function Dashboard() {
   const hasActiveFilters =
     projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
   const hasVisibleSessions = visibleLevels.length > 0;
-
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
+  const emptyStateMessage = hasActiveFilters
+    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    : grouped.done.length > 0
+      ? "No current sessions are visible."
+      : undefined;
 
   const isValidSpawnProject = (candidateProjectId: string) =>
     filterProjectOptions.some((project) => project.id === candidateProjectId);
@@ -443,8 +456,9 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId) return;
+    if (!nextProjectId || spawningRef.current) return;
 
+    spawningRef.current = true;
     setSpawning(true);
     try {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
@@ -467,6 +481,14 @@ export function Dashboard() {
       });
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
+      const session = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = current?.sessions ?? [];
+        return {
+          sessions: upsertSession(currentSessions, session, nextProjectId),
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
@@ -476,11 +498,11 @@ export function Dashboard() {
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
-      await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
+      spawningRef.current = false;
       setSpawning(false);
     }
   };
@@ -527,101 +549,108 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex min-w-0 grow flex-wrap items-center gap-3 sm:flex-nowrap">
-            <div className="flex min-w-0 shrink items-center gap-3">
+        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
+            <div className="flex min-w-0 items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
-                <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                  <span className="block min-w-0 truncate">{activeProjectName}</span>
-                  <svg
-                    aria-hidden="true"
-                    className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
-                    fill="currentColor"
-                    viewBox="0 0 16 16"
-                  >
-                    <path d="M4 6.5 8 10.5 12 6.5Z" />
-                  </svg>
-                </h1>
-                <select
-                  aria-label="Project filter"
-                  className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
-                  onChange={(event) => syncProjectFilter(event.target.value)}
-                  value={projectId}
+              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+                <span className="block min-w-0 truncate">{activeProjectName}</span>
+                <svg
+                  aria-hidden="true"
+                  data-testid="project-filter-chevron"
+                  className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
                 >
-                  <option value="">All Projects</option>
-                  {filterProjectOptions.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                  <path d="M4 6.5 8 10.5 12 6.5Z" />
+                </svg>
+              </h1>
             </div>
-            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
-              <StatItem
-                icon={<IconChat />}
-                label="Needs Input"
-                value={stats.respond}
-                color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-                active={activeStatFilter === "respond"}
-                onClick={() => toggleStatFilter("respond")}
-              />
-              <StatItem
-                icon={<IconBolt />}
-                label="Working"
-                value={stats.working}
-                color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-                active={activeStatFilter === "working"}
-                onClick={() => toggleStatFilter("working")}
-              />
-              <StatItem
-                icon={<IconClock />}
-                label="Waiting"
-                value={stats.pending}
-                color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-                active={activeStatFilter === "pending"}
-                onClick={() => toggleStatFilter("pending")}
-              />
-            </div>
-          </div>
-          <div className="flex min-w-0 grow basis-full items-center gap-2 sm:basis-[360px]">
-            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-              <svg
-                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Filter sessions..."
-                value={searchQuery}
-              />
-            </div>
-            <button
-              className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-              onClick={openSpawnModal}
-              type="button"
+            <select
+              aria-label="Project filter"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
             >
-              Spawn Session
-            </button>
+              <option value="">All Projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
           </div>
+          <StatItem
+            icon={<IconChat />}
+            label="Needs Input"
+            value={stats.respond}
+            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+            active={activeStatFilter === "respond"}
+            onClick={() => toggleStatFilter("respond")}
+          />
+          <StatItem
+            icon={<IconBolt />}
+            label="Working"
+            value={stats.working}
+            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+            active={activeStatFilter === "working"}
+            onClick={() => toggleStatFilter("working")}
+          />
+          <StatItem
+            icon={<IconClock />}
+            label="Waiting"
+            value={stats.pending}
+            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+            active={activeStatFilter === "pending"}
+            onClick={() => toggleStatFilter("pending")}
+          />
+          <StatItem
+            icon={<IconCheck />}
+            label="Completed"
+            value={stats.done}
+            color={
+              activeStatFilter === "done" && stats.done > 0
+                ? "var(--color-status-ready)"
+                : undefined
+            }
+            active={activeStatFilter === "done"}
+            onClick={() => toggleStatFilter("done")}
+          />
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter sessions..."
+              value={searchQuery}
+            />
+          </div>
+          <button
+            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
+            onClick={openSpawnModal}
+            type="button"
+          >
+            Spawn Session
+          </button>
         </header>
 
         {spawnOpen ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
             onClick={(event) => {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -638,7 +667,7 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <select
                     aria-label="Spawn project"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
                   >
@@ -650,7 +679,7 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={INPUT_CLASS}
                     onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
                     value={spawnAgent}
                   >
@@ -661,14 +690,14 @@ export function Dashboard() {
                 <div className="flex gap-2">
                   <input
                     aria-label="branch name"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
                   />
                   <select
                     aria-label="workspace mode"
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={INPUT_CLASS}
                     onChange={(event) =>
                       setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
                     }
@@ -692,7 +721,7 @@ export function Dashboard() {
                 </div>
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
-                    className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`w-full ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
@@ -704,7 +733,7 @@ export function Dashboard() {
                       <div className="flex gap-2" key={step.id}>
                         <input
                           aria-label={`step ${index + 1}`}
-                          className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                          className={`flex-1 ${INPUT_CLASS}`}
                           onChange={(event) => updateStep(step.id, event.target.value)}
                           placeholder={`Step ${index + 1}`}
                           value={step.value}
@@ -729,7 +758,7 @@ export function Dashboard() {
                 </div>
                 <div className="relative flex min-h-0 flex-1 flex-col">
                   <textarea
-                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)] sm:min-h-[10rem]"
+                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
                     onChange={(event) => setSpawnPrompt(event.target.value)}
                     onKeyDown={(event) => {
                       if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
@@ -741,7 +770,7 @@ export function Dashboard() {
                   <VoiceButton voice={voice} />
                 </div>
                 {voice.voiceError ? (
-                  <div className="border border-red-500/30 bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-100">
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
                   </div>
                 ) : null}
@@ -761,7 +790,7 @@ export function Dashboard() {
                       {!spawning ? (
                         <span
                           aria-hidden="true"
-                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                         >
                           CMD + ⏎
                         </span>
@@ -774,9 +803,12 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error ? (
-          <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
-            {error}
+        {error || sessionsError ? (
+          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
+            {error ??
+              (sessionsError instanceof Error
+                ? sessionsError.message
+                : "Failed to load Spur sessions")}
           </div>
         ) : null}
 
@@ -786,13 +818,7 @@ export function Dashboard() {
 
         {!loading && !hasVisibleSessions ? (
           <section className="mt-5">
-            <EmptyState
-              message={
-                hasActiveFilters
-                  ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
-                  : undefined
-              }
-            />
+            <EmptyState message={emptyStateMessage} />
             {hasActiveFilters ? (
               <div className="mt-3 flex justify-center">
                 <button
@@ -831,7 +857,7 @@ export function Dashboard() {
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
-      <StatusBar sessions={rawSessions} />
+      <StatusBar />
     </>
   );
 }

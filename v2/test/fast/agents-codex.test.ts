@@ -38,6 +38,7 @@ import {
   buildCodexRestorePlan,
   codexHookHomePath,
   ensureCodexHooksConfig,
+  appendCodexTrustedProjects,
   findCodexSessionId,
   captureCodexRolloutBaseline,
   scanCodexRolloutForMessage,
@@ -116,6 +117,15 @@ describe("buildCodexPlan", () => {
     const plan = buildCodexPlan("prompt", { codexHomePath: "/path with spaces/codex" });
     expect(plan.launchCommand).toContain("CODEX_HOME='/path with spaces/codex'");
   });
+
+  it("appends configured codex args", () => {
+    const plan = buildCodexPlan("prompt", {
+      codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(
+      `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
+    );
+  });
 });
 
 describe("buildCodexResumePlan", () => {
@@ -147,6 +157,13 @@ describe("buildCodexResumePlan", () => {
       codexHomePath: "/home/codex-dir",
     });
     expect(plan.launchCommand).toContain("CODEX_HOME='/home/codex-dir'");
+  });
+
+  it("appends configured codex args to resume", () => {
+    const plan = buildCodexResumePlan("thread-123", "codex", {
+      codexArgs: ["-c", 'service_tier="fast"', "--enable", "fast_mode"],
+    });
+    expect(plan.launchCommand).toContain(`'-c' 'service_tier="fast"' '--enable' 'fast_mode'`);
   });
 
   it("does not include initialMessage", () => {
@@ -421,6 +438,102 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
   });
 });
 
+describe("appendCodexTrustedProjects", () => {
+  it("appends a trust_level = trusted section for a plain path", () => {
+    const result = appendCodexTrustedProjects('[model]\nname = "test"\n', ["/worktree/path"]);
+    expect(result).toContain('[projects."/worktree/path"]');
+    expect(result).toContain('trust_level = "trusted"');
+  });
+
+  it("preserves existing config content", () => {
+    const result = appendCodexTrustedProjects('[model]\nname = "test"\n', ["/worktree/path"]);
+    expect(result).toContain('[model]\nname = "test"');
+  });
+
+  it("is idempotent when the same trust section already exists", () => {
+    const base = '[projects."/worktree/path"]\ntrust_level = "trusted"\n';
+    const result = appendCodexTrustedProjects(base, ["/worktree/path"]);
+    const count = (result.match(/\[projects\."\/worktree\/path"\]/g) ?? []).length;
+    expect(count).toBe(1);
+  });
+
+  it("returns the input unchanged when no trusted projects are provided", () => {
+    const base = '[model]\nname = "test"\n';
+    expect(appendCodexTrustedProjects(base, [])).toBe(base);
+  });
+});
+
+describe("ensureCodexHooksConfig trusted projects", () => {
+  function setUserConfig(text: string) {
+    mockReadFile.mockImplementation(async (filePath: unknown) => {
+      if (typeof filePath === "string" && filePath.endsWith("config.toml")) {
+        return text;
+      }
+      return "";
+    });
+  }
+
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+    mockCp.mockResolvedValue(undefined);
+    mockExistsSync.mockReturnValue(false);
+    mockReadFile.mockResolvedValue("");
+  });
+
+  it("writes the trust section for the given worktree path", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[projects."/worktree/path"]');
+    expect(content).toContain('trust_level = "trusted"');
+  });
+
+  it("does not duplicate the trust section when already present in user config", async () => {
+    setUserConfig('[model]\nname = "test"\n[projects."/worktree/path"]\ntrust_level = "trusted"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    const count = (content.match(/\[projects\."\/worktree\/path"\]/g) ?? []).length;
+    expect(count).toBe(1);
+  });
+
+  it("preserves base config plus suppress line when adding a trust section", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool", ["/worktree/path"]);
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).toContain('[model]\nname = "test"');
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain('[projects."/worktree/path"]');
+  });
+
+  it("does not add any projects section when trustedProjects is empty or missing", async () => {
+    setUserConfig('[model]\nname = "test"\n');
+
+    await ensureCodexHooksConfig("/session/tool");
+
+    const writeCall = mockWriteFile.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].endsWith("config.toml"),
+    );
+    const content = writeCall?.[1] as string;
+    expect(content).not.toContain("[projects.");
+  });
+});
+
 describe("findCodexSessionId", () => {
   it("returns null when no session files exist", async () => {
     mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
@@ -463,6 +576,43 @@ describe("findCodexSessionId", () => {
     // readdir should have been called at most MAX_SESSION_SCAN_DEPTH+2 times
     // (root + depth 1 + depth 2 + depth 3 + depth 4 = 5 calls max)
     expect(mockReaddir.mock.calls.length).toBeLessThanOrEqual(6);
+  });
+
+  it("prefers the first matching session root over a newer global match", async () => {
+    mockResolveWorktreePathCandidates.mockResolvedValue(["/worktree/path"]);
+    mockReaddir.mockImplementation(async (dir: unknown) => {
+      if (dir === "/session-root") return ["session.jsonl"];
+      if (dir === "/global-root") return ["global.jsonl"];
+      return [];
+    });
+    mockLstat.mockResolvedValue({ isDirectory: () => false });
+    mockStat.mockImplementation(async (filePath: unknown) => {
+      if (filePath === "/session-root/session.jsonl") {
+        return { mtimeMs: 1000 };
+      }
+      if (filePath === "/global-root/global.jsonl") {
+        return { mtimeMs: 2000 };
+      }
+      return { mtimeMs: 0 };
+    });
+    mockStreamsForFiles({
+      "/session-root/session.jsonl": [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            id: "session-thread",
+            cwd: "/worktree/path",
+          },
+        }),
+      ],
+    });
+
+    const result = await findCodexSessionId("/worktree/path", {
+      sessionRootDirs: ["/session-root", "/global-root"],
+    });
+
+    expect(result).toBe("session-thread");
+    expect(mockCreateInterface).toHaveBeenCalledTimes(1);
   });
 });
 

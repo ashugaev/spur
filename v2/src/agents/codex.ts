@@ -318,20 +318,21 @@ export async function findCodexSessionId(
   options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
 ): Promise<string | null> {
   const candidates = await resolveWorktreePathCandidates(worktreePath);
-  let bestMatch: IndexedSessionFile | null = null;
   for (const sessionRootDir of resolveSessionRootDirs(options)) {
     const sessionIndex = await loadSessionIndexForRoot(sessionRootDir);
+    let bestMatch: IndexedSessionFile | null = null;
     for (const candidate of candidates) {
       const match = sessionIndex.get(candidate);
       if (match && (!bestMatch || match.mtimeMs > bestMatch.mtimeMs)) {
         bestMatch = match;
       }
     }
+    if (!bestMatch) {
+      continue;
+    }
+    return bestMatch.threadId ?? readThreadId(bestMatch.path);
   }
-  if (!bestMatch) {
-    return null;
-  }
-  return bestMatch.threadId ?? readThreadId(bestMatch.path);
+  return null;
 }
 
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
@@ -341,13 +342,23 @@ function withCodexHome(command: string, codexHomePath: string | undefined): stri
   return `CODEX_HOME=${shellEscape(codexHomePath)} ${command}`;
 }
 
+function appendCodexArgs(command: string, codexArgs: string[] | undefined): string {
+  if (!codexArgs || codexArgs.length === 0) {
+    return command;
+  }
+  return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentLaunchPlan {
   return {
     launchCommand: withCodexHome(
-      `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+      appendCodexArgs(
+        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     initialMessage: prompt,
@@ -358,11 +369,14 @@ export function buildCodexPlan(
 export function buildCodexResumePlan(
   threadId: string,
   binary = codexCommand(),
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): AgentResumePlan {
   return {
     launchCommand: withCodexHome(
-      `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+      appendCodexArgs(
+        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        options?.codexArgs,
+      ),
       options?.codexHomePath,
     ),
     readyMarkers: ["›"],
@@ -372,7 +386,7 @@ export function buildCodexResumePlan(
 export async function buildCodexRestorePlan(
   worktreePath: string,
   prompt: string,
-  options?: { codexHomePath?: string },
+  options?: { codexHomePath?: string; codexArgs?: string[] },
 ): Promise<AgentLaunchPlan | null> {
   const sessionRootDir = options?.codexHomePath
     ? join(options.codexHomePath, "sessions")
@@ -395,19 +409,51 @@ export function codexHookHomePath(sessionToolDir: string): string {
   return join(sessionToolDir, CODEX_HOME_DIR);
 }
 
-export async function ensureCodexHooksConfig(sessionToolDir: string): Promise<string> {
+// JSON.stringify yields a valid TOML basic-string for filesystem paths.
+export function appendCodexTrustedProjects(
+  configText: string,
+  trustedProjects: readonly string[],
+): string {
+  if (trustedProjects.length === 0) {
+    return configText;
+  }
+  let result = configText;
+  for (const projectPath of trustedProjects) {
+    const header = `[projects.${JSON.stringify(projectPath)}]`;
+    if (result.includes(header)) {
+      continue;
+    }
+    const trimmed = result.trimEnd();
+    const separator = trimmed ? "\n\n" : "";
+    result = `${trimmed}${separator}${header}\ntrust_level = "trusted"\n`;
+  }
+  return result;
+}
+
+export async function buildEphemeralCodexConfig(
+  trustedProjects: readonly string[],
+): Promise<string> {
+  const userConfigPath = join(homedir(), ".codex", "config.toml");
+  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
+  return appendCodexTrustedProjects(baseConfig, trustedProjects);
+}
+
+export async function ensureCodexHooksConfig(
+  sessionToolDir: string,
+  trustedProjects: readonly string[] = [],
+): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
-  const userConfigPath = join(homedir(), ".codex", "config.toml");
   const sessionConfigPath = join(codexDir, "config.toml");
-  const baseConfig = await readFile(userConfigPath, "utf8").catch(() => "");
-  const suppressWarningConfig = baseConfig.includes("suppress_unstable_features_warning")
+  const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
+  const trimmed = baseConfig.trimEnd();
+  const finalConfig = baseConfig.includes("suppress_unstable_features_warning")
     ? baseConfig
-    : `${baseConfig.trimEnd()}\n${baseConfig.trimEnd() ? "\n" : ""}suppress_unstable_features_warning = true\n`;
-  await writeFile(sessionConfigPath, suppressWarningConfig, "utf8");
+    : `${trimmed}\n${trimmed ? "\n" : ""}suppress_unstable_features_warning = true\n`;
+  await writeFile(sessionConfigPath, finalConfig, "utf8");
   const userAgentsDir = join(homedir(), ".codex", "agents");
   if (existsSync(userAgentsDir)) {
     await cp(userAgentsDir, join(codexDir, "agents"), { recursive: true, force: true });
@@ -446,6 +492,8 @@ interface RolloutResponseItemPayload {
 interface RolloutEventMsgPayload {
   type?: string;
   message?: string;
+  turn_id?: string;
+  turnId?: string;
 }
 
 function extractUserTextFromLine(line: string): string | null {
@@ -524,4 +572,168 @@ export async function scanCodexRolloutForMessage(
     }
   }
   return { found: false, lastScannedFile };
+}
+
+export interface CodexRolloutStateRecord {
+  state: "waiting" | "needs_input";
+  timestamp: string;
+  timestampMs: number;
+  filePath: string;
+  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
+  turnId?: string;
+}
+
+function readRolloutTurnId(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function extractCodexRolloutStateLine(
+  line: string,
+): Omit<CodexRolloutStateRecord, "filePath"> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
+  if (!timestamp) {
+    return null;
+  }
+  const timestampMs = Date.parse(timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "event_msg") {
+    const payloadType = payload["type"];
+    if (payloadType === "task_complete") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+          };
+    }
+    if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+          };
+    }
+    if (payloadType === "input_required") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "needs_input",
+            timestamp,
+            timestampMs,
+            reason: "input_required",
+            turnId,
+          }
+        : {
+            state: "needs_input",
+            timestamp,
+            timestampMs,
+            reason: "input_required",
+          };
+    }
+  }
+
+  const payloadType = payload["type"];
+  const payloadName = payload["name"];
+  if (
+    type === "response_item" &&
+    (payloadType === "function_call" || payloadType === "custom_tool_call") &&
+    payloadName === "request_user_input"
+  ) {
+    const turnId = readRolloutTurnId(parsed["turn_id"]) ?? readRolloutTurnId(payload["turn_id"]);
+    return turnId
+      ? {
+          state: "needs_input",
+          timestamp,
+          timestampMs,
+          reason: "request_user_input",
+          turnId,
+        }
+      : {
+          state: "needs_input",
+          timestamp,
+          timestampMs,
+          reason: "request_user_input",
+        };
+  }
+
+  return null;
+}
+
+export async function readCodexRolloutState(
+  sessionsDir: string,
+): Promise<CodexRolloutStateRecord | null> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return null;
+  }
+  const filesWithTimes = await Promise.all(
+    files.map(async (filePath) => {
+      try {
+        const fileStat = await stat(filePath);
+        return { filePath, mtimeMs: fileStat.mtimeMs };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const existingFiles = filesWithTimes.filter(
+    (file): file is { filePath: string; mtimeMs: number } => file !== null,
+  );
+  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
+    let content: string;
+    try {
+      content = await readFile(file.filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = content.trim().split("\n").filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const state = extractCodexRolloutStateLine(lines[index] ?? "");
+      if (state) {
+        return {
+          ...state,
+          filePath: file.filePath,
+        };
+      }
+    }
+  }
+  return null;
 }

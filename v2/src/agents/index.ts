@@ -18,6 +18,7 @@ export type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 interface AgentPlanOptions {
   claudeSettingsPath?: string;
   codexHomePath?: string;
+  codexArgs?: string[];
   planMode?: boolean;
 }
 
@@ -31,8 +32,14 @@ function claudePlanOptions(options?: AgentPlanOptions): {
   };
 }
 
-function codexPlanOptions(options?: AgentPlanOptions): { codexHomePath?: string } {
-  return options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {};
+function codexPlanOptions(options?: AgentPlanOptions): {
+  codexHomePath?: string;
+  codexArgs?: string[];
+} {
+  return {
+    ...(options?.codexHomePath ? { codexHomePath: options.codexHomePath } : {}),
+    ...(options?.codexArgs ? { codexArgs: options.codexArgs } : {}),
+  };
 }
 
 export function parseAgentName(agent: string): AgentName {
@@ -105,11 +112,14 @@ export function buildAgentResumePlan(
 export async function findAgentSessionId(
   agent: AgentName,
   worktreePath: string,
+  options?: { codexSessionRootDir?: string },
 ): Promise<string | null> {
   if (agent === "claude") {
     return findClaudeSessionId(worktreePath);
   }
-  return findCodexSessionId(worktreePath);
+  return findCodexSessionId(worktreePath, {
+    ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
+  });
 }
 
 export async function setupAgentHooks(args: {
@@ -121,5 +131,7 @@ export async function setupAgentHooks(args: {
     // Claude uses JSONL-based state classification — no hook settings needed.
     return {};
   }
-  return { codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir) };
+  return {
+    codexHomePath: await ensureCodexHooksConfig(args.sessionToolDir, [args.worktreePath]),
+  };
 }

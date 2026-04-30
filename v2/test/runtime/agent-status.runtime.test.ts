@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionView } from "../../src/types.js";
 import { findFreePort, pollUntil } from "../helpers/common.js";
@@ -117,17 +119,28 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(view.status).toBe("running");
   });
 
-  it("Claude: tool_use produces needs_input after stale window", async () => {
+  it("Claude: AskUserQuestion JSONL produces needs_input", async () => {
     const { context, configPath, port } = await setup("claude-needs");
     const session = await spawnSession(context, configPath, "claude");
     await waitForState(port, session.id, "waiting");
 
-    // show-waiting-menu makes fake agent write tool_use JSONL without later ack.
-    // After the 3s stale window + debounce, daemon classifies as needs_input.
+    // show-waiting-menu makes fake agent write AskUserQuestion JSONL metadata.
     await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
 
     const view = await waitForState(port, session.id, "needs_input");
     expect(view.state).toBe("needs_input");
+  });
+
+  it("Claude: slow tool_result stays working until the tool completes", async () => {
+    const { context, configPath, port } = await setup("claude-slow-tool");
+    const session = await spawnSession(context, configPath, "claude");
+    await waitForState(port, session.id, "waiting");
+
+    await context.execCli(["--config", configPath, "send", session.id, "slow-tool-result"]);
+
+    const view = await waitForState(port, session.id, "waiting");
+    const states = view.stateHistory?.map((entry) => entry.state) ?? [];
+    expect(states).not.toContain("needs_input");
   });
 
   it("Claude: pause → stopped, resume → waiting, kill → killed", async () => {
@@ -194,8 +207,9 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     expect(states).toContain("needs_input");
   });
 
-  // ── Codex hook-based state detection ───────────────────────────────────
-  // Codex hook propagation: no-hook default is "waiting"; STATE_HOLD_MS (4s) debounce applies.
+  // ── Codex hook/jsonl-based state detection ─────────────────────────────
+  // Codex defaults to hook state, falls back to structured rollout JSONL,
+  // and still uses the same STATE_HOLD_MS (4s) debounce rules.
 
   it("Codex: spawn reaches waiting state from Stop hook", async () => {
     const { context, configPath, port } = await setup("codex-wait");
@@ -204,6 +218,42 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "waiting", 45_000);
     expect(view.state).toBe("waiting");
     expect(view.status).toBe("running");
+  });
+
+  it("Codex: show-waiting-menu produces needs_input from structured hook/jsonl state", async () => {
+    const { context, configPath, port } = await setup("codex-needs");
+    const session = await spawnSession(context, configPath, "codex");
+    await waitForState(port, session.id, "waiting", 45_000);
+
+    await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
+
+    const view = await waitForState(port, session.id, "needs_input", 45_000);
+    expect(view.state).toBe("needs_input");
+  });
+
+  it("Codex: spawn trusts the worktree path in the session-local config", async () => {
+    const { context, configPath } = await setup("codex-trust");
+    const session = await spawnSession(context, configPath, "codex");
+    const worktreePath = session.worktreePath;
+    if (!worktreePath) {
+      throw new Error("expected spawned Codex session to have a worktree path");
+    }
+    const configPathname = join(
+      context.dataDir,
+      "session-tools",
+      session.id,
+      "codex-home",
+      "config.toml",
+    );
+    const trustBlock = `[projects.${JSON.stringify(worktreePath)}]\ntrust_level = "trusted"`;
+
+    const content = await pollUntil(async () => readFile(configPathname, "utf8").catch(() => ""), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes(trustBlock),
+    });
+
+    expect(content).toContain("suppress_unstable_features_warning = true");
+    expect(content).toContain(trustBlock);
   });
 
   it("Codex: pause → stopped, resume → waiting, kill → killed", async () => {

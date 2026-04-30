@@ -8,6 +8,8 @@ export interface ParsedRecord {
   role?: string;
   stopReason?: string;
   hasToolUse?: boolean;
+  /** True when a tool_use payload is explicitly asking the human a question. */
+  requestsUserInput?: boolean;
   /** True when at least one tool_use block declares `run_in_background: true`. */
   toolUseInBackground?: boolean;
   /** Largest `input.timeout` (ms) across tool_use blocks in this record. */
@@ -23,7 +25,9 @@ export interface ClaudeJsonlReaderState {
 }
 
 const TAIL_RECORD_LIMIT = 50;
-const TOOL_USE_STALE_MS = 3_000;
+// Default grace window for silent tool_use before we surface needs_input.
+// Per-tool timeouts and run_in_background hints can extend or bypass it.
+export const TOOL_USE_STALE_MS = 3_000;
 
 // ── Pure classifier (no I/O) ──────────────────────────────────────────
 
@@ -57,6 +61,9 @@ export function classifyClaudeJsonlState(
         return "waiting";
       }
       if (record.hasToolUse) {
+        if (record.requestsUserInput) {
+          return "needs_input";
+        }
         // Model explicitly ran the tool in the background → not waiting on input.
         if (record.toolUseInBackground) {
           return "working";
@@ -94,6 +101,9 @@ export function classifyClaudeJsonlState(
     }
 
     if (record.type === "user") {
+      if (record.requestsUserInput) {
+        return "needs_input";
+      }
       // user + tool_result means the agent is processing tool output → working
       if (record.role === "tool_result") {
         return "working";
@@ -160,6 +170,29 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
   );
 }
 
+function hasAskUserQuestionReference(blocks: unknown[]): boolean {
+  return blocks.some((block) => {
+    if (
+      typeof block !== "object" ||
+      block === null ||
+      (block as Record<string, unknown>)["type"] !== "tool_result"
+    ) {
+      return false;
+    }
+    const content = (block as Record<string, unknown>)["content"];
+    return (
+      Array.isArray(content) &&
+      content.some(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as Record<string, unknown>)["type"] === "tool_reference" &&
+          (entry as Record<string, unknown>)["tool_name"] === "AskUserQuestion",
+      )
+    );
+  });
+}
+
 /**
  * Pull deterministic stale-window hints out of any tool_use blocks:
  *  - `input.run_in_background: true` → the model launched a background task.
@@ -168,10 +201,12 @@ function hasBlockType(blocks: unknown[], type: string): boolean {
  */
 function extractToolUseHints(blocks: unknown[]): {
   hasToolUse: boolean;
+  requestsUserInput: boolean;
   inBackground: boolean;
   timeoutMs?: number;
 } {
   let hasToolUse = false;
+  let requestsUserInput = false;
   let inBackground = false;
   let timeoutMs: number | undefined;
   for (const block of blocks) {
@@ -183,16 +218,28 @@ function extractToolUseHints(blocks: unknown[]): {
       continue;
     }
     hasToolUse = true;
+    const tool = block as Record<string, unknown>;
     const input = (block as Record<string, unknown>)["input"];
+    if (tool["name"] === "AskUserQuestion") {
+      requestsUserInput = true;
+    }
     if (typeof input !== "object" || input === null) continue;
     const inp = input as Record<string, unknown>;
+    if (Array.isArray(inp["questions"]) && inp["questions"].length > 0) {
+      requestsUserInput = true;
+    }
     if (inp["run_in_background"] === true) inBackground = true;
     const rawTimeout = inp["timeout"];
     if (typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0) {
       timeoutMs = Math.max(timeoutMs ?? 0, rawTimeout);
     }
   }
-  return { hasToolUse, inBackground, ...(typeof timeoutMs === "number" ? { timeoutMs } : {}) };
+  return {
+    hasToolUse,
+    requestsUserInput,
+    inBackground,
+    ...(typeof timeoutMs === "number" ? { timeoutMs } : {}),
+  };
 }
 
 function extractTextContent(message: Record<string, unknown>): string {
@@ -242,6 +289,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
       role: "assistant",
       ...(stopReason ? { stopReason } : {}),
       hasToolUse: toolUseHints.hasToolUse,
+      ...(toolUseHints.requestsUserInput ? { requestsUserInput: true } : {}),
       ...(toolUseHints.inBackground ? { toolUseInBackground: true } : {}),
       ...(typeof toolUseHints.timeoutMs === "number"
         ? { toolUseTimeoutMs: toolUseHints.timeoutMs }
@@ -254,6 +302,7 @@ export function parseJsonlRecord(line: string, timestampMs: number): ParsedRecor
     return {
       type: "user",
       role: hasBlockType(contentBlocks(message), "tool_result") ? "tool_result" : "user",
+      ...(hasAskUserQuestionReference(contentBlocks(message)) ? { requestsUserInput: true } : {}),
       timestampMs: recordTimestampMs,
     };
   }

@@ -220,16 +220,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
 
   const toggleRecording = useCallback(() => {
     if (recording) {
-      const recorder = mediaRecorderRef.current;
-      if (!recorder) return;
-      if ("requestData" in recorder && typeof recorder.requestData === "function") {
-        try {
-          recorder.requestData();
-        } catch {
-          // Ignore recorder flush failures and still stop the recording.
-        }
-      }
-      recorder.stop();
+      mediaRecorderRef.current?.stop();
       return;
     }
     if (!voiceStatus?.available) return;

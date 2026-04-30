@@ -40,6 +40,18 @@ export interface FakeGhState {
       repo?: string;
     }
   >;
+  prsByNumber?: Record<
+    string,
+    {
+      number: number;
+      title: string;
+      url: string;
+      reviewDecision?: string | null;
+      mergeable?: string | null;
+      mergeStateStatus?: string | null;
+      repo?: string;
+    }
+  >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
   commentsByPr?: Record<
     string,
@@ -56,6 +68,12 @@ export interface FakeGhState {
     }>
   >;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
+  searchPrs?: Array<{
+    number: number;
+    title: string;
+    url: string;
+    repository: { nameWithOwner: string };
+  }>;
 }
 
 export interface RuntimeTestContext {
@@ -92,6 +110,9 @@ function fakeAgentScript(agentName: "claude" | "codex"): string {
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
+  if printf '%s' "$*" | grep -q "empty preflight output"; then
+    exit 0
+  fi
   branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   if [[ -n "$branch_hint" ]]; then
     printf '%s\n' "$branch_hint"
@@ -131,6 +152,12 @@ jsonl_append() {
   if [[ "\${args[\${#args[@]}-1]:-}" == "-" ]]; then
     preflight_input="$(cat)"
   fi
+  if printf '%s' "$preflight_input" | grep -q "empty preflight output"; then
+    if [[ -n "$output_file" ]]; then
+      : > "$output_file"
+    fi
+    exit 0
+  fi
   branch_hint="$(printf '%s' "$preflight_input" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
   payload='NO_PROJECT_RULES'
   if [[ -n "$branch_hint" ]]; then
@@ -163,15 +190,27 @@ else
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`;
-  // State signal helpers — Claude writes JSONL records, Codex writes hook state files.
+  // State signal helpers — Claude writes JSONL records, Codex writes hook state
+  // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : `emit_hook_event "Stop"`;
   const signalNeedsInput =
     agentName === "claude"
-      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use"}]}}'`
-      : ":";
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
+      : `emit_hook_needs_input
+      emit_rollout_input_required`;
+  const signalSlowToolResult =
+    agentName === "claude"
+      ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
+      sleep 5
+      jsonl_append '{"type":"user","message":{"role":"user","content":[{"type":"tool_result"}]}}'
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}`
+      : `printf '%s\\n' "ack: slow tool"
+      printf '%s\\n' "${prompt}"
+      ${signalWaiting}`;
   // Claude signals working per-line; codex buffers pasted multi-line input and
   // writes a single rollout event_msg with the full message (matching real codex).
   const signalWorking =
@@ -197,6 +236,9 @@ fi`;
       printf '%s\\n' "2. runtime"
       printf '%s\\n' "Enter to select"
       printf '%s\\n' "Esc to cancel"
+      ;;
+    slow-tool-result)
+      ${signalSlowToolResult}
       ;;
     simulate-work)
       printf '%s\\n' "• Working (simulated)"
@@ -261,6 +303,17 @@ emit_hook_event() {
   hook_seq=$((hook_seq + 1))
   printf '{"hook_event_name":"%s","turn_id":"%s-%s"}' "$event_name" "\${SPUR_SESSION:-no-session}" "$hook_seq" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
 }
+emit_hook_needs_input() {
+  hook_seq=$((hook_seq + 1))
+  local turn_id="\${SPUR_SESSION:-no-session}-$hook_seq"
+  printf '{"hook_event_name":"NeedsInput","turn_id":"%s","state":"needs_input","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}' "$turn_id" | "$SPUR_AGENT_STATE_COMMAND" 2>/dev/null || true
+}
+emit_rollout_input_required() {
+  if [[ -z "\${session_rollout:-}" ]]; then
+    return
+  fi
+  printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
+}
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
 if [[ "$mode" == "launch" ]]; then
   printf '%s\n' "${header}"
@@ -291,6 +344,11 @@ function argValue(args, prefix) {
 const state = readState();
 const args = process.argv.slice(2);
 
+if (args[0] === "search" && args[1] === "prs") {
+  print(state.searchPrs || []);
+  process.exit(0);
+}
+
 if (args[0] === "pr" && args[1] === "list") {
   const headIndex = args.indexOf("--head");
   const branch = headIndex === -1 ? "" : args[headIndex + 1] || "";
@@ -301,6 +359,19 @@ if (args[0] === "pr" && args[1] === "list") {
 
 if (args[0] === "pr" && args[1] === "checks") {
   print(state.checksByPr?.[String(args[2] || "")] || []);
+  process.exit(0);
+}
+
+if (args[0] === "pr" && args[1] === "view") {
+  const prNumber = String(args[2] || "");
+  const pr =
+    state.prsByNumber?.[prNumber] ||
+    Object.values(state.prsByBranch || {}).find((value) => String(value?.number || "") === prNumber);
+  if (!pr) {
+    process.stderr.write("unknown fake gh pr view target: " + prNumber + "\\n");
+    process.exit(1);
+  }
+  print(pr);
   process.exit(0);
 }
 
