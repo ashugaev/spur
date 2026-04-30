@@ -1514,8 +1514,7 @@ describe("SessionDetail display state", () => {
   it("shows stopped state when session is stopped (does not override to working)", async () => {
     stubFetch({ status: "paused", state: "stopped" }, "working");
     render(<SessionDetail sessionId="api-a1" />);
-    // ActivityDot renders the "stopped" state as the "paused" label.
-    await expectStateBadge("paused");
+    await expectStateBadge("stopped");
   });
 
   it("overrides to working when session state is waiting and claude conversation reports working", async () => {
