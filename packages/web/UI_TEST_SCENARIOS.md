@@ -79,8 +79,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
-- Stale/missing PR status payloads keep the PR link visible but do not show the footer `Git Error` badge
-- GitHub integration failures surfaced inside the PR payload show the footer `Git Error` badge without breaking the page
+- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
 
@@ -97,6 +97,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
+- Footer shows a separate GitHub connection indicator that is independent from PR status rows
+- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
+- Healthy GitHub status renders as a green check next to the GitHub icon
+- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
+- GitHub connection/auth/API failures render the error text directly in the footer
+- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
 
 ### D6c: Footer resource metrics
 
@@ -107,7 +114,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, tapping anywhere outside the open system health tooltip closes it
 - On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
-- Git / PR aggregate stays outside the `HEALTHY` tooltip
+- GitHub connection status stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 

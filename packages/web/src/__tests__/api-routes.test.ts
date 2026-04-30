@@ -22,13 +22,16 @@ vi.mock("node:fs/promises", () => ({
   statfs: vi.fn(),
 }));
 
-// Prevent pr-status from shelling out to `gh auth token`
-vi.mock("node:child_process", () => ({ execSync: vi.fn(() => "") }));
+// Prevent GitHub status routes from shelling out to `gh auth token`
+vi.mock("node:child_process", () => ({ execFileSync: vi.fn(() => "") }));
 
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
+import { resetGitHubApiStateForTests } from "@/lib/github-api";
+import { resetGitHubStatusForTests } from "@/lib/github-status";
 import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
+import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -80,6 +83,26 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function ghOk(body: unknown = { login: "spur" }) {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function ghErr(status: number, body: unknown = {}) {
+  return {
+    ok: false,
+    status,
+    headers: new Headers(),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
 describe("Spur web API routes", () => {
   beforeEach(() => {
     mockedSpurRequestJson.mockReset();
@@ -88,6 +111,8 @@ describe("Spur web API routes", () => {
     mockedTranscribeAudio.mockReset();
     mockedReadFile.mockReset();
     mockedStatfs.mockReset();
+    resetGitHubApiStateForTests();
+    resetGitHubStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
@@ -995,6 +1020,120 @@ describe("Spur web API routes", () => {
 
   // ── GET /api/pr-status ─────────────────────────────────────────────────
 
+  describe("GET /api/github-status", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      resetGitHubStatusForTests();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITHUB_TOKEN"] = "test-token";
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    it("returns a healthy payload with the request timestamp", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.github.com/user",
+        expect.objectContaining({ method: "GET", cache: "no-store" }),
+      );
+    });
+
+    it("returns an error payload when GitHub responds with an error", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitHub API 503");
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("does not convert a normal GitHub error into a rate-limit error when headers are present", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "x-ratelimit-reset": String(Math.floor((Date.now() + 30_000) / 1000)),
+          "x-ratelimit-remaining": "4999",
+        }),
+        json: async () => ({ message: "upstream unavailable" }),
+        text: async () => JSON.stringify({ message: "upstream unavailable" }),
+      });
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("upstream unavailable");
+    });
+
+    it("returns an auth error payload when no GitHub token is available", async () => {
+      delete process.env["GITHUB_TOKEN"];
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitHub auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns a network error payload when the request throws", async () => {
+      fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("ECONNREFUSED");
+    });
+
+    it("returns cached results for repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.ok).toBe(true);
+    });
+  });
+
   describe("GET /api/pr-status", () => {
     const fetchMock = vi.fn();
 
@@ -1029,26 +1168,6 @@ describe("Spur web API routes", () => {
             },
           },
         },
-      };
-    }
-
-    function ghOk(body: unknown) {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        json: async () => body,
-        text: async () => JSON.stringify(body),
-      };
-    }
-
-    function ghErr(status: number, body: unknown = {}) {
-      return {
-        ok: false,
-        status,
-        headers: new Headers(),
-        json: async () => body,
-        text: async () => JSON.stringify(body),
       };
     }
 
@@ -1248,6 +1367,33 @@ describe("Spur web API routes", () => {
       expect(payload.error).toBe("GitHub API 503");
     });
 
+    it("does not arm rate limiting for non-rate-limited GitHub errors with rate-limit headers", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "x-ratelimit-reset": String(Math.floor((Date.now() + 30_000) / 1000)),
+          "x-ratelimit-remaining": "4999",
+        }),
+        json: async () => ({ message: "upstream unavailable" }),
+        text: async () => JSON.stringify({ message: "upstream unavailable" }),
+      });
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql()));
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload1 = (await first.json()) as { error: string };
+      const payload2 = (await second.json()) as { state: string };
+
+      expect(payload1.error).toBe("GitHub API 503");
+      expect(payload2.state).toBe("open");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
     it("returns an error payload on network-level error", async () => {
       fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
 
@@ -1318,7 +1464,10 @@ describe("Spur web API routes", () => {
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 403,
-        headers: new Headers({ "x-ratelimit-reset": String(resetAt) }),
+        headers: new Headers({
+          "x-ratelimit-reset": String(resetAt),
+          "x-ratelimit-remaining": "0",
+        }),
         json: async () => ({ message: "rate limited" }),
         text: async () => JSON.stringify({ message: "rate limited" }),
       });
