@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
@@ -69,8 +69,10 @@ const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+const findLatestClaudeSessionFileMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
 const captureCodexRolloutBaselineMock = vi.fn();
+const findLatestCodexSessionFileMock = vi.fn();
 const readCodexRolloutStateMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
@@ -89,6 +91,10 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversation: readClaudeConversationMock,
+}));
+
+vi.mock("../../src/agents/claude.js", () => ({
+  findLatestSessionFile: findLatestClaudeSessionFileMock,
 }));
 
 vi.mock("../../src/agents/index.js", () => ({
@@ -146,6 +152,7 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
+  findLatestCodexSessionFile: findLatestCodexSessionFileMock,
   readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
@@ -385,6 +392,7 @@ describe("SessionService", () => {
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
     readAgentHookStateMock.mockReset().mockReturnValue(null);
+    findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
@@ -433,6 +441,7 @@ describe("SessionService", () => {
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
+    findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
     readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
@@ -2101,6 +2110,71 @@ describe("SessionService", () => {
     vi.advanceTimersByTime(1_500);
     const fourth = await service.get("api-1");
     expect(fourth.state).toBe("waiting");
+  });
+
+  it("logs state transitions and snapshots agent history for debugging", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-transition-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"needs input"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock
+      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+    await service.get("api-1");
+
+    const transitionCall = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.state.transition",
+    );
+    expect(transitionCall).toBeTruthy();
+    const transitionEntry = transitionCall?.[1];
+    expect(transitionEntry).toEqual(
+      expect.objectContaining({
+        event: "session.state.transition",
+        message: "Status changed from waiting to needs_input",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: expect.any(String),
+        }),
+      }),
+    );
+    const artifactId = transitionEntry?.details?.historyArtifactId;
+    expect(typeof artifactId).toBe("string");
+    expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
+      '{"type":"assistant","message":"needs input"}\n',
+    );
   });
 
   it("notifies once per attention transition and re-notifies only after the session clears", async () => {

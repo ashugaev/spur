@@ -335,6 +335,26 @@ export async function findCodexSessionId(
   return null;
 }
 
+export async function findLatestCodexSessionFile(
+  options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
+): Promise<string | null> {
+  let bestMatch: { filePath: string; mtimeMs: number } | null = null;
+  for (const sessionRootDir of resolveSessionRootDirs(options)) {
+    const files = await collectJsonlFiles(sessionRootDir).catch(() => []);
+    for (const filePath of files) {
+      try {
+        const fileStat = await stat(filePath);
+        if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
+          bestMatch = { filePath, mtimeMs: fileStat.mtimeMs };
+        }
+      } catch {
+        // Ignore inaccessible files.
+      }
+    }
+  }
+  return bestMatch?.filePath ?? null;
+}
+
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
   if (!codexHomePath) {
     return command;

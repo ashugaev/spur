@@ -187,6 +187,17 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
 
+### S2a: Logs modal
+
+- `Logs` opens a full-screen modal for the current session
+- Modal subtitle reads as Spur orchestrator events plus runtime output, not agent chat history
+- Empty state shows a bordered placeholder instead of raw empty text
+- `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
+- Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
+- Transition rows show a `History snapshot` download link when `historyArtifactId` is present
+- Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
+- Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
+
 ### S2b: Conversation dialog (Claude only)
 
 - Visible only for `agent === "claude"` sessions with conversation messages
