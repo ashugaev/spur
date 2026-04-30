@@ -18,5 +18,5 @@ Principles:
 - ESM imports with .js extension, node: prefix for builtins
 - No any — use unknown + type guards
 
-Output format: ## Plan: <issue> — Steps, Acceptance criteria, Risks, Trade-offs, Test coverage (unit + E2E lists, file paths only), Manual checks (UI tasks only)
+Output format: ## Plan: <issue> — Steps, Acceptance criteria, Risks, Trade-offs, Test coverage (unit + E2E lists, file paths only), Design reference (Figma url or none, UI tasks only), Manual checks (UI tasks only)
 """

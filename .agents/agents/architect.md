@@ -50,6 +50,9 @@ Ground every decision in what the codebase already does. Never assume.
 - Unit tests to add: `<file>` — <scenario>
 - E2E tests to add: `<file>` — <scenario>
 
+### Design reference (UI tasks only)
+- Figma: <url or `none`>
+
 ### Manual checks (UI tasks only)
 - <browser scenario>
 
