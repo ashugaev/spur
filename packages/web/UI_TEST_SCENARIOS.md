@@ -33,6 +33,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D1: Header renders correctly
 
 - 𖤓 icon + large project title visible at the same size as before
+- Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
@@ -183,6 +184,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below

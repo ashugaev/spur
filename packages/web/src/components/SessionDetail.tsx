@@ -592,7 +592,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
-      document.title = `${nextSession.id} | Spur`;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load session");
     }
