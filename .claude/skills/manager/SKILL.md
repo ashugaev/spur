@@ -74,6 +74,12 @@ Task:
 Acceptance criteria:
 - <criterion>
 
+Business logic:
+- <one or two sentences in plain language: what the change does for the user, what trigger leads to what outcome>
+
+Architecture:
+- <one or two sentences: which packages/modules touched, how data flows between them, what new boundaries or contracts exist>
+
 Completed:
 - <todo from TodoWrite> — <gate that closed it>
 
