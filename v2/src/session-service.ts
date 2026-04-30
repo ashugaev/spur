@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -15,11 +22,13 @@ import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js"
 import {
   codexHookHomePath,
   captureCodexRolloutBaseline,
+  findLatestCodexSessionFile,
   readCodexRolloutState,
   scanCodexRolloutForMessage,
   type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
+import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -215,6 +224,15 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function stateTransitionArtifactId(
+  at: string,
+  fromState: SessionState,
+  toState: SessionState,
+): string {
+  const safeTimestamp = at.replaceAll(":", "-").replaceAll(".", "-");
+  return `agent-history-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
 }
 
 function tryRealpath(path: string): string {
@@ -797,7 +815,9 @@ export class SessionService {
 
   private logEvent(
     event: string,
-    entry: Omit<SpurLogEntry, "timestamp" | "event"> = { level: "info" },
+    entry: Omit<SpurLogEntry, "event" | "timestamp"> & { timestamp?: string } = {
+      level: "info",
+    },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
@@ -893,6 +913,7 @@ export class SessionService {
     // Reset waitingChecks on state change
     if (tracker.lastState !== null && tracker.lastState !== state) {
       tracker.waitingChecks = 0;
+      tracker.lastCheckAt = 0;
     }
     tracker.lastState = state;
 
@@ -2684,6 +2705,75 @@ export class SessionService {
     });
   }
 
+  private async findAgentHistoryFile(
+    session: Pick<SessionRecord, "agent" | "id" | "worktreePath">,
+  ): Promise<string | null> {
+    if (session.agent === "claude") {
+      return findLatestClaudeSessionFile(session.worktreePath);
+    }
+    return findLatestCodexSessionFile({ sessionRootDir: this.codexSessionsDir(session.id) });
+  }
+
+  private async captureStateTransitionArtifact(
+    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+    },
+    historySourcePath?: string | null,
+  ): Promise<string | null> {
+    if (isTerminalSessionStatus(session.status)) {
+      return null;
+    }
+    const sourcePath = historySourcePath ?? (await this.findAgentHistoryFile(session));
+    if (!sourcePath) {
+      return null;
+    }
+    try {
+      const artifactId = stateTransitionArtifactId(
+        transition.at,
+        transition.fromState,
+        transition.toState,
+      );
+      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
+      copyFileSync(sourcePath, join(artifactDir, artifactId));
+      return artifactId;
+    } catch {
+      return null;
+    }
+  }
+
+  private async logStateTransition(
+    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+    historySourcePath?: string | null,
+  ): Promise<void> {
+    const historyArtifactId = await this.captureStateTransitionArtifact(
+      session,
+      transition,
+      historySourcePath,
+    );
+    this.logEvent("session.state.transition", {
+      level: "info",
+      timestamp: transition.at,
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Status changed from ${transition.fromState} to ${transition.toState}`,
+      details: {
+        fromState: transition.fromState,
+        toState: transition.toState,
+        source: transition.source,
+        ...(historyArtifactId ? { historyArtifactId } : {}),
+      },
+    });
+  }
+
   private prepareSendMessage(
     session: Pick<SessionRecord, "id">,
     request: SendMessageRequest,
@@ -4045,6 +4135,7 @@ export class SessionService {
 
     let state: SessionState;
     let stateSource: StateSource = "status";
+    let historySourcePath: string | null = null;
     if (session.status === "killed") {
       state = "killed";
     } else if (session.status === "paused" || session.status === "completed") {
@@ -4065,6 +4156,7 @@ export class SessionService {
         this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
         state = jsonlResult.state;
         stateSource = "jsonl";
+        historySourcePath = jsonlResult.reader.filePath;
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -4087,6 +4179,7 @@ export class SessionService {
       state = codexState.state;
       stateSource = codexState.source;
       if (stateSource === "jsonl" && codexState.rolloutState) {
+        historySourcePath = codexState.rolloutState.filePath;
         this.logEvent("session.state.classified", {
           level: "info",
           sessionId: session.id,
@@ -4133,11 +4226,24 @@ export class SessionService {
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
     if (history.length === 0 || lastEntry?.state !== state) {
-      history.push({ state, at: new Date(now).toISOString(), source: stateSource });
+      const transitionAt = new Date(now).toISOString();
+      history.push({ state, at: transitionAt, source: stateSource });
       if (history.length > STATE_HISTORY_LIMIT) {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
+      if (lastEntry) {
+        await this.logStateTransition(
+          session,
+          {
+            at: transitionAt,
+            fromState: lastEntry.state,
+            toState: state,
+            source: stateSource,
+          },
+          historySourcePath,
+        );
+      }
     }
 
     const services: ServiceInstanceView[] = [];
