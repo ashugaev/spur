@@ -74,18 +74,8 @@ Task:
 Acceptance criteria:
 - <criterion>
 
-Execution:
-- research: DONE | SKIPPED
-- clarify: DONE | SKIPPED
-- architect: DONE | SKIPPED
-- developer: DONE
-- caveman: APPROVED | CHANGES_REQUESTED | SKIPPED
-- simplifier: APPROVED | CHANGES_REQUESTED | SKIPPED
-- reviewer: APPROVED | CHANGES_REQUESTED
-- designer: APPROVED | CHANGES_REQUESTED | SKIPPED
-- tester: PASS | FAIL | SKIPPED
-- github: PUSHED | SKIPPED
-- self-verify: PASS | MISSING
+Completed:
+- <todo from TodoWrite> — <gate that closed it>
 
 Risks:
 - <risk>
