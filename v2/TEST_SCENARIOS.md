@@ -10,7 +10,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `runtime integration` = `pnpm --dir v2 test:runtime`
   Uses the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
 - `real-agent smoke` = `pnpm --dir v2 test:smoke`
-  Uses real `claude` and `codex` in Spur worktrees created from the real `ao` repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
+  Uses real `claude` and `codex` in Spur worktrees created from this repo. It auto-skips when `tmux`, binaries, or agent auth are missing.
 - Put each scenario in one tier only. If the boundary changes, move the scenario instead of duplicating it.
 
 ## Fast
@@ -189,8 +189,8 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Real-Agent Smoke
 
-- `claude` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
-- `codex` launches as a real agent in a Spur worktree created from the real `ao` repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- `claude` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
+- `codex` launches as a real agent in a Spur worktree created from this repo, resumes through `restore`, accepts a follow-up `send`, and the session tears down cleanly.
 - Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
 - Real `claude` and `codex` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
 - Real `claude` and `codex` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
