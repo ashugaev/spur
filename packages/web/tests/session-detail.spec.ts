@@ -189,6 +189,14 @@ test.describe("S1: Session detail header", () => {
     expect(classList).toContain("font-bold");
   });
 
+  test("tab title shows only the session id", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s1-title" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page).toHaveTitle(session.id);
+  });
+
   test("activity dot visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-4" });
     await mockSessionDetail(page, session);

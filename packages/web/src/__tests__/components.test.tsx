@@ -14,7 +14,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
-import { generateMetadata } from "@/app/layout";
+import { metadata } from "@/app/layout";
+import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
 
 function createTestQueryClient() {
   return new QueryClient({
@@ -1118,9 +1119,9 @@ describe("Dashboard", () => {
   });
 
   it("exposes install metadata for PWA installability", async () => {
-    const metadata = await generateMetadata();
     const appManifest = manifest();
 
+    expect(metadata.title).toBe("Spur");
     expect(metadata.manifest).toBe("/manifest.webmanifest");
     expect(metadata.applicationName).toBe("Spur");
     expect(metadata.appleWebApp).toMatchObject({
@@ -1152,6 +1153,14 @@ describe("Dashboard", () => {
         }),
       ]),
     );
+  });
+
+  it("uses the decoded session id as the session page title", async () => {
+    const metadata = await generateSessionMetadata({
+      params: Promise.resolve({ id: "feature%2Ftest-123" }),
+    });
+
+    expect(metadata.title).toBe("feature/test-123");
   });
 });
 
