@@ -1601,7 +1601,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 ) : (
                   <div className="flex flex-col gap-3">
                     {logEntries.map((entry, i) => (
-                      <LogEntryRow key={`${entry.timestamp}-${entry.event}-${i}`} entry={entry} sessionId={session.id} />
+                      <LogEntryRow
+                        key={`${entry.timestamp}-${entry.event}-${i}`}
+                        entry={entry}
+                        sessionId={session.id}
+                      />
                     ))}
                   </div>
                 )}

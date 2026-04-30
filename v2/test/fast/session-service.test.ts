@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
-import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
+import type {
+  ServiceInstanceRecord,
+  SessionRecord,
+  SessionStateTransition,
+} from "../../src/types.js";
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
@@ -2175,6 +2179,74 @@ describe("SessionService", () => {
     expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
       '{"type":"assistant","message":"needs input"}\n',
     );
+  });
+
+  it("logs terminal state transitions without recreating debug artifacts", async () => {
+    const sourceHistoryPath = resolve(
+      TEST_ARTIFACTS_ROOT,
+      "claude-terminal-transition-source.jsonl",
+    );
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"done"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    (
+      service as unknown as {
+        stateHistory: Map<string, SessionStateTransition[]>;
+      }
+    ).stateHistory.set("api-1", [
+      {
+        state: "working",
+        at: "2026-03-18T10:01:00.000Z",
+        source: "jsonl",
+      },
+    ]);
+
+    const view = await service.complete("api-1");
+
+    expect(view.state).toBe("stopped");
+    const transitionCall = [...logSpurEventMock.mock.calls]
+      .reverse()
+      .find(([, entry]) => entry.event === "session.state.transition");
+    expect(transitionCall).toBeTruthy();
+    const transitionEntry = transitionCall?.[1];
+    expect(transitionEntry).toEqual(
+      expect.objectContaining({
+        event: "session.state.transition",
+        message: "Status changed from working to stopped",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({
+          fromState: "working",
+          toState: "stopped",
+          source: "status",
+        }),
+      }),
+    );
+    expect(transitionEntry?.details?.historyArtifactId).toBeUndefined();
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
   });
 
   it("notifies once per attention transition and re-notifies only after the session clears", async () => {

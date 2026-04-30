@@ -335,9 +335,10 @@ export async function findCodexSessionId(
   return null;
 }
 
-export async function findLatestCodexSessionFile(
-  options?: { sessionRootDir?: string; sessionRootDirs?: string[] },
-): Promise<string | null> {
+export async function findLatestCodexSessionFile(options?: {
+  sessionRootDir?: string;
+  sessionRootDirs?: string[];
+}): Promise<string | null> {
   let bestMatch: { filePath: string; mtimeMs: number } | null = null;
   for (const sessionRootDir of resolveSessionRootDirs(options)) {
     const files = await collectJsonlFiles(sessionRootDir).catch(() => []);

@@ -217,7 +217,11 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
-function stateTransitionArtifactId(at: string, fromState: SessionState, toState: SessionState): string {
+function stateTransitionArtifactId(
+  at: string,
+  fromState: SessionState,
+  toState: SessionState,
+): string {
   const safeTimestamp = at.replaceAll(":", "-").replaceAll(".", "-");
   return `agent-history-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
 }
@@ -880,6 +884,7 @@ export class SessionService {
     // Reset waitingChecks on state change
     if (tracker.lastState !== null && tracker.lastState !== state) {
       tracker.waitingChecks = 0;
+      tracker.lastCheckAt = 0;
     }
     tracker.lastState = state;
 
@@ -3873,7 +3878,7 @@ export class SessionService {
   }
 
   private async captureStateTransitionArtifact(
-    session: Pick<SessionRecord, "agent" | "id" | "worktreePath">,
+    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
     transition: {
       at: string;
       fromState: SessionState;
@@ -3881,6 +3886,9 @@ export class SessionService {
     },
     historySourcePath?: string | null,
   ): Promise<string | null> {
+    if (isTerminalSessionStatus(session.status)) {
+      return null;
+    }
     const sourcePath = historySourcePath ?? (await this.findAgentHistoryFile(session));
     if (!sourcePath) {
       return null;
@@ -3900,7 +3908,7 @@ export class SessionService {
   }
 
   private async logStateTransition(
-    session: Pick<SessionRecord, "agent" | "id" | "project" | "worktreePath">,
+    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
     transition: {
       at: string;
       fromState: SessionState;

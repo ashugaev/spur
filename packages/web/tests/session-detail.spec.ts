@@ -316,8 +316,7 @@ test.describe("S2a: Logs modal", () => {
           fromState: "waiting",
           toState: "needs_input",
           source: "jsonl",
-          historyArtifactId:
-            "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
         },
       },
     ]);
