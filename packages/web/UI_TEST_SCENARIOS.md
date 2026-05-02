@@ -80,6 +80,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- PR badges show approval only when GitHub `reviewDecision` reports it; resolved threads alone do not mark approval
+- PR badges stay compact: PR number first, then review/CI/comment indicators
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
@@ -274,6 +276,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
+- PR badges use the same compact renderer as dashboard rows, including explicit GitHub approval icons from `reviewDecision`
 - Each link clickable, opens in new tab
 
 ### S4b: Artifacts section

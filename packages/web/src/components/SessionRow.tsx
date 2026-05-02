@@ -2,16 +2,11 @@
 
 import Link from "next/link";
 import { type ReactNode, useState } from "react";
-import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import {
-  CiStatusDot,
-  ReviewCommentsBadge,
-  extractLinkId,
-  GithubIcon,
-  JiraIcon,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons";
+  SessionLinkBadge,
+  useSessionLinkPrInfo,
+} from "@/components/SessionLinkBadge";
+import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
 
@@ -58,7 +53,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
 
   const prLink = session.links.find((l) => l.label === "pr");
   const trackerLink = session.links.find((l) => l.label === "tracker");
-  const prInfo = usePrInfo(prLink?.url);
+  const prInfo = useSessionLinkPrInfo(prLink);
   const showDone = prInfo.state === "merged" && canComplete(session);
   const [completing, setCompleting] = useState(false);
 
@@ -80,30 +75,16 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
       </Link>
 
       {trackerLink ? (
-        <a
-          className="hidden shrink-0 items-center gap-1 text-[var(--color-text-tertiary)] hover:text-[var(--color-status-attention)] hover:no-underline sm:inline-flex"
-          href={trackerLink.url}
-          rel="noreferrer"
-          target="_blank"
-        >
-          <JiraIcon />
-          <span className="text-[10px]">{extractLinkId(trackerLink)}</span>
-        </a>
+        <SessionLinkBadge className="hidden sm:inline-flex" link={trackerLink} variant="row" />
       ) : null}
 
       {prLink ? (
-        <a
-          className="hidden shrink-0 items-center gap-1 hover:text-[var(--color-text-primary)] hover:no-underline sm:inline-flex"
-          href={prLink.url}
-          rel="noreferrer"
-          style={{ color: prStateColor(prInfo.state) ?? "var(--color-text-tertiary)" }}
-          target="_blank"
-        >
-          <GithubIcon />
-          <span className="text-[10px]">{extractLinkId(prLink)}</span>
-          <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </a>
+        <SessionLinkBadge
+          className="hidden sm:inline-flex"
+          link={prLink}
+          prInfo={prInfo}
+          variant="row"
+        />
       ) : null}
 
       <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">

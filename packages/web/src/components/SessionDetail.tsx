@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -17,15 +18,6 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import {
-  CiStatusDot,
-  ReviewCommentsBadge,
-  extractLinkId,
-  GithubIcon,
-  JiraIcon,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -50,32 +42,6 @@ import {
   type DashboardSession,
   type SpurSessionView,
 } from "@/lib/types";
-
-function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
-  const prInfo = usePrInfo(prUrl);
-  const color = prStateColor(prInfo.state);
-
-  return (
-    <a
-      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-      href={link.url}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[10px]" style={color ? { color } : undefined}>
-        {extractLinkId(link)}
-      </span>
-      {link.label === "pr" ? (
-        <>
-          <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </>
-      ) : null}
-    </a>
-  );
-}
 
 function PlayIcon() {
   return (
@@ -1072,7 +1038,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.links
                 .filter((l) => l.label === "tracker" || l.label === "pr")
                 .map((link) => (
-                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
+                  <SessionLinkBadge
+                    key={`${link.label}-${link.url}`}
+                    link={link}
+                    variant="detail"
+                  />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
@@ -1315,15 +1285,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </h2>
                   <div className="flex flex-wrap gap-2">
                     {visibleLinks.map((link) => (
-                      <a
+                      <SessionLinkBadge
                         key={`${session.id}-${link.label}-${link.url}`}
-                        className="border border-[var(--color-border-default)] px-2.5 py-1 text-[var(--color-accent)] hover:no-underline"
-                        href={link.url}
-                        rel="noreferrer"
-                        target="_blank"
-                      >
-                        {link.label}
-                      </a>
+                        link={link}
+                        variant="detail"
+                      />
                     ))}
                   </div>
                 </section>

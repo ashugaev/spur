@@ -782,6 +782,36 @@ test.describe("S4: Links section", () => {
     const link = page.getByRole("link", { name: "docs" });
     await expect(link).toHaveAttribute("target", "_blank");
   });
+
+  test("PR links show compact approval indicator from reviewDecision", async ({ page }) => {
+    const prUrl = "https://github.com/test/repo/pull/42002";
+    const session = makeWorkingSession({
+      id: "detail-s4-pr-1",
+      slots: {
+        title: "Session with PR",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 2,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
+  });
 });
 
 test.describe("S4b: Artifacts section", () => {

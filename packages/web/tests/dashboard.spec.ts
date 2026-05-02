@@ -423,7 +423,14 @@ test.describe("D5: Tracker and PR links", () => {
   });
 
   test("session with PR link shows github link", async ({ page }) => {
-    const session = makeSessionWithPR({ id: "pr-row-1" });
+    const prUrl = "https://github.com/test/repo/pull/42001";
+    const session = makeSessionWithPR({
+      id: "pr-row-1",
+      slots: {
+        title: "Session with PR",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
     await mockSessions(page, [session]);
     await page.route(/\/api\/pr-status/, (route) => {
       void route.fulfill({
@@ -431,6 +438,7 @@ test.describe("D5: Tracker and PR links", () => {
         contentType: "application/json",
         body: JSON.stringify({
           state: "open",
+          reviewDecision: "approved",
           ciStatus: null,
           totalThreads: 0,
           unresolvedThreads: 0,
@@ -439,8 +447,9 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    const prLink = page.locator("a[href*='github.com']").first();
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
     await expect(prLink).toBeVisible();
+    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
   });
 
   test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
@@ -466,7 +475,7 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    await expect(page.locator("a[href*='github.com']").first()).toBeVisible();
+    await expect(page.locator("a[href='https://github.com/test/repo/pull/999']").first()).toBeVisible();
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 

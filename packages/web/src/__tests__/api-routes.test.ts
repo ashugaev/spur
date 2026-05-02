@@ -1207,6 +1207,7 @@ describe("Spur web API routes", () => {
               state: "OPEN",
               isDraft: false,
               merged: false,
+              reviewDecision: null,
               reviewThreads: { nodes: [] },
               commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
               ...overrides,
@@ -1283,6 +1284,41 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { state: string };
 
       expect(payload.state).toBe("closed");
+    });
+
+    it("returns approved reviewDecision from GitHub without inferring it", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED" })));
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { reviewDecision: string | null };
+
+      expect(payload.reviewDecision).toBe("approved");
+    });
+
+    it("does not infer approval from resolved review threads", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            reviewDecision: null,
+            reviewThreads: {
+              nodes: [{ isResolved: true }, { isResolved: true }],
+            },
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        reviewDecision: string | null;
+        unresolvedThreads: number;
+      };
+
+      expect(payload.reviewDecision).toBeNull();
+      expect(payload.unresolvedThreads).toBe(0);
     });
 
     it("returns CI success status", async () => {

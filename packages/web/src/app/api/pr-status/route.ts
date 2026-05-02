@@ -1,9 +1,15 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
 import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
-import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
+import {
+  type CiStatus,
+  type PrInfo,
+  type PrState,
+  isPrInfoShape,
+  parseReviewDecision,
+} from "@/lib/pr-status-shape";
 
 interface PrStatusResponse extends PrInfo {
   error?: string;
@@ -16,6 +22,7 @@ interface GithubGraphQLResponse {
         state: string;
         isDraft: boolean;
         merged: boolean;
+        reviewDecision: string | null;
         reviewThreads: { nodes: { isResolved: boolean }[] };
         commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
       };
@@ -40,7 +47,7 @@ const PERSIST_DEBOUNCE_MS = 1_000;
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
     pullRequest(number:$number) {
-      state isDraft merged
+      state isDraft merged reviewDecision
       reviewThreads(first:100) { nodes { isResolved } }
       commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
     }
@@ -49,6 +56,7 @@ const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
 
 const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
   state: null,
+  reviewDecision: null,
   ciStatus: null,
   totalThreads: 0,
   unresolvedThreads: 0,
@@ -110,6 +118,7 @@ function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">)
 function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
   return {
     state: entry.state,
+    reviewDecision: entry.reviewDecision,
     ciStatus: entry.ciStatus,
     totalThreads: entry.totalThreads,
     unresolvedThreads: entry.unresolvedThreads,
@@ -205,7 +214,13 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
-    const entry = recordLastGood(cacheKey, { state, ciStatus, totalThreads, unresolvedThreads });
+    const entry = recordLastGood(cacheKey, {
+      state,
+      reviewDecision: parseReviewDecision(pr.reviewDecision),
+      ciStatus,
+      totalThreads,
+      unresolvedThreads,
+    });
     const response = freshFromEntry(entry);
     cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
     return NextResponse.json(response);

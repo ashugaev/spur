@@ -6,13 +6,15 @@ import {
   type CiStatus,
   type PrInfo,
   type PrState,
+  type ReviewDecision,
   isCiStatus,
   isPrInfoShape,
   isPrState,
+  parseReviewDecision,
   prInfosEqual,
 } from "@/lib/pr-status-shape";
 
-export type { CiStatus, PrInfo, PrState };
+export type { CiStatus, PrInfo, PrState, ReviewDecision };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -23,6 +25,7 @@ const PR_STATE_COLORS: Record<PrState, string> = {
 
 const EMPTY_PR_INFO: PrInfo = {
   state: null,
+  reviewDecision: null,
   ciStatus: null,
   totalThreads: 0,
   unresolvedThreads: 0,
@@ -109,6 +112,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
       const parsed: PrInfo = {
         state: isPrState(obj["state"]) ? obj["state"] : null,
+        reviewDecision: parseReviewDecision(obj["reviewDecision"]),
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
@@ -155,7 +159,10 @@ export function usePrInfo(url: string | undefined): PrInfo {
       const result = await fetchPrInfo(url);
       if (cancelled) return;
       const prev = prCache.get(url)?.data;
-      if (prev && prInfosEqual(prev, result)) return;
+      if (prev && prInfosEqual(prev, result)) {
+        setInfo(result);
+        return;
+      }
       setPrCache(url, result);
       setInfo(result);
     };
@@ -219,8 +226,86 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
+export function ReviewDecisionDot({ decision }: { decision: ReviewDecision }) {
+  if (!decision) return null;
+
+  if (decision === "approved")
+    return (
+      <span
+        aria-label="Approved"
+        className="inline-flex"
+        data-pr-review-decision="approved"
+        role="img"
+        title="Approved"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--color-status-ready)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <circle cx="12" cy="12" r="9" strokeWidth="2" />
+          <path d="M16.5 9 10.5 15 7.5 12" />
+        </svg>
+      </span>
+    );
+
+  if (decision === "changes_requested")
+    return (
+      <span
+        aria-label="Changes requested"
+        className="inline-flex"
+        data-pr-review-decision="changes_requested"
+        role="img"
+        title="Changes requested"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--color-status-error)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        >
+          <circle cx="12" cy="12" r="9" strokeWidth="2" />
+          <path d="M15.5 8.5 8.5 15.5M8.5 8.5l7 7" />
+        </svg>
+      </span>
+    );
+
+  return (
+    <span
+      aria-label="Review required"
+      className="inline-flex"
+      data-pr-review-decision="review_required"
+      role="img"
+      title="Review required"
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="var(--color-accent-orange)"
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="12" cy="12" r="9" strokeWidth="2" />
+        <path d="M12 7.5v6" />
+        <circle cx="12" cy="16.5" r="1" fill="var(--color-accent-orange)" stroke="none" />
+      </svg>
+    </span>
+  );
+}
+
 export function ReviewCommentsBadge({ total, unresolved }: { total: number; unresolved: number }) {
-  if (total <= 0) return <span className="inline-flex w-6" />;
+  if (total <= 0) return null;
   const hasUnresolved = unresolved > 0;
   const color = hasUnresolved
     ? "text-[var(--color-status-attention)]"
@@ -231,7 +316,7 @@ export function ReviewCommentsBadge({ total, unresolved }: { total: number; unre
     : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className={`inline-flex w-6 items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
       title={title}
     >
       <svg
