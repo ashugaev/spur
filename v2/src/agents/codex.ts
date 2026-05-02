@@ -335,6 +335,27 @@ export async function findCodexSessionId(
   return null;
 }
 
+export async function findLatestCodexSessionFile(options?: {
+  sessionRootDir?: string;
+  sessionRootDirs?: string[];
+}): Promise<string | null> {
+  let bestMatch: { filePath: string; mtimeMs: number } | null = null;
+  for (const sessionRootDir of resolveSessionRootDirs(options)) {
+    const files = await collectJsonlFiles(sessionRootDir).catch(() => []);
+    for (const filePath of files) {
+      try {
+        const fileStat = await stat(filePath);
+        if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
+          bestMatch = { filePath, mtimeMs: fileStat.mtimeMs };
+        }
+      } catch {
+        // Ignore inaccessible files.
+      }
+    }
+  }
+  return bestMatch?.filePath ?? null;
+}
+
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
   if (!codexHomePath) {
     return command;
@@ -349,18 +370,36 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
+  if (!imagePaths || imagePaths.length === 0) {
+    return command;
+  }
+  return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
 ): AgentLaunchPlan {
-  return {
-    launchCommand: withCodexHome(
+  const command = withCodexHome(
+    appendCodexImages(
       appendCodexArgs(
         `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
         options?.codexArgs,
       ),
-      options?.codexHomePath,
+      options?.startupImagePaths,
     ),
+    options?.codexHomePath,
+  );
+  if (options?.startupImagePaths?.length) {
+    return {
+      launchCommand: prompt.trim() ? `${command} ${shellEscape(prompt)}` : command,
+      initialMessage: "",
+      readyMarkers: ["OpenAI Codex", "›"],
+    };
+  }
+  return {
+    launchCommand: command,
     initialMessage: prompt,
     readyMarkers: ["OpenAI Codex", "›"],
   };
@@ -579,7 +618,7 @@ export interface CodexRolloutStateRecord {
   timestamp: string;
   timestampMs: number;
   filePath: string;
-  reason: "task_complete" | "input_required" | "request_user_input";
+  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
   turnId?: string;
 }
 
@@ -630,6 +669,23 @@ function extractCodexRolloutStateLine(
             timestamp,
             timestampMs,
             reason: "task_complete",
+          };
+    }
+    if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
           };
     }
     if (payloadType === "input_required") {

@@ -5,6 +5,7 @@ import type {
   GitHubPrSummary,
   ReviewEventData,
   ReviewSignal,
+  SessionPrBinding,
   SessionRecord,
 } from "../types.js";
 import {
@@ -126,6 +127,37 @@ export async function resolvePrSummary(
   };
 }
 
+export async function resolveBoundPrSummary(
+  worktreePath: string,
+  pr: SessionPrBinding,
+): Promise<GitHubPrSummary> {
+  const raw = await gh(
+    worktreePath,
+    "pr",
+    "view",
+    String(pr.number),
+    "--json",
+    "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+  );
+  const summary = JSON.parse(raw) as {
+    number: number;
+    title: string;
+    url?: string | null;
+    reviewDecision?: string | null;
+    mergeable?: string | null;
+    mergeStateStatus?: string | null;
+  };
+  return {
+    number: summary.number,
+    title: summary.title,
+    url: summary.url ?? pr.url,
+    reviewDecision: normalizeReviewDecision(summary.reviewDecision),
+    repo: parseRepoFromUrl(summary.url ?? pr.url),
+    mergeable: summary.mergeable ?? "",
+    mergeStateStatus: summary.mergeStateStatus ?? "",
+  };
+}
+
 async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
   try {
     const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
@@ -196,8 +228,12 @@ async function fetchIssueCommentSignals(
 async function collectSignals(
   session: SessionRecord,
 ): Promise<{ data: ReviewEventData; snapshot: Map<string, ReviewSignal> } | null> {
-  const branch = await resolveTrackedBranch(session.worktreePath, session.branch);
-  const pr = await resolvePrSummary(session.worktreePath, branch);
+  const pr = session.pr
+    ? await resolveBoundPrSummary(session.worktreePath, session.pr)
+    : await resolvePrSummary(
+        session.worktreePath,
+        await resolveTrackedBranch(session.worktreePath, session.branch),
+      );
   if (!pr) return null;
 
   const [checks, reviewSignals, commentSignals] = await Promise.all([

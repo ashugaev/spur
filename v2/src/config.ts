@@ -293,7 +293,11 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
-  return VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
+  const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
+  if (source.type === "github" && source.query !== undefined) {
+    events.push("github:work_item.new");
+  }
+  return events;
 }
 
 function derivePrefix(projectId: string): string {
@@ -322,10 +326,12 @@ function parseReviewSource<TProvider extends ReviewProviderId>(
   raw: Record<string, unknown>,
 ): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
+  const query = asOptionalString(raw["query"], `${label}.query`);
   return {
     type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    ...(query !== undefined ? { query } : {}),
   } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
@@ -707,6 +713,19 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
+  }
+
+  const workItemSubs = new Map<string, number>();
+  for (const trigger of Object.values(triggers)) {
+    if (trigger.event !== "github:work_item.new") continue;
+    workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
+  }
+  for (const [src, count] of workItemSubs) {
+    if (count > 1) {
+      throw new Error(
+        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to "github:work_item.new"; at most one is allowed`,
+      );
+    }
   }
 
   if (!VALID_ID_RE.test(sessionPrefix)) {

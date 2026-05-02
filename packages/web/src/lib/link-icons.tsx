@@ -1,18 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
+import {
+  type CiStatus,
+  type PrInfo,
+  type PrState,
+  isCiStatus,
+  isPrInfoShape,
+  isPrState,
+  prInfosEqual,
+} from "@/lib/pr-status-shape";
 
-export type PrState = "draft" | "open" | "merged" | "closed";
-export type CiStatus = "success" | "failure" | "pending" | null;
 export type ReviewProvider = "github" | "gitlab" | null;
-
-export interface PrInfo {
-  state: PrState | null;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
-}
+export type { CiStatus, PrInfo, PrState };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -27,33 +28,10 @@ const EMPTY_PR_INFO: PrInfo = {
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-const CACHE_TTL_MS = 120_000; // match server cache
-const POLL_MS = 120_000; // poll every 2 min, not 30s
-
-let gitErrorMessage: string | null = null;
-const gitErrorListeners = new Set<() => void>();
-
-function providerErrorLabel(url: string): string {
-  return reviewProviderFromUrl(url) === "gitlab" ? "GitLab API" : "GitHub API";
-}
-
-function setGitError(msg: string | null) {
-  gitErrorMessage = msg;
-  for (const cb of gitErrorListeners) cb();
-}
-
-/** Subscribe to review integration error state. */
-export function useGitError(): string | null {
-  const [err, setErr] = useState(gitErrorMessage);
-  useEffect(() => {
-    const cb = () => setErr(gitErrorMessage);
-    gitErrorListeners.add(cb);
-    return () => {
-      gitErrorListeners.delete(cb);
-    };
-  }, []);
-  return err;
-}
+const POLL_MS = 120_000;
+const FRESH_TTL_MS = 120_000;
+const PR_CACHE_STORAGE_KEY = "spur:pr-status-cache:v1";
+const PR_CACHE_MAX_ENTRIES = 200;
 
 interface CacheEntry {
   data: PrInfo;
@@ -61,42 +39,95 @@ interface CacheEntry {
 }
 
 const prCache = new Map<string, CacheEntry>();
+const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
-function isPrState(value: unknown): value is PrState {
-  return value === "draft" || value === "open" || value === "merged" || value === "closed";
+function hydratePrCacheFromStorage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(PR_CACHE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return;
+    for (const [url, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== "object" || value === null) continue;
+      const entry = value as Record<string, unknown>;
+      const data = entry["data"];
+      const fetchedAt = entry["fetchedAt"];
+      if (typeof fetchedAt !== "number" || !isPrInfoShape(data)) continue;
+      prCache.set(url, { data, fetchedAt });
+    }
+  } catch {
+    /* storage unavailable or malformed */
+  }
 }
 
-function isCiStatus(value: unknown): value is CiStatus {
-  return value === "success" || value === "failure" || value === "pending" || value === null;
+let storageWriteTimer: ReturnType<typeof setTimeout> | null = null;
+function persistPrCache(): void {
+  if (typeof window === "undefined") return;
+  if (storageWriteTimer) return;
+  storageWriteTimer = setTimeout(() => {
+    storageWriteTimer = null;
+    try {
+      if (prCache.size > PR_CACHE_MAX_ENTRIES) {
+        const sorted = [...prCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+        const drop = sorted.length - PR_CACHE_MAX_ENTRIES;
+        for (let i = 0; i < drop; i++) {
+          const item = sorted[i];
+          if (item) prCache.delete(item[0]);
+        }
+      }
+      const obj = Object.fromEntries(prCache.entries());
+      window.localStorage.setItem(PR_CACHE_STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      /* quota / serialization */
+    }
+  }, 250);
+}
+
+function setPrCache(url: string, data: PrInfo): void {
+  prCache.set(url, { data, fetchedAt: Date.now() });
+  persistPrCache();
+}
+
+hydratePrCacheFromStorage();
+
+function cachedOrEmpty(url: string): PrInfo {
+  const cached = prCache.get(url);
+  return cached ? cached.data : EMPTY_PR_INFO;
 }
 
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
-  try {
-    const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-      setGitError(
-        typeof body["error"] === "string"
-          ? body["error"]
-          : `${providerErrorLabel(url)} ${res.status}`,
-      );
-      return EMPTY_PR_INFO;
+  const existing = pendingPrRequests.get(url);
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
+      if (!res.ok) return cachedOrEmpty(url);
+      const data: unknown = await res.json();
+      if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
+      const obj = data as Record<string, unknown>;
+      const error = typeof obj["error"] === "string" ? obj["error"] : null;
+      const parsed: PrInfo = {
+        state: isPrState(obj["state"]) ? obj["state"] : null,
+        ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+        totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
+        unresolvedThreads:
+          typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
+        fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
+        stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
+      };
+      if (error && parsed.state === null) return cachedOrEmpty(url);
+      return parsed;
+    } catch {
+      return cachedOrEmpty(url);
+    } finally {
+      pendingPrRequests.delete(url);
     }
-    setGitError(null);
-    const data: unknown = await res.json();
-    if (typeof data !== "object" || data === null) return EMPTY_PR_INFO;
-    const obj = data as Record<string, unknown>;
-    return {
-      state: isPrState(obj["state"]) ? obj["state"] : null,
-      ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
-      totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
-      unresolvedThreads:
-        typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
-    };
-  } catch {
-    setGitError(`${providerErrorLabel(url)} unreachable`);
-    return EMPTY_PR_INFO;
-  }
+  })();
+
+  pendingPrRequests.set(url, request);
+  return request;
 }
 
 export function reviewProviderFromUrl(url: string): ReviewProvider {
@@ -130,38 +161,30 @@ export function extractLinkId(link: SpurSessionLink): string {
 }
 
 export function usePrInfo(url: string | undefined): PrInfo {
-  const [info, setInfo] = useState<PrInfo>(() => {
-    if (!url) return EMPTY_PR_INFO;
-    const cached = prCache.get(url);
-    return cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS ? cached.data : EMPTY_PR_INFO;
-  });
-
-  const doFetch = useCallback(async (target: string) => {
-    const cached = prCache.get(target);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      setInfo(cached.data);
-      return;
-    }
-    const result = await fetchPrInfo(target);
-    prCache.set(target, { data: result, fetchedAt: Date.now() });
-    setInfo(result);
-  }, []);
+  const [info, setInfo] = useState<PrInfo>(() => (url ? cachedOrEmpty(url) : EMPTY_PR_INFO));
 
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
 
-    const run = () => {
-      if (!cancelled) void doFetch(url);
+    const run = async () => {
+      const cached = prCache.get(url);
+      if (cached && Date.now() - cached.fetchedAt < FRESH_TTL_MS && !cached.data.stale) return;
+      const result = await fetchPrInfo(url);
+      if (cancelled) return;
+      const prev = prCache.get(url)?.data;
+      if (prev && prInfosEqual(prev, result)) return;
+      setPrCache(url, result);
+      setInfo(result);
     };
 
-    run();
-    const timer = setInterval(run, POLL_MS);
+    void run();
+    const timer = setInterval(() => void run(), POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [url, doFetch]);
+  }, [url]);
 
   return info;
 }

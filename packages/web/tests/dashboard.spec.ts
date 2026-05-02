@@ -8,6 +8,7 @@ import {
   makeWaitingSession,
   makeSessionWithPR,
   makeSessionWithTracker,
+  mockGitHubStatus,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -101,6 +102,12 @@ test.describe("D1: Header renders correctly", () => {
     await mockSessions(page, []);
     await page.goto("/");
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
+  });
+
+  test("tab title is Spur", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+    await expect(page).toHaveTitle("Spur");
   });
 
   test("project title select has All projects option", async ({ page }) => {
@@ -465,6 +472,56 @@ test.describe("D5: Tracker and PR links", () => {
     await expect(prLink.locator("svg")).toHaveCount(1);
   });
 
+  test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "pr-row-missing-1",
+      slots: {
+        title: "Missing PR",
+        links: [{ label: "pr", url: "https://github.com/test/repo/pull/999" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.locator("a[href*='github.com']").first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
+  });
+
+  test("soft PR status errors do not replace the footer GitHub connection status", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          error: "GitHub API 503",
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
+  });
+
   test("session without links has no tracker or PR icons", async ({ page }) => {
     const session = makeWorkingSession({ id: "no-links-1" });
     await mockSessions(page, [session]);
@@ -562,6 +619,76 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toBeVisible();
     // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
     await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+  });
+
+  test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
+    await expect(githubStatus).toBeVisible();
+    await githubStatus.hover();
+
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+  });
+
+  test("footer keeps the GitHub tooltip pinned after clicking the healthy icon", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+    await expect(page.getByText(/Last request:/)).not.toBeVisible();
+  });
+
+  test("footer shows the GitHub error text when the health check fails", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub API 503",
+      requestedAt: "2026-04-28T10:00:00.000Z",
+    });
+    await page.goto("/");
+
+    await expect(page.getByText("GitHub API 503")).toBeVisible();
+  });
+
+  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub auth unavailable",
+      requestedAt: null,
+    });
+    await page.goto("/");
+
+    await expect(page.getByText("GitHub auth unavailable")).toBeVisible();
+
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { error: "ignored" }, { status: 503 });
+    await page.reload();
+
+    await expect(page.getByText("GitHub status unavailable (503)")).toBeVisible();
   });
 
   test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
@@ -702,6 +829,21 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await expect(page.getByText("System")).toBeVisible();
     await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
+  });
+
+  test("touch tap on the GitHub icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitHub connection healthy" }).tap();
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitHub")).not.toBeVisible();
   });
 });
 
@@ -923,6 +1065,57 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await expect(textarea).toHaveValue("Keep me");
     await expect(page.getByText(/Daemon down/i)).toBeVisible();
+  });
+
+  test("spawn prompt accepts image attachments and forwards them in the request body", async ({
+    page,
+  }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-image-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({
+            id: "spawn-image-ack-1",
+            project: "my-project",
+            prompt: "Prompt with image",
+          }),
+        ),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    await textarea.fill("Prompt with image");
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "spawn.png", { type: "image/png" }));
+      return dt;
+    });
+    await textarea.dispatchEvent("drop", { dataTransfer });
+
+    await expect(page.locator('img[alt="spawn.png"]')).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
+    expect(requestBody).toMatchObject({
+      projectId: "my-project",
+      prompt: "Prompt with image",
+      attachments: [{ name: "spawn.png", data: expect.any(String) }],
+    });
   });
 });
 

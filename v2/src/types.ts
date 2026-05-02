@@ -19,6 +19,12 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export interface SessionPrBinding {
+  number: number;
+  repo: string;
+  url: string;
+}
+
 export type SessionArtifactKind = "image" | "video" | "download";
 
 export interface SessionArtifact {
@@ -49,6 +55,16 @@ export const REVIEW_SIGNAL_KINDS = [
 ] as const;
 export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
+export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
+
+export interface GitHubWorkItemEventData {
+  externalId: string;
+  url: string;
+  number: number;
+  title: string;
+  repo: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -61,6 +77,7 @@ export interface CronSourceConfig extends BaseSourceConfig {
 interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
   type: TType;
   intervalMs: number;
+  query?: string;
 }
 
 export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
@@ -252,8 +269,10 @@ export interface SessionRecord {
   planMode?: boolean;
   agentSessionId?: string;
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
+  pr?: SessionPrBinding;
   worktree: boolean;
   worktreePath: string;
   tmuxSession: string;
@@ -327,12 +346,14 @@ export interface PreflightResponse {
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;
+  slots?: { links?: SessionLink[] };
 }
 
 export interface SendMessageAttachment {
@@ -363,6 +384,9 @@ export interface KillSessionRequest {
 }
 
 export interface RespawnSessionRequest {
+  prompt?: string;
+  attachments?: SendMessageAttachment[];
+  startupAttachmentIds?: string[];
   terminateSessionId?: string;
 }
 

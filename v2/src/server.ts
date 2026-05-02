@@ -327,13 +327,13 @@ export async function startServer(
       }
 
       if (method === "POST" && path === "/sessions") {
-        const body = await readJsonBody<SpawnSessionRequest>(request);
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawn(body));
         return;
       }
 
       if (method === "POST" && path === "/sessions/background") {
-        const body = await readJsonBody<SpawnSessionRequest>(request);
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawnInBackground(body));
         return;
       }
@@ -372,8 +372,8 @@ export async function startServer(
 
       const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
       if (method === "POST" && respawnSessionId) {
-        const body = await readJsonBody<RespawnSessionRequest>(request);
-        const respawned = await service.respawn(respawnSessionId);
+        const body = await readJsonBody<RespawnSessionRequest>(request, 15_000_000);
+        const respawned = await service.respawn(respawnSessionId, body);
         sendJson(response, 200, respawned);
         const terminateSessionId = body.terminateSessionId?.trim();
         if (

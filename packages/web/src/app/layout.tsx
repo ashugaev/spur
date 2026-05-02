@@ -18,26 +18,21 @@ export const viewport: Viewport = {
   themeColor: BG_BASE_HEX,
 };
 
-export async function generateMetadata(): Promise<Metadata> {
-  return {
-    title: {
-      template: "%s | Spur",
-      default: "Spur | Dashboard",
-    },
-    description: "Spur dashboard UI",
-    manifest: "/manifest.webmanifest",
-    applicationName: "Spur",
-    appleWebApp: {
-      capable: true,
-      title: "Spur",
-      statusBarStyle: "black-translucent",
-    },
-    icons: {
-      icon: [{ url: "/icon-192" }, { url: "/icon-512" }],
-      apple: [{ url: "/apple-icon" }],
-    },
-  };
-}
+export const metadata: Metadata = {
+  title: "Spur",
+  description: "Spur dashboard UI",
+  manifest: "/manifest.webmanifest",
+  applicationName: "Spur",
+  appleWebApp: {
+    capable: true,
+    title: "Spur",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    icon: [{ url: "/icon-192" }, { url: "/icon-512" }],
+    apple: [{ url: "/apple-icon" }],
+  },
+};
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
