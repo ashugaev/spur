@@ -81,6 +81,24 @@ export function deleteSessionArtifactsDir(dataDir: string, sessionId: string): v
   });
 }
 
+export function deleteSessionArtifactsExcept(
+  dataDir: string,
+  sessionId: string,
+  keepArtifactIds: string[],
+): void {
+  const dir = sessionArtifactsDir(dataDir, sessionId);
+  if (!existsSync(dir)) {
+    return;
+  }
+  const keep = new Set(keepArtifactIds.map((artifactId) => validateArtifactId(artifactId)));
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || keep.has(entry.name)) {
+      continue;
+    }
+    rmSync(join(dir, entry.name), { force: true });
+  }
+}
+
 export function listSessionArtifacts(dataDir: string, sessionId: string): SessionArtifact[] {
   const dir = sessionArtifactsDir(dataDir, sessionId);
   if (!existsSync(dir)) {

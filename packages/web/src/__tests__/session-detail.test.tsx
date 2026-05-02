@@ -577,8 +577,81 @@ describe("SessionDetail voice input", () => {
     expect(backLink).toHaveAttribute("href", "/?project=sp");
   });
 
-  it("respawns without forcing a project query when the detail page had none", async () => {
+  it("respawns with edited prompt and startup images without forcing a project query", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+            startupAttachmentIds: ["1715000000000-source.png"],
+            artifacts: [
+              {
+                id: "1715000000000-source.png",
+                name: "1715000000000-source.png",
+                size: 12,
+                mimeType: "image/png",
+                kind: "image",
+                createdAt: "2026-04-02T10:00:00.000Z",
+                updatedAt: "2026-04-02T10:00:00.000Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            id: "api-b2",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const respawnButton = await screen.findByRole("button", { name: "Edit & Respawn" });
+    fireEvent.click(respawnButton);
+    expect(screen.getByDisplayValue("Fix auth")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Edit the initial message..."), {
+      target: { value: "Re-run with screenshot" },
+    });
+    fireEvent.paste(screen.getByPlaceholderText("Edit the initial message..."), {
+      clipboardData: {
+        files: [new File(["png"], "edited.png", { type: "image/png" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("edited.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+    });
+    expect(respawnBody).toEqual({
+      prompt: "Re-run with screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      attachments: [{ name: "edited.png", data: expect.any(String) }],
+    });
+  });
+
+  it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
         return new Response(
@@ -593,25 +666,23 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            ...sessionFixture(),
-            id: "api-b2",
-          }),
-          { status: 200 },
-        );
-      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    render(<SessionDetail sessionId="api-a1" />);
+    const { container } = render(<SessionDetail sessionId="api-a1" />);
 
-    const respawnButton = await screen.findByRole("button", { name: "Respawn" });
-    fireEvent.click(respawnButton);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+
+    const fileInputs = container.querySelectorAll('input[type="file"]');
+    const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;
+    expect(fileInput).toBeDefined();
+    fireEvent.change(fileInput!, {
+      target: { files: [new File(["png"], "picker-edit.png", { type: "image/png" })] },
+    });
 
     await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+      expect(screen.getByAltText("picker-edit.png")).toBeInTheDocument();
     });
   });
 

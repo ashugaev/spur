@@ -143,6 +143,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
+- The spawn prompt shows an inline image-picker button inside the textarea chrome
+- Pasting, dropping, or picking an image adds a compact thumbnail preview inside the textarea chrome with an inline remove button
+- Spawn payload includes those image attachments, and successful spawn clears the inline preview list
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
@@ -201,6 +204,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
+- `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
 
 ### S2a: Logs modal
 
@@ -257,8 +262,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Ctrl/Cmd+Enter triggers the queued send path
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
-- Cmd+V paste with image on clipboard adds thumbnail preview below textarea
-- Drag-and-drop image file onto textarea adds thumbnail preview
+- The message textarea shows an inline image-picker button inside the textarea chrome
+- Cmd+V paste with image on clipboard adds a compact thumbnail preview inside the textarea
+- Drag-and-drop image file onto textarea adds a compact thumbnail preview inside the textarea
+- Picking an image from the file chooser adds the same compact inline thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
 - Both `Queue` and `Send now` are enabled when attachments are present even with empty text

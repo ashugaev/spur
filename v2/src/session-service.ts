@@ -1,4 +1,11 @@
-import { copyFileSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -79,6 +86,7 @@ import {
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
+  deleteSessionArtifactsExcept,
   deleteSessionArtifactsDir,
   ensureSessionArtifactsDir,
   listSessionArtifacts,
@@ -107,6 +115,7 @@ import {
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
+  type SendMessageAttachment,
   type SendMessageRequest,
   type StartSidecarRequest,
   type SessionRecord,
@@ -333,10 +342,22 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
+  if (!initialMessage.trim()) return "";
   const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+}
+
+function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
+  return attachmentIds.map(
+    (attachmentId) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${attachmentId}]`,
+  );
+}
+
+function baseAttachmentName(artifactId: string): string {
+  const match = artifactId.match(/^\d+(?:-\d+)?-(.+)$/);
+  return match?.[1] ?? artifactId;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -615,15 +636,23 @@ interface PreparedSpawn {
   sessionToolDir: string;
 }
 
-function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
+function resolveRespawnRequest(
+  session: SessionRecord,
+  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+): SpawnSessionRequest {
   return {
     project: session.project,
-    prompt: session.prompt,
+    prompt: options?.prompt ?? session.prompt,
+    ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent: session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
-    ...(session.worktree && session.branchSource === "explicit" ? { branch: session.branch } : {}),
+    ...(session.worktree &&
+    session.branchSource === "explicit" &&
+    isTerminalSessionStatus(session.status)
+      ? { branch: session.branch }
+      : {}),
   };
 }
 
@@ -1695,13 +1724,35 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : prompt;
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachmentLines =
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const sidecarNames = Object.keys(project.sidecars);
+      const spawnInitialMessage = buildInitialMessage(
+        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+        sidecarNames,
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
         sessionToolDir,
       });
       const planOptions = withPlanMode(withProjectAgentOptions(project, hookSetup), planMode);
-      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, planOptions);
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+        ...planOptions,
+        ...(agent === "codex" && startupAttachments.length > 0
+          ? {
+              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
+            }
+          : {}),
+      });
+      const promptDeliveredOnLaunch =
+        agent === "codex" &&
+        startupAttachments.length > 0 &&
+        !launchPlan.initialMessage.trim() &&
+        spawnInitialMessage.trim().length > 0;
       const pipeline = steps
         ? {
             steps,
@@ -1717,6 +1768,11 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(startupAttachments.length > 0
+          ? {
+              startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
+            }
+          : {}),
         ...(pipeline ? { pipeline } : {}),
       };
 
@@ -1760,9 +1816,7 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
-        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -1770,6 +1824,18 @@ export class SessionService {
           message: `Sent initial prompt to ${sessionId}`,
           details: {
             messageLength: launchPlan.initialMessage.length,
+          },
+        });
+      } else if (promptDeliveredOnLaunch) {
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            deliveryMode: "launch_command",
+            imageCount: startupAttachments.length,
+            messageLength: spawnInitialMessage.length,
           },
         });
       }
@@ -1842,7 +1908,7 @@ export class SessionService {
         for (const scName of Object.keys(project.sidecars)) {
           await killSidecarTmux(sessionId, scName).catch(() => {});
         }
-        this.removeSessionArtifacts(sessionId);
+        this.removeSessionArtifacts(sessionId, { preserveStartup: true });
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -2215,16 +2281,34 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
           : prompt;
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachmentLines =
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const sidecarNames = Object.keys(project.sidecars);
+      const spawnInitialMessage = buildInitialMessage(
+        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+        sidecarNames,
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
       });
-      const launchPlan = buildAgentLaunchPlan(
-        agent,
-        initialMessage,
-        withPlanMode(hookSetup, planMode),
-      );
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+        ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
+        ...(agent === "codex" && startupAttachments.length > 0
+          ? {
+              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
+            }
+          : {}),
+      });
+      const promptDeliveredOnLaunch =
+        agent === "codex" &&
+        startupAttachments.length > 0 &&
+        !launchPlan.initialMessage.trim() &&
+        spawnInitialMessage.trim().length > 0;
       const pipeline = prepared.steps
         ? {
             steps: prepared.steps,
@@ -2240,6 +2324,11 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(startupAttachments.length > 0
+          ? {
+              startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
+            }
+          : {}),
         ...(pipeline ? { pipeline } : {}),
       };
 
@@ -2285,9 +2374,7 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
-        const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
-        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
         initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -2297,6 +2384,20 @@ export class SessionService {
           details: {
             messageLength: launchPlan.initialMessage.length,
             attempt,
+          },
+        });
+      } else if (promptDeliveredOnLaunch) {
+        initialPromptSent = true;
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            attempt,
+            deliveryMode: "launch_command",
+            imageCount: startupAttachments.length,
+            messageLength: spawnInitialMessage.length,
           },
         });
       }
@@ -2548,23 +2649,20 @@ export class SessionService {
     }
   }
 
-  private prepareSendMessage(
-    session: Pick<SessionRecord, "id">,
-    request: SendMessageRequest,
-  ): string {
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!hasAttachments) {
-      return message;
+  private storeImageAttachments(
+    sessionId: string,
+    attachments: SendMessageAttachment[] | undefined,
+  ): Array<{ id: string; path: string }> {
+    if (!attachments || attachments.length === 0) {
+      return [];
     }
-
-    const attachments = request.attachments ?? [];
     if (attachments.length > MAX_ATTACHMENTS) {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
-    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
-    const prefixLines: string[] = [];
-    for (const att of attachments) {
+
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
+    const stored: Array<{ id: string; path: string }> = [];
+    for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
       }
@@ -2579,11 +2677,115 @@ export class SessionService {
       if (buf.length > MAX_DECODED_SIZE) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
-      const filename = `${Date.now()}-${att.name}`;
+      let filename = `${Date.now()}-${att.name}`;
+      const initialPath = join(attachDir, filename);
+      if (existsSync(initialPath)) {
+        filename = `${Date.now()}-${index}-${att.name}`;
+      }
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
-      prefixLines.push(`[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${filename}]`);
+      stored.push({ id: filename, path: filePath });
     }
+    return stored;
+  }
+
+  private cloneStartupAttachments(
+    sessionId: string,
+    attachmentIds: string[] | undefined,
+  ): SendMessageAttachment[] {
+    return (attachmentIds ?? []).map((attachmentId) => {
+      const artifact = readSessionArtifact(this.config.dataDir, sessionId, attachmentId);
+      if (!artifact) {
+        throw new Error(`Startup attachment not found: ${attachmentId}`);
+      }
+      return {
+        name: baseAttachmentName(artifact.id),
+        data: readFileSync(artifact.path).toString("base64"),
+      };
+    });
+  }
+
+  private async findAgentHistoryFile(
+    session: Pick<SessionRecord, "agent" | "id" | "worktreePath">,
+  ): Promise<string | null> {
+    if (session.agent === "claude") {
+      return findLatestClaudeSessionFile(session.worktreePath);
+    }
+    return findLatestCodexSessionFile({ sessionRootDir: this.codexSessionsDir(session.id) });
+  }
+
+  private async captureStateTransitionArtifact(
+    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+    },
+    historySourcePath?: string | null,
+  ): Promise<string | null> {
+    if (isTerminalSessionStatus(session.status)) {
+      return null;
+    }
+    const sourcePath = historySourcePath ?? (await this.findAgentHistoryFile(session));
+    if (!sourcePath) {
+      return null;
+    }
+    try {
+      const artifactId = stateTransitionArtifactId(
+        transition.at,
+        transition.fromState,
+        transition.toState,
+      );
+      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
+      copyFileSync(sourcePath, join(artifactDir, artifactId));
+      return artifactId;
+    } catch {
+      return null;
+    }
+  }
+
+  private async logStateTransition(
+    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+    historySourcePath?: string | null,
+  ): Promise<void> {
+    const historyArtifactId = await this.captureStateTransitionArtifact(
+      session,
+      transition,
+      historySourcePath,
+    );
+    this.logEvent("session.state.transition", {
+      level: "info",
+      timestamp: transition.at,
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Status changed from ${transition.fromState} to ${transition.toState}`,
+      details: {
+        fromState: transition.fromState,
+        toState: transition.toState,
+        source: transition.source,
+        ...(historyArtifactId ? { historyArtifactId } : {}),
+      },
+    });
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "id">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const stored = this.storeImageAttachments(session.id, request.attachments);
+    const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
@@ -2881,10 +3083,15 @@ export class SessionService {
     });
   }
 
-  private removeSessionArtifacts(sessionId: string): void {
+  private removeSessionArtifacts(sessionId: string, options?: { preserveStartup?: boolean }): void {
+    const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
-    deleteSessionArtifactsDir(this.config.dataDir, sessionId);
+    if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
+      deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
+    } else {
+      deleteSessionArtifactsDir(this.config.dataDir, sessionId);
+    }
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
@@ -2979,7 +3186,7 @@ export class SessionService {
         const cleanup = await this.resolveCleanupContext(session);
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
-      this.removeSessionArtifacts(sessionId);
+      this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -3384,7 +3591,14 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
-  async respawn(sessionId: string): Promise<SessionView> {
+  async respawn(
+    sessionId: string,
+    request: {
+      prompt?: string;
+      attachments?: SendMessageAttachment[];
+      startupAttachmentIds?: string[];
+    } = {},
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -3406,8 +3620,25 @@ export class SessionService {
       message: `Respawning ${sessionId}`,
       details: { agent: session.agent },
     });
-
-    return this.spawn(resolveRespawnRequest(session));
+    const requestedStartupAttachmentIds =
+      request.startupAttachmentIds ?? session.startupAttachmentIds ?? [];
+    const allowedStartupIds = new Set(session.startupAttachmentIds ?? []);
+    for (const attachmentId of requestedStartupAttachmentIds) {
+      if (!allowedStartupIds.has(attachmentId)) {
+        throw new Error(`Unknown startup attachment id: ${attachmentId}`);
+      }
+    }
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      requestedStartupAttachmentIds,
+    );
+    const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
+    return this.spawn(
+      resolveRespawnRequest(session, {
+        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+      }),
+    );
   }
 
   private resumeSessionDelivery(): void {
@@ -3868,75 +4099,6 @@ export class SessionService {
     );
   }
 
-  private async findAgentHistoryFile(
-    session: Pick<SessionRecord, "agent" | "id" | "worktreePath">,
-  ): Promise<string | null> {
-    if (session.agent === "claude") {
-      return findLatestClaudeSessionFile(session.worktreePath);
-    }
-    return findLatestCodexSessionFile({ sessionRootDir: this.codexSessionsDir(session.id) });
-  }
-
-  private async captureStateTransitionArtifact(
-    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
-    transition: {
-      at: string;
-      fromState: SessionState;
-      toState: SessionState;
-    },
-    historySourcePath?: string | null,
-  ): Promise<string | null> {
-    if (isTerminalSessionStatus(session.status)) {
-      return null;
-    }
-    const sourcePath = historySourcePath ?? (await this.findAgentHistoryFile(session));
-    if (!sourcePath) {
-      return null;
-    }
-    try {
-      const artifactId = stateTransitionArtifactId(
-        transition.at,
-        transition.fromState,
-        transition.toState,
-      );
-      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
-      copyFileSync(sourcePath, join(artifactDir, artifactId));
-      return artifactId;
-    } catch {
-      return null;
-    }
-  }
-
-  private async logStateTransition(
-    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
-    transition: {
-      at: string;
-      fromState: SessionState;
-      toState: SessionState;
-      source: StateSource;
-    },
-    historySourcePath?: string | null,
-  ): Promise<void> {
-    const historyArtifactId = await this.captureStateTransitionArtifact(
-      session,
-      transition,
-      historySourcePath,
-    );
-    this.logEvent("session.state.transition", {
-      level: "info",
-      timestamp: transition.at,
-      sessionId: session.id,
-      projectId: session.project,
-      message: `Status changed from ${transition.fromState} to ${transition.toState}`,
-      details: {
-        fromState: transition.fromState,
-        toState: transition.toState,
-        source: transition.source,
-        ...(historyArtifactId ? { historyArtifactId } : {}),
-      },
-    });
-  }
-
   private async classifyCodexState(sessionId: string): Promise<{
     state: SessionState;
     source: StateSource;
@@ -3995,9 +4157,21 @@ export class SessionService {
         state = jsonlResult.state;
         stateSource = "jsonl";
         historySourcePath = jsonlResult.reader.filePath;
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (jsonl, records=${jsonlResult.reader.tailRecords.length})`,
+        });
       } else {
         // No JSONL file yet (agent just started). Default to working.
         state = "working";
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (no jsonl)`,
+        });
       }
     } else {
       // Codex: hook-primary classification with structured rollout JSONL fallback.
@@ -4006,8 +4180,28 @@ export class SessionService {
       stateSource = codexState.source;
       if (stateSource === "jsonl" && codexState.rolloutState) {
         historySourcePath = codexState.rolloutState.filePath;
-      } else if (!codexState.hookState) {
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (codex jsonl=${codexState.rolloutState.reason})`,
+        });
+      } else if (codexState.hookState) {
+        const hookState = codexState.hookState;
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (hook=${hookState.state}, event=${hookState.hookEvent ?? "?"}, hookAge=${Math.round((Date.now() - new Date(hookState.updatedAt).getTime()) / 1000)}s)`,
+        });
+      } else {
         state = "waiting";
+        this.logEvent("session.state.classified", {
+          level: "info",
+          sessionId: session.id,
+          projectId: session.project,
+          message: `State: ${state} (no hook)`,
+        });
       }
     }
 

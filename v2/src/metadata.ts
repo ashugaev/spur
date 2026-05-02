@@ -160,6 +160,9 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
     prompt: normalizedSession.prompt,
+    ...(normalizedSession.startupAttachmentIds
+      ? { startupAttachmentIds: normalizedSession.startupAttachmentIds }
+      : {}),
     branch: normalizedSession.branch,
     ...(normalizedSession.branchSource ? { branchSource: normalizedSession.branchSource } : {}),
     ...(normalizedSession.pr ? { pr: normalizedSession.pr } : {}),

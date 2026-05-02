@@ -359,6 +359,33 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/spawn forwards attachments", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Do work",
+          attachments: [{ name: "shot.png", data: "cG5n" }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/background",
+      expect.objectContaining({
+        body: JSON.stringify({
+          project: "api",
+          prompt: "Do work",
+          attachments: [{ name: "shot.png", data: "cG5n" }],
+        }),
+      }),
+    );
+  });
+
   it("POST /api/spawn filters out blank steps", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 
@@ -563,17 +590,33 @@ describe("Spur web API routes", () => {
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
   it("POST /api/sessions/:id/respawn proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
 
     const response = await respawnSession(
-      new Request("http://localhost:3000/api/sessions/api-a1/respawn", { method: "POST" }),
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry with screenshot",
+          startupAttachmentIds: ["1715000000000-source.png"],
+          attachments: [{ name: "shot.png", data: "cG5n" }],
+        }),
+      }),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
 
     expect(response.status).toBe(200);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/api-a1/respawn",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        prompt: "Retry with screenshot",
+        startupAttachmentIds: ["1715000000000-source.png"],
+        attachments: [{ name: "shot.png", data: "cG5n" }],
+      },
     );
   });
 

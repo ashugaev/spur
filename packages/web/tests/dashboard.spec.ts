@@ -1037,6 +1037,57 @@ test.describe("D7: Spawn modal", () => {
     await expect(textarea).toHaveValue("Keep me");
     await expect(page.getByText(/Daemon down/i)).toBeVisible();
   });
+
+  test("spawn prompt accepts image attachments and forwards them in the request body", async ({
+    page,
+  }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-image-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({
+            id: "spawn-image-ack-1",
+            project: "my-project",
+            prompt: "Prompt with image",
+          }),
+        ),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    await textarea.fill("Prompt with image");
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "spawn.png", { type: "image/png" }));
+      return dt;
+    });
+    await textarea.dispatchEvent("drop", { dataTransfer });
+
+    await expect(page.locator('img[alt="spawn.png"]')).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
+    expect(requestBody).toMatchObject({
+      projectId: "my-project",
+      prompt: "Prompt with image",
+      attachments: [{ name: "spawn.png", data: expect.any(String) }],
+    });
+  });
 });
 
 // D7b: Silent branch preflight
