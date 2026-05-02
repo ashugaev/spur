@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useSlashSuggestions } from "@/hooks/useSlashSuggestions";
 import { cn } from "@/lib/cn";
 import type { AgentSuggestionEntry } from "@/lib/types";
@@ -20,6 +20,9 @@ export function SlashSuggestions({
 }: SlashSuggestionsProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | undefined>(undefined);
   const { data: suggestions, error, loading } = useSlashSuggestions({ endpoint, enabled: open });
 
   useEffect(() => {
@@ -41,6 +44,48 @@ export function SlashSuggestions({
     };
   }, [open]);
 
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuStyle(undefined);
+      return;
+    }
+
+    const updateMenuPosition = () => {
+      const button = buttonRef.current;
+      const menu = menuRef.current;
+      if (!button || !menu) return;
+
+      const margin = 8;
+      const buttonRect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const width = Math.min(menuRect.width, window.innerWidth - margin * 2);
+      const left = Math.min(
+        Math.max(margin, buttonRect.left),
+        Math.max(margin, window.innerWidth - width - margin),
+      );
+      const aboveTop = buttonRect.top - menuRect.height - margin;
+      const belowTop = buttonRect.bottom + margin;
+      const top =
+        aboveTop >= margin
+          ? aboveTop
+          : Math.max(margin, Math.min(belowTop, window.innerHeight - menuRect.height - margin));
+
+      setMenuStyle({
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${width}px`,
+      });
+    };
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [open, loading, error, suggestions]);
+
   const sections = [
     { label: "Commands", items: suggestions?.commands ?? [] },
     { label: "Skills", items: suggestions?.skills ?? [] },
@@ -53,6 +98,7 @@ export function SlashSuggestions({
         aria-label="Slash"
         aria-expanded={open}
         aria-haspopup="menu"
+        ref={buttonRef}
         className={cn(
           "border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]",
           buttonClassName,
@@ -65,8 +111,10 @@ export function SlashSuggestions({
       {open ? (
         <div
           aria-label="Slash suggestions"
-          className="absolute bottom-full left-0 z-20 mb-2 flex max-h-80 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+          className="fixed z-20 flex max-h-80 w-[min(20rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)] sm:min-w-[18rem] sm:w-auto"
+          ref={menuRef}
           role="menu"
+          style={menuStyle}
         >
           {loading ? (
             <div className="px-2 py-2 text-[10px] uppercase tracking-[0.1em] text-[var(--color-text-tertiary)]">
