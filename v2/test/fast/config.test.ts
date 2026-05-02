@@ -419,6 +419,87 @@ projects:
     });
   });
 
+  it("parses github source query and accepts github:work_item.new triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open label:spur"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toEqual({
+      type: "github",
+      intervalMs: 60_000,
+      runOnStart: false,
+      query: "is:pr is:open label:spur",
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        prompt: "Take this work item.",
+      },
+    });
+  });
+
+  it("rejects github:work_item.new triggers when the source has no query", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.pick-up.event uses unsupported event "github:work_item.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same github source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      one:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "first"
+      two:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "second"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "pr-watch" has 2 triggers subscribed to "github:work_item.new"; at most one is allowed',
+    );
+  });
+
   it("rejects removed GitHub event names during config validation", async () => {
     const configPath = await writeConfig(`
 projects:

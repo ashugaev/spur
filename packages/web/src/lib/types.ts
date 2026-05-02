@@ -55,6 +55,7 @@ export interface SpurSessionView {
   project: string;
   agent: "claude" | "codex";
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
   tmuxSession: string | null;
@@ -100,6 +101,7 @@ export interface DashboardSession {
   agent: "claude" | "codex";
   title: string | null;
   prompt: string;
+  startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
   tmuxSession: string | null;
@@ -141,6 +143,7 @@ export function toDashboardSession(
     agent: session.agent,
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
     tmuxSession: session.tmuxSession ?? null,

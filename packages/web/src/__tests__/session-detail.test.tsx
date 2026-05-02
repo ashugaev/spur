@@ -577,8 +577,81 @@ describe("SessionDetail voice input", () => {
     expect(backLink).toHaveAttribute("href", "/?project=sp");
   });
 
-  it("respawns without forcing a project query when the detail page had none", async () => {
+  it("respawns with edited prompt and startup images without forcing a project query", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+            startupAttachmentIds: ["1715000000000-source.png"],
+            artifacts: [
+              {
+                id: "1715000000000-source.png",
+                name: "1715000000000-source.png",
+                size: 12,
+                mimeType: "image/png",
+                kind: "image",
+                createdAt: "2026-04-02T10:00:00.000Z",
+                updatedAt: "2026-04-02T10:00:00.000Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            id: "api-b2",
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    const respawnButton = await screen.findByRole("button", { name: "Edit & Respawn" });
+    fireEvent.click(respawnButton);
+    expect(screen.getByDisplayValue("Fix auth")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Edit the initial message..."), {
+      target: { value: "Re-run with screenshot" },
+    });
+    fireEvent.paste(screen.getByPlaceholderText("Edit the initial message..."), {
+      clipboardData: {
+        files: [new File(["png"], "edited.png", { type: "image/png" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("edited.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+    });
+    expect(respawnBody).toEqual({
+      prompt: "Re-run with screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      attachments: [{ name: "edited.png", data: expect.any(String) }],
+    });
+  });
+
+  it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/sessions/api-a1") {
         return new Response(
@@ -593,25 +666,23 @@ describe("SessionDetail voice input", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
       }
-      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            ...sessionFixture(),
-            id: "api-b2",
-          }),
-          { status: 200 },
-        );
-      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    render(<SessionDetail sessionId="api-a1" />);
+    const { container } = render(<SessionDetail sessionId="api-a1" />);
 
-    const respawnButton = await screen.findByRole("button", { name: "Respawn" });
-    fireEvent.click(respawnButton);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+
+    const fileInputs = container.querySelectorAll('input[type="file"]');
+    const fileInput = fileInputs[fileInputs.length - 1] as HTMLInputElement | undefined;
+    expect(fileInput).toBeDefined();
+    fireEvent.change(fileInput!, {
+      target: { files: [new File(["png"], "picker-edit.png", { type: "image/png" })] },
+    });
 
     await waitFor(() => {
-      expect(pushMock).toHaveBeenCalledWith("/sessions/api-b2");
+      expect(screen.getByAltText("picker-edit.png")).toBeInTheDocument();
     });
   });
 
@@ -718,7 +789,7 @@ describe("SessionDetail voice input", () => {
             ...sessionFixture(),
             sidecars: [{ name: "isolated-ui", alive: true }],
             slots: {
-              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
             },
           }),
           { status: 200 },
@@ -735,9 +806,38 @@ describe("SessionDetail voice input", () => {
     await waitFor(() => {
       expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute(
         "href",
-        "http://openclaw-dev.tail90e846.ts.net:5601",
+        "http://example.com:5601",
       );
     });
+  });
+
+  it("does not render an Open link when no slot link matches the sidecar name", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-daemon", alive: true }],
+            slots: {
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("isolated-daemon")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("link", { name: "Open" })).not.toBeInTheDocument();
   });
 
   it("keeps the start or stop sidecar action at the far right of the sidecar actions", async () => {
@@ -749,7 +849,7 @@ describe("SessionDetail voice input", () => {
             ...sessionFixture(),
             sidecars: [{ name: "isolated-ui", alive: true }],
             slots: {
-              links: [{ label: "sidecar-ui", url: "http://openclaw-dev.tail90e846.ts.net:5601" }],
+              links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
             },
           }),
           { status: 200 },
@@ -1204,7 +1304,9 @@ describe("SessionDetail voice input", () => {
         body: JSON.stringify({ message: "Queued follow up", queue: true }),
       });
     });
-    expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toHaveValue("");
+    });
   });
 
   it("shows the primary composer hotkey hint only on Send now", async () => {
@@ -1290,7 +1392,9 @@ describe("SessionDetail voice input", () => {
 
     render(<SessionDetail sessionId="api-a1" />);
 
-    const textarea = await screen.findByPlaceholderText("Message to the running agent... Voice ⌘ + .");
+    const textarea = await screen.findByPlaceholderText(
+      "Message to the running agent... Voice ⌘ + .",
+    );
 
     fireEvent.keyDown(textarea, { key: ".", metaKey: true });
     await waitFor(() => {
@@ -1473,6 +1577,75 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.queryByRole("heading", { name: /queued messages/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("SessionDetail logs", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("renders state transition logs with a history snapshot link", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ messages: [] })), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/logs") {
+        return new Response(
+          JSON.stringify([
+            {
+              timestamp: "2026-04-02T10:01:00.000Z",
+              event: "session.state.transition",
+              level: "info",
+              message: "Status changed from waiting to needs_input",
+              details: {
+                fromState: "waiting",
+                toState: "needs_input",
+                source: "jsonl",
+                historyArtifactId:
+                  "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+              },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^logs$/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+
+    expect(await screen.findByText("Status transition")).toBeInTheDocument();
+    expect(screen.getByText("waiting")).toBeInTheDocument();
+    expect(screen.getByText("needs input")).toBeInTheDocument();
+    expect(screen.getByText("source jsonl")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
+      "href",
+      "/api/sessions/api-a1/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+    );
   });
 });
 
