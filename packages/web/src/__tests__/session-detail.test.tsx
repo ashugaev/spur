@@ -187,7 +187,9 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toBeInTheDocument();
+      expect(
+        screen.getByPlaceholderText(/^Message to the running agent\.\.\./),
+      ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
@@ -471,7 +473,9 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByPlaceholderText(/^Message to the running agent\.\.\./)).toBeInTheDocument();
+      expect(
+        screen.getByPlaceholderText(/^Message to the running agent\.\.\./),
+      ).toBeInTheDocument();
     });
 
     fireEvent.change(screen.getByPlaceholderText(/^Message to the running agent\.\.\./), {

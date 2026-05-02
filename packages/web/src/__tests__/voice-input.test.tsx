@@ -26,7 +26,9 @@ function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
 
 describe("VoiceInput", () => {
   it("hides the idle status line when voice is available", () => {
-    const { container } = render(<VoiceStatusHint voice={createVoice({ voiceModalOpen: false })} />);
+    const { container } = render(
+      <VoiceStatusHint voice={createVoice({ voiceModalOpen: false })} />,
+    );
 
     expect(container).toBeEmptyDOMElement();
   });
