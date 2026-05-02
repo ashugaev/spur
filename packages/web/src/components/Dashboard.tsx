@@ -26,7 +26,7 @@ import {
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
@@ -138,6 +138,21 @@ function IconCheck() {
       strokeLinejoin="round"
     >
       <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+function IconStop() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="5" width="14" height="14" />
     </svg>
   );
 }
@@ -298,8 +313,9 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      pending: [],
       working: [],
+      pending: [],
+      stopped: [],
       done: [],
     };
 
@@ -313,8 +329,9 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      pending: grouped.pending.length,
       working: grouped.working.length,
+      pending: grouped.pending.length,
+      stopped: grouped.stopped.length,
       done: grouped.done.length,
     }),
     [grouped],
@@ -603,6 +620,14 @@ export function Dashboard() {
             color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
             active={activeStatFilter === "pending"}
             onClick={() => toggleStatFilter("pending")}
+          />
+          <StatItem
+            icon={<IconStop />}
+            label="Stopped"
+            value={stats.stopped}
+            color={stats.stopped > 0 ? "var(--color-accent-orange)" : undefined}
+            active={activeStatFilter === "stopped"}
+            onClick={() => toggleStatFilter("stopped")}
           />
           <StatItem
             icon={<IconCheck />}

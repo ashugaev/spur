@@ -39,10 +39,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting, Completed stat buttons in header after title, before search input
+- Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention/ready)
+- Non-zero values show colored (error/working/attention/orange/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- `Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
 - After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
@@ -93,7 +94,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
+- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - Empty sections are hidden instead of rendering placeholder rows
