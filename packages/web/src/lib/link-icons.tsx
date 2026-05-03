@@ -264,16 +264,102 @@ function ReviewCheck({
   );
 }
 
+function CompositeCiReviewMark({
+  className,
+  reviewColor,
+  reviewGlyph,
+  title,
+}: {
+  className?: string;
+  reviewColor: string;
+  reviewGlyph: "check" | "cross";
+  title: string;
+}) {
+  return (
+    <span
+      aria-label={title}
+      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
+      role="img"
+      title={title}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3.5 w-4"
+        viewBox="0 0 28 24"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M3.5 12.5 8 17l8-10" stroke="var(--color-status-ready)" strokeWidth="2.5" />
+        {reviewGlyph === "check" ? (
+          <path d="M10.5 10.5 15 15l8-10" stroke={reviewColor} strokeWidth="2.5" />
+        ) : (
+          <>
+            <path d="M14.5 8.5 22.5 16.5" stroke={reviewColor} strokeWidth="2.3" />
+            <path d="M22.5 8.5 14.5 16.5" stroke={reviewColor} strokeWidth="2.3" />
+          </>
+        )}
+      </svg>
+    </span>
+  );
+}
+
 export function ReviewDecisionDot({
   decision,
   showPlaceholder = false,
   className,
+  withCiSuccess = false,
 }: {
   decision: ReviewDecision;
   showPlaceholder?: boolean;
   className?: string;
+  withCiSuccess?: boolean;
 }) {
   if (!decision && !showPlaceholder) return null;
+
+  if (withCiSuccess && decision === "approved")
+    return (
+      <span className={className} data-pr-review-decision="approved">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-ready)"
+          reviewGlyph="check"
+          title="Approved"
+        />
+      </span>
+    );
+
+  if (withCiSuccess && decision === "changes_requested")
+    return (
+      <span className={className} data-pr-review-decision="changes_requested">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-error)"
+          reviewGlyph="cross"
+          title="Changes requested"
+        />
+      </span>
+    );
+
+  if (withCiSuccess && decision === "review_required")
+    return (
+      <span className={className} data-pr-review-decision="review_required">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-attention)"
+          reviewGlyph="check"
+          title="Approval required"
+        />
+      </span>
+    );
+
+  if (withCiSuccess)
+    return (
+      <span className={className} data-pr-review-decision="none">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-text-tertiary)"
+          reviewGlyph="check"
+          title="No approval required"
+        />
+      </span>
+    );
 
   if (decision === "approved")
     return (
