@@ -680,8 +680,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
-  const [artifactVisibility, setArtifactVisibility] =
-    useState<ArtifactVisibility>("intentional");
+  const [artifactVisibility, setArtifactVisibility] = useState<ArtifactVisibility>("intentional");
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);

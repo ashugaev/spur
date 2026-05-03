@@ -1827,7 +1827,10 @@ describe("SessionDetail artifacts", () => {
         );
       }
 
-      if (url === "/api/sessions/api-a1/conversation" || url === "/api/sessions/api-b2/conversation") {
+      if (
+        url === "/api/sessions/api-a1/conversation" ||
+        url === "/api/sessions/api-b2/conversation"
+      ) {
         return new Response(JSON.stringify(conversationFixture()), { status: 200 });
       }
 
@@ -1856,88 +1859,84 @@ describe("SessionDetail artifacts", () => {
     expect(screen.queryByRole("button", { name: /automatic \(0\)/i })).not.toBeInTheDocument();
   });
 
-  it(
-    "self-heals back to intentional artifacts when automatic artifacts disappear on refresh",
-    async () => {
-      let sessionPayload = sessionFixture({
-        artifacts: [
-          {
-            id: "intentional.txt",
-            name: "intentional.txt",
-            size: 3200,
-            mimeType: "text/plain; charset=utf-8",
-            kind: "download",
-            origin: "intentional",
-            createdAt: "2026-04-02T10:00:00.000Z",
-            updatedAt: "2026-04-02T10:00:00.000Z",
-          },
-          {
-            id: "agent-history.jsonl",
-            name: "agent-history.jsonl",
-            size: 2200,
-            mimeType: "application/octet-stream",
-            kind: "download",
-            origin: "automatic",
-            createdAt: "2026-04-02T10:00:00.000Z",
-            updatedAt: "2026-04-02T10:00:00.000Z",
-          },
-        ],
-      });
+  it("self-heals back to intentional artifacts when automatic artifacts disappear on refresh", async () => {
+    let sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "intentional.txt",
+          name: "intentional.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
 
-      vi.spyOn(global, "fetch").mockImplementation(async (input) => {
-        const url = typeof input === "string" ? input : input.url;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
 
-        if (url === "/api/sessions/api-a1") {
-          return new Response(JSON.stringify(sessionPayload), { status: 200 });
-        }
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionPayload), { status: 200 });
+      }
 
-        if (url === "/api/sessions/api-a1/conversation") {
-          return new Response(JSON.stringify(conversationFixture()), { status: 200 });
-        }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
 
-        throw new Error(`Unexpected fetch: ${url}`);
-      });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
 
-      render(<SessionDetail sessionId="api-a1" />);
+    render(<SessionDetail sessionId="api-a1" />);
 
-      await waitFor(() => {
-        expect(screen.getByText("intentional.txt")).toBeInTheDocument();
-      });
+    await waitFor(() => {
+      expect(screen.getByText("intentional.txt")).toBeInTheDocument();
+    });
 
-      fireEvent.click(screen.getByRole("button", { name: "Automatic (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Automatic (1)" }));
 
-      await waitFor(() => {
-        expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
-      });
+    await waitFor(() => {
+      expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
+    });
 
-      sessionPayload = sessionFixture({
-        artifacts: [
-          {
-            id: "intentional.txt",
-            name: "intentional.txt",
-            size: 3200,
-            mimeType: "text/plain; charset=utf-8",
-            kind: "download",
-            origin: "intentional",
-            createdAt: "2026-04-02T10:00:00.000Z",
-            updatedAt: "2026-04-02T10:00:00.000Z",
-          },
-        ],
-      });
+    sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "intentional.txt",
+          name: "intentional.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
 
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 4_100));
-      });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 4_100));
+    });
 
-      await waitFor(() => {
-        expect(screen.getByText("intentional.txt")).toBeInTheDocument();
-      });
+    await waitFor(() => {
+      expect(screen.getByText("intentional.txt")).toBeInTheDocument();
+    });
 
-      expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /automatic \(/i })).not.toBeInTheDocument();
-    },
-    12_000,
-  );
+    expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /automatic \(/i })).not.toBeInTheDocument();
+  }, 12_000);
 });
 
 describe("SessionDetail display state", () => {

@@ -27,7 +27,7 @@ describe("session artifact origins", () => {
     const dir = sessionArtifactsDir(dataDir, sessionId);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "report.txt"), "hello", "utf8");
-    await writeFile(join(dir, "agent-history.jsonl"), "{\"ok\":true}\n", "utf8");
+    await writeFile(join(dir, "agent-history.jsonl"), '{"ok":true}\n', "utf8");
 
     setSessionArtifactOrigin(dataDir, sessionId, "agent-history.jsonl", "automatic");
 
