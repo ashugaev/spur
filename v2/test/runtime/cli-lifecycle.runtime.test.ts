@@ -199,9 +199,6 @@ async function runRestoreScenario(args: {
   if (args.agent) {
     await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
   } else {
-  if (args.agent) {
-    await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
-  } else {
     const controllerSessionName = `${sessionPrefix}-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
     await createTmuxSession({
@@ -224,7 +221,6 @@ async function runRestoreScenario(args: {
     await sendKeysToTmux(controllerSessionName, "r");
     await sleep(1_000);
     await sendKeysToTmux(controllerSessionName, "q");
-  }
   }
 
   const restored = await pollUntil(

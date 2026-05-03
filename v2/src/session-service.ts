@@ -535,57 +535,6 @@ function collectReservedSidecarPorts(
   );
 }
 
-function reserveSidecarPorts(
-  dataDir: string,
-  session: Pick<SessionRecord, "id" | "status" | "sidecarPorts">,
-  sidecarName: string,
-  sidecar: ProjectConfig["sidecars"][string],
-): SessionRecord["sidecarPorts"] | undefined {
-  if (!sidecar.ports || session.sidecarPorts?.[sidecarName]) {
-    return session.sidecarPorts;
-  }
-  const unavailable = new Set<number>();
-  for (const service of listServiceInstances(dataDir)) {
-    if (service.port !== undefined) {
-      unavailable.add(service.port);
-    }
-  }
-  for (const existingSession of listSessions(dataDir)) {
-    if (existingSession.id === session.id) continue;
-    for (const port of collectReservedSidecarPorts(existingSession)) {
-      unavailable.add(port);
-    }
-  }
-  for (const port of collectReservedSidecarPorts(session)) {
-    unavailable.add(port);
-  }
-
-  const reservedEnvPorts: Record<string, number> = {};
-  for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
-    let selectedPort: number | undefined;
-    for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
-      if (unavailable.has(candidate)) continue;
-      selectedPort = candidate;
-      unavailable.add(candidate);
-      break;
-    }
-    if (selectedPort === undefined) {
-      throw new Error(
-        `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}`,
-      );
-    }
-    reservedEnvPorts[portConfig.env] = selectedPort;
-  }
-
-  if (Object.keys(reservedEnvPorts).length === 0) {
-    return session.sidecarPorts;
-  }
-  return {
-    ...(session.sidecarPorts ?? {}),
-    [sidecarName]: reservedEnvPorts,
-  };
-}
-
 function sidecarPortEnv(
   session: Pick<SessionRecord, "sidecarPorts">,
   sidecarName: string,
