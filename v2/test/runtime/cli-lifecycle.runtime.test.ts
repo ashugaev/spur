@@ -174,7 +174,7 @@ async function runRestoreScenario(args: {
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
   } else {
@@ -191,7 +191,7 @@ async function runRestoreScenario(args: {
       accept: (value) =>
         value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === (stopMode === "pause" ? "paused" : "running"),
+        value[0]?.status === "stopped",
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -1426,7 +1426,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
     expect(existsSync(spawned.worktreePath)).toBe(true);
@@ -1440,7 +1440,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -1553,7 +1553,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes(`Paused ${spawned.id}.`),
+      accept: (value) => value.includes(`Stopped ${spawned.id}.`),
     });
 
     const pausedList = await pollUntil(
@@ -1565,7 +1565,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -2928,7 +2928,7 @@ projects:
     expect(result.spawned.agent).toBe("claude");
   });
 
-  it("restores a paused session in place without sending a restore prompt", async () => {
+  it("restores a manually stopped session in place without sending a restore prompt", async () => {
     const result = await runRestoreScenario({
       configName: "restore-paused.yaml",
       stopMode: "pause",
@@ -4094,7 +4094,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.workspaceExists).toBe(true);
 
     const devSessionGone = !(await tmuxSessionExists(devSessionName));

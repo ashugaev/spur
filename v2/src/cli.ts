@@ -1003,7 +1003,7 @@ async function runInteractiveSessionList(
     if (!session) return;
 
     busy = true;
-    statusMessage = brandLine(`Pausing ${session.id}...`);
+    statusMessage = brandLine(`Stopping ${session.id}...`);
     render();
 
     try {
@@ -1011,7 +1011,7 @@ async function runInteractiveSessionList(
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
       pendingKillConfirmationSessionId = null;
-      statusMessage = brandLine(`Paused ${paused.id}.`);
+      statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -1498,7 +1498,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "pausing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
-        success: (session) => `Paused ${session.id}.`,
+        success: (session) => `Stopped ${session.id}.`,
         render: renderSessionCard,
       });
     });

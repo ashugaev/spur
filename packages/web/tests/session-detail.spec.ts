@@ -1040,14 +1040,14 @@ test.describe("S7: Display state override", () => {
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 
-  test("completed session shows paused label (stopped state), not working", async ({ page }) => {
+  test("completed session shows stopped label, not working", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s7-2" });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "working");
     await page.goto(`/sessions/${session.id}`);
 
     const header = page.locator("header").first();
-    await expect(header.getByText("paused", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("stopped", { exact: true }).first()).toBeVisible();
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 

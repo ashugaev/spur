@@ -172,6 +172,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     tmuxSession: normalizedSession.tmuxSession,
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
+    ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),

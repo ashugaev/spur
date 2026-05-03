@@ -1,7 +1,14 @@
 export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
+export type SessionStatus =
+  | "spawning"
+  | "running"
+  | "stopped"
+  | "paused"
+  | "errored"
+  | "completed"
+  | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type StateSource = "jsonl" | "hook" | "pane" | "status";
 
@@ -251,6 +258,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
+  stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
   retainInList?: boolean;

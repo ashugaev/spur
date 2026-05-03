@@ -59,7 +59,7 @@ export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSe
     ...baseSession("session-stopped-1"),
     runtimeAlive: false,
     tmuxSession: null,
-    status: "paused",
+    status: "stopped",
     state: "stopped",
     ...overrides,
   };
