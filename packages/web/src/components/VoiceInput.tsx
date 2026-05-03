@@ -42,12 +42,7 @@ function MicOrSpinner({ voice }: { voice: UseVoiceInput }) {
 
 function StopIcon() {
   return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="currentColor"
-      viewBox="0 0 24 24"
-    >
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 24 24">
       <rect height="10" rx="1" width="10" x="7" y="7" />
     </svg>
   );
@@ -66,11 +61,7 @@ function EditIcon() {
       strokeWidth="1.5"
       viewBox="0 0 24 24"
     >
-      <path
-        d="M4 20h4l10-10-4-4L4 16v4Zm10-14 4 4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <path d="M4 20h4l10-10-4-4L4 16v4Zm10-14 4 4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -191,12 +182,11 @@ export function VoiceRecordingStrip({
   }>;
   className?: string;
 }) {
-  const activeLabel =
-    voice.recording
-      ? voice.recordingDurationLabel
-      : voice.voiceBusy === "starting"
-        ? "ARMING"
-        : "SAVING";
+  const activeLabel = voice.recording
+    ? voice.recordingDurationLabel
+    : voice.voiceBusy === "starting"
+      ? "ARMING"
+      : "SAVING";
 
   return (
     <div
@@ -295,7 +285,8 @@ export function VoiceRecordingTimer({
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
   if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
-  if (voice.recording) return <>Recording {voice.recordingDurationLabel}... click the mic to stop</>;
+  if (voice.recording)
+    return <>Recording {voice.recordingDurationLabel}... click the mic to stop</>;
   return null;
 }
 

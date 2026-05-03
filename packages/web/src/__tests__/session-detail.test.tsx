@@ -193,7 +193,9 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
@@ -242,7 +244,9 @@ describe("SessionDetail voice input", () => {
     });
 
     expect(screen.getByText("00:00")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Stop and save voice recording" }),
+    ).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(2_000);
@@ -279,7 +283,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
@@ -328,7 +334,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
@@ -378,7 +386,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
@@ -430,7 +440,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
@@ -474,7 +486,9 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 

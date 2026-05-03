@@ -433,7 +433,9 @@ test.describe("S3 mobile voice", () => {
       await page.goto(`/sessions/${session.id}`);
 
       await page.getByRole("button", { name: /start voice recording/i }).click();
-      await expect(page.getByRole("button", { name: /stop and save voice recording/i })).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: /stop and save voice recording/i }),
+      ).toBeVisible();
       await expect(page.getByText("00:00")).toBeVisible();
       await page.waitForTimeout(1_100);
       await expect(page.getByText("00:01")).toBeVisible();
@@ -680,9 +682,15 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(terminalDialog.getByText("00:00")).toBeVisible();
     await expect(terminalDialog.getByRole("button", { name: /^enter$/i })).toHaveCount(0);
     await expect(terminalDialog.getByRole("button", { name: /arrow left/i })).toHaveCount(0);
-    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toHaveCount(0);
-    await expect(terminalDialog.getByRole("button", { name: /stop and edit voice draft/i })).toBeVisible();
-    await expect(terminalDialog.getByRole("button", { name: /stop and send voice draft/i })).toBeVisible();
+    await expect(
+      terminalDialog.getByRole("button", { name: /start voice recording/i }),
+    ).toHaveCount(0);
+    await expect(
+      terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }),
+    ).toBeVisible();
+    await expect(
+      terminalDialog.getByRole("button", { name: /stop and send voice draft/i }),
+    ).toBeVisible();
     await terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }).click();
 
     const dialog = page.getByRole("dialog", { name: /confirm voice input/i });
@@ -727,7 +735,9 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const historyDialog = secondPopup.getByRole("dialog", { name: /input history/i });
     await expect(historyDialog.getByText(/UTC/)).toBeVisible();
-    await expect(historyDialog.getByRole("button", { name: /check deployment status/i })).toBeVisible();
+    await expect(
+      historyDialog.getByRole("button", { name: /check deployment status/i }),
+    ).toBeVisible();
 
     await historyDialog.getByRole("button", { name: /check deployment status/i }).click();
     await expect(secondPopup.getByRole("textbox")).toHaveValue("Check deployment status");

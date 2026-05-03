@@ -279,7 +279,9 @@ describe("Dashboard", () => {
     });
 
     expect(screen.getByText("00:00")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop and save voice recording" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Stop and save voice recording" }),
+    ).toBeInTheDocument();
 
     act(() => {
       vi.advanceTimersByTime(3_000);
