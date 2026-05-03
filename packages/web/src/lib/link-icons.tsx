@@ -236,38 +236,6 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
-function ReviewCheck({
-  className,
-  color,
-  title,
-}: {
-  className?: string;
-  color: string;
-  title: string;
-}) {
-  return (
-    <span
-      aria-label={title}
-      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
-      role="img"
-      title={title}
-    >
-      <svg
-        aria-hidden="true"
-        className="h-3 w-3"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke={color}
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M20 6 9 17l-5-5" />
-      </svg>
-    </span>
-  );
-}
-
 function CompositeCiReviewMark({
   className,
   reviewColor,
@@ -319,18 +287,12 @@ function CompositeCiReviewMark({
 
 export function ReviewDecisionDot({
   decision,
-  showPlaceholder = false,
   className,
-  withCiSuccess = false,
 }: {
-  decision: ReviewDecision;
-  showPlaceholder?: boolean;
+  decision: "approved" | "changes_requested";
   className?: string;
-  withCiSuccess?: boolean;
 }) {
-  if (!decision && !showPlaceholder) return null;
-
-  if (withCiSuccess && decision === "approved")
+  if (decision === "approved")
     return (
       <span className={className} data-pr-review-decision="approved">
         <CompositeCiReviewMark
@@ -341,80 +303,13 @@ export function ReviewDecisionDot({
       </span>
     );
 
-  if (withCiSuccess && decision === "changes_requested")
-    return (
-      <span className={className} data-pr-review-decision="changes_requested">
-        <CompositeCiReviewMark
-          reviewColor="var(--color-status-error)"
-          reviewGlyph="cross"
-          title="Changes requested"
-        />
-      </span>
-    );
-
-  if (withCiSuccess && decision === "review_required")
-    return (
-      <span className={className} data-pr-review-decision="review_required">
-        <CompositeCiReviewMark
-          reviewColor="var(--color-status-attention)"
-          reviewGlyph="check"
-          title="Approval required"
-        />
-      </span>
-    );
-
-  if (withCiSuccess)
-    return (
-      <span className={className} data-pr-review-decision="none">
-        <CompositeCiReviewMark
-          reviewColor="var(--color-text-tertiary)"
-          reviewGlyph="check"
-          title="No approval required"
-        />
-      </span>
-    );
-
-  if (decision === "approved")
-    return (
-      <span className={className} data-pr-review-decision="approved">
-        <ReviewCheck color="var(--color-status-ready)" title="Approved" />
-      </span>
-    );
-
-  if (decision === "changes_requested")
-    return (
-      <span
-        aria-label="Changes requested"
-        className={className}
-        data-pr-review-decision="changes_requested"
-        role="img"
-        title="Changes requested"
-      >
-        <svg
-          aria-hidden="true"
-          className="h-3 w-3"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="var(--color-status-error)"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-        >
-          <circle cx="12" cy="12" r="9" strokeWidth="2" />
-          <path d="M15.5 8.5 8.5 15.5M8.5 8.5l7 7" />
-        </svg>
-      </span>
-    );
-
-  if (decision === "review_required")
-    return (
-      <span className={className} data-pr-review-decision="review_required">
-        <ReviewCheck color="var(--color-status-attention)" title="Approval required" />
-      </span>
-    );
-
   return (
-    <span className={className} data-pr-review-decision="none">
-      <ReviewCheck color="var(--color-text-tertiary)" title="No approval required" />
+    <span className={className} data-pr-review-decision="changes_requested">
+      <CompositeCiReviewMark
+        reviewColor="var(--color-status-error)"
+        reviewGlyph="cross"
+        title="Changes requested"
+      />
     </span>
   );
 }
