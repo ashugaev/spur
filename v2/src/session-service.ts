@@ -19,6 +19,7 @@ import {
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
+import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
   captureCodexRolloutBaseline,
@@ -28,7 +29,7 @@ import {
   type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
-import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
+import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -40,6 +41,7 @@ import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
@@ -105,6 +107,7 @@ import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from
 import {
   SPUR_DAEMON_API_VERSION,
   type AgentName,
+  type AgentSuggestionsResponse,
   type AppConfig,
   type BranchSource,
   type ConversationResponse,
@@ -518,6 +521,19 @@ function sidecarPortEnv(
 ): Record<string, string> {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function requestGitHubMergeConflictRestoreReplays(
+  config: AppConfig,
+  projectId: string,
+  sessionId: string,
+): void {
+  const project = config.projects[projectId];
+  if (!project) return;
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
+  }
 }
 
 function buildSidecarRuntimeEnv(
@@ -1368,6 +1384,35 @@ export class SessionService {
     if (session.agent !== "claude") return fallback;
     const result = await readClaudeConversation(session.worktreePath);
     return result ? { ...result, durationMs } : fallback;
+  }
+
+  async getProjectSuggestions(
+    projectId: string,
+    requestedAgent?: string,
+  ): Promise<AgentSuggestionsResponse> {
+    const project = this.getProject(projectId);
+    const agent = parseAgentName(
+      requestedAgent ?? project.defaultAgent ?? this.config.defaultAgent,
+    );
+    return loadProjectSuggestions(agent, project.path);
+  }
+
+  async getSessionSuggestions(sessionId: string): Promise<AgentSuggestionsResponse> {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    return loadSessionSuggestions({
+      agent: session.agent,
+      worktreePath: session.worktreePath,
+      ...(session.agent === "codex"
+        ? {
+            codexHomePath: codexHookHomePath(
+              join(this.config.dataDir, "session-tools", session.id),
+            ),
+          }
+        : {}),
+    });
   }
 
   async reconcileStoppedSessions(): Promise<{ scanned: number; alive: number; drifted: number }> {
@@ -3632,6 +3677,11 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
+    requestGitHubMergeConflictRestoreReplays(
+      this.config,
+      persistedRestored.project,
+      persistedRestored.id,
+    );
     this.logEvent("session.restore.completed", {
       level: "info",
       sessionId,

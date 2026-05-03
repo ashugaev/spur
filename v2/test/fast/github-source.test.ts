@@ -6,13 +6,17 @@ const listSessionsMock = vi.fn();
 const readGitHubSourceSnapshotsMock = vi.fn();
 const writeGitHubSourceSnapshotMock = vi.fn();
 const deleteGitHubSourceSnapshotMock = vi.fn();
+const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
+const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const writeSessionMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
 vi.mock("../../src/metadata.js", () => ({
+  clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
   deleteGitHubSourceSnapshot: deleteGitHubSourceSnapshotMock,
+  hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readGitHubSourceSnapshots: readGitHubSourceSnapshotsMock,
   writeGitHubSourceSnapshot: writeGitHubSourceSnapshotMock,
@@ -53,6 +57,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
   });
 
   afterEach(() => {

@@ -57,6 +57,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `codex` send delivery uses bracketed paste for the prompt text and a separate `Enter` submit, so multi-line prompt delivery does not depend on pasted newline characters being interpreted as submit.
 - `list` hides `completed` and `killed` sessions by default while keeping `paused` sessions visible.
 - `GET /projects` returns daemon-owned project labels, and explicit `connect` / `disconnect` mutate only the connected project-config registry.
+- `GET /projects/:id/slash-commands` and `GET /sessions/:id/slash-commands` return normalized command / skill / agent suggestions from daemon-owned filesystem discovery without changing the hot `/sessions` list payload.
 - `GET /sessions/:id/artifacts/:artifactId` streams session-owned artifact bytes with inline disposition for images/videos and attachment disposition for download-only files.
 - `pause` stops tmux, keeps the worktree, persists `stopped`, and leaves slot metadata intact.
 - `restore(sessionId)` keeps worktree-backed sessions restorable after both manual `pause` and unexpected agent stops; a manually paused `stopped` session relaunches/resumes in place without sending any prompt, while `stopped` sessions from unexpected interruption still deliver the restore prompt.
@@ -177,6 +178,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the bound PR, even if the worktree branch later drifts.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
+- After a stopped session is restored back to `running`, GitHub source polling re-delivers any still-active `github:merge_conflict` signal to the restored tmux-backed session without requiring the PR state to change again.
 - Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.
 
 - Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` from `AskUserQuestion` JSONL metadata, and normal message exchange cycles waiting→working→waiting.

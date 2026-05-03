@@ -593,6 +593,38 @@ test.describe("S3: Message section", () => {
     await expect(page.getByRole("button", { name: /^send now$/i })).toBeDisabled();
   });
 
+  test("slash button inserts a suggested command into the message composer", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-slash", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/slash-commands`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "status",
+              label: "/status",
+              insertText: "/status",
+              detail: "Show status",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: "Slash" }).click();
+    await page.getByRole("menuitem", { name: /\/status/i }).click();
+
+    await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
+  });
+
   test("Not accepting input message when session is completed", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s3-3" });
     await mockSessionDetail(page, session);
@@ -889,6 +921,20 @@ test.describe("S4: Links section", () => {
     await expect(page.getByText("Links").first()).toBeVisible();
     const link = page.getByRole("link", { name: "docs" });
     await expect(link).toBeVisible();
+  });
+
+  test("canonical github-pr links render as github pr", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4-pr",
+      slots: {
+        title: "Session with GitHub PR",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
   });
 
   test("links open in new tab", async ({ page }) => {

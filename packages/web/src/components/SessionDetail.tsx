@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -23,6 +24,7 @@ import {
   extractLinkId,
   GithubIcon,
   JiraIcon,
+  isGitHubPrLinkLabel,
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
@@ -52,7 +54,8 @@ import {
 } from "@/lib/types";
 
 function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
+  const isPrLink = isGitHubPrLinkLabel(link.label);
+  const prUrl = isPrLink ? link.url : undefined;
   const prInfo = usePrInfo(prUrl);
   const color = prStateColor(prInfo.state);
 
@@ -63,11 +66,11 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       rel="noreferrer"
       target="_blank"
     >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      {isPrLink ? <GithubIcon /> : <JiraIcon />}
       <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
-      {link.label === "pr" ? (
+      {isPrLink ? (
         <>
           <CiStatusDot status={prInfo.ciStatus} />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
@@ -75,6 +78,10 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       ) : null}
     </a>
   );
+}
+
+function displayLinkLabel(label: string): string {
+  return isGitHubPrLinkLabel(label) ? "github pr" : label;
 }
 
 function PlayIcon() {
@@ -447,6 +454,26 @@ interface DialogMessage {
   pending?: boolean;
 }
 
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
+
 interface ToastState {
   id: number;
   tone: "success" | "error";
@@ -684,6 +711,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -1129,7 +1157,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || l.label === "pr")
+                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
                 .map((link) => (
                   <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
@@ -1322,6 +1350,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         )
                       }
                       placeholder="Message to the running agent..."
+                      textareaRef={messageRef}
                       value={message}
                       voice={voice}
                     />
@@ -1331,6 +1360,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <div className="flex items-center gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            session
+                              ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+                              : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
+                          }
+                        />
                         <InputHistoryButton
                           entries={messageHistory.entries}
                           onSelect={setMessage}
@@ -1381,7 +1420,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {link.label}
+                        {displayLinkLabel(link.label)}
                       </a>
                     ))}
                   </div>
