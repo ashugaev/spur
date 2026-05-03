@@ -2,7 +2,9 @@ import { existsSync } from "node:fs";
 import { setInterval as startInterval, clearInterval } from "node:timers";
 import { gh } from "../gh.js";
 import {
+  clearGitHubMergeConflictRestoreReplay,
   deleteGitHubSourceSnapshot,
+  hasGitHubMergeConflictRestoreReplay,
   listSessions,
   readGitHubSourceSnapshots,
   writeGitHubSourceSnapshot,
@@ -339,10 +341,24 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       for (const session of sessions) {
         currentSessionIds.add(session.id);
         try {
+          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+          );
           const collected = await collectSignals(session);
           if (!collected) {
             snapshots.delete(session.id);
             deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id);
+            if (restoreReplayRequested) {
+              clearGitHubMergeConflictRestoreReplay(
+                deps.dataDir,
+                deps.projectId,
+                deps.sourceId,
+                session.id,
+              );
+            }
             continue;
           }
 
@@ -355,8 +371,24 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
           snapshots.set(session.id, next);
           writeGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id, next);
-          if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (mergeConflictSignal) {
+              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
+            }
+          } else if (
+            (previous && changed.length > 0) ||
+            (!previous && emitInitial && next.size > 0)
+          ) {
             emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
+          }
+          if (restoreReplayRequested) {
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -370,6 +402,12 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
         if (!currentSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
           deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+          clearGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
         }
       }
     } finally {

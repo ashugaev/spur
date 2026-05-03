@@ -176,6 +176,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub source polling plus send triggers deliver `github:ci_failed` into the live tmux-backed session when failing checks appear on the tracked PR, even if the live worktree branch has drifted from persisted session metadata.
 - GitHub source polling emits `github:merge_conflict` only when the tracked PR becomes conflicting, clears it when the conflict disappears, and emits again if the conflict returns later.
 - GitHub source polling plus send triggers deliver `github:merge_conflict` into the live tmux-backed session when merge conflicts appear on the tracked PR.
+- After a stopped session is restored back to `running`, GitHub source polling re-delivers any still-active `github:merge_conflict` signal to the restored tmux-backed session without requiring the PR state to change again.
 - Service sources currently do not emit `service:<ruleId>` until Spur has a non-`tmux` service log source.
 
 - Claude agent status detection: spawn produces `waiting` (end_turn JSONL), `send` produces `working` (user JSONL), `show-waiting-menu` produces `needs_input` from `AskUserQuestion` JSONL metadata, and normal message exchange cycles waiting→working→waiting.

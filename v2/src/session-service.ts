@@ -33,6 +33,7 @@ import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
   deleteServiceInstancesForSession,
@@ -462,6 +463,19 @@ function sidecarPortEnv(
 ): Record<string, string> {
   const entries = Object.entries(session.sidecarPorts?.[sidecarName] ?? {});
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
+}
+
+function requestGitHubMergeConflictRestoreReplays(
+  config: AppConfig,
+  projectId: string,
+  sessionId: string,
+): void {
+  const project = config.projects[projectId];
+  if (!project) return;
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
+  }
 }
 
 function buildSidecarRuntimeEnv(
@@ -3217,6 +3231,11 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
+    requestGitHubMergeConflictRestoreReplays(
+      this.config,
+      persistedRestored.project,
+      persistedRestored.id,
+    );
     this.logEvent("session.restore.completed", {
       level: "info",
       sessionId,
