@@ -34,7 +34,6 @@ function command(id: string, label: string, detail: string): AgentHotkey {
 }
 
 const COMMON_HOTKEYS: AgentHotkey[] = [
-  shortcut("slash", "Slash", "/", "/", "Start a slash command"),
   shortcut("escape", "Esc", "Esc", "\x1b", "Back out of the current terminal state"),
   shortcut("switch-mode", "Switch mode", "Shift+Tab", "\x1b[Z", "Switch the current work mode"),
 ];

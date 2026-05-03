@@ -33,6 +33,7 @@ export interface SessionPrBinding {
 }
 
 export type SessionArtifactKind = "image" | "video" | "download";
+export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {
   id: string;
@@ -40,6 +41,8 @@ export interface SessionArtifact {
   size: number;
   mimeType: string;
   kind: SessionArtifactKind;
+  origin: SessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -381,6 +384,24 @@ export interface UpdateSessionSlotsRequest {
 export interface ProjectListEntry {
   id: string;
   name: string;
+}
+
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: AgentName;
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
 }
 
 export interface ConnectProjectConfigRequest {

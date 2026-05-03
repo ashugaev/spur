@@ -34,6 +34,9 @@ function normalizeSlotLabel(label: string): string {
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
   }
+  if (normalized === "pr" || normalized === "github_pr") {
+    return "github-pr";
+  }
   return normalized;
 }
 
@@ -157,8 +160,8 @@ export function withSessionSlotInstructions(prompt: string): string {
 
 Session metadata:
 - Update the session title and related links as soon as you know them.
-- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
+- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link github-pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
+- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link github-pr=https://...\` to add them without changing the title.
 - Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }

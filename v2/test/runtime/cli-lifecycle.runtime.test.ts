@@ -1684,7 +1684,7 @@ projects:
       "--link",
       "tracker=https://tracker.example.com/TASK-9",
       "--link",
-      "pr=https://github.com/org/repo/pull/9",
+      "github-pr=https://github.com/org/repo/pull/9",
     ]);
 
     const listed = await pollUntil(
@@ -1713,17 +1713,17 @@ projects:
       title: "Investigate status bar links",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
-        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
     expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("pr ##9");
+    expect(statusRight).toContain("github pr ##9");
     expect(statusRight).toContain(
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
     expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
+      "#[hyperlink=https://github.com/org/repo/pull/9]github pr ##9#[hyperlink=]",
     );
     expect(mouseBinding).toContain("MouseUp1StatusRight");
     expect(mouseBinding).toContain("open-link.js");

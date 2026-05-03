@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
@@ -239,6 +240,22 @@ export function DirectTerminal({
       }
     },
     [agent, sendTerminalInput, sendWithAck],
+  );
+
+  const submitSlash = useCallback(
+    async (text: string) => {
+      try {
+        setSubmitError(null);
+        for (const payload of buildSubmittedTextPayloads(agent, text)) {
+          await sendWithAck(payload);
+        }
+      } catch (slashError) {
+        setSubmitError(
+          slashError instanceof Error ? slashError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [agent, sendWithAck],
   );
 
   useEffect(() => {
@@ -657,6 +674,11 @@ export function DirectTerminal({
               </div>
             ) : null}
           </div>
+          <SlashSuggestions
+            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
+            onSelect={(entry) => void submitSlash(entry.insertText)}
+          />
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}

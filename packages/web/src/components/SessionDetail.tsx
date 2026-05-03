@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
@@ -23,6 +24,7 @@ import {
   extractLinkId,
   GithubIcon,
   JiraIcon,
+  isGitHubPrLinkLabel,
   prStateColor,
   usePrInfo,
 } from "@/lib/link-icons";
@@ -52,7 +54,8 @@ import {
 } from "@/lib/types";
 
 function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
+  const isPrLink = isGitHubPrLinkLabel(link.label);
+  const prUrl = isPrLink ? link.url : undefined;
   const prInfo = usePrInfo(prUrl);
   const color = prStateColor(prInfo.state);
 
@@ -63,11 +66,11 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       rel="noreferrer"
       target="_blank"
     >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
+      {isPrLink ? <GithubIcon /> : <JiraIcon />}
       <span className="text-[10px]" style={color ? { color } : undefined}>
         {extractLinkId(link)}
       </span>
-      {link.label === "pr" ? (
+      {isPrLink ? (
         <>
           <CiStatusDot status={prInfo.ciStatus} />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
@@ -75,6 +78,10 @@ function LinkBadge({ link }: { link: { label: string; url: string } }) {
       ) : null}
     </a>
   );
+}
+
+function displayLinkLabel(label: string): string {
+  return isGitHubPrLinkLabel(label) ? "github pr" : label;
 }
 
 function PlayIcon() {
@@ -214,6 +221,7 @@ interface LogEntry {
 }
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
+type ArtifactCategory = "agent" | "attached" | "system";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -446,6 +454,26 @@ interface DialogMessage {
   pending?: boolean;
 }
 
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
+
 interface ToastState {
   id: number;
   tone: "success" | "error";
@@ -538,7 +566,15 @@ function logBadgeClass(level: string): string {
   return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
 }
 
-function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string }) {
+function LogEntryRow({
+  entry,
+  sessionId,
+  visibleArtifactIds,
+}: {
+  entry: LogEntry;
+  sessionId: string;
+  visibleArtifactIds: ReadonlySet<string>;
+}) {
   const fromState = readLogDetail(entry.details, "fromState");
   const toState = readLogDetail(entry.details, "toState");
   const source = readLogDetail(entry.details, "source");
@@ -557,6 +593,8 @@ function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string 
           ? `sidecar ${sidecarName}`
           : "sidecar"
         : null;
+  const showHistorySnapshot =
+    historyArtifactId !== null && visibleArtifactIds.has(historyArtifactId);
 
   return (
     <article
@@ -589,7 +627,7 @@ function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string 
               {formatStateLabel(toState ?? "")}
             </span>
           </div>
-          {historyArtifactId ? (
+          {showHistorySnapshot ? (
             <a
               className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={historyArtifactId}
@@ -690,9 +728,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
+  const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
@@ -776,6 +816,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, []);
 
   useEffect(() => {
+    setArtifactCategory("agent");
+  }, [sessionId]);
+
+  useEffect(() => {
     if (!session) return;
     setArtifactPreviewStates((current) => {
       const next: Record<string, ArtifactPreviewState> = {};
@@ -794,13 +838,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedArtifact]);
-
-  useEffect(() => {
-    if (!selectedArtifact || !session) return;
-    if (!session.artifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
-      setSelectedArtifact(null);
-    }
-  }, [selectedArtifact, session]);
 
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
@@ -970,6 +1007,37 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
+  const agentArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
+      ) ?? [],
+    [session],
+  );
+  const attachedArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
+      ) ?? [],
+    [session],
+  );
+  const systemArtifacts = useMemo(
+    () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
+    [session],
+  );
+  const visibleArtifacts = useMemo(
+    () =>
+      artifactCategory === "attached"
+        ? attachedArtifacts
+        : artifactCategory === "system"
+          ? systemArtifacts
+          : agentArtifacts,
+    [artifactCategory, agentArtifacts, attachedArtifacts, systemArtifacts],
+  );
+  const visibleArtifactIds = useMemo(
+    () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
+    [visibleArtifacts],
+  );
   const startupArtifacts = useMemo(() => {
     const startupAttachmentIds = session?.startupAttachmentIds ?? [];
     return (
@@ -981,6 +1049,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     [session, sidecarLinkLabels],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
+
+  useEffect(() => {
+    if (!selectedArtifact || !session) return;
+    if (!visibleArtifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
+      setSelectedArtifact(null);
+    }
+  }, [selectedArtifact, session, visibleArtifacts]);
+
+  useEffect(() => {
+    const activeCount =
+      artifactCategory === "attached"
+        ? attachedArtifacts.length
+        : artifactCategory === "system"
+          ? systemArtifacts.length
+          : agentArtifacts.length;
+    if (artifactCategory !== "agent" && activeCount === 0) {
+      setArtifactCategory("agent");
+    }
+  }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -1093,7 +1180,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || l.label === "pr")
+                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
                 .map((link) => (
                   <LinkBadge key={`${link.label}-${link.url}`} link={link} />
                 ))}
@@ -1286,6 +1373,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         )
                       }
                       placeholder="Message to the running agent..."
+                      textareaRef={messageRef}
                       value={message}
                       voice={voice}
                     />
@@ -1295,6 +1383,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
                       </span>
                       <div className="flex items-center gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            session
+                              ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+                              : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
+                          }
+                        />
                         <InputHistoryButton
                           entries={messageHistory.entries}
                           onSelect={setMessage}
@@ -1345,7 +1443,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {link.label}
+                        {displayLinkLabel(link.label)}
                       </a>
                     ))}
                   </div>
@@ -1357,37 +1455,83 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
                     <span className="text-[var(--color-text-secondary)]">
-                      {session.artifacts.length}
+                      {visibleArtifacts.length}
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                    {session.artifacts.map((artifact) => {
-                      const artifactHref = artifactUrl(session.id, artifact.id);
-                      const previewState = artifactPreviewStates[artifact.id] ?? "loading";
-                      return (
-                        <ArtifactCard
-                          key={`${session.id}-${artifact.id}`}
-                          artifact={artifact}
-                          artifactHref={artifactHref}
-                          onPreview={setSelectedArtifact}
-                          onPreviewError={(artifactId) =>
-                            setArtifactPreviewStates((current) => ({
-                              ...current,
-                              [artifactId]: "error",
-                            }))
-                          }
-                          onPreviewReady={(artifactId) =>
-                            setArtifactPreviewStates((current) => ({
-                              ...current,
-                              [artifactId]: "ready",
-                            }))
-                          }
-                          previewState={previewState}
-                        />
-                      );
-                    })}
-                  </div>
+                  {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
+                    <div
+                      aria-label="Artifact category"
+                      className="mb-3 inline-flex border border-[var(--color-border-default)]"
+                      role="tablist"
+                    >
+                      {(
+                        [
+                          ["agent", `Agent (${agentArtifacts.length})`],
+                          ...(attachedArtifacts.length > 0
+                            ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
+                            : []),
+                          ...(systemArtifacts.length > 0
+                            ? ([["system", `System (${systemArtifacts.length})`]] as const)
+                            : []),
+                        ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                      ).map(([value, label]) => {
+                        const active = artifactCategory === value;
+                        return (
+                          <button
+                            key={value}
+                            aria-pressed={active}
+                            className={`border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+                              active
+                                ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+                                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+                            }`}
+                            onClick={() => setArtifactCategory(value)}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {visibleArtifacts.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                      {visibleArtifacts.map((artifact) => {
+                        const artifactHref = artifactUrl(session.id, artifact.id);
+                        const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                        return (
+                          <ArtifactCard
+                            key={`${session.id}-${artifact.id}`}
+                            artifact={artifact}
+                            artifactHref={artifactHref}
+                            onPreview={setSelectedArtifact}
+                            onPreviewError={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "error",
+                              }))
+                            }
+                            onPreviewReady={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "ready",
+                              }))
+                            }
+                            previewState={previewState}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="py-2 text-[var(--color-text-secondary)]">
+                      {artifactCategory === "attached"
+                        ? "No attached artifacts yet."
+                        : artifactCategory === "system"
+                          ? "No system artifacts yet."
+                          : "No agent artifacts yet."}
+                    </p>
+                  )}
                 </section>
               ) : null}
 
@@ -1610,6 +1754,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         key={`${entry.timestamp}-${entry.event}-${i}`}
                         entry={entry}
                         sessionId={session.id}
+                        visibleArtifactIds={visibleArtifactIds}
                       />
                     ))}
                   </div>

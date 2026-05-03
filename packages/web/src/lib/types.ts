@@ -34,6 +34,7 @@ export interface SpurSessionLink {
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {
   id: string;
@@ -41,6 +42,8 @@ export interface SpurSessionArtifact {
   size: number;
   mimeType: string;
   kind: SpurSessionArtifactKind;
+  origin: SpurSessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -88,6 +91,24 @@ export interface SpurSessionView {
 export interface ProjectInfo {
   id: string;
   name: string;
+}
+
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: "claude" | "codex";
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
 }
 
 export interface SpurSessionsResponse {

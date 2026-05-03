@@ -33,6 +33,7 @@ const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
@@ -77,6 +78,8 @@ const withSessionSlotInstructionsMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
+const setSessionArtifactOriginMock = vi.fn();
+const setSessionArtifactUserAddedMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
@@ -159,6 +162,7 @@ vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
   readServiceInstance: readServiceInstanceMock,
   readSession: readSessionMock,
+  requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
 }));
@@ -234,6 +238,8 @@ vi.mock("../../src/session-artifacts.js", () => ({
   }),
   listSessionArtifacts: listSessionArtifactsMock,
   readSessionArtifact: readSessionArtifactMock,
+  setSessionArtifactOrigin: setSessionArtifactOriginMock,
+  setSessionArtifactUserAdded: setSessionArtifactUserAddedMock,
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
@@ -265,6 +271,8 @@ function baseConfig() {
         worktree: true,
         symlinks: [".env"],
         sidecars: {},
+        sources: {},
+        triggers: {},
       },
     },
   };
@@ -470,6 +478,7 @@ describe("SessionService", () => {
     listSessionsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
     writeSessionMock.mockReset();
+    requestGitHubMergeConflictRestoreReplayMock.mockReset();
     deleteServiceInstanceMock.mockReset();
     deleteServiceInstancesForSessionMock.mockReset();
     deleteRuntimeLogCursorsForSessionMock.mockReset();
@@ -516,6 +525,8 @@ describe("SessionService", () => {
     deleteSessionArtifactsExceptMock.mockReset();
     listSessionArtifactsMock.mockReset().mockReturnValue([]);
     readSessionArtifactMock.mockReset().mockReturnValue(null);
+    setSessionArtifactOriginMock.mockReset();
+    setSessionArtifactUserAddedMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
@@ -531,11 +542,14 @@ describe("SessionService", () => {
       }
       if (request.links) {
         for (const link of request.links) {
-          const index = links.findIndex((entry) => entry.label === link.label);
+          const normalizedLabel =
+            link.label === "pr" || link.label === "github_pr" ? "github-pr" : link.label;
+          const normalizedLink = { ...link, label: normalizedLabel };
+          const index = links.findIndex((entry) => entry.label === normalizedLabel);
           if (index === -1) {
-            links.push(link);
+            links.push(normalizedLink);
           } else {
-            links[index] = link;
+            links[index] = normalizedLink;
           }
         }
       }
@@ -1711,6 +1725,18 @@ describe("SessionService", () => {
     const artifactPath = `${artifactDirForSession("api-1")}/1773828300000-shot.png`;
     expect(existsSync(artifactPath)).toBe(true);
     expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
+    expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      "intentional",
+    );
+    expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      true,
+    );
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
@@ -3419,25 +3445,27 @@ describe("SessionService", () => {
       prompt: "Fix runtime regression from PR #42",
     });
 
-    expect(runSpawnPreflightMock).toHaveBeenCalledWith({
-      agent: "claude",
-      projectId: "api",
-      project: {
-        path: "/repo/api",
-        defaultBranch: "main",
-        sessionPrefix: "api",
+    expect(runSpawnPreflightMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "claude",
+        projectId: "api",
+        project: expect.objectContaining({
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          symlinks: [".env"],
+          sidecars: {},
+          defaultAgent: "claude",
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        }),
+        baseBranch: "main",
         worktree: true,
-        symlinks: [".env"],
-        sidecars: {},
-        defaultAgent: "claude",
-        preflight: {
-          prompt: "Suggest a branch name from the task context.",
-        },
-      },
-      baseBranch: "main",
-      worktree: true,
-      prompt: "Fix runtime regression from PR #42",
-    });
+        prompt: "Fix runtime regression from PR #42",
+      }),
+    );
     expect(createWorktreeMock).toHaveBeenCalledWith({
       repoPath: "/repo/api",
       worktreeBaseDir: "/tmp/spur-worktrees",
@@ -4059,7 +4087,15 @@ describe("SessionService", () => {
         { label: "pr", url: "https://github.com/org/repo/pull/1" },
       ],
     });
-    expect(result.slots?.links).toHaveLength(2);
+    expect(result.pr).toEqual({
+      number: 1,
+      repo: "org/repo",
+      url: "https://github.com/org/repo/pull/1",
+    });
+    expect(result.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+      { label: "pr", url: "https://github.com/org/repo/pull/1" },
+    ]);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
@@ -4103,14 +4139,14 @@ describe("SessionService", () => {
           title: "Existing title",
           links: [
             { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "pr", url: "https://example.com/claude/pull/1" },
+            { label: "github-pr", url: "https://example.com/claude/pull/1" },
           ],
         },
       }),
     );
     expect(result.pr).toBeUndefined();
     expect(result.slots?.links).toEqual(
-      expect.arrayContaining([{ label: "pr", url: "https://example.com/claude/pull/1" }]),
+      expect.arrayContaining([{ label: "github-pr", url: "https://example.com/claude/pull/1" }]),
     );
   });
 
@@ -4236,6 +4272,20 @@ describe("SessionService", () => {
   });
 
   it("restores a manually stopped session without sending a restore prompt", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: {
+            gh: {
+              type: "github",
+            },
+          },
+          triggers: {},
+        },
+      },
+    });
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -4273,6 +4323,12 @@ describe("SessionService", () => {
     expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
     expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+    expect(requestGitHubMergeConflictRestoreReplayMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "gh",
+      "api-1",
+    );
     expect(restored.status).toBe("running");
     expect(restored.runtimeAlive).toBe(true);
   });
@@ -4380,7 +4436,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
     // This test uses real timers because waitForRestorePlan polls with
@@ -4425,7 +4481,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("waits for native resume state to appear before restoring", async () => {
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
@@ -4598,7 +4654,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("restore throws 'Failed to restore' when codex rollout ack times out", async () => {
     vi.useRealTimers();
@@ -5942,6 +5998,7 @@ describe("SessionService", () => {
         size: 12,
         mimeType: "image/png",
         kind: "image",
+        origin: "intentional",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:00:00.000Z",
       });

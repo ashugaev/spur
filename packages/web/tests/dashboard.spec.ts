@@ -918,6 +918,44 @@ test.describe("D7: Spawn modal", () => {
     );
   });
 
+  test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-slash-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              insertText: "/compact",
+              detail: "Compact the chat",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await expect(page.getByRole("button", { name: "Slash", exact: true })).toHaveText("/");
+    await page.getByRole("button", { name: "Slash", exact: true }).click();
+    await page.getByRole("menuitem", { name: /\/compact/i }).click();
+
+    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");
+  });
+
   test("Spawn button disabled when project field is empty", async ({ page }) => {
     await mockSessions(page, [], []);
     await page.goto("/");

@@ -58,6 +58,55 @@ test.describe("R1: Mobile viewport", () => {
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).toBeVisible();
   });
+
+  test("spawn slash suggestions stay within the viewport on mobile", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              insertText: "/compact",
+              detail: "Compact the chat",
+              source: "built-in",
+              kind: "command",
+            },
+            {
+              id: "agents",
+              label: "/agents",
+              insertText: "/agents",
+              detail: "Manage agents",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByRole("button", { name: "Slash", exact: true }).click();
+
+    const menu = page.getByRole("menu", { name: "Slash suggestions" });
+    await expect(menu).toBeVisible();
+    const bounds = await menu.boundingBox();
+    expect(bounds).not.toBeNull();
+    if (!bounds) {
+      throw new Error("Expected mobile slash suggestions menu bounds");
+    }
+
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  });
 });
 
 // R2: Tablet
