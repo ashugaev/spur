@@ -32,6 +32,7 @@ export interface SpurSessionLink {
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {
   id: string;
@@ -39,6 +40,8 @@ export interface SpurSessionArtifact {
   size: number;
   mimeType: string;
   kind: SpurSessionArtifactKind;
+  origin: SpurSessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }

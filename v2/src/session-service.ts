@@ -91,6 +91,8 @@ import {
   ensureSessionArtifactsDir,
   listSessionArtifacts,
   readSessionArtifact,
+  setSessionArtifactOrigin,
+  setSessionArtifactUserAdded,
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
@@ -2716,6 +2718,8 @@ export class SessionService {
       }
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
+      setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
+      setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
       stored.push({ id: filename, path: filePath });
     }
     return stored;
@@ -2770,6 +2774,7 @@ export class SessionService {
       );
       const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
       copyFileSync(sourcePath, join(artifactDir, artifactId));
+      setSessionArtifactOrigin(this.config.dataDir, session.id, artifactId, "automatic");
       return artifactId;
     } catch {
       return null;

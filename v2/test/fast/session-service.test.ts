@@ -71,6 +71,8 @@ const withSessionSlotInstructionsMock = vi.fn();
 const deleteSessionArtifactsExceptMock = vi.fn();
 const listSessionArtifactsMock = vi.fn();
 const readSessionArtifactMock = vi.fn();
+const setSessionArtifactOriginMock = vi.fn();
+const setSessionArtifactUserAddedMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
@@ -222,6 +224,8 @@ vi.mock("../../src/session-artifacts.js", () => ({
   }),
   listSessionArtifacts: listSessionArtifactsMock,
   readSessionArtifact: readSessionArtifactMock,
+  setSessionArtifactOrigin: setSessionArtifactOriginMock,
+  setSessionArtifactUserAdded: setSessionArtifactUserAddedMock,
   withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
@@ -463,6 +467,8 @@ describe("SessionService", () => {
     deleteSessionArtifactsExceptMock.mockReset();
     listSessionArtifactsMock.mockReset().mockReturnValue([]);
     readSessionArtifactMock.mockReset().mockReturnValue(null);
+    setSessionArtifactOriginMock.mockReset();
+    setSessionArtifactUserAddedMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
@@ -1614,6 +1620,18 @@ describe("SessionService", () => {
     const artifactPath = `${artifactDirForSession("api-1")}/1773828300000-shot.png`;
     expect(existsSync(artifactPath)).toBe(true);
     expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
+    expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      "intentional",
+    );
+    expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      true,
+    );
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
@@ -5756,6 +5774,7 @@ describe("SessionService", () => {
         size: 12,
         mimeType: "image/png",
         kind: "image",
+        origin: "intentional",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:00:00.000Z",
       });

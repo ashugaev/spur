@@ -33,6 +33,7 @@ export interface SessionPrBinding {
 }
 
 export type SessionArtifactKind = "image" | "video" | "download";
+export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {
   id: string;
@@ -40,6 +41,8 @@ export interface SessionArtifact {
   size: number;
   mimeType: string;
   kind: SessionArtifactKind;
+  origin: SessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }

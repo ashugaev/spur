@@ -238,6 +238,7 @@ describe("startServer", () => {
         size: 14,
         mimeType: "image/png",
         kind: "image",
+        origin: "intentional",
         createdAt: "2026-04-15T00:00:00.000Z",
         updatedAt: "2026-04-15T00:00:00.000Z",
         path: artifactPath,

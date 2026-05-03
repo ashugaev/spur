@@ -595,6 +595,7 @@ describe("SessionDetail voice input", () => {
                 size: 12,
                 mimeType: "image/png",
                 kind: "image",
+                origin: "intentional",
                 createdAt: "2026-04-02T10:00:00.000Z",
                 updatedAt: "2026-04-02T10:00:00.000Z",
               },
@@ -1460,12 +1461,30 @@ describe("SessionDetail logs", () => {
     window.history.replaceState(null, "", "/sessions/api-a1");
   });
 
-  it("renders state transition logs with a history snapshot link", async () => {
+  it("hides automatic history snapshot links in the default agent view", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
 
       if (url === "/api/sessions/api-a1") {
-        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
       }
 
       if (url === "/api/sessions/api-a1/conversation") {
@@ -1512,10 +1531,173 @@ describe("SessionDetail logs", () => {
     expect(screen.getByText("waiting")).toBeInTheDocument();
     expect(screen.getByText("needs input")).toBeInTheDocument();
     expect(screen.getByText("source jsonl")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /history snapshot/i })).not.toBeInTheDocument();
+  });
+
+  it("shows automatic history snapshot links after switching to the system view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-output.txt",
+                  name: "agent-output.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ messages: [] })), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/logs") {
+        return new Response(
+          JSON.stringify([
+            {
+              timestamp: "2026-04-02T10:01:00.000Z",
+              event: "session.state.transition",
+              level: "info",
+              message: "Status changed from waiting to needs_input",
+              details: {
+                fromState: "waiting",
+                toState: "needs_input",
+                source: "jsonl",
+                historyArtifactId:
+                  "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+              },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "System (1)" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+
+    expect(await screen.findByText("Status transition")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
       "href",
       "/api/sessions/api-a1/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
     );
+  });
+
+  it("keeps automatic history snapshot links hidden in the attached view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "upload.png",
+                  name: "upload.png",
+                  size: 1400,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  addedByUser: true,
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture({ messages: [] })), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/logs") {
+        return new Response(
+          JSON.stringify([
+            {
+              timestamp: "2026-04-02T10:01:00.000Z",
+              event: "session.state.transition",
+              level: "info",
+              message: "Status changed from waiting to needs_input",
+              details: {
+                fromState: "waiting",
+                toState: "needs_input",
+                source: "jsonl",
+                historyArtifactId:
+                  "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+              },
+            },
+          ]),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Attached (1)" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Attached (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: /^logs$/i }));
+
+    expect(await screen.findByText("Status transition")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /history snapshot/i })).not.toBeInTheDocument();
   });
 });
 
@@ -1539,6 +1721,7 @@ describe("SessionDetail artifacts", () => {
                   size: 1200,
                   mimeType: "image/png",
                   kind: "image",
+                  origin: "intentional",
                   createdAt: "2026-04-02T10:00:00.000Z",
                   updatedAt: "2026-04-02T10:00:00.000Z",
                 },
@@ -1548,6 +1731,7 @@ describe("SessionDetail artifacts", () => {
                   size: 2200,
                   mimeType: "video/webm",
                   kind: "video",
+                  origin: "intentional",
                   createdAt: "2026-04-02T10:00:00.000Z",
                   updatedAt: "2026-04-02T10:00:00.000Z",
                 },
@@ -1557,6 +1741,7 @@ describe("SessionDetail artifacts", () => {
                   size: 3200,
                   mimeType: "text/plain; charset=utf-8",
                   kind: "download",
+                  origin: "intentional",
                   createdAt: "2026-04-02T10:00:00.000Z",
                   updatedAt: "2026-04-02T10:00:00.000Z",
                 },
@@ -1599,6 +1784,301 @@ describe("SessionDetail artifacts", () => {
       "/api/sessions/api-a1/artifacts/shot.png",
     );
   });
+
+  it("hides system artifacts by default and shows them after toggling", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-output.txt",
+                  name: "agent-output.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "agent-history.jsonl",
+                  name: "agent-history.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-output.txt")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Agent (1)" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("agent-output.txt")).not.toBeInTheDocument();
+  });
+
+  it("shows user-added artifacts only in the attached view", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              artifacts: [
+                {
+                  id: "agent-output.txt",
+                  name: "agent-output.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "later-upload.png",
+                  name: "later-upload.png",
+                  size: 2200,
+                  mimeType: "image/png",
+                  kind: "image",
+                  origin: "intentional",
+                  addedByUser: true,
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-output.txt")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("later-upload.png")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Attached (1)" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("later-upload.png")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("agent-output.txt")).not.toBeInTheDocument();
+  });
+
+  it("resets back to agent artifacts when switching to a new session", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              id: "api-a1",
+              artifacts: [
+                {
+                  id: "agent-a1.txt",
+                  name: "agent-a1.txt",
+                  size: 3200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+                {
+                  id: "agent-history-a1.jsonl",
+                  name: "agent-history-a1.jsonl",
+                  size: 2200,
+                  mimeType: "application/octet-stream",
+                  kind: "download",
+                  origin: "automatic",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (url === "/api/sessions/api-b2") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              id: "api-b2",
+              artifacts: [
+                {
+                  id: "agent-b2.txt",
+                  name: "agent-b2.txt",
+                  size: 4200,
+                  mimeType: "text/plain; charset=utf-8",
+                  kind: "download",
+                  origin: "intentional",
+                  createdAt: "2026-04-02T10:00:00.000Z",
+                  updatedAt: "2026-04-02T10:00:00.000Z",
+                },
+              ],
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+
+      if (
+        url === "/api/sessions/api-a1/conversation" ||
+        url === "/api/sessions/api-b2/conversation"
+      ) {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { rerender } = render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-a1.txt")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-history-a1.jsonl")).toBeInTheDocument();
+    });
+
+    rerender(<SessionDetail sessionId="api-b2" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-b2.txt")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("agent-history-a1.jsonl")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /system \(0\)/i })).not.toBeInTheDocument();
+  });
+
+  it("self-heals back to agent artifacts when system artifacts disappear on refresh", async () => {
+    let sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionPayload), { status: 200 });
+      }
+
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-output.txt")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "System (1)" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-history.jsonl")).toBeInTheDocument();
+    });
+
+    sessionPayload = sessionFixture({
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 4_100));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("agent-output.txt")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("agent-history.jsonl")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /system \(/i })).not.toBeInTheDocument();
+  }, 12_000);
 });
 
 describe("SessionDetail display state", () => {
