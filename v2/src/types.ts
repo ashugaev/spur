@@ -1,7 +1,14 @@
 export type AgentName = "claude" | "codex";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
+export type SessionStatus =
+  | "spawning"
+  | "running"
+  | "stopped"
+  | "paused"
+  | "errored"
+  | "completed"
+  | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type StateSource = "jsonl" | "hook" | "status";
 
@@ -19,6 +26,12 @@ export interface SessionLink {
   label: string;
   url: string;
 }
+export interface SessionPrBinding {
+  number: number;
+  repo: string;
+  url: string;
+}
+
 export type SessionArtifactKind = "image" | "video" | "download";
 
 export interface SessionArtifact {
@@ -48,6 +61,16 @@ export const GITHUB_SIGNAL_KINDS = [
 ] as const;
 export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
 
+export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
+
+export interface GitHubWorkItemEventData {
+  externalId: string;
+  url: string;
+  number: number;
+  title: string;
+  repo: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -60,6 +83,7 @@ export interface CronSourceConfig extends BaseSourceConfig {
 export interface GitHubSourceConfig extends BaseSourceConfig {
   type: "github";
   intervalMs: number;
+  query?: string;
 }
 
 export interface ServiceRuleConfig {
@@ -225,13 +249,16 @@ export interface SessionRecord {
   planMode?: boolean;
   agentSessionId?: string;
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   branchSource?: BranchSource;
+  pr?: SessionPrBinding;
   worktree: boolean;
   worktreePath: string;
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
+  stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
   retainInList?: boolean;
@@ -300,12 +327,14 @@ export interface PreflightResponse {
 export interface SpawnSessionRequest {
   project: string;
   prompt?: string;
+  attachments?: SendMessageAttachment[];
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   configPath?: string;
+  slots?: { links?: SessionLink[] };
 }
 
 export interface SendMessageAttachment {
@@ -336,6 +365,9 @@ export interface KillSessionRequest {
 }
 
 export interface RespawnSessionRequest {
+  prompt?: string;
+  attachments?: SendMessageAttachment[];
+  startupAttachmentIds?: string[];
   terminateSessionId?: string;
 }
 

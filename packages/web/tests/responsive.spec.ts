@@ -182,6 +182,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
       page.getByRole("button", { name: /Needs Input/i }),
       page.getByRole("button", { name: /Working/i }),
       page.getByRole("button", { name: /Waiting/i }),
+      page.getByRole("button", { name: /Stopped/i }),
       page.getByRole("button", { name: /Completed/i }),
     ];
 

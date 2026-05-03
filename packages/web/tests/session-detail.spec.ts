@@ -1,5 +1,5 @@
 import { test, expect, devices, type Page } from "playwright/test";
-import { makeWorkingSession, makeCompletedSession } from "./fixtures.js";
+import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -125,6 +125,16 @@ function mockSessionConversationPayload(
   });
 }
 
+function mockSessionLogs(page: Page, sessionId: string, payload: Array<Record<string, unknown>>) {
+  return page.route(`**/api/sessions/${sessionId}/logs`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  });
+}
+
 function mockVoiceStatus(page: Page) {
   return page.route("**/api/runtime/voice", (route) => {
     void route.fulfill({
@@ -187,6 +197,14 @@ test.describe("S1: Session detail header", () => {
     const classList = await title.getAttribute("class");
     expect(classList).toContain("uppercase");
     expect(classList).toContain("font-bold");
+  });
+
+  test("tab title shows only the session id", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s1-title" });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page).toHaveTitle(session.id);
   });
 
   test("activity dot visible", async ({ page }) => {
@@ -266,6 +284,70 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("button", { name: /^terminal$/i })).toHaveCount(0);
   });
 
+  test("Edit & Respawn accepts pasted images and forwards startup image selections", async ({
+    page,
+  }) => {
+    let respawnBody: Record<string, unknown> | null = null;
+    const session = makeCompletedSession({
+      id: "detail-s2-respawn-1",
+      prompt: "Retry with screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      artifacts: [
+        {
+          id: "1715000000000-source.png",
+          name: "1715000000000-source.png",
+          size: 12,
+          mimeType: "image/png",
+          kind: "image",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionDetail(page, makeSpawningSession({ id: "detail-s2-respawn-next" }));
+    await page.route(`**/api/sessions/${session.id}/respawn`, async (route) => {
+      respawnBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(makeSpawningSession({ id: "detail-s2-respawn-next" })),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: /edit & respawn/i }).click();
+    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    const textarea = page.getByPlaceholder("Edit the initial message...");
+    await expect(textarea).toHaveValue("Retry with screenshot");
+    await textarea.fill("Retry with a fresh screenshot");
+    await page.evaluate(() => {
+      const textarea = document.querySelector(
+        'textarea[placeholder="Edit the initial message..."]',
+      );
+      if (!textarea) return;
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "respawn.png", { type: "image/png" }));
+      textarea.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: dt,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+
+    await expect(page.locator('img[alt="respawn.png"]')).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: /^respawn$/i }).click();
+    await page.waitForURL("**/sessions/detail-s2-respawn-next");
+
+    expect(respawnBody).toMatchObject({
+      prompt: "Retry with a fresh screenshot",
+      startupAttachmentIds: ["1715000000000-source.png"],
+      attachments: [{ name: "respawn.png", data: expect.any(String) }],
+    });
+  });
+
   test("link workspace access entries are visible when configured", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s2-7",
@@ -286,6 +368,41 @@ test.describe("S2: Actions bar", () => {
     await expect(page.getByRole("link", { name: /^open web ide$/i })).toHaveAttribute(
       "href",
       "https://code.example.com/?folder=%2Ftmp%2Fworktrees%2Fdetail-s2-7",
+    );
+  });
+});
+
+// S2a: Logs modal
+test.describe("S2a: Logs modal", () => {
+  test("shows status transition entries with history snapshot download", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s2a-1" });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await mockSessionLogs(page, session.id, [
+      {
+        timestamp: "2026-04-02T10:01:00.000Z",
+        event: "session.state.transition",
+        level: "info",
+        message: "Status changed from waiting to needs_input",
+        details: {
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+        },
+      },
+    ]);
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^logs$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
+    await expect(page.getByText("Status transition")).toBeVisible();
+    await expect(page.getByText("waiting")).toBeVisible();
+    await expect(page.getByText("needs input")).toBeVisible();
+    await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
+      "href",
+      `/api/sessions/${session.id}/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl`,
     );
   });
 });
@@ -954,14 +1071,14 @@ test.describe("S7: Display state override", () => {
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 
-  test("completed session shows paused label (stopped state), not working", async ({ page }) => {
+  test("completed session shows stopped label, not working", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s7-2" });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "working");
     await page.goto(`/sessions/${session.id}`);
 
     const header = page.locator("header").first();
-    await expect(header.getByText("paused", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("stopped", { exact: true }).first()).toBeVisible();
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 

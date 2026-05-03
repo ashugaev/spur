@@ -1,6 +1,7 @@
 export type SpurSessionStatus =
   | "spawning"
   | "running"
+  | "stopped"
   | "paused"
   | "errored"
   | "completed"
@@ -55,6 +56,7 @@ export interface SpurSessionView {
   project: string;
   agent: "claude" | "codex";
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
   tmuxSession: string | null;
@@ -109,7 +111,7 @@ export interface SpurSessionsResponse {
   projects?: ProjectInfo[];
 }
 
-export type AttentionLevel = "respond" | "pending" | "working" | "done";
+export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
 
 export interface DashboardSession {
   id: string;
@@ -118,6 +120,7 @@ export interface DashboardSession {
   agent: "claude" | "codex";
   title: string | null;
   prompt: string;
+  startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
   tmuxSession: string | null;
@@ -159,6 +162,7 @@ export function toDashboardSession(
     agent: session.agent,
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
     tmuxSession: session.tmuxSession ?? null,
@@ -196,7 +200,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
-  if (session.status === "paused") return true;
+  if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
 }
 
@@ -244,8 +248,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.state === "error" ||
     Boolean(session.error) ||
     hasServiceProblems(session) ||
-    !session.workspaceExists ||
-    (!session.runtimeAlive && session.status === "running")
+    !session.workspaceExists
   ) {
     return "respond";
   }
@@ -254,7 +257,16 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "working";
   }
 
-  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.state === "stopped" ||
+    !session.runtimeAlive
+  ) {
+    return "stopped";
+  }
+
+  if (session.state === "waiting") {
     return "pending";
   }
 

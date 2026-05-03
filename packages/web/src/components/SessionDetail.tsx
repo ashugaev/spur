@@ -3,14 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
-import { INPUT_CLASS } from "@/design/classes";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -34,6 +34,11 @@ import {
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import {
   canComplete,
   canPause,
@@ -206,32 +211,13 @@ const POLL_INTERVAL_MS = 4_000;
 const SESSION_MESSAGE_HISTORY_STORAGE_KEY = "spur:input-history:session-message";
 const HARD_WRAP_TEXT_CLASS = "min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]";
 
-const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-
-function sanitizeFilename(name: string): string {
-  return name.replace(/[^\w.-]/g, "_");
-}
-
-async function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
-interface Attachment {
-  file: File;
-  preview: string;
-}
-
 interface LogEntry {
   timestamp: string;
   event: string;
   level: string;
   message?: string;
   sessionId?: string;
+  details?: Record<string, unknown>;
 }
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
@@ -550,13 +536,114 @@ function ToastBanner({ toast }: { toast: ToastState }) {
   );
 }
 
-function formatLogTime(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return iso;
+function readLogDetail(details: Record<string, unknown> | undefined, key: string): string | null {
+  const value = details?.[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function formatLogEventLabel(event: string): string {
+  return event.replaceAll(".", " ");
+}
+
+function formatStateLabel(state: string): string {
+  return state.replaceAll("_", " ");
+}
+
+function logRowAccent(level: string): string {
+  if (level === "error") return "border-l-[var(--color-status-error)]";
+  if (level === "warn") return "border-l-[var(--color-status-attention)]";
+  return "border-l-[var(--color-status-working)]";
+}
+
+function logBadgeClass(level: string): string {
+  if (level === "error") {
+    return "border-[var(--color-status-error)] text-[var(--color-status-error)]";
   }
+  if (level === "warn") {
+    return "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
+  }
+  return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
+}
+
+function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string }) {
+  const fromState = readLogDetail(entry.details, "fromState");
+  const toState = readLogDetail(entry.details, "toState");
+  const source = readLogDetail(entry.details, "source");
+  const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
+  const serviceId = readLogDetail(entry.details, "serviceId");
+  const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const isStateTransition =
+    entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const runtimeLabel =
+    entry.event === "service.output"
+      ? serviceId
+        ? `service ${serviceId}`
+        : "service"
+      : entry.event === "sidecar.output"
+        ? sidecarName
+          ? `sidecar ${sidecarName}`
+          : "sidecar"
+        : null;
+
+  return (
+    <article
+      className={`border-l-2 border-y border-r border-[var(--color-border-default)] bg-[var(--color-bg-surface)] ${logRowAccent(entry.level)}`}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-subtle)] px-3 py-2 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+        <span>{formatAbsoluteTime(entry.timestamp)}</span>
+        <span className={`border px-2 py-0.5 ${logBadgeClass(entry.level)}`}>{entry.level}</span>
+        <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+          {runtimeLabel ?? formatLogEventLabel(entry.event)}
+        </span>
+        {source ? (
+          <span className="border border-[var(--color-border-default)] px-2 py-0.5">
+            source {source}
+          </span>
+        ) : null}
+      </div>
+
+      {isStateTransition ? (
+        <div className="flex flex-wrap items-center gap-3 px-3 py-3">
+          <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            Status transition
+          </div>
+          <div className="flex items-center gap-2 font-bold uppercase text-[var(--color-text-primary)]">
+            <span className="border border-[var(--color-border-default)] px-2 py-1 text-[var(--color-text-secondary)]">
+              {formatStateLabel(fromState ?? "")}
+            </span>
+            <span className="text-[var(--color-status-working)]">-&gt;</span>
+            <span className="border border-[var(--color-status-working)] px-2 py-1">
+              {formatStateLabel(toState ?? "")}
+            </span>
+          </div>
+          {historyArtifactId ? (
+            <a
+              className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+              download={historyArtifactId}
+              href={artifactUrl(sessionId, historyArtifactId)}
+            >
+              History snapshot
+            </a>
+          ) : null}
+        </div>
+      ) : (
+        <div className="px-3 py-3">
+          {entry.message ? (
+            <pre
+              className="whitespace-pre-wrap break-words font-mono text-[11px] leading-5"
+              style={{
+                color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-primary)",
+              }}
+            >
+              {entry.message}
+            </pre>
+          ) : (
+            <div className="text-[var(--color-text-tertiary)]">No message payload.</div>
+          )}
+        </div>
+      )}
+    </article>
+  );
 }
 
 const LOG_LEVEL_COLORS: Record<string, string> = {
@@ -599,7 +686,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [locationSearch, setLocationSearch] = useState("");
   const [logsOpen, setLogsOpen] = useState(false);
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnOpen, setRespawnOpen] = useState(false);
+  const [respawnPrompt, setRespawnPrompt] = useState("");
+  const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
+  const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -620,7 +711,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
       setError(null);
-      document.title = `${nextSession.id} | Spur`;
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load session");
     }
@@ -756,11 +846,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const handleRespawn = async () => {
     setBusyAction("respawn");
     try {
+      const payload: Record<string, unknown> = {
+        prompt: respawnPrompt.trim(),
+        startupAttachmentIds: respawnStartupAttachmentIds,
+      };
+      const encodedAttachments = encodeImageAttachments(respawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
       const data = (await response.json()) as SpurSessionView;
+      setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
     } catch (respawnError) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
@@ -808,21 +907,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const addImageFiles = (files: FileList | null) => {
-    if (!files) return;
-    const images = Array.from(files).filter((f) => IMAGE_TYPES.has(f.type));
-    if (images.length === 0) return;
-    void Promise.all(images.map(async (f) => ({ file: f, preview: await fileToDataUrl(f) })))
+    void imageAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
+      .catch(() => {});
+  };
+
+  const addRespawnImageFiles = (files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
     if (!trimmed && attachments.length === 0) return;
-    const encoded = attachments.map((att) => ({
-      name: sanitizeFilename(att.file.name),
-      data: att.preview.split(",")[1] ?? "",
-    }));
+    const encoded = encodeImageAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
     if (options?.queue !== undefined) body.queue = options.queue;
@@ -870,15 +969,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => getTerminalQuerySessionId(new URLSearchParams(locationSearch)),
     [locationSearch],
   );
-  const sidecarUiLink = useMemo(
-    () => session?.links.find((link) => link.label === "sidecar-ui")?.url ?? null,
+  const sidecarLinkLabels = useMemo(
+    () => new Set((session?.sidecars ?? []).map((sc) => sc.name)),
     [session],
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const visibleLinks = useMemo(
-    () => session?.links.filter((link) => link.label !== "sidecar-ui") ?? [],
+  const startupArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ??
+      [],
     [session],
+  );
+  const visibleLinks = useMemo(
+    () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
+    [session, sidecarLinkLabels],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -891,6 +996,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
+
+  const openRespawnEditor = useCallback(() => {
+    if (!session) return;
+    setRespawnPrompt(session.prompt);
+    setRespawnStartupAttachmentIds(session.startupAttachmentIds);
+    setRespawnAttachments([]);
+    setRespawnOpen(true);
+  }, [session]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -1057,10 +1170,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <button
                 type="button"
                 disabled={busyAction !== null}
-                onClick={() => void handleRespawn()}
+                onClick={openRespawnEditor}
                 className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
               </button>
             ) : null}
             <button
@@ -1162,55 +1275,26 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </h2>
                 {canSendMessage(session) ? (
                   <div className="space-y-2">
-                    <div className="relative">
-                      <textarea
-                        className={`min-h-24 w-full resize-y ${INPUT_CLASS} pr-12`}
-                        ref={messageRef}
-                        onChange={(event) => setMessage(event.target.value)}
-                        onKeyDown={(event) => {
-                          if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                            void doSend({ queue: true });
-                          }
-                        }}
-                        onPaste={(e) => {
-                          const files = e.clipboardData.files;
-                          if (files.length > 0) {
-                            e.preventDefault();
-                            addImageFiles(files);
-                          }
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          addImageFiles(e.dataTransfer.files);
-                        }}
-                        onDragOver={(e) => e.preventDefault()}
-                        placeholder="Message to the running agent..."
-                        value={message}
-                      />
-                      <VoiceButton voice={voice} />
-                    </div>
-                    {attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {attachments.map((att, i) => (
-                          <div key={`${att.file.name}-${i}`} className="group relative">
-                            <img
-                              src={att.preview}
-                              alt={att.file.name}
-                              className="h-12 w-12 border border-[var(--color-border-default)] object-cover"
-                            />
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setAttachments((prev) => prev.filter((_, j) => j !== i))
-                              }
-                              className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center bg-[var(--color-status-error)] text-[10px] text-[var(--color-accent)] opacity-0 transition group-hover:opacity-100"
-                            >
-                              x
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <ImageAttachmentTextarea
+                      attachments={attachments}
+                      minHeightClass="min-h-24"
+                      onAddFiles={addImageFiles}
+                      onChange={setMessage}
+                      onKeyDown={(event) => {
+                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                          void doSend({ queue: true });
+                        }
+                      }}
+                      onRemoveAttachment={(index) =>
+                        setAttachments((current) =>
+                          current.filter((_, currentIndex) => currentIndex !== index),
+                        )
+                      }
+                      placeholder="Message to the running agent..."
+                      textareaRef={messageRef}
+                      value={message}
+                      voice={voice}
+                    />
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         <VoiceStatusHint voice={voice} />{" "}
@@ -1448,54 +1532,59 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                 </h2>
                 <div className="space-y-2">
-                  {session.sidecars.map((sc) => (
-                    <div
-                      key={sc.name}
-                      className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
-                        />
-                        <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
-                        <span className="text-[var(--color-text-tertiary)]">
-                          {sc.alive ? "alive" : "offline"}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {sc.alive && canAttach ? (
+                  {session.sidecars.map((sc) => {
+                    const sidecarOpenUrl = sc.alive
+                      ? session.links.find((link) => link.label === sc.name)?.url
+                      : undefined;
+                    return (
+                      <div
+                        key={sc.name}
+                        className="flex items-center justify-between gap-4 border-b border-[var(--color-border-subtle)] py-1.5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-block h-2 w-2 rounded-full ${sc.alive ? "bg-[var(--color-chip-alive)]" : "bg-[var(--color-text-tertiary)]"}`}
+                          />
+                          <span className="text-[var(--color-text-secondary)]">{sc.name}</span>
+                          <span className="text-[var(--color-text-tertiary)]">
+                            {sc.alive ? "alive" : "offline"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {sc.alive && canAttach ? (
+                            <button
+                              type="button"
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                              onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
+                            >
+                              Terminal
+                            </button>
+                          ) : null}
+                          {sidecarOpenUrl ? (
+                            <a
+                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
+                              href={sidecarOpenUrl}
+                              rel="noreferrer"
+                              target="_blank"
+                            >
+                              Open
+                            </a>
+                          ) : null}
                           <button
+                            aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
+                            className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={busyAction !== null}
+                            onClick={() =>
+                              void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
+                            }
                             type="button"
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                            onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                           >
-                            Terminal
+                            {sc.alive ? <StopIcon /> : <PlayIcon />}
                           </button>
-                        ) : null}
-                        {sc.alive && sc.name === "isolated-ui" && sidecarUiLink ? (
-                          <a
-                            className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
-                            href={sidecarUiLink}
-                            rel="noreferrer"
-                            target="_blank"
-                          >
-                            Open
-                          </a>
-                        ) : null}
-                        <button
-                          aria-label={`${sc.alive ? "Stop" : "Start"} sidecar ${sc.name}`}
-                          className="inline-flex h-6 w-6 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:cursor-not-allowed disabled:opacity-50"
-                          disabled={busyAction !== null}
-                          onClick={() =>
-                            void handleSidecarAction(sc.name, sc.alive ? "stop" : "start")
-                          }
-                          type="button"
-                        >
-                          {sc.alive ? <StopIcon /> : <PlayIcon />}
-                        </button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             ) : null}
@@ -1508,10 +1597,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               role="dialog"
               aria-label={`Logs ${session.id}`}
             >
-              <div className="flex items-center justify-between border-b border-[var(--color-border-default)] px-4 py-2">
-                <span className="font-bold uppercase text-[var(--color-text-primary)]">
-                  Logs — {session.id}
-                </span>
+              <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border-default)] px-4 py-3">
+                <div>
+                  <div className="font-bold uppercase text-[var(--color-text-primary)]">
+                    Logs {session.id}
+                  </div>
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Spur orchestrator events and runtime output
+                  </div>
+                </div>
                 <button
                   type="button"
                   className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
@@ -1520,24 +1614,21 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   ✕
                 </button>
               </div>
-              <div className="flex-1 overflow-y-auto px-4 py-3 font-mono text-[10px] leading-5">
+              <div className="flex-1 overflow-y-auto px-4 py-4">
                 {logEntries.length === 0 ? (
-                  <p className="text-[var(--color-text-tertiary)]">No log entries.</p>
+                  <div className="flex h-full items-center justify-center border border-dashed border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-4 text-center text-[var(--color-text-tertiary)]">
+                    No Spur log entries yet.
+                  </div>
                 ) : (
-                  logEntries.map((entry, i) => (
-                    <div
-                      key={`${entry.timestamp}-${i}`}
-                      style={{
-                        color: LOG_LEVEL_COLORS[entry.level] ?? "var(--color-text-secondary)",
-                      }}
-                    >
-                      <span className="text-[var(--color-text-tertiary)]">
-                        [{formatLogTime(entry.timestamp)}]
-                      </span>{" "}
-                      <span className="uppercase">{entry.event}</span>
-                      {entry.message ? ` — ${entry.message}` : ""}
-                    </div>
-                  ))
+                  <div className="flex flex-col gap-3">
+                    {logEntries.map((entry, i) => (
+                      <LogEntryRow
+                        key={`${entry.timestamp}-${entry.event}-${i}`}
+                        entry={entry}
+                        sessionId={session.id}
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
             </div>
@@ -1559,6 +1650,102 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   : undefined
               }
             />
+          ) : null}
+          {respawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && busyAction !== "respawn") {
+                  setRespawnOpen(false);
+                }
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Edit & Respawn
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={busyAction === "respawn"}
+                    onClick={() => setRespawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <ImageAttachmentTextarea
+                    attachments={respawnAttachments}
+                    minHeightClass="min-h-[10rem]"
+                    onAddFiles={addRespawnImageFiles}
+                    onChange={setRespawnPrompt}
+                    onRemoveAttachment={(index) =>
+                      setRespawnAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index),
+                      )
+                    }
+                    placeholder="Edit the initial message..."
+                    value={respawnPrompt}
+                  />
+                  {startupArtifacts.length > 0 ? (
+                    <div className="space-y-2">
+                      <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                        Keep existing images
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {startupArtifacts.map((artifact) => {
+                          const selected = respawnStartupAttachmentIds.includes(artifact.id);
+                          return (
+                            <button
+                              key={artifact.id}
+                              className={`relative border ${selected ? "border-[var(--color-accent)]" : "border-[var(--color-border-default)]"}`}
+                              onClick={() =>
+                                setRespawnStartupAttachmentIds((current) =>
+                                  current.includes(artifact.id)
+                                    ? current.filter((id) => id !== artifact.id)
+                                    : [...current, artifact.id],
+                                )
+                              }
+                              type="button"
+                            >
+                              <img
+                                alt={artifact.name}
+                                className="h-9 w-9 object-cover"
+                                src={artifactUrl(session.id, artifact.id)}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      disabled={busyAction === "respawn"}
+                      onClick={() => setRespawnOpen(false)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={
+                        busyAction === "respawn" ||
+                        (!respawnPrompt.trim() &&
+                          respawnStartupAttachmentIds.length === 0 &&
+                          respawnAttachments.length === 0)
+                      }
+                      onClick={() => void handleRespawn()}
+                      type="button"
+                    >
+                      {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
           ) : null}
           <ArtifactLightbox
             artifact={selectedArtifact}

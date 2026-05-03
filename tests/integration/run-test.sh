@@ -5,7 +5,7 @@ set -e
 
 cd "$(dirname "$0")"
 
-echo "🚀 Running Agent Orchestrator onboarding integration test..."
+echo "🚀 Running Spur onboarding integration test..."
 echo ""
 
 # Build and run

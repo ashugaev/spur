@@ -12,12 +12,18 @@ interface AttentionZoneProps {
   onOpenTerminal?: (session: DashboardSession) => void;
 }
 
-const zoneConfig: Record<AttentionLevel, { label: string; color: string }> = {
-  respond: { label: "Needs Input", color: "var(--color-status-error)" },
-  pending: { label: "Waiting", color: "var(--color-status-attention)" },
-  working: { label: "Working", color: "var(--color-status-working)" },
-  done: { label: "Completed", color: "var(--color-status-ready)" },
-};
+const zoneConfig: Record<AttentionLevel, { label: string; color: string; dividerColor?: string }> =
+  {
+    respond: { label: "Needs Input", color: "var(--color-status-error)" },
+    working: { label: "Working", color: "var(--color-status-working)" },
+    pending: { label: "Waiting", color: "var(--color-status-attention)" },
+    stopped: {
+      label: "Stopped",
+      color: "var(--color-text-tertiary)",
+      dividerColor: "var(--color-border-subtle)",
+    },
+    done: { label: "Completed", color: "var(--color-status-ready)" },
+  };
 
 export function AttentionZone({
   level,
@@ -38,7 +44,10 @@ export function AttentionZone({
       </span>
       <div
         className="flex-1 border-t"
-        style={{ borderColor: `color-mix(in srgb, ${config.color} 25%, transparent)` }}
+        style={{
+          borderColor:
+            config.dividerColor ?? `color-mix(in srgb, ${config.color} 25%, transparent)`,
+        }}
       />
       <span className="text-[10px] text-[var(--color-text-tertiary)]">{sessions.length}</span>
     </div>

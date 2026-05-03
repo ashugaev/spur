@@ -12,8 +12,10 @@ import {
 import type { SessionRecord } from "../../src/types.js";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
-const ghMock = vi.fn();
-const readCurrentBranchMock = vi.fn();
+const { ghMock, readCurrentBranchMock } = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  readCurrentBranchMock: vi.fn(),
+}));
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
@@ -27,7 +29,7 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
-  resolvePrSummary,
+  resolveBoundPrSummary,
   resolveTrackedBranch,
   githubSourceModule,
 } = await import("../../src/event-sources/github.js");
@@ -52,6 +54,11 @@ function sourceSession(worktreePath: string): SessionRecord {
     agent: "claude",
     prompt: "hello",
     branch: "feature/test",
+    pr: {
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    },
     worktree: true,
     worktreePath,
     tmuxSession: "api-1",
@@ -199,7 +206,7 @@ describe("hasMergeConflict", () => {
   });
 });
 
-describe("resolvePrSummary", () => {
+describe("resolveBoundPrSummary", () => {
   beforeEach(() => {
     ghMock.mockReset();
   });
@@ -208,64 +215,73 @@ describe("resolvePrSummary", () => {
     readCurrentBranchMock.mockReset();
   });
 
-  const listPr = {
-    number: 212,
-    title: "t",
-    url: "https://github.com/o/r/pull/212",
-    reviewDecision: "REVIEW_REQUIRED",
-  };
+  it("loads the tracked PR directly from the persisted binding", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        url: "https://github.com/o/r/pull/212",
+        reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "DIRTY",
+      }),
+    );
 
-  it("forces compute via pr view when pr list returns UNKNOWN mergeability", async () => {
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
-      )
-      .mockResolvedValueOnce(
-        JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
-      );
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("CONFLICTING");
-    expect(pr?.mergeStateStatus).toBe("DIRTY");
-    expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls[1]).toEqual([
+    expect(pr).toMatchObject({
+      number: 212,
+      title: "native binding",
+      url: "https://github.com/o/r/pull/212",
+      reviewDecision: "changes_requested",
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+    });
+    expect(ghMock).toHaveBeenCalledWith(
       "/wt",
       "pr",
       "view",
       "212",
       "--json",
-      "mergeable,mergeStateStatus",
-    ]);
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+    );
   });
 
-  it("skips pr view when pr list already returns a resolved mergeability", async () => {
+  it("falls back to the stored URL when gh omits url", async () => {
     ghMock.mockResolvedValueOnce(
-      JSON.stringify([{ ...listPr, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }]),
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+      }),
     );
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("MERGEABLE");
-    expect(pr?.mergeStateStatus).toBe("BLOCKED");
-    expect(ghMock).toHaveBeenCalledTimes(1);
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
+
+    expect(pr?.url).toBe("https://github.com/o/r/pull/212");
+    expect(pr?.repo).toBe("o/r");
   });
 
-  it("keeps UNKNOWN when the pr view fallback fails", async () => {
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
-      )
-      .mockRejectedValueOnce(new Error("gh offline"));
+  it("returns null when gh pr view fails", async () => {
+    ghMock.mockRejectedValueOnce(new Error("gh offline"));
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("UNKNOWN");
-    expect(pr?.mergeStateStatus).toBe("UNKNOWN");
-  });
-
-  it("returns null when no PR matches the branch", async () => {
-    ghMock.mockResolvedValueOnce("[]");
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr).toBeNull();
-    expect(ghMock).toHaveBeenCalledTimes(1);
+    await expect(
+      resolveBoundPrSummary("/wt", {
+        number: 212,
+        repo: "o/r",
+        url: "https://github.com/o/r/pull/212",
+      }),
+    ).rejects.toThrow("gh offline");
   });
 });
 
@@ -324,16 +340,14 @@ describe("github source rearm", () => {
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     ghMock
       .mockResolvedValueOnce(
-        JSON.stringify([
-          {
-            number: 42,
-            title: "Keep branch mergeable",
-            url: "https://github.com/acme/api/pull/42",
-            reviewDecision: null,
-            mergeable: "CONFLICTING",
-            mergeStateStatus: "DIRTY",
-          },
-        ]),
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        }),
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
@@ -379,16 +393,14 @@ describe("github source rearm", () => {
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     ghMock
       .mockResolvedValueOnce(
-        JSON.stringify([
-          {
-            number: 42,
-            title: "Keep branch mergeable",
-            url: "https://github.com/acme/api/pull/42",
-            reviewDecision: null,
-            mergeable: "MERGEABLE",
-            mergeStateStatus: "CLEAN",
-          },
-        ]),
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        }),
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")
@@ -427,16 +439,14 @@ describe("github source rearm", () => {
     requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     ghMock
       .mockResolvedValueOnce(
-        JSON.stringify([
-          {
-            number: 42,
-            title: "Keep branch mergeable",
-            url: "https://github.com/acme/api/pull/42",
-            reviewDecision: null,
-            mergeable: "MERGEABLE",
-            mergeStateStatus: "CLEAN",
-          },
-        ]),
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        }),
       )
       .mockResolvedValueOnce("[]")
       .mockResolvedValueOnce("[]")

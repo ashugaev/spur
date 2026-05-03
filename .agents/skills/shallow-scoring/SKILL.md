@@ -1,5 +1,5 @@
 ---
-name: ao-shallow-scoring
+name: shallow-scoring
 description: Score task complexity 1–5. No tools, pure reasoning, < 5 seconds.
 ---
 

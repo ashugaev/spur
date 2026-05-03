@@ -17,6 +17,7 @@ import type {
   SessionPipelineState,
   SessionRecord,
 } from "./types.js";
+import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
@@ -24,6 +25,10 @@ function sessionFilePath(dataDir: string, projectId: string, sessionId: string):
 
 function githubSnapshotDir(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github", projectId, sourceId);
+}
+
+function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -73,8 +78,21 @@ function githubMergeConflictRestoreFilePath(
   return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.merge-conflict`);
 }
 
+function hasLegacyNativePrLink(session: SessionRecord): boolean {
+  return (
+    session.slots?.links.some(
+      (link) => link.label === "pr" && parseSessionPrBinding(link.url) !== null,
+    ) ?? false
+  );
+}
+
 function readSessionFile(path: string): SessionRecord {
-  return JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  const rawSession = JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  const normalizedSession = normalizeSessionRecord(rawSession);
+  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
+    writeJsonFile(path, normalizedSession);
+  }
+  return normalizedSession;
 }
 
 function readServiceInstanceFile(path: string): ServiceInstanceRecord {
@@ -142,30 +160,40 @@ function normalizeQueuedMessagesState(
 }
 
 function normalizeSessionRecord(session: SessionRecord): SessionRecord {
+  const normalizedSession = normalizeSessionPrBinding(session);
   return {
-    id: session.id,
-    project: session.project,
-    agent: session.agent,
-    ...(session.agentSessionId ? { agentSessionId: session.agentSessionId } : {}),
-    prompt: session.prompt,
-    branch: session.branch,
-    ...(session.branchSource ? { branchSource: session.branchSource } : {}),
-    worktree: session.worktree,
-    worktreePath: session.worktreePath,
-    tmuxSession: session.tmuxSession,
-    launchCommand: session.launchCommand,
-    status: session.status,
-    createdAt: session.createdAt,
-    updatedAt: session.updatedAt,
-    ...(session.retainInList ? { retainInList: true } : {}),
-    ...(session.slots ? { slots: session.slots } : {}),
-    ...(session.sidecarNames ? { sidecarNames: session.sidecarNames } : {}),
-    ...(session.sidecarPorts ? { sidecarPorts: session.sidecarPorts } : {}),
-    ...(session.pipeline ? { pipeline: normalizePipelineState(session.pipeline) } : {}),
-    ...(session.queuedMessages
-      ? { queuedMessages: normalizeQueuedMessagesState(session.queuedMessages) }
+    id: normalizedSession.id,
+    project: normalizedSession.project,
+    agent: normalizedSession.agent,
+    ...(normalizedSession.agentSessionId
+      ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
-    ...(session.error ? { error: session.error } : {}),
+    prompt: normalizedSession.prompt,
+    ...(normalizedSession.startupAttachmentIds
+      ? { startupAttachmentIds: normalizedSession.startupAttachmentIds }
+      : {}),
+    branch: normalizedSession.branch,
+    ...(normalizedSession.branchSource ? { branchSource: normalizedSession.branchSource } : {}),
+    ...(normalizedSession.pr ? { pr: normalizedSession.pr } : {}),
+    worktree: normalizedSession.worktree,
+    worktreePath: normalizedSession.worktreePath,
+    tmuxSession: normalizedSession.tmuxSession,
+    launchCommand: normalizedSession.launchCommand,
+    status: normalizedSession.status,
+    ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
+    createdAt: normalizedSession.createdAt,
+    updatedAt: normalizedSession.updatedAt,
+    ...(normalizedSession.retainInList ? { retainInList: true } : {}),
+    ...(normalizedSession.slots ? { slots: normalizedSession.slots } : {}),
+    ...(normalizedSession.sidecarNames ? { sidecarNames: normalizedSession.sidecarNames } : {}),
+    ...(normalizedSession.sidecarPorts ? { sidecarPorts: normalizedSession.sidecarPorts } : {}),
+    ...(normalizedSession.pipeline
+      ? { pipeline: normalizePipelineState(normalizedSession.pipeline) }
+      : {}),
+    ...(normalizedSession.queuedMessages
+      ? { queuedMessages: normalizeQueuedMessagesState(normalizedSession.queuedMessages) }
+      : {}),
+    ...(normalizedSession.error ? { error: normalizedSession.error } : {}),
   };
 }
 
@@ -403,6 +431,38 @@ export function clearGitHubMergeConflictRestoreReplay(
 ): void {
   rmSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
+  });
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return new Set();
+    const ids = (parsed as { ids?: unknown }).ids;
+    if (!Array.isArray(ids)) return new Set();
+    return new Set(ids.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function recordWorkItem(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalId: string,
+): void {
+  const ids = readWorkItemRegistry(dataDir, projectId, sourceId);
+  if (ids.has(externalId)) return;
+  ids.add(externalId);
+  writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...ids].sort(),
   });
 }
 

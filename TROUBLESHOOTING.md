@@ -71,5 +71,3 @@ The supported root surfaces are only:
 - `v2/`
 - `packages/web/`
 - the root docs/scripts/workflows that support them
-
-If a workflow or script refers to `ao`, `agent-orchestrator.yaml`, `packages/mobile`, or a deleted plugin/package tree, it is stale and should be removed or rewritten.
