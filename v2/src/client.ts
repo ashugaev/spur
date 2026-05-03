@@ -191,6 +191,16 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
 }
 
 function spawnDaemon(cliEntrypoint: string, configPath: string): void {
+  // SPUR_DISABLE_AUTOSTART blocks CLI auto-spawn so the daemon is only ever
+  // started by an external manager (e.g. systemd on the prod VM). Without
+  // this guard, a CLI invocation during a restart window can fork a daemon
+  // outside the service cgroup, win the :4310 bind race, and put
+  // spur-daemon.service into an EADDRINUSE crash loop.
+  if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
+    throw new Error(
+      "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; start it via the service manager (e.g. `systemctl start spur-daemon`).",
+    );
+  }
   const child = spawn(
     process.execPath,
     [cliEntrypoint, "--config", configPath, "daemon", "start"],
