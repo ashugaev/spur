@@ -35,6 +35,7 @@ export interface SessionArtifact {
   mimeType: string;
   kind: SessionArtifactKind;
   origin: SessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }

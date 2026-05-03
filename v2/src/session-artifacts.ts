@@ -35,9 +35,23 @@ export interface SessionArtifactFile extends SessionArtifact {
 
 interface ArtifactMetadataRecord {
   origin?: SessionArtifactOrigin;
+  addedByUser?: boolean;
 }
 
 type ArtifactMetadataMap = Record<string, ArtifactMetadataRecord>;
+
+function isArtifactMetadataRecord(value: unknown): value is ArtifactMetadataRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as { origin?: unknown; addedByUser?: unknown };
+  return (
+    (candidate.origin === undefined ||
+      candidate.origin === "intentional" ||
+      candidate.origin === "automatic") &&
+    (candidate.addedByUser === undefined || typeof candidate.addedByUser === "boolean")
+  );
+}
 
 function artifactKindForMimeType(mimeType: string): SessionArtifactKind {
   if (mimeType.startsWith("image/")) {
@@ -66,10 +80,7 @@ function readArtifactMetadata(dir: string): ArtifactMetadataMap {
     return Object.fromEntries(
       Object.entries(parsed).filter(
         ([artifactId, metadata]) =>
-          typeof artifactId === "string" &&
-          metadata !== null &&
-          typeof metadata === "object" &&
-          !Array.isArray(metadata),
+          typeof artifactId === "string" && isArtifactMetadataRecord(metadata),
       ),
     );
   } catch {
@@ -90,6 +101,10 @@ function artifactOrigin(metadata: ArtifactMetadataMap, name: string): SessionArt
   return metadata[name]?.origin ?? "intentional";
 }
 
+function artifactAddedByUser(metadata: ArtifactMetadataMap, name: string): boolean {
+  return metadata[name]?.addedByUser === true;
+}
+
 function artifactFromFile(
   path: string,
   name: string,
@@ -104,6 +119,7 @@ function artifactFromFile(
     mimeType,
     kind: artifactKindForMimeType(mimeType),
     origin: artifactOrigin(metadata, name),
+    addedByUser: artifactAddedByUser(metadata, name),
     createdAt: stat.birthtime.toISOString(),
     updatedAt: stat.mtime.toISOString(),
     path,
@@ -208,7 +224,20 @@ export function setSessionArtifactOrigin(
   const normalizedId = validateArtifactId(artifactId);
   const dir = ensureSessionArtifactsDir(dataDir, sessionId);
   const metadata = readArtifactMetadata(dir);
-  metadata[normalizedId] = { origin };
+  metadata[normalizedId] = { ...metadata[normalizedId], origin };
+  writeArtifactMetadata(dir, metadata);
+}
+
+export function setSessionArtifactUserAdded(
+  dataDir: string,
+  sessionId: string,
+  artifactId: string,
+  addedByUser: boolean,
+): void {
+  const normalizedId = validateArtifactId(artifactId);
+  const dir = ensureSessionArtifactsDir(dataDir, sessionId);
+  const metadata = readArtifactMetadata(dir);
+  metadata[normalizedId] = { ...metadata[normalizedId], addedByUser };
   writeArtifactMetadata(dir, metadata);
 }
 

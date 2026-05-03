@@ -215,7 +215,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
 - Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
 - Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
-- Automatic history snapshots stay hidden in the default intentional view and appear only after switching to the automatic artifact view
+- Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
 - Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
 - Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
@@ -280,8 +280,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4b: Artifacts section
 
 - Shows when session has persisted artifacts
-- Default artifact view is `Intentional`; automatic artifacts stay hidden until the explicit `Automatic` toggle is selected
-- `Intentional` and `Automatic` views never mix cards from both origins at once
+- Default artifact view is `Agent`; `Attached` shows only user-added artifacts and `System` shows automatic artifacts
+- `Agent`, `Attached`, and `System` views never mix cards across categories
 - Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
 - Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
 - Clicking preview opens a full-screen artifact lightbox with close and download actions

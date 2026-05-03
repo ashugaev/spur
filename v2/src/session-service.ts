@@ -92,6 +92,7 @@ import {
   listSessionArtifacts,
   readSessionArtifact,
   setSessionArtifactOrigin,
+  setSessionArtifactUserAdded,
   type SessionArtifactFile,
   withSessionArtifactInstructions,
 } from "./session-artifacts.js";
@@ -2686,6 +2687,7 @@ export class SessionService {
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
+      setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
       stored.push({ id: filename, path: filePath });
     }
     return stored;

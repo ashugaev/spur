@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   listSessionArtifacts,
   setSessionArtifactOrigin,
+  setSessionArtifactUserAdded,
   sessionArtifactsDir,
 } from "../../src/session-artifacts.js";
 import { createTempDir } from "../helpers/common.js";
@@ -21,25 +22,34 @@ async function newDataDir(): Promise<string> {
 }
 
 describe("session artifact origins", () => {
-  it("defaults ad-hoc artifacts to intentional and preserves automatic metadata", async () => {
+  it("defaults ad-hoc artifacts to agent-owned and preserves automatic plus user-added metadata", async () => {
     const dataDir = await newDataDir();
     const sessionId = "api-a1";
     const dir = sessionArtifactsDir(dataDir, sessionId);
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "report.txt"), "hello", "utf8");
     await writeFile(join(dir, "agent-history.jsonl"), '{"ok":true}\n', "utf8");
+    await writeFile(join(dir, "uploaded.png"), "png", "utf8");
 
     setSessionArtifactOrigin(dataDir, sessionId, "agent-history.jsonl", "automatic");
+    setSessionArtifactUserAdded(dataDir, sessionId, "uploaded.png", true);
 
     expect(listSessionArtifacts(dataDir, sessionId)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: "report.txt",
           origin: "intentional",
+          addedByUser: false,
         }),
         expect.objectContaining({
           id: "agent-history.jsonl",
           origin: "automatic",
+          addedByUser: false,
+        }),
+        expect.objectContaining({
+          id: "uploaded.png",
+          origin: "intentional",
+          addedByUser: true,
         }),
       ]),
     );

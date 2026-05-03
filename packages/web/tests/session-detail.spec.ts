@@ -375,7 +375,7 @@ test.describe("S2: Actions bar", () => {
 
 // S2a: Logs modal
 test.describe("S2a: Logs modal", () => {
-  test("hides automatic history snapshot download in the default intentional view", async ({
+  test("hides automatic history snapshot download in the default agent view", async ({
     page,
   }) => {
     const session = makeWorkingSession({
@@ -421,15 +421,15 @@ test.describe("S2a: Logs modal", () => {
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 
-  test("shows automatic history snapshot download after switching to automatic artifacts", async ({
+  test("shows automatic history snapshot download after switching to system artifacts", async ({
     page,
   }) => {
     const session = makeWorkingSession({
       id: "detail-s2a-2",
       artifacts: [
         {
-          id: "intentional.txt",
-          name: "intentional.txt",
+          id: "agent-output.txt",
+          name: "agent-output.txt",
           size: 3200,
           mimeType: "text/plain; charset=utf-8",
           kind: "download",
@@ -467,7 +467,7 @@ test.describe("S2a: Logs modal", () => {
     ]);
 
     await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: "Automatic (1)" }).click();
+    await page.getByRole("button", { name: "System (1)" }).click();
     await page.getByRole("button", { name: /^logs$/i }).click();
 
     await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
@@ -475,6 +475,60 @@ test.describe("S2a: Logs modal", () => {
       "href",
       `/api/sessions/${session.id}/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl`,
     );
+  });
+
+  test("keeps automatic history snapshot download hidden in attached artifacts", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2a-3",
+      artifacts: [
+        {
+          id: "upload.png",
+          name: "upload.png",
+          size: 1400,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await mockSessionLogs(page, session.id, [
+      {
+        timestamp: "2026-04-02T10:01:00.000Z",
+        event: "session.state.transition",
+        level: "info",
+        message: "Status changed from waiting to needs_input",
+        details: {
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+        },
+      },
+    ]);
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: "Attached (1)" }).click();
+    await page.getByRole("button", { name: /^logs$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
+    await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 });
 
@@ -910,15 +964,15 @@ test.describe("S4b: Artifacts section", () => {
     );
   });
 
-  test("shows intentional artifacts by default and reveals automatic artifacts only after toggle", async ({
+  test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
     page,
   }) => {
     const session = makeWorkingSession({
       id: "detail-s4b-2",
       artifacts: [
         {
-          id: "intentional.txt",
-          name: "intentional.txt",
+          id: "agent-output.txt",
+          name: "agent-output.txt",
           size: 3200,
           mimeType: "text/plain; charset=utf-8",
           kind: "download",
@@ -941,26 +995,65 @@ test.describe("S4b: Artifacts section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("button", { name: "Intentional (1)" })).toHaveAttribute(
+    await expect(page.getByRole("button", { name: "Agent (1)" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await expect(page.getByText("intentional.txt")).toBeVisible();
+    await expect(page.getByText("agent-output.txt")).toBeVisible();
     await expect(page.getByText("agent-history.jsonl")).toHaveCount(0);
 
-    await page.getByRole("button", { name: "Automatic (1)" }).click();
+    await page.getByRole("button", { name: "System (1)" }).click();
 
     await expect(page.getByText("agent-history.jsonl")).toBeVisible();
-    await expect(page.getByText("intentional.txt")).toHaveCount(0);
+    await expect(page.getByText("agent-output.txt")).toHaveCount(0);
   });
 
-  test("resets to intentional view after navigating to another session", async ({ page }) => {
-    const firstSession = makeWorkingSession({
+  test("shows user-added artifacts only in the attached view", async ({ page }) => {
+    const session = makeWorkingSession({
       id: "detail-s4b-3",
       artifacts: [
         {
-          id: "intentional-first.txt",
-          name: "intentional-first.txt",
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "later-upload.png",
+          name: "later-upload.png",
+          size: 2200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("agent-output.txt")).toBeVisible();
+    await expect(page.getByText("later-upload.png")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Attached (1)" }).click();
+
+    await expect(page.getByText("later-upload.png")).toBeVisible();
+    await expect(page.getByText("agent-output.txt")).toHaveCount(0);
+  });
+
+  test("resets to agent view after navigating to another session", async ({ page }) => {
+    const firstSession = makeWorkingSession({
+      id: "detail-s4b-4",
+      artifacts: [
+        {
+          id: "agent-first.txt",
+          name: "agent-first.txt",
           size: 3200,
           mimeType: "text/plain; charset=utf-8",
           kind: "download",
@@ -981,11 +1074,11 @@ test.describe("S4b: Artifacts section", () => {
       ],
     });
     const secondSession = makeWorkingSession({
-      id: "detail-s4b-4",
+      id: "detail-s4b-5",
       artifacts: [
         {
-          id: "intentional-second.txt",
-          name: "intentional-second.txt",
+          id: "agent-second.txt",
+          name: "agent-second.txt",
           size: 4200,
           mimeType: "text/plain; charset=utf-8",
           kind: "download",
@@ -999,14 +1092,14 @@ test.describe("S4b: Artifacts section", () => {
     await mockSessionDetail(page, secondSession);
 
     await page.goto(`/sessions/${firstSession.id}`);
-    await page.getByRole("button", { name: "Automatic (1)" }).click();
+    await page.getByRole("button", { name: "System (1)" }).click();
     await expect(page.getByText("agent-history-first.jsonl")).toBeVisible();
 
     await page.goto(`/sessions/${secondSession.id}`);
 
-    await expect(page.getByText("intentional-second.txt")).toBeVisible();
+    await expect(page.getByText("agent-second.txt")).toBeVisible();
     await expect(page.getByText("agent-history-first.jsonl")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /automatic \(/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /system \(/i })).toHaveCount(0);
   });
 });
 

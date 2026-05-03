@@ -40,6 +40,7 @@ export interface SpurSessionArtifact {
   mimeType: string;
   kind: SpurSessionArtifactKind;
   origin: SpurSessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }

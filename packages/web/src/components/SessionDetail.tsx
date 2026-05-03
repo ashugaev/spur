@@ -214,7 +214,7 @@ interface LogEntry {
 }
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
-type ArtifactVisibility = "intentional" | "automatic";
+type ArtifactCategory = "agent" | "attached" | "system";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -680,7 +680,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
-  const [artifactVisibility, setArtifactVisibility] = useState<ArtifactVisibility>("intentional");
+  const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
@@ -765,7 +765,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, []);
 
   useEffect(() => {
-    setArtifactVisibility("intentional");
+    setArtifactCategory("agent");
   }, [sessionId]);
 
   useEffect(() => {
@@ -956,17 +956,32 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const intentionalArtifacts = useMemo(
-    () => session?.artifacts.filter((artifact) => artifact.origin !== "automatic") ?? [],
+  const agentArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
+      ) ?? [],
     [session],
   );
-  const automaticArtifacts = useMemo(
+  const attachedArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
+      ) ?? [],
+    [session],
+  );
+  const systemArtifacts = useMemo(
     () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
     [session],
   );
   const visibleArtifacts = useMemo(
-    () => (artifactVisibility === "automatic" ? automaticArtifacts : intentionalArtifacts),
-    [artifactVisibility, automaticArtifacts, intentionalArtifacts],
+    () =>
+      artifactCategory === "attached"
+        ? attachedArtifacts
+        : artifactCategory === "system"
+          ? systemArtifacts
+          : agentArtifacts,
+    [artifactCategory, agentArtifacts, attachedArtifacts, systemArtifacts],
   );
   const visibleArtifactIds = useMemo(
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
@@ -992,10 +1007,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, [selectedArtifact, session, visibleArtifacts]);
 
   useEffect(() => {
-    if (artifactVisibility === "automatic" && automaticArtifacts.length === 0) {
-      setArtifactVisibility("intentional");
+    const activeCount =
+      artifactCategory === "attached"
+        ? attachedArtifacts.length
+        : artifactCategory === "system"
+          ? systemArtifacts.length
+          : agentArtifacts.length;
+    if (artifactCategory !== "agent" && activeCount === 0) {
+      setArtifactCategory("agent");
     }
-  }, [artifactVisibility, automaticArtifacts.length]);
+  }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -1376,17 +1397,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
-                  {automaticArtifacts.length > 0 ? (
+                  {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
                     <div
-                      aria-label="Artifact visibility"
+                      aria-label="Artifact category"
                       className="mb-3 inline-flex border border-[var(--color-border-default)]"
                       role="tablist"
                     >
-                      {[
-                        ["intentional", `Intentional (${intentionalArtifacts.length})`],
-                        ["automatic", `Automatic (${automaticArtifacts.length})`],
-                      ].map(([value, label]) => {
-                        const active = artifactVisibility === value;
+                      {(
+                        [
+                          ["agent", `Agent (${agentArtifacts.length})`],
+                          ...(attachedArtifacts.length > 0
+                            ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
+                            : []),
+                          ...(systemArtifacts.length > 0
+                            ? ([["system", `System (${systemArtifacts.length})`]] as const)
+                            : []),
+                        ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                      ).map(([value, label]) => {
+                        const active = artifactCategory === value;
                         return (
                           <button
                             key={value}
@@ -1396,7 +1424,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
                                 : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
                             }`}
-                            onClick={() => setArtifactVisibility(value as ArtifactVisibility)}
+                            onClick={() => setArtifactCategory(value)}
                             type="button"
                           >
                             {label}
@@ -1435,9 +1463,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     </div>
                   ) : (
                     <p className="py-2 text-[var(--color-text-secondary)]">
-                      {artifactVisibility === "intentional"
-                        ? "No intentional artifacts yet."
-                        : "No automatic artifacts yet."}
+                      {artifactCategory === "attached"
+                        ? "No attached artifacts yet."
+                        : artifactCategory === "system"
+                          ? "No system artifacts yet."
+                          : "No agent artifacts yet."}
                     </p>
                   )}
                 </section>
