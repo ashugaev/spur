@@ -49,6 +49,7 @@ describe("client.ensureServer", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -236,6 +237,17 @@ describe("client.ensureServer", () => {
       restarted: false,
     });
     expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to auto-start the daemon when SPUR_DISABLE_AUTOSTART=1", async () => {
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /SPUR_DISABLE_AUTOSTART/,
+    );
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
