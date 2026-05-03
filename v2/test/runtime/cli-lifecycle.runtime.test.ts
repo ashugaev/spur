@@ -26,6 +26,13 @@ import {
 
 const tmuxOk = await isTmuxAvailable();
 
+interface DoctorResult {
+  configPath: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
+}
+
 const activeContexts: Array<{
   context: RuntimeTestContext;
   daemonPid?: number;
@@ -297,6 +304,90 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       expect(info.port).toBe(port);
     },
   );
+
+  it("doctor writes a local config and list --json auto-connects it", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+      timeout: 60_000,
+    });
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
+    expect(doctor.defaultBranch).toBe("main");
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toContain(
+      `  ${doctor.projectId}:`,
+    );
+
+    const listRun = await execFileAsync(process.execPath, [CLI_PATH, "list", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+      timeout: 60_000,
+    });
+    let sessions: SessionView[];
+    try {
+      sessions = JSON.parse(listRun.stdout) as SessionView[];
+    } catch (error) {
+      throw new Error(`Expected list JSON output, received: ${listRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    const info = await context.fetchJson<RuntimeInfo>("/info");
+    currentActiveContext().daemonPid = info.pid;
+    const projects = await context.fetchJson<Array<{ id: string }>>("/projects");
+
+    expect(sessions).toEqual([]);
+    expect(projects.map((project) => project.id)).toContain(doctor.projectId);
+  });
+
+  it("doctor refuses to overwrite an existing local config", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-existing-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
+    await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+
+    await expect(
+      execFileAsync(process.execPath, [CLI_PATH, "doctor"], {
+        cwd: context.repoDir,
+        env: context.env,
+        timeout: 60_000,
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Local project config already exists"),
+    });
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
 
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
     const port = await findFreePort();

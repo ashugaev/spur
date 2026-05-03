@@ -20,6 +20,8 @@ interface GitWorktreeEntry {
   branch?: string;
 }
 
+const DEFAULT_BRANCH_HINT = "main";
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout.trimEnd();
@@ -68,6 +70,38 @@ function parseWorktreeList(output: string): GitWorktreeEntry[] {
 
 export async function readCurrentBranch(repoPath: string): Promise<string> {
   return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
+}
+
+function normalizeBranchHint(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "HEAD") {
+    return undefined;
+  }
+  return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+}
+
+export async function readDoctorBranchHint(repoPath: string): Promise<string> {
+  const currentBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "HEAD"),
+  );
+  if (currentBranch) {
+    return currentBranch;
+  }
+
+  const checkedOutBranch = normalizeBranchHint(await tryGit(repoPath, "branch", "--show-current"));
+  if (checkedOutBranch) {
+    return checkedOutBranch;
+  }
+
+  const remoteDefaultBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
+  );
+  if (remoteDefaultBranch) {
+    return remoteDefaultBranch;
+  }
+
+  return normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch"))
+    ?? DEFAULT_BRANCH_HINT;
 }
 
 export async function findWorktreePathForBranch(

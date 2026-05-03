@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
@@ -55,6 +55,14 @@ interface ConfigDefaults {
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
+}
+
+export interface ProjectConfigScaffold {
+  configPath: string;
+  content: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
 }
 
 const projectEnvCache = new Map<string, Record<string, string>>();
@@ -271,6 +279,44 @@ function defaultInstanceConfigYaml(): string {
     `  model: ${DEFAULT_VOICE_MODEL}`,
     "",
   ].join("\n");
+}
+
+function deriveScaffoldId(repoPath: string): string {
+  const sanitized = basename(resolve(repoPath))
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+  return sanitized || "project";
+}
+
+export function createProjectConfigScaffold(
+  startDir: string,
+  defaultBranch: string,
+): ProjectConfigScaffold {
+  const repoPath = resolve(startDir);
+  const projectId = deriveScaffoldId(repoPath);
+  return {
+    configPath: join(repoPath, DEFAULT_PROJECT_CONFIG_FILES[0]),
+    content: [
+      "projects:",
+      `  ${projectId}:`,
+      "    path: .",
+      `    defaultBranch: ${defaultBranch}`,
+      `    sessionPrefix: ${projectId}`,
+      "",
+    ].join("\n"),
+    defaultBranch,
+    projectId,
+    sessionPrefix: projectId,
+  };
+}
+
+export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): void {
+  mkdirSync(dirname(scaffold.configPath), { recursive: true });
+  writeFileSync(scaffold.configPath, scaffold.content, "utf8");
 }
 
 function asOptionalVoiceProvider(
