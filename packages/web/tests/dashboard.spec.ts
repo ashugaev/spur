@@ -498,7 +498,7 @@ test.describe("D5: Tracker and PR links", () => {
         body: JSON.stringify({
           state: "open",
           reviewDecision: "approved",
-          ciStatus: null,
+          ciStatus: "success",
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
