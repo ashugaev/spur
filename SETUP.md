@@ -1,11 +1,13 @@
 # Setup
 
-This file is only for the current repository shape:
+This file is contributor-only. Use it when changing this repository itself.
+
+For package-first Spur install and first run, use [v2/README.md](v2/README.md).
+
+This file matches the current repository shape:
 
 - `v2/` contains Spur's daemon and CLI.
 - `packages/web/` contains the optional UI over Spur's API.
-
-For the actual Spur command/config reference, use [v2/README.md](v2/README.md).
 
 ## Prerequisites
 
@@ -23,10 +25,11 @@ spur --version
 ```
 
 The setup script installs dependencies, builds `v2/`, and links the `spur` CLI globally.
+That is repo bootstrap and dogfood setup, not the primary product install path.
 
 If `spur` is not on your `PATH` afterward, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
-## Config
+## Config For This Repo
 
 Start from Spur's example config:
 
@@ -38,7 +41,7 @@ $EDITOR spur.yaml
 The first Spur command auto-creates the global instance config at `~/.spur/config.yaml`.
 Keep repo-local `spur.yaml` focused on `projects:` only. This repository also keeps a tracked root `spur.yaml` for dogfooding the repo itself. Use it only if its project settings match the checkout you are running.
 
-## Run Spur
+## Run Spur In This Repo
 
 ```bash
 spur list

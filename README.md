@@ -8,14 +8,36 @@ This repository has two supported product surfaces:
 ## Quick Start
 
 ```bash
-bash scripts/setup.sh
+npm pack ./v2
+npm install -g ./composio-spur-<version>.tgz
+spur doctor
 spur list
+spur spawn <project> "your task"
+```
+
+Registry package install uses the same command shape when a published release exists:
+
+```bash
+npm install -g @composio/spur
+```
+
+`spur doctor` writes a local `spur.yaml` for the current repo. The first normal Spur command still
+auto-initializes the global instance config at `~/.spur/config.yaml`, and `spur list` / `spur spawn`
+auto-connect the local project config when present.
+
+The web UI is optional. It defaults to the instance `ui.port` from that same global config; the default is `5555`.
+
+## Contributor Setup
+
+Use the repo bootstrap only when developing Spur itself:
+
+```bash
+bash scripts/setup.sh
 pnpm dev
 ```
 
-The first Spur command auto-initializes the global instance config at `~/.spur/config.yaml`.
-Use repo-local `spur.yaml` only for project definitions; `spur list` / `spur spawn` auto-connect it when present.
-The web UI defaults to the instance `ui.port` from that same global config; the default is `5555`.
+That path installs repo dependencies, builds `v2/`, and links the local CLI for dogfooding.
+Contributor setup details live in [SETUP.md](SETUP.md).
 
 For a production-like UI server:
 
@@ -44,7 +66,7 @@ pnpm main:deploy
 
 - `v2/` — Spur daemon, CLI, automation runtime, tests, config example
 - `packages/web/` — Next.js UI over the Spur daemon API
-- `scripts/setup.sh` — bootstrap for local development and dogfooding
+- `scripts/setup.sh` — contributor bootstrap for local development and dogfooding
 - `scripts/main-deploy.sh` — deploys the latest `origin/main` from a dedicated release clone on a production host
 - `tests/integration/` — onboarding smoke environment
 - `spur.yaml` — repo-local project config for this checkout
@@ -65,8 +87,8 @@ pnpm --dir v2 test:smoke
 
 ## Docs
 
-- [v2/README.md](v2/README.md) — Spur commands, config, automation, validation
-- [SETUP.md](SETUP.md) — local repo setup and web UI development
+- [v2/README.md](v2/README.md) — Spur install, commands, config, automation, validation
+- [SETUP.md](SETUP.md) — contributor bootstrap and web UI development
 - [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — current failure modes and fixes
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution scope and required checks

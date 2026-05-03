@@ -9,6 +9,7 @@ This repo accepts changes in three places only:
 ## Setup
 
 ```bash
+cat SETUP.md
 bash scripts/setup.sh
 ```
 

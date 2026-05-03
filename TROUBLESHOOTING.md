@@ -1,6 +1,18 @@
 # Troubleshooting
 
-## `spur` not found after setup
+## `spur` not found after package install
+
+Package installs and local tarball installs both use your global npm bin directory.
+
+Check the prefix:
+
+```bash
+npm prefix -g
+```
+
+Then add its `bin/` directory to your shell profile.
+
+## `spur` not found after contributor setup
 
 `scripts/setup.sh` uses `npm link` from `v2/`. If your global npm bin directory is not on `PATH`, the link succeeds but the shell cannot find `spur`.
 
@@ -15,11 +27,16 @@ Then add its `bin/` directory to your shell profile.
 ## Web UI shows no projects
 
 The UI reads project labels from the daemon's `/projects` response, not from a local repo file.
-Verify that the repo has been connected to the active Spur instance:
+Verify that the repo has been auto-connected to the active Spur instance:
 
 ```bash
-spur connect
 spur list
+```
+
+If you need to attach a specific local config file manually:
+
+```bash
+spur connect /path/to/spur.yaml
 ```
 
 If you use multiple instance configs, point both CLI and web at the same global config:

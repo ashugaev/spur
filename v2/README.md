@@ -8,6 +8,52 @@ Local daemon + CLI orchestrator.
 
 No UI. No tracker flow. No plugin layer.
 
+## Install
+
+Primary package-first path from this repo:
+
+```bash
+npm pack ./v2
+npm install -g ./composio-spur-<version>.tgz
+```
+
+Registry release install uses the same global package flow when published:
+
+```bash
+npm install -g @composio/spur
+```
+
+First run in a repo you want Spur to manage:
+
+```bash
+spur doctor
+spur list
+spur spawn <project> "Fix the flaky auth test"
+```
+
+`spur doctor` writes a minimal local `spur.yaml` for the current repo. It does not call `connect`,
+does not start the daemon, and does not invent a second bootstrap flow. The first normal Spur
+command still auto-initializes `~/.spur/config.yaml`, and `spur list` / `spur spawn` auto-connect
+the local project config through the existing registry path.
+
+If you are developing this repository itself, use `bash scripts/setup.sh` instead. That path is
+for contributors and dogfooding, not the main install flow.
+
+## Local Project Config
+
+`spur doctor` writes the same minimal shape shown below:
+
+```yaml
+projects:
+  my-project:
+    path: .
+    defaultBranch: main
+    sessionPrefix: my-project
+```
+
+Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`,
+`triggers`, `sidecars`, or agent overrides only when the repo needs them.
+
 ## Commands
 
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.

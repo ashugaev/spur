@@ -10,6 +10,11 @@ on:
       - "scripts/setup.sh"
       - "tests/integration/**"
       - "v2/**"
+      - "README.md"
+      - "SETUP.md"
+      - "TROUBLESHOOTING.md"
+      - "CONTRIBUTING.md"
+      - "docs/v2-package-first-onboarding-plan.md"
       - ".github/workflows/onboarding-test.yml"
   push:
     branches:
