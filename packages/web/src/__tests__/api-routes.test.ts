@@ -50,6 +50,7 @@ import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/sto
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getSessionArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
+import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -1207,6 +1208,8 @@ describe("Spur web API routes", () => {
               state: "OPEN",
               isDraft: false,
               merged: false,
+              mergeable: null,
+              mergeStateStatus: null,
               reviewDecision: null,
               reviewThreads: { nodes: [] },
               commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
@@ -1251,6 +1254,7 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
       expect(payload.state).toBe("open");
       expect(payload.ciStatus).toBeNull();
+      expect(payload.canMerge).toBe(false);
     });
 
     it("returns draft state for a draft PR", async () => {
@@ -1336,6 +1340,42 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { ciStatus: string };
 
       expect(payload.ciStatus).toBe("success");
+    });
+
+    it("returns canMerge when GitHub reports a clean mergeable PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { canMerge: boolean };
+
+      expect(payload.canMerge).toBe(true);
+    });
+
+    it("returns canMerge false for a dirty PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { canMerge: boolean };
+
+      expect(payload.canMerge).toBe(false);
     });
 
     it("returns CI failure for FAILURE rollup", async () => {
@@ -1656,6 +1696,71 @@ describe("Spur web API routes", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.state).toBeNull();
       expect(payload.error).toContain("GitHub rate limit");
+    });
+  });
+
+  describe("POST /api/pr-status/merge", () => {
+    beforeEach(() => {
+      vi.stubGlobal("fetch", vi.fn());
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("returns 400 when url is missing", async () => {
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(response.status).toBe(400);
+    });
+
+    it("merges a PR with squash and returns ok", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        ghOk({
+          merged: true,
+          sha: "abc123",
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({ url: "https://github.com/owner/repo/pull/42" }),
+        }),
+      );
+      const payload = (await response.json()) as { ok: boolean; sha: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.sha).toBe("abc123");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.github.com/repos/owner/repo/pulls/42/merge",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ merge_method: "squash" }),
+        }),
+      );
+    });
+
+    it("surfaces GitHub merge errors", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ghErr(405, { message: "Not mergeable" })));
+
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({ url: "https://github.com/owner/repo/pull/42" }),
+        }),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(405);
+      expect(payload.error).toBe("Not mergeable");
     });
   });
 });

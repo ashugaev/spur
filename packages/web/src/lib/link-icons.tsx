@@ -27,6 +27,7 @@ const EMPTY_PR_INFO: PrInfo = {
   state: null,
   reviewDecision: null,
   ciStatus: null,
+  canMerge: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
@@ -98,6 +99,10 @@ function cachedOrEmpty(url: string): PrInfo {
   return cached ? cached.data : EMPTY_PR_INFO;
 }
 
+export function primePrInfo(url: string, data: PrInfo): void {
+  setPrCache(url, data);
+}
+
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
   const existing = pendingPrRequests.get(url);
   if (existing) return existing;
@@ -114,6 +119,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
         state: isPrState(obj["state"]) ? obj["state"] : null,
         reviewDecision: parseReviewDecision(obj["reviewDecision"]),
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+        canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
@@ -226,31 +232,53 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
-export function ReviewDecisionDot({ decision }: { decision: ReviewDecision }) {
-  if (!decision) return null;
+function ReviewCheck({
+  className,
+  color,
+  title,
+}: {
+  className?: string;
+  color: string;
+  title: string;
+}) {
+  return (
+    <span
+      aria-label={title}
+      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
+      role="img"
+      title={title}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M20 6 9 17l-5-5" />
+      </svg>
+    </span>
+  );
+}
+
+export function ReviewDecisionDot({
+  decision,
+  showPlaceholder = false,
+  className,
+}: {
+  decision: ReviewDecision;
+  showPlaceholder?: boolean;
+  className?: string;
+}) {
+  if (!decision && !showPlaceholder) return null;
 
   if (decision === "approved")
     return (
-      <span
-        aria-label="Approved"
-        className="inline-flex"
-        data-pr-review-decision="approved"
-        role="img"
-        title="Approved"
-      >
-        <svg
-          aria-hidden="true"
-          className="h-3 w-3"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="var(--color-status-ready)"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <circle cx="12" cy="12" r="9" strokeWidth="2" />
-          <path d="M16.5 9 10.5 15 7.5 12" />
-        </svg>
+      <span className={className} data-pr-review-decision="approved">
+        <ReviewCheck color="var(--color-status-ready)" title="Approved" />
       </span>
     );
 
@@ -258,7 +286,7 @@ export function ReviewDecisionDot({ decision }: { decision: ReviewDecision }) {
     return (
       <span
         aria-label="Changes requested"
-        className="inline-flex"
+        className={className}
         data-pr-review-decision="changes_requested"
         role="img"
         title="Changes requested"
@@ -278,28 +306,16 @@ export function ReviewDecisionDot({ decision }: { decision: ReviewDecision }) {
       </span>
     );
 
+  if (decision === "review_required")
+    return (
+      <span className={className} data-pr-review-decision="review_required">
+        <ReviewCheck color="var(--color-status-attention)" title="Approval required" />
+      </span>
+    );
+
   return (
-    <span
-      aria-label="Review required"
-      className="inline-flex"
-      data-pr-review-decision="review_required"
-      role="img"
-      title="Review required"
-    >
-      <svg
-        aria-hidden="true"
-        className="h-3 w-3"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="var(--color-accent-orange)"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <circle cx="12" cy="12" r="9" strokeWidth="2" />
-        <path d="M12 7.5v6" />
-        <circle cx="12" cy="16.5" r="1" fill="var(--color-accent-orange)" stroke="none" />
-      </svg>
+    <span className={className} data-pr-review-decision="none">
+      <ReviewCheck color="var(--color-text-tertiary)" title="No approval required" />
     </span>
   );
 }

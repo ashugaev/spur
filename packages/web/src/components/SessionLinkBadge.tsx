@@ -76,8 +76,12 @@ export function SessionLinkBadge({
       </span>
       {isPr ? (
         <>
-          <ReviewDecisionDot decision={prInfo.reviewDecision} />
           <CiStatusDot status={prInfo.ciStatus} />
+          <ReviewDecisionDot
+            className={prInfo.ciStatus === "success" ? "-ml-1" : undefined}
+            decision={prInfo.reviewDecision}
+            showPlaceholder={prInfo.ciStatus === "success"}
+          />
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}

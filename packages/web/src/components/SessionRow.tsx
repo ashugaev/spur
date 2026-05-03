@@ -4,6 +4,7 @@ import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
+import { primePrInfo } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
 
@@ -51,8 +52,11 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const prLink = session.links.find((l) => l.label === "pr");
   const trackerLink = session.links.find((l) => l.label === "tracker");
   const prInfo = useSessionLinkPrInfo(prLink);
-  const showDone = prInfo.state === "merged" && canComplete(session);
+  const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
+  const showDone = (prInfo.state === "merged" || mergedAfterMerge) && canComplete(session);
+  const showMerge = Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
   const [completing, setCompleting] = useState(false);
+  const [merging, setMerging] = useState(false);
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
@@ -121,6 +125,51 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
             viewBox="0 0 24 24"
           >
             <path d="M20 6 9 17l-5-5" />
+          </svg>
+        </IconButton>
+      ) : showMerge ? (
+        <IconButton
+          label={`Merge PR for ${session.id}`}
+          disabled={merging}
+          activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
+          onClick={async () => {
+            if (!prLink) return;
+            setMerging(true);
+            try {
+              const res = await fetch("/api/pr-status/merge", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ url: prLink.url }),
+              });
+              if (!res.ok) throw new Error(`merge: ${res.status}`);
+              primePrInfo(prLink.url, {
+                ...prInfo,
+                state: "merged",
+                canMerge: false,
+                fetchedAt: Date.now(),
+                stale: false,
+              });
+              setMergedAfterMerge(true);
+            } catch (err) {
+              console.error("merge failed", err);
+              setMerging(false);
+            }
+          }}
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            viewBox="0 0 24 24"
+          >
+            <path d="M7 6a2.5 2.5 0 1 0-2.5 2.5A2.5 2.5 0 0 0 7 6Z" />
+            <path d="M19.5 15.5A2.5 2.5 0 1 0 17 18a2.5 2.5 0 0 0 2.5-2.5Z" />
+            <path d="M19.5 6A2.5 2.5 0 1 0 17 8.5 2.5 2.5 0 0 0 19.5 6Z" />
+            <path d="M7 6h5a5 5 0 0 1 5 5v2.5" />
           </svg>
         </IconButton>
       ) : (

@@ -15,6 +15,7 @@ beforeEach(async () => {
       state: "open",
       reviewDecision: null,
       ciStatus: null,
+      canMerge: false,
       totalThreads: 0,
       unresolvedThreads: 0,
     }),
@@ -44,6 +45,7 @@ describe("fetchPrInfo", () => {
         state: "open",
         reviewDecision: "approved",
         ciStatus: "success",
+        canMerge: true,
         totalThreads: 5,
         unresolvedThreads: 2,
       }),
@@ -53,6 +55,7 @@ describe("fetchPrInfo", () => {
     expect(result.state).toBe("open");
     expect(result.reviewDecision).toBe("approved");
     expect(result.ciStatus).toBe("success");
+    expect(result.canMerge).toBe(true);
     expect(result.totalThreads).toBe(5);
     expect(result.unresolvedThreads).toBe(2);
   });
@@ -63,6 +66,7 @@ describe("fetchPrInfo", () => {
         state: "open",
         reviewDecision: "MERGED",
         ciStatus: "success",
+        canMerge: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       }),
@@ -78,6 +82,7 @@ describe("fetchPrInfo", () => {
         state: "merged",
         reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       }),
@@ -174,10 +179,11 @@ describe("fetchPrInfo", () => {
 
     await act(async () => {
       const result = await fetchPrInfo("https://github.com/org/repo/pull/soft-missing");
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         state: null,
         reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       });
@@ -207,11 +213,12 @@ describe("fetchPrInfo", () => {
       }),
     );
 
-    await expect(Promise.all([first, second])).resolves.toEqual([
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
       {
         state: "open",
         reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 1,
         unresolvedThreads: 0,
       },
@@ -219,6 +226,7 @@ describe("fetchPrInfo", () => {
         state: "open",
         reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 1,
         unresolvedThreads: 0,
       },

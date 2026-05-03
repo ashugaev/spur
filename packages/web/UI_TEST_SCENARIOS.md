@@ -52,12 +52,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, terminal button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
-### D4: Terminal button state
+### D4: Dashboard row action button state
 
 - Sessions with `runtimeAlive=true` + `tmuxSession` + `status!=completed|killed`: button enabled (visible border, secondary text color)
 - Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
@@ -66,6 +66,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
+- Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
+- Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
 ### D4b: Merged-PR done button
 
@@ -80,8 +82,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
-- PR badges show approval only when GitHub `reviewDecision` reports it; resolved threads alone do not mark approval
-- PR badges stay compact: PR number first, then review/CI/comment indicators
+- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
+- When approval is received, the second overlapping check is green
+- When approval is still required, the second overlapping check is yellow
+- When no approval is required, the second overlapping check is gray
+- When changes are requested, the second review mark stays red/error
+- Resolved threads alone do not turn the review mark green
+- PR badges stay compact: PR number first, then CI/review mark, then review thread count
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
@@ -276,7 +283,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
-- PR badges use the same compact renderer as dashboard rows, including explicit GitHub approval icons from `reviewDecision`
+- PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
 - Each link clickable, opens in new tab
 
 ### S4b: Artifacts section

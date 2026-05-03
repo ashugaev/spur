@@ -19,6 +19,7 @@ describe("SessionLinkBadge", () => {
       state: null,
       reviewDecision: null,
       ciStatus: null,
+      canMerge: false,
       totalThreads: 0,
       unresolvedThreads: 0,
     });
@@ -30,6 +31,7 @@ describe("SessionLinkBadge", () => {
           state: "open",
           reviewDecision: "approved",
           ciStatus: "success",
+          canMerge: true,
           totalThreads: 2,
           unresolvedThreads: 0,
         }}
@@ -47,6 +49,7 @@ describe("SessionLinkBadge", () => {
       state: "open",
       reviewDecision: "approved",
       ciStatus: "success",
+      canMerge: true,
       totalThreads: 3,
       unresolvedThreads: 1,
     });
@@ -63,11 +66,52 @@ describe("SessionLinkBadge", () => {
     expect(screen.getByTitle("1 unresolved of 3 threads")).toBeInTheDocument();
   });
 
+  it("renders a gray secondary check when CI passed without approval requirement", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/77" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.getByLabelText("No approval required")).toBeInTheDocument();
+  });
+
+  it("renders a yellow secondary check when approval is still required", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "review_required",
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/78" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.getByLabelText("Approval required")).toBeInTheDocument();
+  });
+
   it("renders tracker badges without PR status indicators", () => {
     usePrInfoMock.mockReturnValue({
       state: null,
       reviewDecision: null,
       ciStatus: null,
+      canMerge: false,
       totalThreads: 0,
       unresolvedThreads: 0,
     });

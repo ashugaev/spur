@@ -393,6 +393,7 @@ test.describe("D4b: Merged-PR done button", () => {
         body: JSON.stringify({
           state: "merged",
           ciStatus: null,
+          canMerge: false,
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
@@ -406,6 +407,55 @@ test.describe("D4b: Merged-PR done button", () => {
       name: new RegExp(`Mark ${session.id} as done`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
+  });
+
+  test("merge button replaces terminal button when PR can merge", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "merge-btn-1",
+      status: "running",
+      state: "needs_input",
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status\?/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: true,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.route("/api/pr-status/merge", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, merged: true, sha: "abc123" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const mergeBtn = page.getByRole("button", {
+      name: new RegExp(`Merge PR for ${session.id}`, "i"),
+    });
+    await expect(mergeBtn).toBeVisible({ timeout: 8000 });
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+
+    await mergeBtn.click();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Mark ${session.id} as done`, "i"),
+      }),
+    ).toBeVisible();
   });
 });
 
