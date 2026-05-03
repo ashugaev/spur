@@ -44,7 +44,12 @@ export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
   return usePrInfo(link?.label === "pr" ? link.url : undefined);
 }
 
-export function SessionLinkBadge({ className, link, prInfo: providedPrInfo, variant }: SessionLinkBadgeProps) {
+export function SessionLinkBadge({
+  className,
+  link,
+  prInfo: providedPrInfo,
+  variant,
+}: SessionLinkBadgeProps) {
   const isPr = link.label === "pr";
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;

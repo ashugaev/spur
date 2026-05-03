@@ -1,10 +1,6 @@
 export const PR_STATES = ["draft", "open", "merged", "closed"] as const;
 export const CI_STATUSES = ["success", "failure", "pending"] as const;
-export const REVIEW_DECISIONS = [
-  "approved",
-  "changes_requested",
-  "review_required",
-] as const;
+export const REVIEW_DECISIONS = ["approved", "changes_requested", "review_required"] as const;
 
 export type PrState = (typeof PR_STATES)[number];
 export type CiStatus = (typeof CI_STATUSES)[number] | null;

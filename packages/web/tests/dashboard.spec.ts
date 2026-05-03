@@ -475,7 +475,9 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    await expect(page.locator("a[href='https://github.com/test/repo/pull/999']").first()).toBeVisible();
+    await expect(
+      page.locator("a[href='https://github.com/test/repo/pull/999']").first(),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 

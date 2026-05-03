@@ -2,10 +2,7 @@
 
 import Link from "next/link";
 import { type ReactNode, useState } from "react";
-import {
-  SessionLinkBadge,
-  useSessionLinkPrInfo,
-} from "@/components/SessionLinkBadge";
+import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { buildSessionPath } from "@/lib/project-routes";
 import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
