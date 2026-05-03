@@ -1,13 +1,17 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import os from "node:os";
 import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
-import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
-
-interface PrStatusResponse extends PrInfo {
-  error?: string;
-}
+import { type CiStatus, type PrState, parseReviewDecision } from "@/lib/pr-status-shape";
+import {
+  cacheKeyForCoords,
+  cachePrStatusResponse,
+  cacheTtlMs,
+  errorCacheTtlMs,
+  errorResponse,
+  extractPrCoords,
+  readCachedPrStatus,
+  recordSuccessfulPrStatus,
+  resetPrStatusCacheForTests,
+} from "@/lib/pr-status-store";
 
 interface GithubGraphQLResponse {
   data?: {
@@ -16,6 +20,9 @@ interface GithubGraphQLResponse {
         state: string;
         isDraft: boolean;
         merged: boolean;
+        mergeable: string | null;
+        mergeStateStatus: string | null;
+        reviewDecision: string | null;
         reviewThreads: { nodes: { isResolved: boolean }[] };
         commits: { nodes: { commit: { statusCheckRollup?: { state: string } } }[] };
       };
@@ -24,110 +31,18 @@ interface GithubGraphQLResponse {
   errors?: Array<{ message?: string }>;
 }
 
-interface CacheEntry {
-  response: PrStatusResponse;
-  expiresAt: number;
-}
-
-type LastGoodEntry = Omit<PrInfo, "stale"> & { fetchedAt: number };
-
-const cache = new Map<string, CacheEntry>();
-const lastGoodCache = new Map<string, LastGoodEntry>();
-const CACHE_TTL_MS = 120_000;
-const ERROR_CACHE_TTL_MS = 60_000;
-const PERSIST_DEBOUNCE_MS = 1_000;
-
 const GQL_QUERY = `query($owner:String!,$repo:String!,$number:Int!) {
   repository(owner:$owner,name:$repo) {
     pullRequest(number:$number) {
-      state isDraft merged
+      state isDraft merged mergeable mergeStateStatus reviewDecision
       reviewThreads(first:100) { nodes { isResolved } }
       commits(last:1) { nodes { commit { statusCheckRollup { state } } } }
     }
   }
 }`;
 
-const EMPTY_PR_STATUS: Omit<PrStatusResponse, "error"> = {
-  state: null,
-  ciStatus: null,
-  totalThreads: 0,
-  unresolvedThreads: 0,
-};
-
-function persistFilePath(): string {
-  const stateDir = process.env["SPUR_STATE_DIR"];
-  if (stateDir) {
-    return path.join(stateDir, "spur-pr-status-cache.json");
-  }
-  return path.join(os.tmpdir(), "spur-pr-status-cache.json");
-}
-
-let persistTimer: NodeJS.Timeout | null = null;
-
-function isLastGoodEntry(value: unknown): value is LastGoodEntry {
-  return isPrInfoShape(value) && typeof (value as { fetchedAt?: unknown }).fetchedAt === "number";
-}
-
-function loadPersistedLastGood(): void {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(persistFilePath(), "utf-8"));
-    if (typeof parsed !== "object" || parsed === null) return;
-    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (isLastGoodEntry(value)) lastGoodCache.set(key, value);
-    }
-  } catch {
-    /* file missing, unreadable, or malformed */
-  }
-}
-
-function schedulePersist(): void {
-  if (persistTimer) return;
-  persistTimer = setTimeout(() => {
-    persistTimer = null;
-    try {
-      const filePath = persistFilePath();
-      mkdirSync(path.dirname(filePath), { recursive: true });
-      const tmp = `${filePath}.${process.pid}.tmp`;
-      const data = Object.fromEntries(lastGoodCache.entries());
-      writeFileSync(tmp, JSON.stringify(data), "utf-8");
-      renameSync(tmp, filePath);
-    } catch {
-      /* best-effort */
-    }
-  }, PERSIST_DEBOUNCE_MS);
-  if (persistTimer && typeof persistTimer.unref === "function") persistTimer.unref();
-}
-
-loadPersistedLastGood();
-
-function recordLastGood(key: string, snapshot: Omit<LastGoodEntry, "fetchedAt">): LastGoodEntry {
-  const entry: LastGoodEntry = { ...snapshot, fetchedAt: Date.now() };
-  lastGoodCache.set(key, entry);
-  schedulePersist();
-  return entry;
-}
-
-function freshFromEntry(entry: LastGoodEntry): PrStatusResponse {
-  return {
-    state: entry.state,
-    ciStatus: entry.ciStatus,
-    totalThreads: entry.totalThreads,
-    unresolvedThreads: entry.unresolvedThreads,
-    fetchedAt: entry.fetchedAt,
-    stale: false,
-  };
-}
-
-function errorResponse(key: string, error: string): PrStatusResponse {
-  const last = lastGoodCache.get(key);
-  if (last) return { ...freshFromEntry(last), stale: true, error };
-  return { ...EMPTY_PR_STATUS, stale: false, error };
-}
-
-function extractPrCoords(url: string): { owner: string; repo: string; number: string } | null {
-  const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  if (!match || !match[1] || !match[2] || !match[3]) return null;
-  return { owner: match[1], repo: match[2], number: match[3] };
+function normalizeGitHubState(value: string | null | undefined): string {
+  return (value ?? "").trim().toUpperCase();
 }
 
 export async function GET(request: NextRequest) {
@@ -141,10 +56,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "invalid GitHub PR URL" }, { status: 400 });
   }
 
-  const cacheKey = `${coords.owner}/${coords.repo}/${coords.number}`;
-  const cached = cache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json(cached.response);
+  const cacheKey = cacheKeyForCoords(coords);
+  const cached = readCachedPrStatus(cacheKey);
+  if (cached) {
+    return NextResponse.json(cached);
   }
 
   const rateLimitError = getGitHubRateLimitError();
@@ -152,12 +67,10 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(errorResponse(cacheKey, rateLimitError));
   }
 
-  const headers = ghHeaders();
-
   try {
     const ghResponse = await fetch("https://api.github.com/graphql", {
       method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
+      headers: { ...ghHeaders(), "content-type": "application/json" },
       body: JSON.stringify({
         query: GQL_QUERY,
         variables: { owner: coords.owner, repo: coords.repo, number: Number(coords.number) },
@@ -168,7 +81,7 @@ export async function GET(request: NextRequest) {
     if (!ghResponse.ok) {
       handleGitHubRateLimit(ghResponse);
       const response = errorResponse(cacheKey, `GitHub API ${ghResponse.status}`);
-      cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+      cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
       return NextResponse.json(response);
     }
 
@@ -178,15 +91,23 @@ export async function GET(request: NextRequest) {
       ?.map((entry) => entry.message?.trim())
       .filter(Boolean)
       .join("; ");
+
     if (!pr) {
       if (gqlError) {
         const response = errorResponse(cacheKey, gqlError);
-        cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+        cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
         return NextResponse.json(response);
       }
-      const entry = recordLastGood(cacheKey, EMPTY_PR_STATUS);
-      const response = freshFromEntry(entry);
-      cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
+
+      const response = recordSuccessfulPrStatus(cacheKey, {
+        state: null,
+        reviewDecision: null,
+        ciStatus: null,
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+      cachePrStatusResponse(cacheKey, response, cacheTtlMs());
       return NextResponse.json(response);
     }
 
@@ -197,7 +118,11 @@ export async function GET(request: NextRequest) {
     else state = "open";
 
     const totalThreads = pr.reviewThreads.nodes.length;
-    const unresolvedThreads = pr.reviewThreads.nodes.filter((t) => !t.isResolved).length;
+    const unresolvedThreads = pr.reviewThreads.nodes.filter((thread) => !thread.isResolved).length;
+    const canMerge =
+      state === "open" &&
+      normalizeGitHubState(pr.mergeable) === "MERGEABLE" &&
+      normalizeGitHubState(pr.mergeStateStatus) === "CLEAN";
 
     let ciStatus: CiStatus = null;
     const rollupState = pr.commits.nodes[0]?.commit.statusCheckRollup?.state;
@@ -205,25 +130,26 @@ export async function GET(request: NextRequest) {
     else if (rollupState === "FAILURE" || rollupState === "ERROR") ciStatus = "failure";
     else if (rollupState === "PENDING" || rollupState === "EXPECTED") ciStatus = "pending";
 
-    const entry = recordLastGood(cacheKey, { state, ciStatus, totalThreads, unresolvedThreads });
-    const response = freshFromEntry(entry);
-    cache.set(cacheKey, { response, expiresAt: Date.now() + CACHE_TTL_MS });
+    const response = recordSuccessfulPrStatus(cacheKey, {
+      state,
+      reviewDecision: parseReviewDecision(pr.reviewDecision),
+      ciStatus,
+      canMerge,
+      totalThreads,
+      unresolvedThreads,
+    });
+    cachePrStatusResponse(cacheKey, response, cacheTtlMs());
     return NextResponse.json(response);
   } catch (error) {
     const message = error instanceof Error ? error.message : "GitHub API request failed";
     const response = errorResponse(cacheKey, message);
-    cache.set(cacheKey, { response, expiresAt: Date.now() + ERROR_CACHE_TTL_MS });
+    cachePrStatusResponse(cacheKey, response, errorCacheTtlMs());
     return NextResponse.json(response);
   }
 }
 
 if (process.env["NODE_ENV"] === "test") {
   (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
-    cache.clear();
-    lastGoodCache.clear();
-    if (persistTimer) {
-      clearTimeout(persistTimer);
-      persistTimer = null;
-    }
+    resetPrStatusCacheForTests();
   };
 }

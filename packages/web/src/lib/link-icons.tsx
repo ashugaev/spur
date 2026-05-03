@@ -6,13 +6,15 @@ import {
   type CiStatus,
   type PrInfo,
   type PrState,
+  type ReviewDecision,
   isCiStatus,
   isPrInfoShape,
   isPrState,
+  parseReviewDecision,
   prInfosEqual,
 } from "@/lib/pr-status-shape";
 
-export type { CiStatus, PrInfo, PrState };
+export type { CiStatus, PrInfo, PrState, ReviewDecision };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -23,7 +25,9 @@ const PR_STATE_COLORS: Record<PrState, string> = {
 
 const EMPTY_PR_INFO: PrInfo = {
   state: null,
+  reviewDecision: null,
   ciStatus: null,
+  canMerge: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
@@ -99,6 +103,10 @@ function cachedOrEmpty(url: string): PrInfo {
   return cached ? cached.data : EMPTY_PR_INFO;
 }
 
+export function primePrInfo(url: string, data: PrInfo): void {
+  setPrCache(url, data);
+}
+
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
   const existing = pendingPrRequests.get(url);
   if (existing) return existing;
@@ -113,7 +121,9 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
       const error = typeof obj["error"] === "string" ? obj["error"] : null;
       const parsed: PrInfo = {
         state: isPrState(obj["state"]) ? obj["state"] : null,
+        reviewDecision: parseReviewDecision(obj["reviewDecision"]),
         ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+        canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
         totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
         unresolvedThreads:
           typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
@@ -159,7 +169,10 @@ export function usePrInfo(url: string | undefined): PrInfo {
       const result = await fetchPrInfo(url);
       if (cancelled) return;
       const prev = prCache.get(url)?.data;
-      if (prev && prInfosEqual(prev, result)) return;
+      if (prev && prInfosEqual(prev, result)) {
+        setInfo(result);
+        return;
+      }
       setPrCache(url, result);
       setInfo(result);
     };
@@ -223,8 +236,191 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
+function ReviewCheck({
+  className,
+  color,
+  title,
+}: {
+  className?: string;
+  color: string;
+  title: string;
+}) {
+  return (
+    <span
+      aria-label={title}
+      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
+      role="img"
+      title={title}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3 w-3"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M20 6 9 17l-5-5" />
+      </svg>
+    </span>
+  );
+}
+
+function CompositeCiReviewMark({
+  className,
+  reviewColor,
+  reviewGlyph,
+  title,
+}: {
+  className?: string;
+  reviewColor: string;
+  reviewGlyph: "check" | "cross";
+  title: string;
+}) {
+  const halo = "var(--color-bg-base)";
+
+  const strokedPath = (d: string, color: string, width: number) => (
+    <>
+      <path d={d} stroke={halo} strokeWidth={width + 1.25} />
+      <path d={d} stroke={color} strokeWidth={width} />
+    </>
+  );
+
+  return (
+    <span
+      aria-label={title}
+      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
+      role="img"
+      title={title}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3.5 w-[1.15rem]"
+        viewBox="0 0 24 18"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {reviewGlyph === "check" ? (
+          strokedPath("M8.75 9.5 11.9 12.65 17.65 5.9", reviewColor, 2.15)
+        ) : (
+          <>
+            {strokedPath("M11 6.1 17.4 12.5", reviewColor, 2.05)}
+            {strokedPath("M17.4 6.1 11 12.5", reviewColor, 2.05)}
+          </>
+        )}
+        {strokedPath("M2.75 9.5 5.9 12.65 11.65 5.9", "var(--color-status-ready)", 2.15)}
+      </svg>
+    </span>
+  );
+}
+
+export function ReviewDecisionDot({
+  decision,
+  showPlaceholder = false,
+  className,
+  withCiSuccess = false,
+}: {
+  decision: ReviewDecision;
+  showPlaceholder?: boolean;
+  className?: string;
+  withCiSuccess?: boolean;
+}) {
+  if (!decision && !showPlaceholder) return null;
+
+  if (withCiSuccess && decision === "approved")
+    return (
+      <span className={className} data-pr-review-decision="approved">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-ready)"
+          reviewGlyph="check"
+          title="Approved"
+        />
+      </span>
+    );
+
+  if (withCiSuccess && decision === "changes_requested")
+    return (
+      <span className={className} data-pr-review-decision="changes_requested">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-error)"
+          reviewGlyph="cross"
+          title="Changes requested"
+        />
+      </span>
+    );
+
+  if (withCiSuccess && decision === "review_required")
+    return (
+      <span className={className} data-pr-review-decision="review_required">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-status-attention)"
+          reviewGlyph="check"
+          title="Approval required"
+        />
+      </span>
+    );
+
+  if (withCiSuccess)
+    return (
+      <span className={className} data-pr-review-decision="none">
+        <CompositeCiReviewMark
+          reviewColor="var(--color-text-tertiary)"
+          reviewGlyph="check"
+          title="No approval required"
+        />
+      </span>
+    );
+
+  if (decision === "approved")
+    return (
+      <span className={className} data-pr-review-decision="approved">
+        <ReviewCheck color="var(--color-status-ready)" title="Approved" />
+      </span>
+    );
+
+  if (decision === "changes_requested")
+    return (
+      <span
+        aria-label="Changes requested"
+        className={className}
+        data-pr-review-decision="changes_requested"
+        role="img"
+        title="Changes requested"
+      >
+        <svg
+          aria-hidden="true"
+          className="h-3 w-3"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="var(--color-status-error)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        >
+          <circle cx="12" cy="12" r="9" strokeWidth="2" />
+          <path d="M15.5 8.5 8.5 15.5M8.5 8.5l7 7" />
+        </svg>
+      </span>
+    );
+
+  if (decision === "review_required")
+    return (
+      <span className={className} data-pr-review-decision="review_required">
+        <ReviewCheck color="var(--color-status-attention)" title="Approval required" />
+      </span>
+    );
+
+  return (
+    <span className={className} data-pr-review-decision="none">
+      <ReviewCheck color="var(--color-text-tertiary)" title="No approval required" />
+    </span>
+  );
+}
+
 export function ReviewCommentsBadge({ total, unresolved }: { total: number; unresolved: number }) {
-  if (total <= 0) return <span className="inline-flex w-6" />;
+  if (total <= 0) return null;
   const hasUnresolved = unresolved > 0;
   const color = hasUnresolved
     ? "text-[var(--color-status-attention)]"
@@ -235,7 +431,7 @@ export function ReviewCommentsBadge({ total, unresolved }: { total: number; unre
     : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className={`inline-flex w-6 items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
       title={title}
     >
       <svg

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceStatusHint } from "@/components/VoiceInput";
@@ -18,16 +19,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import {
-  CiStatusDot,
-  ReviewCommentsBadge,
-  extractLinkId,
-  GithubIcon,
-  JiraIcon,
-  isGitHubPrLinkLabel,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons";
+import { isGitHubPrLinkLabel } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -52,33 +44,6 @@ import {
   type DashboardSession,
   type SpurSessionView,
 } from "@/lib/types";
-
-function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const isPrLink = isGitHubPrLinkLabel(link.label);
-  const prUrl = isPrLink ? link.url : undefined;
-  const prInfo = usePrInfo(prUrl);
-  const color = prStateColor(prInfo.state);
-
-  return (
-    <a
-      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-      href={link.url}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {isPrLink ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[10px]" style={color ? { color } : undefined}>
-        {extractLinkId(link)}
-      </span>
-      {isPrLink ? (
-        <>
-          <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </>
-      ) : null}
-    </a>
-  );
-}
 
 function displayLinkLabel(label: string): string {
   return isGitHubPrLinkLabel(label) ? "github pr" : label;
@@ -1159,7 +1124,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.links
                 .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
                 .map((link) => (
-                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
+                  <SessionLinkBadge
+                    key={`${link.label}-${link.url}`}
+                    link={link}
+                    variant="detail"
+                  />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
