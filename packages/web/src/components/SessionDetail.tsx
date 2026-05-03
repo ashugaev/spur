@@ -970,13 +970,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const startupArtifacts = useMemo(
-    () => {
-      const startupAttachmentIds = session?.startupAttachmentIds ?? [];
-      return session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? [];
-    },
-    [session],
-  );
+  const startupArtifacts = useMemo(() => {
+    const startupAttachmentIds = session?.startupAttachmentIds ?? [];
+    return (
+      session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
+    );
+  }, [session]);
   const visibleLinks = useMemo(
     () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
     [session, sidecarLinkLabels],
