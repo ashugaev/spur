@@ -625,7 +625,7 @@ export function Dashboard() {
             icon={<IconStop />}
             label="Stopped"
             value={stats.stopped}
-            color={stats.stopped > 0 ? "var(--color-accent-orange)" : undefined}
+            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
             active={activeStatFilter === "stopped"}
             onClick={() => toggleStatFilter("stopped")}
           />

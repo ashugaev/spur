@@ -41,7 +41,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention/orange/ready)
+- Non-zero values show colored (error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
 - `Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
