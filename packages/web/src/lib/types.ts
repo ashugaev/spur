@@ -32,11 +32,32 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export type SpurSessionArtifactKind = "image" | "video" | "download";
+
+export interface SpurSessionArtifact {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: SpurSessionArtifactKind;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SpurSessionWorkspaceAccess {
+  items: Array<{
+    label: string;
+    kind: "copy" | "link";
+    value: string;
+  }>;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
   agent: AgentName;
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
   tmuxSession: string | null;
@@ -53,11 +74,13 @@ export interface SpurSessionView {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  artifacts: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
   };
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -80,6 +103,7 @@ export interface DashboardSession {
   agent: AgentName;
   title: string | null;
   prompt: string;
+  startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
   tmuxSession: string | null;
@@ -92,12 +116,14 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  artifacts: SpurSessionArtifact[];
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
   };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -119,6 +145,7 @@ export function toDashboardSession(
     agent: session.agent,
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
     tmuxSession: session.tmuxSession ?? null,
@@ -131,9 +158,11 @@ export function toDashboardSession(
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
     services: session.services,
+    artifacts: session.artifacts,
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
+    workspaceAccess: session.workspaceAccess,
     error: session.error,
   };
 }

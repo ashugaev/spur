@@ -7,6 +7,7 @@ interface SpawnBody {
   projectId?: string;
   prompt?: string;
   agent?: AgentName;
+  attachments?: Array<{ name: string; data: string }>;
   branch?: string;
   planMode?: boolean;
   steps?: string[];
@@ -33,6 +34,9 @@ export async function POST(request: NextRequest) {
       body.overrides && Object.keys(body.overrides).length > 0 ? body.overrides : undefined;
 
     const payload: Record<string, unknown> = { project, prompt };
+    if (Array.isArray(body.attachments) && body.attachments.length > 0) {
+      payload.attachments = body.attachments;
+    }
     if (body.agent) payload.agent = body.agent;
     if (body.branch?.trim()) payload.branch = body.branch.trim();
     if (body.planMode === true) payload.planMode = true;

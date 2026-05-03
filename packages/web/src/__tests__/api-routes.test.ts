@@ -22,13 +22,16 @@ vi.mock("node:fs/promises", () => ({
   statfs: vi.fn(),
 }));
 
-// Prevent pr-status from shelling out to `gh auth token`
-vi.mock("node:child_process", () => ({ execSync: vi.fn(() => "") }));
+// Prevent GitHub status routes from shelling out to `gh auth token`
+vi.mock("node:child_process", () => ({ execFileSync: vi.fn(() => "") }));
 
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
+import { resetGitHubApiStateForTests } from "@/lib/github-api";
+import { resetGitHubStatusForTests } from "@/lib/github-status";
 import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
+import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -45,6 +48,7 @@ import { POST as respawnSession } from "@/app/api/sessions/[id]/respawn/route";
 import { POST as startSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/start/route";
 import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/stop/route";
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
+import { GET as getSessionArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 
@@ -74,7 +78,28 @@ function sessionFixture(overrides: Record<string, unknown> = {}) {
     workspaceExists: true,
     worktreePath: "/tmp/api-a1",
     services: [],
+    artifacts: [],
     ...overrides,
+  };
+}
+
+function ghOk(body: unknown = { login: "spur" }) {
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers(),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+function ghErr(status: number, body: unknown = {}) {
+  return {
+    ok: false,
+    status,
+    headers: new Headers(),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
   };
 }
 
@@ -86,6 +111,8 @@ describe("Spur web API routes", () => {
     mockedTranscribeAudio.mockReset();
     mockedReadFile.mockReset();
     mockedStatfs.mockReset();
+    resetGitHubApiStateForTests();
+    resetGitHubStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
@@ -217,6 +244,41 @@ describe("Spur web API routes", () => {
     expect(payload.error).toBe("Session not found");
   });
 
+  it("GET /api/sessions/:id/artifacts/:artifactId proxies artifact content from the daemon", async () => {
+    mockedSpurRequest.mockResolvedValue(
+      new Response("artifact-bytes", {
+        status: 200,
+        headers: {
+          "content-type": "image/png",
+          "content-length": "13",
+          "content-disposition": 'inline; filename="shot.png"',
+        },
+      }),
+    );
+
+    const response = await getSessionArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("artifact-bytes");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/api-a1/artifacts/shot.png");
+  });
+
+  it("GET /api/sessions/:id/artifacts/:artifactId returns 502 on daemon error", async () => {
+    mockedSpurRequest.mockRejectedValue(new Error("Artifact unavailable"));
+
+    const response = await getSessionArtifact(
+      new Request("http://localhost:3000/api/sessions/api-a1/artifacts/shot.png"),
+      { params: Promise.resolve({ id: "api-a1", artifactId: "shot.png" }) },
+    );
+    const payload = (await response.json()) as { error: string };
+
+    expect(response.status).toBe(502);
+    expect(payload.error).toBe("Artifact unavailable");
+  });
+
   // ── POST /api/spawn ────────────────────────────────────────────────────
 
   it("POST /api/spawn accepts a missing prompt and proxies an empty prompt to Spur", async () => {
@@ -292,6 +354,33 @@ describe("Spur web API routes", () => {
           planMode: true,
           steps: ["step 1", "step 2"],
           overrides: { worktree: true },
+        }),
+      }),
+    );
+  });
+
+  it("POST /api/spawn forwards attachments", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Do work",
+          attachments: [{ name: "shot.png", data: "cG5n" }],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith(
+      "/sessions/background",
+      expect.objectContaining({
+        body: JSON.stringify({
+          project: "api",
+          prompt: "Do work",
+          attachments: [{ name: "shot.png", data: "cG5n" }],
         }),
       }),
     );
@@ -501,17 +590,33 @@ describe("Spur web API routes", () => {
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
   it("POST /api/sessions/:id/respawn proxies to daemon", async () => {
-    mockedSpurRequestJson.mockResolvedValue({ ok: true });
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
 
     const response = await respawnSession(
-      new Request("http://localhost:3000/api/sessions/api-a1/respawn", { method: "POST" }),
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry with screenshot",
+          startupAttachmentIds: ["1715000000000-source.png"],
+          attachments: [{ name: "shot.png", data: "cG5n" }],
+        }),
+      }),
       { params: Promise.resolve({ id: "api-a1" }) },
     );
 
     expect(response.status).toBe(200);
     expect(mockedSpurRequestJson).toHaveBeenCalledWith(
       "/sessions/api-a1/respawn",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+      }),
+    );
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      {
+        prompt: "Retry with screenshot",
+        startupAttachmentIds: ["1715000000000-source.png"],
+        attachments: [{ name: "shot.png", data: "cG5n" }],
+      },
     );
   });
 
@@ -958,6 +1063,120 @@ describe("Spur web API routes", () => {
 
   // ── GET /api/pr-status ─────────────────────────────────────────────────
 
+  describe("GET /api/github-status", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      resetGitHubStatusForTests();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITHUB_TOKEN"] = "test-token";
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    it("returns a healthy payload with the request timestamp", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.github.com/user",
+        expect.objectContaining({ method: "GET", cache: "no-store" }),
+      );
+    });
+
+    it("returns an error payload when GitHub responds with an error", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitHub API 503");
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("does not convert a normal GitHub error into a rate-limit error when headers are present", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "x-ratelimit-reset": String(Math.floor((Date.now() + 30_000) / 1000)),
+          "x-ratelimit-remaining": "4999",
+        }),
+        json: async () => ({ message: "upstream unavailable" }),
+        text: async () => JSON.stringify({ message: "upstream unavailable" }),
+      });
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("upstream unavailable");
+    });
+
+    it("returns an auth error payload when no GitHub token is available", async () => {
+      delete process.env["GITHUB_TOKEN"];
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitHub auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns a network error payload when the request throws", async () => {
+      fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("ECONNREFUSED");
+    });
+
+    it("returns cached results for repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
+      const response = await getGitHubStatus(
+        new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.ok).toBe(true);
+    });
+  });
+
   describe("GET /api/pr-status", () => {
     const fetchMock = vi.fn();
 
@@ -971,6 +1190,8 @@ describe("Spur web API routes", () => {
       vi.stubGlobal("fetch", fetchMock);
       fetchMock.mockReset();
       process.env["GITHUB_TOKEN"] = "test-token";
+      const reset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof reset === "function") (reset as () => void)();
     });
 
     afterEach(() => {
@@ -992,26 +1213,6 @@ describe("Spur web API routes", () => {
             },
           },
         },
-      };
-    }
-
-    function ghOk(body: unknown) {
-      return {
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        json: async () => body,
-        text: async () => JSON.stringify(body),
-      };
-    }
-
-    function ghErr(status: number, body: unknown = {}) {
-      return {
-        ok: false,
-        status,
-        headers: new Headers(),
-        json: async () => body,
-        text: async () => JSON.stringify(body),
       };
     }
 
@@ -1175,34 +1376,81 @@ describe("Spur web API routes", () => {
       expect(payload.unresolvedThreads).toBe(2);
     });
 
-    it("returns 404 when PR is not found in GraphQL response", async () => {
+    it("returns an empty payload when PR is not found in GraphQL response", async () => {
       fetchMock.mockResolvedValue(ghOk({ data: { repository: { pullRequest: null } } }));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as {
+        state: null;
+        ciStatus: null;
+        totalThreads: number;
+        unresolvedThreads: number;
+        error?: string;
+      };
 
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject({
+        state: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      });
+      expect(payload.error).toBeUndefined();
     });
 
-    it("returns 502 when GitHub API responds with a server error", async () => {
+    it("returns an error payload when GitHub API responds with a server error", async () => {
       fetchMock.mockResolvedValue(ghErr(503));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("GitHub API 503");
     });
 
-    it("returns 502 on network-level error", async () => {
+    it("does not arm rate limiting for non-rate-limited GitHub errors with rate-limit headers", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({
+          "x-ratelimit-reset": String(Math.floor((Date.now() + 30_000) / 1000)),
+          "x-ratelimit-remaining": "4999",
+        }),
+        json: async () => ({ message: "upstream unavailable" }),
+        text: async () => JSON.stringify({ message: "upstream unavailable" }),
+      });
+      fetchMock.mockResolvedValueOnce(ghOk(makePrGql()));
+
+      const first = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const second = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload1 = (await first.json()) as { error: string };
+      const payload2 = (await second.json()) as { state: string };
+
+      expect(payload1.error).toBe("GitHub API 503");
+      expect(payload2.state).toBe("open");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns an error payload on network-level error", async () => {
       fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
 
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(502);
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("ECONNREFUSED");
     });
 
     it("returns cached response on second identical request", async () => {
@@ -1218,13 +1466,143 @@ describe("Spur web API routes", () => {
       expect(response2.status).toBe(200);
     });
 
+    it("preserves upstream error details from cache on repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const url = nextPrUrl();
+      const response1 = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const response2 = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const payload1 = (await response1.json()) as { error: string };
+      const payload2 = (await response2.json()) as { error: string };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response1.status).toBe(200);
+      expect(response2.status).toBe(200);
+      expect(payload1.error).toBe("GitHub API 503");
+      expect(payload2.error).toBe("GitHub API 503");
+    });
+
+    it("returns GraphQL errors as a soft error payload", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk({
+          data: { repository: { pullRequest: null } },
+          errors: [{ message: "Resource not accessible by integration" }],
+        }),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { state: null; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("Resource not accessible by integration");
+    });
+
+    it("fresh successful response includes stale:false and a recent fetchedAt", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql()));
+      const before = Date.now();
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        stale: boolean;
+        fetchedAt: number;
+      };
+
+      expect(payload.state).toBe("open");
+      expect(payload.stale).toBe(false);
+      expect(typeof payload.fetchedAt).toBe("number");
+      expect(payload.fetchedAt).toBeGreaterThanOrEqual(before);
+    });
+
+    it("after a successful fetch, a subsequent error returns the prior snapshot with stale:true", async () => {
+      const doReset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof doReset === "function") (doReset as () => void)();
+
+      const url = nextPrUrl();
+
+      // 1) Success populates lastGoodCache and short-TTL cache.
+      fetchMock.mockResolvedValueOnce(
+        ghOk(
+          makePrGql({
+            commits: { nodes: [{ commit: { statusCheckRollup: { state: "SUCCESS" } } }] },
+          }),
+        ),
+      );
+      const okResp = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+      );
+      const okPayload = (await okResp.json()) as { fetchedAt: number; ciStatus: string };
+      expect(okPayload.ciStatus).toBe("success");
+
+      // 2) Clear the short-TTL response cache only by reaching into lastGoodCache via a
+      // fresh module reset of `cache` is not exposed. Instead, we trigger a network
+      // re-fetch by invalidating the short-TTL entry. The cleanest way without new
+      // exports: monkey-patch Date.now to advance past CACHE_TTL_MS.
+      const realNow = Date.now;
+      try {
+        Date.now = () => realNow() + 200_000;
+        fetchMock.mockResolvedValueOnce(ghErr(503));
+        const errResp = await getPrStatus(
+          new NextRequest(`http://localhost:3000/api/pr-status?url=${url}`),
+        );
+        const errPayload = (await errResp.json()) as {
+          state: string;
+          ciStatus: string;
+          stale: boolean;
+          fetchedAt: number;
+          error: string;
+        };
+        expect(errResp.status).toBe(200);
+        expect(errPayload.stale).toBe(true);
+        expect(errPayload.state).toBe("open");
+        expect(errPayload.ciStatus).toBe("success");
+        expect(errPayload.error).toBe("GitHub API 503");
+        expect(errPayload.fetchedAt).toBe(okPayload.fetchedAt);
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    it("with no prior success, an error returns EMPTY_PR_STATUS with error and stale:false", async () => {
+      const doReset = (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"];
+      if (typeof doReset === "function") (doReset as () => void)();
+
+      fetchMock.mockResolvedValueOnce(ghErr(503));
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        state: null;
+        error: string;
+        stale: boolean;
+        fetchedAt?: number;
+      };
+
+      expect(payload.state).toBeNull();
+      expect(payload.error).toBe("GitHub API 503");
+      expect(payload.stale).toBe(false);
+      expect(payload.fetchedAt).toBeUndefined();
+    });
+
     // Rate-limit tests must run last: they set module-level rateLimitResetAt
-    it("returns 429 while rate-limit window is active", async () => {
+    it("returns a soft error while rate-limit window is active", async () => {
       const resetAt = Math.floor((Date.now() + 30_000) / 1000);
       fetchMock.mockResolvedValueOnce({
         ok: false,
         status: 403,
-        headers: new Headers({ "x-ratelimit-reset": String(resetAt) }),
+        headers: new Headers({
+          "x-ratelimit-reset": String(resetAt),
+          "x-ratelimit-remaining": "0",
+        }),
         json: async () => ({ message: "rate limited" }),
         text: async () => JSON.stringify({ message: "rate limited" }),
       });
@@ -1236,9 +1614,12 @@ describe("Spur web API routes", () => {
       const response = await getPrStatus(
         new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
       );
+      const payload = (await response.json()) as { state: null; error: string };
 
-      expect(response.status).toBe(429);
+      expect(response.status).toBe(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.state).toBeNull();
+      expect(payload.error).toContain("GitHub rate limit");
     });
   });
 });

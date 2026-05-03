@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
+import { userInfo } from "node:os";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -15,15 +23,18 @@ import {
   parseAgentName,
   setupAgentHooks,
 } from "./agents/index.js";
+import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import {
   codexHookHomePath,
   captureCodexRolloutBaseline,
+  findLatestCodexSessionFile,
   readCodexRolloutState,
   scanCodexRolloutForMessage,
   type CodexRolloutStateRecord,
   type RolloutBaseline,
 } from "./agents/codex.js";
+import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   readClaudeConversation,
   readClaudeJsonlState,
@@ -32,6 +43,7 @@ import {
 import { findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
+import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
   deleteRuntimeLogCursorsForSession,
@@ -52,9 +64,9 @@ import { runSpawnPreflight } from "./preflight.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
 import { PIPELINE_STEP_TIMEOUT_MS, formatPipelineStepMessage } from "./pipeline.js";
 import {
+  captureTmuxPane,
   createTmuxCommandSession,
   createTmuxSidecarSession,
-  captureTmuxPane,
   createTmuxSession,
   sidecarTmuxAlive,
   sidecarTmuxSession,
@@ -75,9 +87,24 @@ import {
   SLOT_TOOL_NAME,
   applySlotsUpdate,
   ensureSessionSlotTool,
+  normalizeSlotsUpdate,
   removeSessionSlotTool,
   withSessionSlotInstructions,
 } from "./session-slots.js";
+import {
+  deleteSessionArtifactsExcept,
+  deleteSessionArtifactsDir,
+  ensureSessionArtifactsDir,
+  listSessionArtifacts,
+  readSessionArtifact,
+  type SessionArtifactFile,
+  withSessionArtifactInstructions,
+} from "./session-artifacts.js";
+import {
+  deriveSessionSlots,
+  discoverSessionPrBinding,
+  parseSessionPrBinding,
+} from "./session-pr.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
   SPUR_DAEMON_API_VERSION,
@@ -94,6 +121,7 @@ import {
   type RuntimeInfo,
   type ServiceInstanceRecord,
   type ServiceInstanceView,
+  type SendMessageAttachment,
   type SendMessageRequest,
   type StartSidecarRequest,
   type SessionRecord,
@@ -102,6 +130,7 @@ import {
   type SessionState,
   type SessionView,
   type SessionStateTransition,
+  type SessionWorkspaceAccess,
   type SpawnOverrides,
   type SpawnSessionRequest,
   type StateSource,
@@ -127,7 +156,6 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
-import { gh } from "./gh.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -150,6 +178,9 @@ const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
+const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
 
 interface PrCheckTracker {
@@ -157,6 +188,10 @@ interface PrCheckTracker {
   lastState: SessionState | null;
   lastCheckAt: number;
   found: boolean;
+}
+
+export class SessionResourceNotFoundError extends Error {
+  readonly statusCode = 404;
 }
 
 const RESTORE_PROMPT_PREFIX =
@@ -180,6 +215,14 @@ function isTerminalSessionStatus(status: SessionStatus): status is "completed" |
   return status === "completed" || status === "killed";
 }
 
+const SIDECAR_PROBE_BUDGET_ITERATIONS = 180;
+const SIDECAR_PROBE_INTERVAL_MS = 1_000;
+const SIDECAR_PROBE_REQUEST_TIMEOUT_MS = 2_000;
+
+function sidecarProbeKey(sessionId: string, sidecarName: string): string {
+  return `${sessionId}::${sidecarName}`;
+}
+
 function isRestorableStatus(status: SessionStatus): boolean {
   return status === "running" || status === "paused";
 }
@@ -195,6 +238,15 @@ type PipelineWaitOutcome = "ready" | "stopped" | "exited" | "timeout";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function stateTransitionArtifactId(
+  at: string,
+  fromState: SessionState,
+  toState: SessionState,
+): string {
+  const safeTimestamp = at.replaceAll(":", "-").replaceAll(".", "-");
+  return `agent-history-${safeTimestamp}-${fromState}-to-${toState}.jsonl`;
 }
 
 function tryRealpath(path: string): string {
@@ -323,10 +375,22 @@ function isFresh(timestamp: Date, thresholdMs: number): boolean {
 }
 
 function buildInitialMessage(initialMessage: string, sidecarNames: string[]): string {
-  const base = withSessionSlotInstructions(initialMessage);
+  if (!initialMessage.trim()) return "";
+  const base = withSessionArtifactInstructions(withSessionSlotInstructions(initialMessage));
   if (sidecarNames.length === 0) return base;
   const names = sidecarNames.map((n) => `\`${n}\``).join(", ");
   return `${base}\n\nSidecars: use Sidecar for testing by default. Run \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>\` to start one, or \`"$SPUR_SESSION_TOOL_DIR/spur-sidecar" stop --name <name>\` to stop one. Do not start app, dev server, or test helper processes directly with \`pnpm\`, \`next\`, or similar commands unless the user explicitly tells you to bypass Sidecar. Auto-start applies only when the main session spawns. From inside a sidecar, nested sidecars are manual-only and stop after one more level. See \`v2/README.md\` for sidecar usage. Available: ${names}.`;
+}
+
+function buildAttachmentReferenceLines(attachmentIds: string[]): string[] {
+  return attachmentIds.map(
+    (attachmentId) => `[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/${attachmentId}]`,
+  );
+}
+
+function baseAttachmentName(artifactId: string): string {
+  const match = artifactId.match(/^\d+(?:-\d+)?-(.+)$/);
+  return match?.[1] ?? artifactId;
 }
 
 function pipelineDelayRemainingMs(nextStepNotBefore: string | undefined): number {
@@ -438,9 +502,13 @@ function buildSessionEnv(args: {
     SPUR_PROJECT: args.projectId,
     SPUR_AGENT: args.agent,
     SPUR_SESSION_TOOL_DIR: args.sessionToolDir,
+    SPUR_SESSION_ARTIFACTS_DIR: ensureSessionArtifactsDir(args.dataDir, args.sessionId),
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
+    // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
+    // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
+    SPUR_REAL_HOME: userInfo().homedir,
     PATH: `${args.sessionToolDir}:${process.env["PATH"] ?? ""}`,
   };
   if (
@@ -542,11 +610,54 @@ function buildSidecarRuntimeEnv(
   };
 }
 
+const SIDECAR_STARTUP_VERIFY_MS = 600;
+const SIDECAR_STARTUP_TAIL_LINES = 40;
+
+async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
+  const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
+  await sleep(SIDECAR_STARTUP_VERIFY_MS);
+  if (!(await tmuxPaneDead(tmuxSession))) return;
+  const output = (await captureTmuxPane(tmuxSession, SIDECAR_STARTUP_TAIL_LINES)).trim();
+  await killTmuxSession(tmuxSession);
+  const detail = output ? `\nLast output:\n${output}` : "";
+  throw new Error(`Sidecar "${sidecarName}" exited immediately after launch.${detail}`);
+}
+
 function sessionSidecarNames(
   session: Pick<SessionRecord, "sidecarNames">,
   project?: Pick<ProjectConfig, "sidecars">,
 ): string[] {
   return session.sidecarNames ?? Object.keys(project?.sidecars ?? {});
+}
+
+function buildWorkspaceAccess(
+  session: Pick<SessionRecord, "worktreePath">,
+  project?: Pick<ProjectConfig, "workspaceAccess">,
+  workspaceExistsForSession = true,
+): SessionWorkspaceAccess | undefined {
+  const worktreePath = session.worktreePath.trim();
+  if (!workspaceExistsForSession || !worktreePath || !project?.workspaceAccess) {
+    return undefined;
+  }
+
+  const items = project.workspaceAccess.items.flatMap((item) => {
+    const value = item.value
+      .replaceAll(WORKTREE_PATH_TOKEN, worktreePath)
+      .replaceAll(WORKTREE_PATH_SHELL_TOKEN, shellEscape(worktreePath))
+      .replaceAll(WORKTREE_PATH_URL_TOKEN, encodeURIComponent(worktreePath));
+
+    if (item.kind === "link") {
+      try {
+        return [{ ...item, value: new URL(value).toString() }];
+      } catch {
+        return [];
+      }
+    }
+
+    return [{ ...item, value }];
+  });
+
+  return items.length > 0 ? { items } : undefined;
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -614,15 +725,23 @@ interface PreparedSpawn {
   sessionToolDir: string;
 }
 
-function resolveRespawnRequest(session: SessionRecord): SpawnSessionRequest {
+function resolveRespawnRequest(
+  session: SessionRecord,
+  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+): SpawnSessionRequest {
   return {
     project: session.project,
-    prompt: session.prompt,
+    prompt: options?.prompt ?? session.prompt,
+    ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
     agent: session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
-    ...(session.worktree && session.branchSource === "explicit" ? { branch: session.branch } : {}),
+    ...(session.worktree &&
+    session.branchSource === "explicit" &&
+    isTerminalSessionStatus(session.status)
+      ? { branch: session.branch }
+      : {}),
   };
 }
 
@@ -673,6 +792,7 @@ export class SessionService {
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
   private readonly prCheckTrackers = new Map<string, PrCheckTracker>();
   private sidecarPortLock: Promise<void> = Promise.resolve();
+  private readonly sidecarProbes = new Map<string, AbortController>();
 
   constructor(configPath?: string, startedAt = nowIso()) {
     const bootstrap = buildMergedConfig(configPath ?? process.env["SPUR_CONFIG"], [], {
@@ -785,7 +905,9 @@ export class SessionService {
 
   private logEvent(
     event: string,
-    entry: Omit<SpurLogEntry, "timestamp" | "event"> = { level: "info" },
+    entry: Omit<SpurLogEntry, "event" | "timestamp"> & { timestamp?: string } = {
+      level: "info",
+    },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
   }
@@ -874,8 +996,7 @@ export class SessionService {
   }
 
   private checkPrForSession(session: SessionRecord, state: SessionState): void {
-    // Skip if PR slot already exists
-    if (session.slots?.links.some((link) => link.label === "pr")) {
+    if (session.pr) {
       return;
     }
     // Skip terminal states
@@ -905,6 +1026,7 @@ export class SessionService {
     // Reset waitingChecks on state change
     if (tracker.lastState !== null && tracker.lastState !== state) {
       tracker.waitingChecks = 0;
+      tracker.lastCheckAt = 0;
     }
     tracker.lastState = state;
 
@@ -936,20 +1058,8 @@ export class SessionService {
   }
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
-    const raw = await gh(
-      session.worktreePath,
-      "pr",
-      "list",
-      "--head",
-      session.branch,
-      "--json",
-      "url",
-      "--limit",
-      "1",
-    );
-    const prs: Array<{ url: string }> = JSON.parse(raw);
-    const pr = prs[0];
-    if (!pr?.url) {
+    const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
+    if (!binding) {
       return;
     }
 
@@ -960,21 +1070,21 @@ export class SessionService {
 
     // Re-read session to avoid stale overwrites
     const current = readSession(this.config.dataDir, session.id);
-    if (!current || current.slots?.links.some((link) => link.label === "pr")) {
+    if (!current?.worktreePath || current.pr) {
       return;
     }
 
-    const slots = applySlotsUpdate(current.slots, {
-      links: [{ label: "pr", url: pr.url }],
-    });
-    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
+    const updated: SessionRecord = {
+      ...current,
+      pr: binding,
+    };
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${pr.url}`,
+      message: `Auto-detected PR for ${session.id}: ${binding.url}`,
     });
   }
 
@@ -1042,6 +1152,84 @@ export class SessionService {
     );
   }
 
+  private async ensureSidecarReservation(
+    session: SessionRecord,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+  ): Promise<SessionRecord> {
+    if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
+      return session;
+    }
+
+    const currentSidecarPorts = session.sidecarPorts?.[sidecarName] ?? {};
+    const keepReserved = new Set(Object.values(currentSidecarPorts));
+    const unavailable = new Set<number>();
+
+    for (const service of listServiceInstances(this.config.dataDir)) {
+      if (service.port !== undefined) {
+        unavailable.add(service.port);
+      }
+    }
+    for (const liveSession of listSessions(this.config.dataDir)) {
+      for (const port of collectReservedSidecarPorts(liveSession)) {
+        if (liveSession.id === session.id && keepReserved.has(port)) {
+          continue;
+        }
+        unavailable.add(port);
+      }
+    }
+
+    const reservedForSidecar: Record<string, number> = {};
+    let changed = false;
+    for (const [portId, portConfig] of Object.entries(sidecar.ports)) {
+      const existingPort = currentSidecarPorts[portConfig.env];
+      if (existingPort !== undefined) {
+        reservedForSidecar[portConfig.env] = existingPort;
+        unavailable.add(existingPort);
+        continue;
+      }
+
+      let selectedPort: number | undefined;
+      const hostBusy: number[] = [];
+      for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
+        if (unavailable.has(candidate)) continue;
+        if (!(await isHostPortFree(candidate))) {
+          unavailable.add(candidate);
+          hostBusy.push(candidate);
+          continue;
+        }
+        selectedPort = candidate;
+        unavailable.add(candidate);
+        break;
+      }
+      if (selectedPort === undefined) {
+        const busyDetail = hostBusy.length > 0 ? ` Host-bound: ${hostBusy.join(", ")}.` : "";
+        throw new Error(
+          `No free reserved port for sidecar ${sidecarName}.${portId} in range ${portConfig.start}-${portConfig.end}.${busyDetail}`,
+        );
+      }
+      reservedForSidecar[portConfig.env] = selectedPort;
+      changed = true;
+    }
+
+    if (!changed) {
+      return session;
+    }
+
+    const updated: SessionRecord = {
+      ...session,
+      sidecarPorts: {
+        ...(session.sidecarPorts ?? {}),
+        [sidecarName]: {
+          ...currentSidecarPorts,
+          ...reservedForSidecar,
+        },
+      },
+      updatedAt: nowIso(),
+    };
+    writeSession(this.config.dataDir, updated);
+    return updated;
+  }
   private async startSidecarInternal(args: {
     session: SessionRecord;
     project: ProjectConfig;
@@ -1055,19 +1243,11 @@ export class SessionService {
       }
 
       const agentConfig = this.sessionAgentConfig(args.session);
-      const nextSidecarPorts = reserveSidecarPorts(
-        this.config.dataDir,
+      const reservedSession = await this.ensureSidecarReservation(
         args.session,
         args.sidecarName,
         args.sidecar,
       );
-      const reservedSession =
-        nextSidecarPorts && nextSidecarPorts !== args.session.sidecarPorts
-          ? {
-              ...args.session,
-              sidecarPorts: nextSidecarPorts,
-            }
-          : args.session;
 
       const sessionToolDir = this.prepareSessionTools(reservedSession.id, reservedSession.agent);
       const sessionEnv = buildSessionEnv({
@@ -1081,19 +1261,30 @@ export class SessionService {
         ...(agentConfig.env ? { extraEnv: agentConfig.env } : {}),
       });
 
-      await createTmuxSidecarSession({
-        sessionId: reservedSession.id,
-        sidecarName: args.sidecarName,
-        cwd: reservedSession.worktreePath,
-        command: args.sidecar.command,
-        env: buildSidecarRuntimeEnv(
-          sessionEnv,
-          reservedSession,
-          args.sidecarName,
-          args.sidecar.env,
-          args.sidecarDepth,
-        ),
-      });
+      try {
+        await createTmuxSidecarSession({
+          sessionId: reservedSession.id,
+          sidecarName: args.sidecarName,
+          cwd: reservedSession.worktreePath,
+          command: args.sidecar.command,
+          env: buildSidecarRuntimeEnv(
+            sessionEnv,
+            reservedSession,
+            args.sidecarName,
+            args.sidecar.env,
+            args.sidecarDepth,
+          ),
+        });
+        await verifySidecarStartup(reservedSession.id, args.sidecarName);
+      } catch (error) {
+        if (reservedSession !== args.session) {
+          writeSession(this.config.dataDir, {
+            ...args.session,
+            updatedAt: nowIso(),
+          });
+        }
+        throw error;
+      }
 
       const sidecarNames = sessionSidecarNames(reservedSession, args.project);
       const updated: SessionRecord = {
@@ -1105,6 +1296,109 @@ export class SessionService {
       };
       writeSession(this.config.dataDir, updated);
       return updated;
+    });
+  }
+
+  private maybeStartSidecarUrlProbe(
+    sessionId: string,
+    sidecarName: string,
+    sidecar: ProjectConfig["sidecars"][string],
+    record: SessionRecord,
+  ): void {
+    const urlPort = Object.values(sidecar.ports ?? {}).find((p) => p.url !== undefined);
+    if (!urlPort || urlPort.url === undefined) return;
+    const reservedPort = record.sidecarPorts?.[sidecarName]?.[urlPort.env];
+    if (typeof reservedPort !== "number") return;
+    this.startSidecarProbe(sessionId, sidecarName, reservedPort, urlPort.url);
+  }
+
+  private startSidecarProbe(
+    sessionId: string,
+    sidecarName: string,
+    reservedPort: number,
+    url: string,
+  ): void {
+    const key = sidecarProbeKey(sessionId, sidecarName);
+    this.sidecarProbes.get(key)?.abort();
+    const controller = new AbortController();
+    this.sidecarProbes.set(key, controller);
+    void this.publishSidecarLinkWhenReady({
+      sessionId,
+      sidecarName,
+      reservedPort,
+      url,
+      signal: controller.signal,
+    }).finally(() => {
+      if (this.sidecarProbes.get(key) === controller) {
+        this.sidecarProbes.delete(key);
+      }
+    });
+  }
+
+  private stopSidecarProbe(sessionId: string, sidecarName: string): void {
+    const key = sidecarProbeKey(sessionId, sidecarName);
+    const controller = this.sidecarProbes.get(key);
+    if (!controller) return;
+    controller.abort();
+    this.sidecarProbes.delete(key);
+  }
+
+  private async publishSidecarLinkWhenReady(args: {
+    sessionId: string;
+    sidecarName: string;
+    reservedPort: number;
+    url: string;
+    signal: AbortSignal;
+  }): Promise<void> {
+    const { sessionId, sidecarName, reservedPort, url, signal } = args;
+    const targetUrl = `http://127.0.0.1:${reservedPort}/`;
+    const linkUrl = `${url}:${reservedPort}`;
+    for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
+      if (signal.aborted) return;
+      const perRequest = AbortSignal.any([
+        signal,
+        AbortSignal.timeout(SIDECAR_PROBE_REQUEST_TIMEOUT_MS),
+      ]);
+      let responded: boolean;
+      try {
+        await fetch(targetUrl, { signal: perRequest, redirect: "manual" });
+        responded = true;
+      } catch {
+        responded = false;
+      }
+      if (responded) {
+        const latest = readSession(this.config.dataDir, sessionId);
+        if (!latest) return;
+        if (isTerminalSessionStatus(latest.status)) return;
+        if (!(await sidecarTmuxAlive(sessionId, sidecarName))) return;
+        const slots = applySlotsUpdate(latest.slots, {
+          links: [{ label: sidecarName, url: linkUrl }],
+          unlinkLabels: [],
+        });
+        const updated: SessionRecord = slots
+          ? { ...latest, slots }
+          : (() => {
+              const { slots: _drop, ...rest } = latest;
+              return rest;
+            })();
+        writeSession(this.config.dataDir, updated);
+        await syncTmuxStatus(updated.tmuxSession, updated.slots);
+        this.logEvent("session.sidecar.link.published", {
+          level: "info",
+          sessionId,
+          projectId: latest.project,
+          message: `Published sidecar link ${sidecarName} for ${sessionId}`,
+          details: { sidecarName, url: linkUrl },
+        });
+        return;
+      }
+      await sleep(SIDECAR_PROBE_INTERVAL_MS);
+    }
+    this.logEvent("session.sidecar.link.timeout", {
+      level: "warn",
+      sessionId,
+      message: `Sidecar ${sidecarName} did not respond at ${targetUrl} within probe budget`,
+      details: { sidecarName, reservedPort },
     });
   }
 
@@ -1151,6 +1445,18 @@ export class SessionService {
       throw new Error(`Session not found: ${sessionId}`);
     }
     return this.enrich(session);
+  }
+
+  getArtifact(sessionId: string, artifactId: string): SessionArtifactFile {
+    const session = readSession(this.config.dataDir, sessionId);
+    if (!session) {
+      throw new SessionResourceNotFoundError(`Session not found: ${sessionId}`);
+    }
+    const artifact = readSessionArtifact(this.config.dataDir, sessionId, artifactId);
+    if (!artifact) {
+      throw new SessionResourceNotFoundError(`Artifact not found: ${sessionId}/${artifactId}`);
+    }
+    return artifact;
   }
 
   async getConversation(sessionId: string): Promise<ConversationResponse> {
@@ -1487,6 +1793,7 @@ export class SessionService {
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
+        ...(request.slots?.links?.length ? { slots: { links: request.slots.links } } : {}),
       };
       writeSession(this.config.dataDir, placeholder);
       placeholderWritten = true;
@@ -1534,6 +1841,16 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : prompt;
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachmentLines =
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const sidecarNames = Object.keys(project.sidecars);
+      const spawnInitialMessage = buildInitialMessage(
+        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+        sidecarNames,
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
@@ -1550,7 +1867,19 @@ export class SessionService {
         }),
         planMode,
       );
-      const launchPlan = buildAgentLaunchPlan(agent, initialMessage, planOptions);
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+        ...planOptions,
+        ...(agent === "codex" && startupAttachments.length > 0
+          ? {
+              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
+            }
+          : {}),
+      });
+      const promptDeliveredOnLaunch =
+        agent === "codex" &&
+        startupAttachments.length > 0 &&
+        !launchPlan.initialMessage.trim() &&
+        spawnInitialMessage.trim().length > 0;
       const pipeline = steps
         ? {
             steps,
@@ -1566,6 +1895,11 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(startupAttachments.length > 0
+          ? {
+              startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
+            }
+          : {}),
         ...(pipeline ? { pipeline } : {}),
       };
 
@@ -1598,7 +1932,7 @@ export class SessionService {
       });
 
       stage = "tmux.status";
-      await syncTmuxStatus(tmuxSession, runningRecord.slots);
+      await syncTmuxStatus(tmuxSession, deriveSessionSlots(runningRecord));
       stage = "tmux.ready";
       await waitForTmuxReady(tmuxSession, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
@@ -1610,9 +1944,7 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = "prompt.send";
-        const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
-        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
           sessionId,
@@ -1620,6 +1952,18 @@ export class SessionService {
           message: `Sent initial prompt to ${sessionId}`,
           details: {
             messageLength: launchPlan.initialMessage.length,
+          },
+        });
+      } else if (promptDeliveredOnLaunch) {
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            deliveryMode: "launch_command",
+            imageCount: startupAttachments.length,
+            messageLength: spawnInitialMessage.length,
           },
         });
       }
@@ -1654,6 +1998,7 @@ export class SessionService {
               tmuxSession: sidecarTmuxSession(sessionId, name),
             },
           });
+          this.maybeStartSidecarUrlProbe(sessionId, name, sidecar, updatedRecord);
         } catch (sidecarError) {
           const sidecarMessage =
             sidecarError instanceof Error ? sidecarError.message : String(sidecarError);
@@ -1690,7 +2035,7 @@ export class SessionService {
         for (const scName of Object.keys(project.sidecars)) {
           await killSidecarTmux(sessionId, scName).catch(() => {});
         }
-        this.removeSessionArtifacts(sessionId);
+        this.removeSessionArtifacts(sessionId, { preserveStartup: true });
         if (worktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
@@ -2063,16 +2408,34 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
           : prompt;
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachmentLines =
+        agent === "codex"
+          ? []
+          : buildAttachmentReferenceLines(startupAttachments.map((attachment) => attachment.id));
+      const sidecarNames = Object.keys(project.sidecars);
+      const spawnInitialMessage = buildInitialMessage(
+        [...startupAttachmentLines, initialMessage].filter((line) => line.trim()).join("\n"),
+        sidecarNames,
+      );
       const hookSetup = await setupAgentHooks({
         agent,
         worktreePath: workspacePath,
         sessionToolDir: prepared.sessionToolDir,
       });
-      const launchPlan = buildAgentLaunchPlan(
-        agent,
-        initialMessage,
-        withPlanMode(hookSetup, planMode),
-      );
+      const launchPlan = buildAgentLaunchPlan(agent, spawnInitialMessage, {
+        ...withPlanMode(withProjectAgentOptions(project, hookSetup), planMode),
+        ...(agent === "codex" && startupAttachments.length > 0
+          ? {
+              startupImagePaths: startupAttachments.map((attachment) => attachment.path),
+            }
+          : {}),
+      });
+      const promptDeliveredOnLaunch =
+        agent === "codex" &&
+        startupAttachments.length > 0 &&
+        !launchPlan.initialMessage.trim() &&
+        spawnInitialMessage.trim().length > 0;
       const pipeline = prepared.steps
         ? {
             steps: prepared.steps,
@@ -2088,6 +2451,11 @@ export class SessionService {
         launchCommand: launchPlan.launchCommand,
         status: "running",
         updatedAt: nowIso(),
+        ...(startupAttachments.length > 0
+          ? {
+              startupAttachmentIds: startupAttachments.map((attachment) => attachment.id),
+            }
+          : {}),
         ...(pipeline ? { pipeline } : {}),
       };
 
@@ -2120,7 +2488,7 @@ export class SessionService {
       });
 
       stage = attempt > 1 ? `retry.${attempt}.tmux.status` : "tmux.status";
-      await syncTmuxStatus(sessionId, runningRecord.slots);
+      await syncTmuxStatus(sessionId, deriveSessionSlots(runningRecord));
       stage = attempt > 1 ? `retry.${attempt}.tmux.ready` : "tmux.ready";
       await waitForTmuxReady(sessionId, launchPlan.readyMarkers, undefined, { agent });
       this.logEvent("session.spawn.ready", {
@@ -2133,9 +2501,7 @@ export class SessionService {
 
       if (launchPlan.initialMessage.trim()) {
         stage = attempt > 1 ? `retry.${attempt}.prompt.send` : "prompt.send";
-        const sidecarNames = Object.keys(project.sidecars);
-        const spawnInitialMessage = buildInitialMessage(launchPlan.initialMessage, sidecarNames);
-        await this.sendAgentMessage(runningRecord, spawnInitialMessage);
+        await this.sendAgentMessage(runningRecord, launchPlan.initialMessage);
         initialPromptSent = true;
         this.logEvent("session.spawn.initial_prompt_sent", {
           level: "info",
@@ -2145,6 +2511,20 @@ export class SessionService {
           details: {
             messageLength: launchPlan.initialMessage.length,
             attempt,
+          },
+        });
+      } else if (promptDeliveredOnLaunch) {
+        initialPromptSent = true;
+        this.logEvent("session.spawn.initial_prompt_sent", {
+          level: "info",
+          sessionId,
+          projectId: request.project,
+          message: `Sent initial prompt to ${sessionId}`,
+          details: {
+            attempt,
+            deliveryMode: "launch_command",
+            imageCount: startupAttachments.length,
+            messageLength: spawnInitialMessage.length,
           },
         });
       }
@@ -2170,6 +2550,7 @@ export class SessionService {
               ...sidecarPortEnv(runningRecord, name),
             },
           });
+          await verifySidecarStartup(sessionId, name);
           this.logEvent("session.sidecar.started", {
             level: "info",
             sessionId,
@@ -2399,24 +2780,20 @@ export class SessionService {
     }
   }
 
-  private prepareSendMessage(
-    session: Pick<SessionRecord, "worktreePath">,
-    request: SendMessageRequest,
-  ): string {
-    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
-    const message = typeof request.message === "string" ? request.message.trim() : "";
-    if (!hasAttachments) {
-      return message;
+  private storeImageAttachments(
+    sessionId: string,
+    attachments: SendMessageAttachment[] | undefined,
+  ): Array<{ id: string; path: string }> {
+    if (!attachments || attachments.length === 0) {
+      return [];
     }
-
-    const attachments = request.attachments ?? [];
     if (attachments.length > MAX_ATTACHMENTS) {
       throw new Error(`Too many attachments (max ${MAX_ATTACHMENTS})`);
     }
-    const attachDir = join(session.worktreePath, ".spur", "attachments");
-    mkdirSync(attachDir, { recursive: true });
-    const prefixLines: string[] = [];
-    for (const att of attachments) {
+
+    const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
+    const stored: Array<{ id: string; path: string }> = [];
+    for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
       }
@@ -2431,11 +2808,115 @@ export class SessionService {
       if (buf.length > MAX_DECODED_SIZE) {
         throw new Error(`Attachment ${att.name} exceeds 5MB`);
       }
-      const filename = `${Date.now()}-${att.name}`;
+      let filename = `${Date.now()}-${att.name}`;
+      const initialPath = join(attachDir, filename);
+      if (existsSync(initialPath)) {
+        filename = `${Date.now()}-${index}-${att.name}`;
+      }
       const filePath = join(attachDir, filename);
       writeFileSync(filePath, buf, { mode: 0o644 });
-      prefixLines.push(`[Attached file: ${filePath}]`);
+      stored.push({ id: filename, path: filePath });
     }
+    return stored;
+  }
+
+  private cloneStartupAttachments(
+    sessionId: string,
+    attachmentIds: string[] | undefined,
+  ): SendMessageAttachment[] {
+    return (attachmentIds ?? []).map((attachmentId) => {
+      const artifact = readSessionArtifact(this.config.dataDir, sessionId, attachmentId);
+      if (!artifact) {
+        throw new Error(`Startup attachment not found: ${attachmentId}`);
+      }
+      return {
+        name: baseAttachmentName(artifact.id),
+        data: readFileSync(artifact.path).toString("base64"),
+      };
+    });
+  }
+
+  private async findAgentHistoryFile(
+    session: Pick<SessionRecord, "agent" | "id" | "worktreePath">,
+  ): Promise<string | null> {
+    if (session.agent === "claude") {
+      return findLatestClaudeSessionFile(session.worktreePath);
+    }
+    return findLatestCodexSessionFile({ sessionRootDir: this.codexSessionsDir(session.id) });
+  }
+
+  private async captureStateTransitionArtifact(
+    session: Pick<SessionRecord, "agent" | "id" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+    },
+    historySourcePath?: string | null,
+  ): Promise<string | null> {
+    if (isTerminalSessionStatus(session.status)) {
+      return null;
+    }
+    const sourcePath = historySourcePath ?? (await this.findAgentHistoryFile(session));
+    if (!sourcePath) {
+      return null;
+    }
+    try {
+      const artifactId = stateTransitionArtifactId(
+        transition.at,
+        transition.fromState,
+        transition.toState,
+      );
+      const artifactDir = ensureSessionArtifactsDir(this.config.dataDir, session.id);
+      copyFileSync(sourcePath, join(artifactDir, artifactId));
+      return artifactId;
+    } catch {
+      return null;
+    }
+  }
+
+  private async logStateTransition(
+    session: Pick<SessionRecord, "agent" | "id" | "project" | "status" | "worktreePath">,
+    transition: {
+      at: string;
+      fromState: SessionState;
+      toState: SessionState;
+      source: StateSource;
+    },
+    historySourcePath?: string | null,
+  ): Promise<void> {
+    const historyArtifactId = await this.captureStateTransitionArtifact(
+      session,
+      transition,
+      historySourcePath,
+    );
+    this.logEvent("session.state.transition", {
+      level: "info",
+      timestamp: transition.at,
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Status changed from ${transition.fromState} to ${transition.toState}`,
+      details: {
+        fromState: transition.fromState,
+        toState: transition.toState,
+        source: transition.source,
+        ...(historyArtifactId ? { historyArtifactId } : {}),
+      },
+    });
+  }
+
+  private prepareSendMessage(
+    session: Pick<SessionRecord, "id">,
+    request: SendMessageRequest,
+  ): string {
+    const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
+    const message = typeof request.message === "string" ? request.message.trim() : "";
+    if (!hasAttachments) {
+      return message;
+    }
+
+    const stored = this.storeImageAttachments(session.id, request.attachments);
+    const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
 
@@ -2519,28 +3000,59 @@ export class SessionService {
   }
 
   async updateSlots(sessionId: string, request: UpdateSessionSlotsRequest): Promise<SessionView> {
-    const session = readSession(this.config.dataDir, sessionId);
-    if (!session) {
+    const currentSession = readSession(this.config.dataDir, sessionId);
+    if (!currentSession) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    const slots = applySlotsUpdate(session.slots, request);
+    const session = currentSession;
+    const normalized = normalizeSlotsUpdate(request);
+    const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
+    const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
+    const genericLinks = normalized.links.filter(
+      (link) => link.label !== "pr" || (prLink?.url === link.url && nativePr === null),
+    );
+    const genericUnlinks = normalized.unlinkLabels;
+    const hasGenericChanges =
+      normalized.title !== undefined ||
+      normalized.clearTitle ||
+      genericLinks.length > 0 ||
+      genericUnlinks.length > 0;
+    const slots = hasGenericChanges
+      ? applySlotsUpdate(session.slots, {
+          ...(normalized.title !== undefined ? { title: normalized.title } : {}),
+          ...(normalized.clearTitle ? { clearTitle: true } : {}),
+          ...(genericLinks.length > 0 ? { links: genericLinks } : {}),
+          ...(genericUnlinks.length > 0 ? { unlinkLabels: genericUnlinks } : {}),
+        })
+      : session.slots;
     const updated: SessionRecord = {
       ...session,
       ...(slots ? { slots } : {}),
+      ...(nativePr
+        ? { pr: nativePr }
+        : normalized.unlinkLabels.includes("pr")
+          ? {}
+          : session.pr
+            ? { pr: session.pr }
+            : {}),
     };
     if (!slots) {
       delete updated.slots;
     }
+    if (prLink === undefined && normalized.unlinkLabels.includes("pr")) {
+      delete updated.pr;
+    }
     writeSession(this.config.dataDir, updated);
-    await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    const displaySlots = deriveSessionSlots(updated);
+    await syncTmuxStatus(updated.tmuxSession, displaySlots);
     this.logEvent("session.slots.updated", {
       level: "info",
       sessionId,
       projectId: session.project,
       message: `Updated session slots for ${sessionId}`,
       details: {
-        title: updated.slots?.title ?? null,
-        linkCount: updated.slots?.links.length ?? 0,
+        title: displaySlots?.title ?? null,
+        linkCount: displaySlots?.links.length ?? 0,
       },
     });
     return this.enrich(updated);
@@ -2613,6 +3125,7 @@ export class SessionService {
         tmuxSession: sidecarTmuxSession(sessionId, sidecarName),
       },
     });
+    this.maybeStartSidecarUrlProbe(sessionId, sidecarName, sidecar, updated);
     return this.enrich(updated);
   }
 
@@ -2634,13 +3147,28 @@ export class SessionService {
       return this.enrich(session);
     }
 
+    this.stopSidecarProbe(sessionId, sidecarName);
     await killSidecarTmux(sessionId, sidecarName);
 
+    const afterKill = readSession(this.config.dataDir, sessionId) ?? session;
+    const nextSlots = applySlotsUpdate(afterKill.slots, { unlinkLabels: [sidecarName] });
+    const baseRecord: SessionRecord =
+      nextSlots !== afterKill.slots
+        ? nextSlots
+          ? { ...afterKill, slots: nextSlots }
+          : (() => {
+              const { slots: _drop, ...rest } = afterKill;
+              return rest;
+            })()
+        : afterKill;
     const updated: SessionRecord = {
-      ...session,
+      ...baseRecord,
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, updated);
+    if (nextSlots !== afterKill.slots) {
+      await syncTmuxStatus(updated.tmuxSession, updated.slots);
+    }
     this.logEvent("session.sidecar.stopped", {
       level: "info",
       sessionId,
@@ -2657,6 +3185,21 @@ export class SessionService {
   private async cleanupSessionServices(session: SessionRecord): Promise<void> {
     const project = this.resolveProjectForSession(session);
     for (const scName of sessionSidecarNames(session, project)) {
+      this.stopSidecarProbe(session.id, scName);
+      const record = readSession(this.config.dataDir, session.id);
+      if (record) {
+        const next = applySlotsUpdate(record.slots, { unlinkLabels: [scName] });
+        if (next !== record.slots) {
+          const updated: SessionRecord = next
+            ? { ...record, slots: next }
+            : (() => {
+                const { slots: _drop, ...rest } = record;
+                return rest;
+              })();
+          writeSession(this.config.dataDir, updated);
+          await syncTmuxStatus(updated.tmuxSession, updated.slots);
+        }
+      }
       await killSidecarTmux(session.id, scName).catch(() => {});
     }
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
@@ -2675,9 +3218,15 @@ export class SessionService {
     });
   }
 
-  private removeSessionArtifacts(sessionId: string): void {
+  private removeSessionArtifacts(sessionId: string, options?: { preserveStartup?: boolean }): void {
+    const session = options?.preserveStartup ? readSession(this.config.dataDir, sessionId) : null;
     deleteAgentHookState(this.config.dataDir, sessionId);
     deleteRuntimeLogCursorsForSession(this.config.dataDir, sessionId);
+    if (options?.preserveStartup && session?.startupAttachmentIds?.length) {
+      deleteSessionArtifactsExcept(this.config.dataDir, sessionId, session.startupAttachmentIds);
+    } else {
+      deleteSessionArtifactsDir(this.config.dataDir, sessionId);
+    }
     removeSessionSlotTool(this.config.dataDir, sessionId);
   }
 
@@ -2773,7 +3322,7 @@ export class SessionService {
         const cleanup = await this.resolveCleanupContext(session);
         await removeWorktree(cleanup.repoPath, session.worktreePath);
       }
-      this.removeSessionArtifacts(sessionId);
+      this.removeSessionArtifacts(sessionId, { preserveStartup: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logEvent("session.kill.failed", {
@@ -2966,7 +3515,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(
         session.tmuxSession,
         recoveryPlan?.readyMarkers ?? baseLaunchPlan.readyMarkers,
@@ -3008,7 +3557,7 @@ export class SessionService {
         agent: session.agent,
         env,
       });
-      await syncTmuxStatus(session.tmuxSession, session.slots);
+      await syncTmuxStatus(session.tmuxSession, deriveSessionSlots(session));
       await waitForTmuxReady(session.tmuxSession, baseLaunchPlan.readyMarkers, undefined, {
         agent: session.agent,
       });
@@ -3092,7 +3641,8 @@ export class SessionService {
       });
       const sessionAgentConfig = this.sessionAgentConfig(current);
       const planMode = resolvePlanMode(current);
-      const restorePrompt = buildRestorePrompt(current.prompt);
+      const shouldSendRestoreMessage = current.status !== "paused";
+      const restorePrompt = shouldSendRestoreMessage ? buildRestorePrompt(current.prompt) : "";
       const restoreProjectConfig = this.getProject(current.project);
       const planOptions = withPlanMode(
         withProjectAgentOptions(restoreProjectConfig, {
@@ -3175,7 +3725,7 @@ export class SessionService {
         agent: current.agent,
         env,
       });
-      await syncTmuxStatus(current.tmuxSession, current.slots);
+      await syncTmuxStatus(current.tmuxSession, deriveSessionSlots(current));
       await waitForTmuxReady(current.tmuxSession, restoreReadyMarkers, undefined, {
         agent: current.agent,
       });
@@ -3187,11 +3737,13 @@ export class SessionService {
       ) {
         throw new Error(`Agent ${current.agent} exited before restore became ready`);
       }
-      const restoreInitialMessage = buildInitialMessage(
-        effectivePlan.initialMessage,
-        restoreSidecarNames,
-      );
-      await this.sendAgentMessage(current, restoreInitialMessage);
+      if (shouldSendRestoreMessage && effectivePlan.initialMessage.trim()) {
+        const restoreInitialMessage = buildInitialMessage(
+          effectivePlan.initialMessage,
+          restoreSidecarNames,
+        );
+        await this.sendAgentMessage(current, restoreInitialMessage);
+      }
     } catch (error) {
       await killTmuxSession(current.tmuxSession);
       const message = error instanceof Error ? error.message : String(error);
@@ -3234,7 +3786,14 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
-  async respawn(sessionId: string): Promise<SessionView> {
+  async respawn(
+    sessionId: string,
+    request: {
+      prompt?: string;
+      attachments?: SendMessageAttachment[];
+      startupAttachmentIds?: string[];
+    } = {},
+  ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -3256,8 +3815,25 @@ export class SessionService {
       message: `Respawning ${sessionId}`,
       details: { agent: session.agent },
     });
-
-    return this.spawn(resolveRespawnRequest(session));
+    const requestedStartupAttachmentIds =
+      request.startupAttachmentIds ?? session.startupAttachmentIds ?? [];
+    const allowedStartupIds = new Set(session.startupAttachmentIds ?? []);
+    for (const attachmentId of requestedStartupAttachmentIds) {
+      if (!allowedStartupIds.has(attachmentId)) {
+        throw new Error(`Unknown startup attachment id: ${attachmentId}`);
+      }
+    }
+    const clonedAttachments = this.cloneStartupAttachments(
+      session.id,
+      requestedStartupAttachmentIds,
+    );
+    const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
+    return this.spawn(
+      resolveRespawnRequest(session, {
+        ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
+        ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+      }),
+    );
   }
 
   private resumeSessionDelivery(): void {
@@ -3755,6 +4331,7 @@ export class SessionService {
 
     let state: SessionState;
     let stateSource: StateSource = "status";
+    let historySourcePath: string | null = null;
     if (session.status === "killed") {
       state = "killed";
     } else if (session.status === "paused" || session.status === "completed") {
@@ -3776,6 +4353,7 @@ export class SessionService {
           this.claudeJsonlReaders.set(session.id, jsonlResult.reader);
           state = jsonlResult.state;
           stateSource = "jsonl";
+          historySourcePath = jsonlResult.reader.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
@@ -3796,6 +4374,7 @@ export class SessionService {
         state = codexState.state;
         stateSource = codexState.source;
         if (stateSource === "jsonl" && codexState.rolloutState) {
+          historySourcePath = codexState.rolloutState.filePath;
           this.logEvent("session.state.classified", {
             level: "info",
             sessionId: session.id,
@@ -3856,11 +4435,24 @@ export class SessionService {
     const history = this.stateHistory.get(session.id) ?? [];
     const lastEntry = history[history.length - 1];
     if (history.length === 0 || lastEntry?.state !== state) {
-      history.push({ state, at: new Date(now).toISOString(), source: stateSource });
+      const transitionAt = new Date(now).toISOString();
+      history.push({ state, at: transitionAt, source: stateSource });
       if (history.length > STATE_HISTORY_LIMIT) {
         history.splice(0, history.length - STATE_HISTORY_LIMIT);
       }
       this.stateHistory.set(session.id, history);
+      if (lastEntry) {
+        await this.logStateTransition(
+          session,
+          {
+            at: transitionAt,
+            fromState: lastEntry.state,
+            toState: state,
+            source: stateSource,
+          },
+          historySourcePath,
+        );
+      }
     }
 
     const services: ServiceInstanceView[] = [];
@@ -3874,17 +4466,22 @@ export class SessionService {
       sidecars.push({ name, alive: await sidecarTmuxAlive(session.id, name) });
     }
     const queuedMessagesView = displayQueuedMessages(session);
+    const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
+    const displaySlots = deriveSessionSlots(session);
 
     return {
       ...session,
       planMode: resolvePlanMode(session),
+      ...(displaySlots ? { slots: displaySlots } : {}),
       runtimeAlive,
       workspaceExists: workspacePresent,
       state,
       ...(history.length > 0 ? { stateHistory: history } : {}),
       lastActivityAt,
+      artifacts: listSessionArtifacts(this.config.dataDir, session.id),
       services,
       sidecars,
+      ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
     };
   }

@@ -33,6 +33,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D1: Header renders correctly
 
 - 𖤓 icon + large project title visible at the same size as before
+- Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
@@ -79,8 +80,16 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
+
+### D5b: PR status survives reload and GitHub errors
+
+- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
+- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
+- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
 
 ### D6: Attention zone sections
 
@@ -95,6 +104,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
+- Footer shows a separate GitHub connection indicator that is independent from PR status rows
+- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
+- Healthy GitHub status renders as a green check next to the GitHub icon
+- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
+- GitHub connection/auth/API failures render the error text directly in the footer
+- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
 
 ### D6c: Footer resource metrics
 
@@ -105,7 +121,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, tapping anywhere outside the open system health tooltip closes it
 - On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
-- Git / PR aggregate stays outside the `HEALTHY` tooltip
+- GitHub connection status stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
@@ -128,6 +144,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
+- The spawn prompt shows an inline image-picker button inside the textarea chrome
+- Pasting, dropping, or picking an image adds a compact thumbnail preview inside the textarea chrome with an inline remove button
+- Spawn payload includes those image attachments, and successful spawn clears the inline preview list
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
@@ -157,6 +176,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7d: Sessions list cache on revisit
+
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- Background refetch on the 5s interval silently replaces the list only when the server response differs
+
 ## Session Detail
 
 ### S1: Header with white underline
@@ -164,6 +188,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
@@ -173,12 +198,26 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- `Workspace Access` section appears only when daemon `workspaceAccess.items[]` is present, and link items open in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
+- `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
+
+### S2a: Logs modal
+
+- `Logs` opens a full-screen modal for the current session
+- Modal subtitle reads as Spur orchestrator events plus runtime output, not agent chat history
+- Empty state shows a bordered placeholder instead of raw empty text
+- `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
+- Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
+- Transition rows show a `History snapshot` download link when `historyArtifactId` is present
+- Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
+- Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
 ### S2b: Conversation dialog (Claude only)
 
@@ -191,6 +230,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
@@ -201,6 +241,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Messages render the full send stack in FIFO order
 - Manual queued sends appear before future auto-step messages in the same stack
 - Each queued message is shown as its own stacked row with full wrapped text
+- Long unbroken queued tokens hard-wrap inside the row on mobile instead of widening the section
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
 
@@ -222,8 +263,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Ctrl/Cmd+Enter triggers the queued send path
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
-- Cmd+V paste with image on clipboard adds thumbnail preview below textarea
-- Drag-and-drop image file onto textarea adds thumbnail preview
+- The message textarea shows an inline image-picker button inside the textarea chrome
+- Cmd+V paste with image on clipboard adds a compact thumbnail preview inside the textarea
+- Drag-and-drop image file onto textarea adds a compact thumbnail preview inside the textarea
+- Picking an image from the file chooser adds the same compact inline thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
 - Both `Queue` and `Send now` are enabled when attachments are present even with empty text
@@ -234,10 +277,20 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Shows when session has links
 - Each link clickable, opens in new tab
 
+### S4b: Artifacts section
+
+- Shows when session has persisted artifacts
+- Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
+- Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- Clicking preview opens a full-screen artifact lightbox with close and download actions
+- Non-media artifacts render as file tiles with extension badge and download action only
+- Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
+
 ### S5: Runtime sidebar
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace
 - Worktree path in bordered box
+- Copy workspace access items show the final text, use an interactive copy icon button, and show a styled success/error toast after copy attempts
 - Error shown in red box when present
 
 ### S6: Terminal modal (dashboard + detail page)
@@ -264,7 +317,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
-- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
+- If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ### S7: Display state override
@@ -306,7 +360,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Each sidecar shows name and alive/offline status
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
 - Terminal button visible only when sidecar is alive and session is attachable
-- `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
+- Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - Clicking play/stop updates the sidecar row state without leaving the page

@@ -20,7 +20,7 @@ spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branc
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
-- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Cursor startup adds `--plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -49,9 +49,9 @@ When `steps` are present, Spur sends messages like "step 1/N: research" plus the
 `list` hides `completed` and `killed` sessions by default.
 `pause` stops the runtime but keeps the worktree. `complete` and `kill` both stop the runtime and remove owned artifacts, but persist different statuses for later filtering.
 
-`list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex/Cursor activity signals.
+`list` derives live `state` and `lastActivityAt` from `tmux` plus native Claude/Codex activity signals.
 While the agent is busy, manual `send` requests queue per session and flush after the agent returns to a prompt. Queued manual sends run before the next auto-step in a pipelined session.
-When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex/Cursor conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
+When a worktree-backed session is `stopped` or `paused`, `send` first tries to resume the same native Claude/Codex conversation in the existing worktree using a stored or re-discovered agent session id, then falls back to a fresh launch if native resume is unavailable or stale.
 Spur appends structured lifecycle events to `<dataDir>/events.jsonl`, including recover checks, native resume failures, fresh-launch fallbacks, and pipeline step delivery.
 The `list` log view combines those key session events with a live tail of the main agent tmux pane for the selected session.
 
@@ -59,7 +59,6 @@ Agents run with full access:
 
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
-- `agent --force --sandbox disabled`
 
 Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
 If that preflight-suggested branch is already checked out in another worktree, Spur falls back to the fresh session id branch instead of failing the spawn.
@@ -85,14 +84,16 @@ spur service status api-a1b2
 ```
 
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
-If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
+If the agent already knows the service port, pass it with `--port` so `list` can surface it.
 Spur also collects sidecar and service output into the session event log, so `spur service logs` and `/sessions/:id/logs` can inspect those runtime lines alongside the normal session log stream.
 
-For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
+For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs. New isolated worktrees inherit the current worktree's `spur.yaml`, agent instructions, and `.env` through the isolated config overlay plus symlinks, so sidecar testing sees the same workspace-access settings as the active branch.
 
 `autoStart` applies only when the main session spawns. From inside a sidecar, starting another sidecar is always manual through the same helper, and nesting stops after one more level: `session -> sidecar -> nested sidecar`. Nested sidecars never auto-start.
 
-If a sidecar defines `ports`, Spur allocates those ports when that sidecar starts and injects them into the sidecar env. Auto-start keeps the session alive when allocation fails, and manual retry succeeds after the conflicting port is released.
+If a sidecar defines `ports`, Spur reserves those ports when that sidecar starts and injects them into the sidecar env. Reservation also probes each candidate port on the host, so sibling sessions and unrelated host processes cannot race onto the same port range before anything starts listening.
+
+Spur commands run through `bash -lc`, so sidecar commands may start with `VAR=value other_cmd ...` and may rely on login-shell initialization. If the launching agent runs in a sandbox that remaps `$HOME` to a scratch directory (e.g. `/tmp/spur-runtime-*`), the sidecar inherits that `$HOME`. To reach the real user home from a sidecar command, use `$SPUR_REAL_HOME` — Spur resolves it from `/etc/passwd` and exports it into every session and sidecar env. For example: `source "$SPUR_REAL_HOME/.nvm/nvm.sh"` instead of `source "$HOME/.nvm/nvm.sh"`.
 
 ## Start
 
@@ -202,7 +203,7 @@ sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 ```
 pnpm --dir v2 test            # fast (mocked, in-process)
 pnpm --dir v2 test:runtime    # runtime integration (CLI, tmux, worktree, process boundaries)
-pnpm --dir v2 test:smoke      # real-agent smoke on the real ao repo (skips if tmux/binaries/auth missing)
+pnpm --dir v2 test:smoke      # real-agent smoke against this repo (skips if tmux/binaries/auth missing)
 ```
 
 Run `runtime integration` when touching CLI, daemon, transport, session lifecycle, worktree, or tmux.
@@ -212,11 +213,13 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 ## Automation
 
 - `cron` emits `cron:tick`
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and — when `query` is set on the source — `github:work_item.new` (one event per matching PR, ever)
 - `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
+
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). The PR URL is seeded into `slots.links` (`label: "pr"`) on the spawned session.
 
 `send.interrupt`:
 
@@ -277,6 +280,12 @@ projects:
         type: github
         intervalMs: 60000
         runOnStart: false
+      pr-review-queue:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        # `gh search prs` query. One Spur session per matched PR, ever.
+        query: "is:pr is:open repo:acme/backend-api label:needs-review"
       web-watch:
         type: service
         service: web
@@ -323,6 +332,12 @@ projects:
         send:
           interrupt: false # queued, deduped, flushed as one batch
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      pr-review-queue-spawn:
+        source: pr-review-queue
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "Run /code-review on this pull request and post findings."
       web-watch-crash:
         source: web-watch
         event: service:crash
@@ -366,7 +381,7 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, makes Claude startup enter plan mode, passes `--plan` to Cursor, and leaves Codex launch behavior unchanged.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, and makes Claude startup enter plan mode; Codex currently accepts the flag but launch behavior is unchanged.
 - `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.

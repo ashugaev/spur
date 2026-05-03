@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
 
 const ghMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/workspace.js", () => ({
+  readCurrentBranch: readCurrentBranchMock,
 }));
 
 const {
@@ -12,7 +16,8 @@ const {
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
-  resolvePrSummary,
+  resolveBoundPrSummary,
+  resolveTrackedBranch,
 } = await import("../../src/event-sources/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
@@ -165,71 +170,106 @@ describe("hasMergeConflict", () => {
   });
 });
 
-describe("resolvePrSummary", () => {
+describe("resolveBoundPrSummary", () => {
   beforeEach(() => {
     ghMock.mockReset();
   });
   afterEach(() => {
     ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
   });
 
-  const listPr = {
-    number: 212,
-    title: "t",
-    url: "https://github.com/o/r/pull/212",
-    reviewDecision: "REVIEW_REQUIRED",
-  };
+  it("loads the tracked PR directly from the persisted binding", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        url: "https://github.com/o/r/pull/212",
+        reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "DIRTY",
+      }),
+    );
 
-  it("forces compute via pr view when pr list returns UNKNOWN mergeability", async () => {
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
-      )
-      .mockResolvedValueOnce(
-        JSON.stringify({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
-      );
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("CONFLICTING");
-    expect(pr?.mergeStateStatus).toBe("DIRTY");
-    expect(ghMock).toHaveBeenCalledTimes(2);
-    expect(ghMock.mock.calls[1]).toEqual([
+    expect(pr).toMatchObject({
+      number: 212,
+      title: "native binding",
+      url: "https://github.com/o/r/pull/212",
+      reviewDecision: "changes_requested",
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+    });
+    expect(ghMock).toHaveBeenCalledWith(
       "/wt",
       "pr",
       "view",
       "212",
       "--json",
-      "mergeable,mergeStateStatus",
-    ]);
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+    );
   });
 
-  it("skips pr view when pr list already returns a resolved mergeability", async () => {
+  it("falls back to the stored URL when gh omits url", async () => {
     ghMock.mockResolvedValueOnce(
-      JSON.stringify([{ ...listPr, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }]),
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+      }),
     );
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("MERGEABLE");
-    expect(pr?.mergeStateStatus).toBe("BLOCKED");
-    expect(ghMock).toHaveBeenCalledTimes(1);
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
+
+    expect(pr?.url).toBe("https://github.com/o/r/pull/212");
+    expect(pr?.repo).toBe("o/r");
   });
 
-  it("keeps UNKNOWN when the pr view fallback fails", async () => {
-    ghMock
-      .mockResolvedValueOnce(
-        JSON.stringify([{ ...listPr, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }]),
-      )
-      .mockRejectedValueOnce(new Error("gh offline"));
+  it("returns null when gh pr view fails", async () => {
+    ghMock.mockRejectedValueOnce(new Error("gh offline"));
 
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr?.mergeable).toBe("UNKNOWN");
-    expect(pr?.mergeStateStatus).toBe("UNKNOWN");
+    await expect(
+      resolveBoundPrSummary("/wt", {
+        number: 212,
+        repo: "o/r",
+        url: "https://github.com/o/r/pull/212",
+      }),
+    ).rejects.toThrow("gh offline");
+  });
+});
+
+describe("resolveTrackedBranch", () => {
+  beforeEach(() => {
+    readCurrentBranchMock.mockReset();
   });
 
-  it("returns null when no PR matches the branch", async () => {
-    ghMock.mockResolvedValueOnce("[]");
-    const pr = await resolvePrSummary("/wt", "feature/x");
-    expect(pr).toBeNull();
-    expect(ghMock).toHaveBeenCalledTimes(1);
+  it("prefers the current worktree branch over stale session metadata", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+
+    await expect(resolveTrackedBranch("/wt", "stale-session-branch")).resolves.toBe("feature/live");
+    expect(readCurrentBranchMock).toHaveBeenCalledWith("/wt");
+  });
+
+  it("falls back to the persisted session branch when git reports detached HEAD", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("HEAD");
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+
+  it("falls back to the persisted session branch when the worktree lookup fails", async () => {
+    readCurrentBranchMock.mockRejectedValueOnce(new Error("missing worktree"));
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
   });
 });

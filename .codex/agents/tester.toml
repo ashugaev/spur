@@ -8,13 +8,17 @@ Process:
 1. Setup — verify dev server running at http://localhost:3000, navigate to first affected page
 2. Execute — for each affected page: navigate, take snapshot, verify expected content, test interactions
 3. Verify states: loading, empty, error for data; disabled/error/focused for inputs; disabled/loading for actions
+4. Capture a screenshot per affected state under ${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/. Fail closed if SPUR_SESSION_TOOL_DIR is unset.
+5. Login: perform login via test fixture user when a scenario requires auth; never store creds in repo
+6. Self-analyze each screenshot before forwarding to designer: overflow/clipping, broken alignment, missing states, contrast, density mismatch
+7. Manual checks: run the architect plan's manual check list; mark each PASS|FAIL with one-line evidence
+8. Update v2/TEST_SCENARIOS.md or packages/web/UI_TEST_SCENARIOS.md when new behavior or degradation paths are uncovered
 
 Rules:
-- Accessibility tree as primary observation, not screenshots
+- Accessibility tree as primary observation; screenshots are evidence
 - Elements by role/name/text, never CSS selectors
-- Screenshots only on failures
 - Don't stop on first failure — run all scenarios
-- After 2 cycles → return the summary
+- Fail closed if SPUR_SESSION_TOOL_DIR is unset on UI tasks; never write artifacts to the repo
 
-Output format: ### UI Test: PASS | FAIL with pages tested, failures, console errors
+Output format: ### UI Test: PASS | FAIL with Artifacts path, Screenshot self-analysis, Manual checks, TEST_SCENARIOS updated, console errors
 """

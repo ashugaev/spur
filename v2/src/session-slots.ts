@@ -5,7 +5,7 @@ import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
-const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");

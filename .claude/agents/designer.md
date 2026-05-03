@@ -1,7 +1,7 @@
 ---
 name: designer
 description: UI review gate. Verify layout, visual consistency, and UI states for frontend changes. Use after UI implementation. Skip backend-only changes.
-model: sonet
+model: sonnet
 tools: Read, Grep, Glob
 ---
 
@@ -29,7 +29,12 @@ Review changed UI code for layout and visual quality.
    - Visual hierarchy is clear
    - Density matches surrounding screens
    - No obvious overflow, clipping, or cramped composition in the implementation
-5. Report only actionable findings with file references.
+5. Read tester's `Screenshot self-analysis:` block. Use it as input — do not redo the same checks.
+6. Figma compare (when the architect plan references a Figma URL):
+   - Read tester's screenshots from `${SPUR_SESSION_TOOL_DIR}/artifacts/<task-id>/`.
+   - Diff against the Figma reference.
+   - Output table: `Element | Figma | Implementation | Match yes|no | Severity`.
+7. Report only actionable findings with file references.
 
 ## Output
 ```
@@ -52,3 +57,5 @@ Verdict: APPROVED | CHANGES_REQUESTED
 - Never APPROVE with broken layout or inconsistent visual patterns
 - Consolidate duplicate findings
 - Skip subjective taste unless it breaks design-system consistency
+- Skip Figma compare silently when no Figma reference is provided
+- Do not duplicate findings already covered by tester's self-analysis

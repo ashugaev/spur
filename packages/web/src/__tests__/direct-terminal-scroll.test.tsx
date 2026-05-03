@@ -361,7 +361,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByText("Connected")).toBeInTheDocument();
   });
 
-  it("refreshes the websocket after returning from a hidden tab", async () => {
+  it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
     await mountTerminal("test-visibility");
 
     await waitFor(() => {
@@ -376,8 +376,36 @@ describe("DirectTerminal scroll integration", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("reconnects after returning from a hidden tab when the websocket is already closed", async () => {
+    await mountTerminal("test-visibility-closed");
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    act(() => {
+      wsInstances[0].readyState = 3;
     });
 
     act(() => {

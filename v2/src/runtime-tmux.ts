@@ -220,7 +220,8 @@ export async function createTmuxCommandSession(input: {
   env?: Record<string, string>;
 }): Promise<void> {
   const sessionTarget = exactSessionTarget(input.sessionName);
-  const shellCommand = `sh -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
+  // `bash` so the exec builtin accepts `VAR=value cmd` assignments (dash rejects them).
+  const shellCommand = `bash -lc ${shellEscape(`exec ${input.launchCommand}`)}`;
   await execFileAsync("tmux", [
     ...withTmuxSocketArgs([]),
     "-f",

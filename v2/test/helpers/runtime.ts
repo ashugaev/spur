@@ -40,6 +40,18 @@ export interface FakeGhState {
       repo?: string;
     }
   >;
+  prsByNumber?: Record<
+    string,
+    {
+      number: number;
+      title: string;
+      url: string;
+      reviewDecision?: string | null;
+      mergeable?: string | null;
+      mergeStateStatus?: string | null;
+      repo?: string;
+    }
+  >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
   commentsByPr?: Record<
     string,
@@ -56,6 +68,12 @@ export interface FakeGhState {
     }>
   >;
   reviewThreadsByPr?: Record<string, Array<Record<string, unknown>>>;
+  searchPrs?: Array<{
+    number: number;
+    title: string;
+    url: string;
+    repository: { nameWithOwner: string };
+  }>;
 }
 
 export interface RuntimeTestContext {
@@ -389,6 +407,11 @@ function argValue(args, prefix) {
 const state = readState();
 const args = process.argv.slice(2);
 
+if (args[0] === "search" && args[1] === "prs") {
+  print(state.searchPrs || []);
+  process.exit(0);
+}
+
 if (args[0] === "pr" && args[1] === "list") {
   const headIndex = args.indexOf("--head");
   const branch = headIndex === -1 ? "" : args[headIndex + 1] || "";
@@ -399,6 +422,19 @@ if (args[0] === "pr" && args[1] === "list") {
 
 if (args[0] === "pr" && args[1] === "checks") {
   print(state.checksByPr?.[String(args[2] || "")] || []);
+  process.exit(0);
+}
+
+if (args[0] === "pr" && args[1] === "view") {
+  const prNumber = String(args[2] || "");
+  const pr =
+    state.prsByNumber?.[prNumber] ||
+    Object.values(state.prsByBranch || {}).find((value) => String(value?.number || "") === prNumber);
+  if (!pr) {
+    process.stderr.write("unknown fake gh pr view target: " + prNumber + "\\n");
+    process.exit(1);
+  }
+  print(pr);
   process.exit(0);
 }
 

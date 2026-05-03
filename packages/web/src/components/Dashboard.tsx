@@ -1,16 +1,23 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
@@ -25,7 +32,7 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 
-const POLL_INTERVAL_MS = 5_000;
+const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
@@ -174,13 +181,10 @@ function upsertSession(
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(() => {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
@@ -193,6 +197,7 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
+  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -234,50 +239,30 @@ export function Dashboard() {
     [locationSearch],
   );
 
-  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-
-    try {
-      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = (await response.json()) as SpurSessionsResponse;
-      setRawSessions(payload.sessions);
-      setProjects(payload.projects ?? []);
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, []);
-
   useEffect(() => {
     setProjectId(requestedProject);
   }, [requestedProject]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async (silent = false) => {
-      if (cancelled) return;
-      await fetchSessions(projectId, silent);
-    };
-
-    void run(false);
-    const timer = setInterval(() => {
-      void run(true);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchSessions, projectId]);
+  const queryClient = useQueryClient();
+  const sessionsQueryKey = ["sessions", projectId] as const;
+  const {
+    data,
+    isPending,
+    error: sessionsError,
+  } = useQuery<SpurSessionsResponse>({
+    queryKey: sessionsQueryKey,
+    queryFn: async ({ signal }) => {
+      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(`sessions ${response.status}`);
+      return (await response.json()) as SpurSessionsResponse;
+    },
+    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+  const rawSessions = data?.sessions ?? [];
+  const projects = data?.projects ?? [];
+  const loading = isPending;
 
   const filterProjectOptions = useMemo(() => {
     const merged = new Map(projects.map((project) => [project.id, project]));
@@ -492,6 +477,8 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      const encodedAttachments = encodeImageAttachments(spawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
@@ -505,13 +492,20 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
-      setRawSessions((current) => upsertSession(current, session, nextProjectId));
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = current?.sessions ?? [];
+        return {
+          sessions: upsertSession(currentSessions, session, nextProjectId),
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
+      setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
@@ -531,8 +525,18 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
     setSpawnOpen(true);
   };
+
+  const addSpawnImages = useCallback((files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setSpawnAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -777,19 +781,25 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <div className="relative flex min-h-0 flex-1 flex-col">
-                  <textarea
-                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                        void handleSpawn();
-                    }}
-                    placeholder="Prompt for the new session..."
-                    value={spawnPrompt}
-                  />
-                  <VoiceButton voice={voice} />
-                </div>
+                <ImageAttachmentTextarea
+                  ariaLabel="Prompt for the new session..."
+                  attachments={spawnAttachments}
+                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                  onAddFiles={addSpawnImages}
+                  onChange={setSpawnPrompt}
+                  onKeyDown={(event) => {
+                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                      void handleSpawn();
+                  }}
+                  onRemoveAttachment={(index) =>
+                    setSpawnAttachments((current) =>
+                      current.filter((_, currentIndex) => currentIndex !== index),
+                    )
+                  }
+                  placeholder="Prompt for the new session..."
+                  value={spawnPrompt}
+                  voice={voice}
+                />
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
@@ -824,9 +834,12 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error ? (
+        {error || sessionsError ? (
           <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error}
+            {error ??
+              (sessionsError instanceof Error
+                ? sessionsError.message
+                : "Failed to load Spur sessions")}
           </div>
         ) : null}
 
@@ -875,7 +888,7 @@ export function Dashboard() {
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
-      <StatusBar sessions={rawSessions} />
+      <StatusBar />
     </>
   );
 }
