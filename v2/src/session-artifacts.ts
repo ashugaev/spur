@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import type { SessionArtifact, SessionArtifactKind } from "./types.js";
+import type { SessionArtifact, SessionArtifactKind, SessionArtifactOrigin } from "./types.js";
 
 const ARTIFACTS_DIR = "session-artifacts";
+const ARTIFACT_METADATA_FILE = ".spur-artifacts.json";
 
 const MIME_BY_EXT: Record<string, string> = {
   ".gif": "image/gif",
@@ -24,6 +25,12 @@ export interface SessionArtifactFile extends SessionArtifact {
   path: string;
 }
 
+interface ArtifactMetadataRecord {
+  origin?: SessionArtifactOrigin;
+}
+
+type ArtifactMetadataMap = Record<string, ArtifactMetadataRecord>;
+
 function artifactKindForMimeType(mimeType: string): SessionArtifactKind {
   if (mimeType.startsWith("image/")) {
     return "image";
@@ -38,7 +45,48 @@ function artifactMimeType(name: string): string {
   return MIME_BY_EXT[extname(name).toLowerCase()] ?? "application/octet-stream";
 }
 
-function artifactFromFile(path: string, name: string): SessionArtifactFile {
+function readArtifactMetadata(dir: string): ArtifactMetadataMap {
+  const metadataPath = join(dir, ARTIFACT_METADATA_FILE);
+  if (!existsSync(metadataPath)) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(metadataPath, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        ([artifactId, metadata]) =>
+          typeof artifactId === "string" &&
+          metadata !== null &&
+          typeof metadata === "object" &&
+          !Array.isArray(metadata),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeArtifactMetadata(dir: string, metadata: ArtifactMetadataMap): void {
+  const metadataPath = join(dir, ARTIFACT_METADATA_FILE);
+  if (Object.keys(metadata).length === 0) {
+    rmSync(metadataPath, { force: true });
+    return;
+  }
+  writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, "utf-8");
+}
+
+function artifactOrigin(metadata: ArtifactMetadataMap, name: string): SessionArtifactOrigin {
+  return metadata[name]?.origin ?? "intentional";
+}
+
+function artifactFromFile(
+  path: string,
+  name: string,
+  metadata: ArtifactMetadataMap,
+): SessionArtifactFile {
   const stat = statSync(path);
   const mimeType = artifactMimeType(name);
   return {
@@ -47,6 +95,7 @@ function artifactFromFile(path: string, name: string): SessionArtifactFile {
     size: stat.size,
     mimeType,
     kind: artifactKindForMimeType(mimeType),
+    origin: artifactOrigin(metadata, name),
     createdAt: stat.birthtime.toISOString(),
     updatedAt: stat.mtime.toISOString(),
     path,
@@ -91,12 +140,17 @@ export function deleteSessionArtifactsExcept(
     return;
   }
   const keep = new Set(keepArtifactIds.map((artifactId) => validateArtifactId(artifactId)));
+  const metadata = readArtifactMetadata(dir);
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile() || keep.has(entry.name)) {
+    if (!entry.isFile() || entry.name === ARTIFACT_METADATA_FILE || keep.has(entry.name)) {
       continue;
     }
     rmSync(join(dir, entry.name), { force: true });
   }
+  writeArtifactMetadata(
+    dir,
+    Object.fromEntries(Object.entries(metadata).filter(([artifactId]) => keep.has(artifactId))),
+  );
 }
 
 export function listSessionArtifacts(dataDir: string, sessionId: string): SessionArtifact[] {
@@ -106,9 +160,10 @@ export function listSessionArtifacts(dataDir: string, sessionId: string): Sessio
   }
 
   try {
+    const metadata = readArtifactMetadata(dir);
     return readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isFile())
-      .map((entry) => artifactFromFile(join(dir, entry.name), entry.name))
+      .filter((entry) => entry.isFile() && entry.name !== ARTIFACT_METADATA_FILE)
+      .map((entry) => artifactFromFile(join(dir, entry.name), entry.name, metadata))
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .map(({ path: _path, ...artifact }) => artifact);
   } catch {
@@ -122,11 +177,31 @@ export function readSessionArtifact(
   artifactId: string,
 ): SessionArtifactFile | null {
   const normalizedId = validateArtifactId(artifactId);
+  if (normalizedId === ARTIFACT_METADATA_FILE) {
+    return null;
+  }
   const path = join(sessionArtifactsDir(dataDir, sessionId), normalizedId);
   if (!existsSync(path) || !statSync(path).isFile()) {
     return null;
   }
-  return artifactFromFile(path, normalizedId);
+  return artifactFromFile(
+    path,
+    normalizedId,
+    readArtifactMetadata(sessionArtifactsDir(dataDir, sessionId)),
+  );
+}
+
+export function setSessionArtifactOrigin(
+  dataDir: string,
+  sessionId: string,
+  artifactId: string,
+  origin: SessionArtifactOrigin,
+): void {
+  const normalizedId = validateArtifactId(artifactId);
+  const dir = ensureSessionArtifactsDir(dataDir, sessionId);
+  const metadata = readArtifactMetadata(dir);
+  metadata[normalizedId] = { origin };
+  writeArtifactMetadata(dir, metadata);
 }
 
 export function withSessionArtifactInstructions(prompt: string): string {
