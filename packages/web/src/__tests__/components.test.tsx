@@ -346,6 +346,86 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
   });
 
+  it("shows stopped sessions in a dedicated Stopped category", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-stopped-1",
+                prompt: "Manual stop",
+                status: "stopped",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
+      expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
+    });
+  });
+
+  it("routes crashed non-terminal sessions into Stopped instead of Needs Input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-crashed-1",
+                prompt: "Crashed run",
+                status: "running",
+                state: "working",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
+      expect(within(header).getByRole("button", { name: /Needs Input/i })).toHaveTextContent("0");
+      expect(screen.getByRole("link", { name: "Crashed run" })).toBeInTheDocument();
+    });
+  });
+
   it("keeps completed-only dashboards neutral until Completed is selected", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -788,6 +868,59 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Re-run the flaky deploy/i }));
 
     expect(screen.getByDisplayValue("Re-run the flaky deploy")).toBeInTheDocument();
+  });
+
+  it("inserts a slash suggestion into the spawn prompt", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/projects/api/slash-commands?agent=claude") {
+        return new Response(
+          JSON.stringify({
+            agent: "claude",
+            commands: [
+              {
+                id: "cmd-compact",
+                label: "/compact",
+                insertText: "/compact",
+                detail: "Compact the chat",
+                source: "built-in",
+                kind: "command",
+              },
+            ],
+            skills: [],
+            agents: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
+
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("/compact");
   });
 
   it.each([

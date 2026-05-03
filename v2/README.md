@@ -69,7 +69,7 @@ Use it inside the session to update the task title and any named links shown in 
 
 ```bash
 spur-slots --title "Fix flaky auth test"
-spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
+spur-slots --link tracker=https://tracker.example.com/TASK-123 --link github-pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
 

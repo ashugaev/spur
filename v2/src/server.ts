@@ -5,9 +5,7 @@ import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
-import { listSessions } from "./metadata.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { tmuxSessionExists } from "./runtime-tmux.js";
 import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
@@ -262,6 +260,19 @@ export async function startServer(
         return;
       }
 
+      const projectSuggestionsId = path.match(/^\/projects\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && projectSuggestionsId) {
+        sendJson(
+          response,
+          200,
+          await service.getProjectSuggestions(
+            projectSuggestionsId,
+            url.searchParams.get("agent")?.trim() || undefined,
+          ),
+        );
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
@@ -296,6 +307,12 @@ export async function startServer(
       const conversationSessionId = path.match(/^\/sessions\/([^/]+)\/conversation$/)?.[1];
       if (method === "GET" && conversationSessionId) {
         sendJson(response, 200, await service.getConversation(conversationSessionId));
+        return;
+      }
+
+      const sessionSuggestionsId = path.match(/^\/sessions\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && sessionSuggestionsId) {
+        sendJson(response, 200, await service.getSessionSuggestions(sessionSuggestionsId));
         return;
       }
 
@@ -508,35 +525,11 @@ export async function startServer(
   }
 
   try {
-    const sessionsOnDisk = listSessions(service.config.dataDir);
-    const candidates = sessionsOnDisk.filter(
-      (s) => s.status === "running" || s.status === "paused" || s.status === "spawning",
-    );
-    let alive = 0;
-    let drifted = 0;
-    for (const session of candidates) {
-      const exists = await tmuxSessionExists(session.tmuxSession);
-      if (exists) {
-        alive += 1;
-        continue;
-      }
-      drifted += 1;
-      logEvent("session.reconcile.drift", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Drift: ${session.id} status=${session.status} but tmux ${session.tmuxSession} missing at boot`,
-        details: {
-          status: session.status,
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-        },
-      });
-    }
+    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
     logEvent("daemon.startup.reconciled", {
       level: "info",
-      message: `Reconciled sessions at boot: scanned=${candidates.length}, alive=${alive}, drifted=${drifted}`,
-      details: { scanned: candidates.length, alive, drifted },
+      message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
+      details: { scanned, alive, drifted },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -5,6 +5,7 @@ import {
   CiStatusDot,
   extractLinkId,
   GithubIcon,
+  isGitHubPrLinkLabel,
   JiraIcon,
   type PrInfo,
   prStateColor,
@@ -41,7 +42,7 @@ function hoverClassForLink(link: SpurSessionLink): string {
 }
 
 export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
-  return usePrInfo(link?.label === "pr" ? link.url : undefined);
+  return usePrInfo(link && isGitHubPrLinkLabel(link.label) ? link.url : undefined);
 }
 
 export function SessionLinkBadge({
@@ -50,7 +51,7 @@ export function SessionLinkBadge({
   prInfo: providedPrInfo,
   variant,
 }: SessionLinkBadgeProps) {
-  const isPr = link.label === "pr";
+  const isPr = isGitHubPrLinkLabel(link.label);
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
   const labelStyle: CSSProperties | undefined = isPr

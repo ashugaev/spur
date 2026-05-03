@@ -310,12 +310,15 @@ describe("fetchPrInfo", () => {
 
 describe("extractLinkId", () => {
   it("extracts PR number from GitHub pull URL", () => {
-    const link: SpurSessionLink = { label: "pr", url: "https://github.com/org/repo/pull/123" };
+    const link: SpurSessionLink = {
+      label: "github-pr",
+      url: "https://github.com/org/repo/pull/123",
+    };
     expect(extractLinkId(link)).toBe("#123");
   });
 
   it("returns 'PR' when URL has no pull number", () => {
-    const link: SpurSessionLink = { label: "pr", url: "https://github.com/org/repo" };
+    const link: SpurSessionLink = { label: "github-pr", url: "https://github.com/org/repo" };
     expect(extractLinkId(link)).toBe("PR");
   });
 

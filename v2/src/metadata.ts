@@ -69,6 +69,15 @@ function githubSnapshotFilePath(
   return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.json`);
 }
 
+function githubMergeConflictRestoreFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.merge-conflict`);
+}
+
 function hasLegacyNativePrLink(session: SessionRecord): boolean {
   return (
     session.slots?.links.some(
@@ -171,6 +180,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     tmuxSession: normalizedSession.tmuxSession,
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
+    ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
@@ -391,6 +401,35 @@ export function deleteGitHubSourceSnapshot(
   sessionId: string,
 ): void {
   rmSync(githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId), {
+    force: true,
+  });
+}
+
+export function hasGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): boolean {
+  return existsSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId));
+}
+
+export function requestGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), true);
+}
+
+export function clearGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), {
     force: true,
   });
 }

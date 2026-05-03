@@ -170,7 +170,7 @@ async function runRestoreScenario(args: {
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
   } else {
@@ -187,7 +187,7 @@ async function runRestoreScenario(args: {
       accept: (value) =>
         value[0]?.state === "stopped" &&
         value[0]?.runtimeAlive === (stopMode === "exit") &&
-        value[0]?.status === (stopMode === "pause" ? "paused" : "running"),
+        value[0]?.status === "stopped",
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
@@ -1418,7 +1418,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
     expect(existsSync(spawned.worktreePath)).toBe(true);
@@ -1432,7 +1432,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -1545,7 +1545,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes(`Paused ${spawned.id}.`),
+      accept: (value) => value.includes(`Stopped ${spawned.id}.`),
     });
 
     const pausedList = await pollUntil(
@@ -1557,7 +1557,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -1676,7 +1676,7 @@ projects:
       "--link",
       "tracker=https://tracker.example.com/TASK-9",
       "--link",
-      "pr=https://github.com/org/repo/pull/9",
+      "github-pr=https://github.com/org/repo/pull/9",
     ]);
 
     const listed = await pollUntil(
@@ -1705,17 +1705,17 @@ projects:
       title: "Investigate status bar links",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
-        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
     expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("pr ##9");
+    expect(statusRight).toContain("github pr ##9");
     expect(statusRight).toContain(
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
     expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
+      "#[hyperlink=https://github.com/org/repo/pull/9]github pr ##9#[hyperlink=]",
     );
     expect(mouseBinding).toContain("MouseUp1StatusRight");
     expect(mouseBinding).toContain("open-link.js");
@@ -2915,7 +2915,7 @@ projects:
     expect(result.spawned.agent).toBe("claude");
   });
 
-  it("restores a paused session in place without sending a restore prompt", async () => {
+  it("restores a manually stopped session in place without sending a restore prompt", async () => {
     const result = await runRestoreScenario({
       configName: "restore-paused.yaml",
       stopMode: "pause",
@@ -4072,7 +4072,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.workspaceExists).toBe(true);
 
     const devSessionGone = !(await tmuxSessionExists(devSessionName));

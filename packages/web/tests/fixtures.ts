@@ -59,7 +59,7 @@ export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSe
     ...baseSession("session-stopped-1"),
     runtimeAlive: false,
     tmuxSession: null,
-    status: "paused",
+    status: "stopped",
     state: "stopped",
     ...overrides,
   };
@@ -107,7 +107,7 @@ export function makeSessionWithPR(overrides?: Partial<SpurSessionView>): SpurSes
     state: "working",
     slots: {
       title: "Session with PR",
-      links: [{ label: "pr", url: "https://github.com/test/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
     },
     ...overrides,
   };

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
-import { primePrInfo } from "@/lib/link-icons";
+import { isGitHubPrLinkLabel, primePrInfo } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
 import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
 
@@ -49,7 +49,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
-  const prLink = session.links.find((l) => l.label === "pr");
+  const prLink = session.links.find((l) => isGitHubPrLinkLabel(l.label));
   const trackerLink = session.links.find((l) => l.label === "tracker");
   const prInfo = useSessionLinkPrInfo(prLink);
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);

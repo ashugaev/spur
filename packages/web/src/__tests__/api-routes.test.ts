@@ -34,12 +34,14 @@ import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { GET as getProjectSlashCommands } from "@/app/api/projects/[id]/slash-commands/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { GET as getSessionSlashCommands } from "@/app/api/sessions/[id]/slash-commands/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -243,6 +245,58 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(502);
     expect(payload.error).toBe("Session not found");
+  });
+
+  it("GET /api/projects/:id/slash-commands proxies the daemon route", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      agent: "claude",
+      commands: [
+        {
+          id: "c1",
+          label: "/compact",
+          insertText: "/compact",
+          detail: "Compact",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
+      skills: [],
+      agents: [],
+    });
+
+    const response = await getProjectSlashCommands(
+      new NextRequest("http://localhost:3000/api/projects/api/slash-commands?agent=claude"),
+      { params: Promise.resolve({ id: "api" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/api/slash-commands?agent=claude");
+  });
+
+  it("GET /api/sessions/:id/slash-commands proxies the daemon route", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      agent: "codex",
+      commands: [
+        {
+          id: "c1",
+          label: "/permissions",
+          insertText: "/permissions",
+          detail: "Permissions",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
+      skills: [],
+      agents: [],
+    });
+
+    const response = await getSessionSlashCommands(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/slash-commands"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/api-a1/slash-commands");
   });
 
   it("GET /api/sessions/:id/artifacts/:artifactId proxies artifact content from the daemon", async () => {

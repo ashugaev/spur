@@ -44,6 +44,10 @@ interface CacheEntry {
 const prCache = new Map<string, CacheEntry>();
 const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
+export function isGitHubPrLinkLabel(label: string): boolean {
+  return label === "github-pr" || label === "pr";
+}
+
 function hydratePrCacheFromStorage(): void {
   if (typeof window === "undefined") return;
   try {
@@ -141,7 +145,7 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
 
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
-  if (link.label === "pr") {
+  if (isGitHubPrLinkLabel(link.label)) {
     const match = url.match(/\/pull\/(\d+)/);
     return match ? `#${match[1]}` : "PR";
   }
@@ -275,6 +279,15 @@ function CompositeCiReviewMark({
   reviewGlyph: "check" | "cross";
   title: string;
 }) {
+  const halo = "var(--color-bg-base)";
+
+  const strokedPath = (d: string, color: string, width: number) => (
+    <>
+      <path d={d} stroke={halo} strokeWidth={width + 1.25} />
+      <path d={d} stroke={color} strokeWidth={width} />
+    </>
+  );
+
   return (
     <span
       aria-label={title}
@@ -290,19 +303,15 @@ function CompositeCiReviewMark({
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        <path
-          d="M2.75 9.5 5.9 12.65 11.65 5.9"
-          stroke="var(--color-status-ready)"
-          strokeWidth="2.15"
-        />
         {reviewGlyph === "check" ? (
-          <path d="M8.75 9.5 11.9 12.65 17.65 5.9" stroke={reviewColor} strokeWidth="2.15" />
+          strokedPath("M8.75 9.5 11.9 12.65 17.65 5.9", reviewColor, 2.15)
         ) : (
           <>
-            <path d="M11 6.1 17.4 12.5" stroke={reviewColor} strokeWidth="2.05" />
-            <path d="M17.4 6.1 11 12.5" stroke={reviewColor} strokeWidth="2.05" />
+            {strokedPath("M11 6.1 17.4 12.5", reviewColor, 2.05)}
+            {strokedPath("M17.4 6.1 11 12.5", reviewColor, 2.05)}
           </>
         )}
+        {strokedPath("M2.75 9.5 5.9 12.65 11.65 5.9", "var(--color-status-ready)", 2.15)}
       </svg>
     </span>
   );

@@ -1,6 +1,7 @@
 export type SpurSessionStatus =
   | "spawning"
   | "running"
+  | "stopped"
   | "paused"
   | "errored"
   | "completed"
@@ -31,6 +32,7 @@ export interface SpurSessionLink {
 }
 
 export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SpurSessionArtifact {
   id: string;
@@ -38,6 +40,8 @@ export interface SpurSessionArtifact {
   size: number;
   mimeType: string;
   kind: SpurSessionArtifactKind;
+  origin: SpurSessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -87,12 +91,30 @@ export interface ProjectInfo {
   name: string;
 }
 
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: "claude" | "codex";
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
+}
+
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
 }
 
-export type AttentionLevel = "respond" | "pending" | "working" | "done";
+export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
 
 export interface DashboardSession {
   id: string;
@@ -181,7 +203,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
-  if (session.status === "paused") return true;
+  if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
 }
 
@@ -229,8 +251,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.state === "error" ||
     Boolean(session.error) ||
     hasServiceProblems(session) ||
-    !session.workspaceExists ||
-    (!session.runtimeAlive && session.status === "running")
+    !session.workspaceExists
   ) {
     return "respond";
   }
@@ -239,7 +260,16 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "working";
   }
 
-  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.state === "stopped" ||
+    !session.runtimeAlive
+  ) {
+    return "stopped";
+  }
+
+  if (session.state === "waiting") {
     return "pending";
   }
 

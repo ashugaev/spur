@@ -1,7 +1,14 @@
 export type AgentName = "claude" | "codex";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
+export type SessionStatus =
+  | "spawning"
+  | "running"
+  | "stopped"
+  | "paused"
+  | "errored"
+  | "completed"
+  | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
 export type StateSource = "jsonl" | "hook" | "status";
 
@@ -26,6 +33,7 @@ export interface SessionPrBinding {
 }
 
 export type SessionArtifactKind = "image" | "video" | "download";
+export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {
   id: string;
@@ -33,6 +41,8 @@ export interface SessionArtifact {
   size: number;
   mimeType: string;
   kind: SessionArtifactKind;
+  origin: SessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -251,6 +261,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
+  stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
   retainInList?: boolean;
@@ -373,6 +384,24 @@ export interface UpdateSessionSlotsRequest {
 export interface ProjectListEntry {
   id: string;
   name: string;
+}
+
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: AgentName;
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
 }
 
 export interface ConnectProjectConfigRequest {
