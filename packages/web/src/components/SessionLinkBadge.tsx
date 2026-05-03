@@ -77,12 +77,13 @@ export function SessionLinkBadge({
       </span>
       {isPr ? (
         <>
-          {prInfo.ciStatus === "success" ? null : <CiStatusDot status={prInfo.ciStatus} />}
           {prInfo.ciStatus === "success" &&
           (prInfo.reviewDecision === "approved" ||
             prInfo.reviewDecision === "changes_requested") ? (
             <ReviewDecisionDot decision={prInfo.reviewDecision} />
-          ) : null}
+          ) : (
+            <CiStatusDot status={prInfo.ciStatus} />
+          )}
           <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
         </>
       ) : null}

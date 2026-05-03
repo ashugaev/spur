@@ -150,7 +150,7 @@ describe("SessionLinkBadge", () => {
     expect(container.querySelectorAll("svg")).toHaveLength(1); // only the GitHub icon
   });
 
-  it("suppresses review badge when CI passes but review_required", () => {
+  it("renders CI passing dot when CI passes but review_required", () => {
     usePrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: "review_required",
@@ -169,10 +169,10 @@ describe("SessionLinkBadge", () => {
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Approval required")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
   });
 
-  it("suppresses review badge when CI passes but reviewDecision is null", () => {
+  it("renders CI passing dot when CI passes but reviewDecision is null", () => {
     usePrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: null,
@@ -191,7 +191,7 @@ describe("SessionLinkBadge", () => {
 
     expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("No approval required")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
   });
 
   it("renders tracker badges without PR status indicators", () => {

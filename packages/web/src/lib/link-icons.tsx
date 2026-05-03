@@ -197,6 +197,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   if (status === "success")
     return (
       <svg
+        aria-label="CI passing"
+        role="img"
         className="h-3 w-3"
         viewBox="0 0 24 24"
         fill="none"
@@ -211,6 +213,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   if (status === "failure")
     return (
       <svg
+        aria-label="CI failing"
+        role="img"
         className="h-3 w-3"
         viewBox="0 0 24 24"
         fill="none"
@@ -223,6 +227,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
     );
   return (
     <svg
+      aria-label="CI pending"
+      role="img"
       className="h-3 w-3"
       viewBox="0 0 24 24"
       fill="none"
