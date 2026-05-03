@@ -177,7 +177,9 @@ export function describeSession(session: SessionView): string {
   const facts = [`updated ${formatRelativeTime(session.lastActivityAt)}`];
   const services = session.services;
 
-  if (session.status === "paused") {
+  if (session.stopReason === "manual_pause") {
+    facts.push("stopped by user");
+  } else if (session.status === "paused") {
     facts.push("paused by user");
   } else if (session.status === "completed") {
     facts.push("marked complete");
