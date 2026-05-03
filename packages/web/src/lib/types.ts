@@ -69,12 +69,12 @@ export interface SpurSessionView {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   worktreePath: string;
-  services: SpurServiceView[];
+  services?: SpurServiceView[];
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
   };
-  artifacts: SpurSessionArtifact[];
+  artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -157,8 +157,8 @@ export function toDashboardSession(
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
-    services: session.services,
-    artifacts: session.artifacts,
+    services: session.services ?? [],
+    artifacts: session.artifacts ?? [],
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,

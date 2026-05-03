@@ -639,7 +639,7 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
 
     const agentSelect = screen.getByRole("combobox", { name: "Spawn agent" });
-    expect(within(agentSelect).getByRole("option", { name: "Cursor Agent" })).toBeInTheDocument();
+    expect(within(agentSelect).getByRole("option", { name: "Cursor" })).toBeInTheDocument();
     fireEvent.change(agentSelect, { target: { value: "cursor" } });
     fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
       target: { value: "api" },

@@ -3,9 +3,9 @@ export const AGENT_OPTIONS = ["claude", "codex", "cursor"] as const;
 export type AgentName = (typeof AGENT_OPTIONS)[number];
 
 const AGENT_LABELS: Record<AgentName, string> = {
-  claude: "Claude Code",
-  codex: "Codex CLI",
-  cursor: "Cursor Agent",
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
 };
 
 export function getAgentDisplayName(agent: AgentName): string {

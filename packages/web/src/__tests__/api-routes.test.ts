@@ -210,7 +210,12 @@ describe("Spur web API routes", () => {
 
   it("GET /api/sessions/:id returns session by id", async () => {
     const session = sessionFixture({ id: "sid-1" });
-    mockedSpurRequestJson.mockResolvedValue(session);
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await getSession(new Request("http://localhost:3000/api/sessions/sid-1"), {
       params: Promise.resolve({ id: "sid-1" }),
@@ -219,28 +224,38 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({ id: "sid-1" });
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/sid-1");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/sid-1");
   });
 
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "my/session 1" }));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({ id: "my/session 1" })), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     await getSession(new Request("http://localhost:3000/api/sessions/my%2Fsession%201"), {
       params: Promise.resolve({ id: "my/session 1" }),
     });
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
   });
 
   it("GET /api/sessions/:id returns 502 when daemon fails", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Session not found"));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Session not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await getSession(new Request("http://localhost:3000/api/sessions/bad-id"), {
       params: Promise.resolve({ id: "bad-id" }),
     });
     const payload = (await response.json()) as { error: string };
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(404);
     expect(payload.error).toBe("Session not found");
   });
 
