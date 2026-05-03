@@ -284,19 +284,23 @@ function CompositeCiReviewMark({
     >
       <svg
         aria-hidden="true"
-        className="h-3.5 w-4"
-        viewBox="0 0 28 24"
+        className="h-3.5 w-[1.15rem]"
+        viewBox="0 0 24 18"
         fill="none"
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        <path d="M3.5 12.5 8 17l8-10" stroke="var(--color-status-ready)" strokeWidth="2.5" />
+        <path
+          d="M2.75 9.5 5.9 12.65 11.65 5.9"
+          stroke="var(--color-status-ready)"
+          strokeWidth="2.15"
+        />
         {reviewGlyph === "check" ? (
-          <path d="M10.5 10.5 15 15l8-10" stroke={reviewColor} strokeWidth="2.5" />
+          <path d="M8.75 9.5 11.9 12.65 17.65 5.9" stroke={reviewColor} strokeWidth="2.15" />
         ) : (
           <>
-            <path d="M14.5 8.5 22.5 16.5" stroke={reviewColor} strokeWidth="2.3" />
-            <path d="M22.5 8.5 14.5 16.5" stroke={reviewColor} strokeWidth="2.3" />
+            <path d="M11 6.1 17.4 12.5" stroke={reviewColor} strokeWidth="2.05" />
+            <path d="M17.4 6.1 11 12.5" stroke={reviewColor} strokeWidth="2.05" />
           </>
         )}
       </svg>
