@@ -867,9 +867,9 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("option", { name: /select project/i })).toBeAttached();
     // Agent select
     await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
-    await expect(page.getByRole("option", { name: "Claude" })).toBeAttached();
-    await expect(page.getByRole("option", { name: "Codex" })).toBeAttached();
-    await expect(page.getByRole("option", { name: "Cursor" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "codex" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     // Plan checkbox - it's a checkbox input inside a label with "Plan" text
