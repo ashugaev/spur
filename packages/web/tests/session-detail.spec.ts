@@ -375,9 +375,7 @@ test.describe("S2: Actions bar", () => {
 
 // S2a: Logs modal
 test.describe("S2a: Logs modal", () => {
-  test("hides automatic history snapshot download in the default agent view", async ({
-    page,
-  }) => {
+  test("hides automatic history snapshot download in the default agent view", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s2a-1",
       artifacts: [
