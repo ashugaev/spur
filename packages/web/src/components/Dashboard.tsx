@@ -202,18 +202,6 @@ function buildSpawnOverrides(
   return undefined;
 }
 
-function upsertSession(
-  sessions: SpurSessionView[],
-  nextSession: SpurSessionView,
-  currentFilterProjectId: string,
-): SpurSessionView[] {
-  const filtered = sessions.filter((session) => session.id !== nextSession.id);
-  if (currentFilterProjectId && nextSession.project !== currentFilterProjectId) {
-    return filtered;
-  }
-  return [nextSession, ...filtered];
-}
-
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -532,9 +520,14 @@ export function Dashboard() {
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = current?.sessions ?? [];
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== session.id,
+        );
         return {
-          sessions: upsertSession(currentSessions, session, projectId),
+          sessions:
+            projectId && session.project !== projectId
+              ? currentSessions
+              : [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
