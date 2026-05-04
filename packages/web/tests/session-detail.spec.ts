@@ -158,6 +158,21 @@ function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
 
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
+  test("missing session shows an inline error instead of hanging", async ({ page }) => {
+    await page.route("**/api/sessions/detail-missing", (route) => {
+      void route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Session not found" }),
+      });
+    });
+    await page.goto("/sessions/detail-missing");
+
+    await expect(page.getByText("Session not found")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByText("Loading session...")).toHaveCount(0);
+  });
+
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
     await mockSessionDetail(page, session);
@@ -299,6 +314,7 @@ test.describe("S2: Actions bar", () => {
           size: 12,
           mimeType: "image/png",
           kind: "image",
+          origin: "intentional",
           createdAt: "2026-04-02T10:00:00.000Z",
           updatedAt: "2026-04-02T10:00:00.000Z",
         },
@@ -374,8 +390,22 @@ test.describe("S2: Actions bar", () => {
 
 // S2a: Logs modal
 test.describe("S2a: Logs modal", () => {
-  test("shows status transition entries with history snapshot download", async ({ page }) => {
-    const session = makeWorkingSession({ id: "detail-s2a-1" });
+  test("hides automatic history snapshot download in the default agent view", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2a-1",
+      artifacts: [
+        {
+          id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "waiting");
     await mockSessionLogs(page, session.id, [
@@ -400,10 +430,118 @@ test.describe("S2a: Logs modal", () => {
     await expect(page.getByText("Status transition")).toBeVisible();
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
+    await expect(page.getByText("source jsonl")).toBeVisible();
+    await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
+  });
+
+  test("shows automatic history snapshot download after switching to system artifacts", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2a-2",
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await mockSessionLogs(page, session.id, [
+      {
+        timestamp: "2026-04-02T10:01:00.000Z",
+        event: "session.state.transition",
+        level: "info",
+        message: "Status changed from waiting to needs_input",
+        details: {
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+        },
+      },
+    ]);
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: "System (1)" }).click();
+    await page.getByRole("button", { name: /^logs$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveAttribute(
       "href",
       `/api/sessions/${session.id}/artifacts/agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl`,
     );
+  });
+
+  test("keeps automatic history snapshot download hidden in attached artifacts", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s2a-3",
+      artifacts: [
+        {
+          id: "upload.png",
+          name: "upload.png",
+          size: 1400,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          name: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await mockSessionConversation(page, session.id, "waiting");
+    await mockSessionLogs(page, session.id, [
+      {
+        timestamp: "2026-04-02T10:01:00.000Z",
+        event: "session.state.transition",
+        level: "info",
+        message: "Status changed from waiting to needs_input",
+        details: {
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
+        },
+      },
+    ]);
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: "Attached (1)" }).click();
+    await page.getByRole("button", { name: /^logs$/i }).click();
+
+    await expect(page.getByRole("dialog", { name: `Logs ${session.id}` })).toBeVisible();
+    await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 });
 
@@ -468,6 +606,38 @@ test.describe("S3: Message section", () => {
 
     await expect(page.getByRole("button", { name: /^queue$/i })).toBeDisabled();
     await expect(page.getByRole("button", { name: /^send now$/i })).toBeDisabled();
+  });
+
+  test("slash button inserts a suggested command into the message composer", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-slash", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.route(`**/api/sessions/${session.id}/slash-commands`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "status",
+              label: "/status",
+              insertText: "/status",
+              detail: "Show status",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await page.getByRole("button", { name: "Slash" }).click();
+    await page.getByRole("menuitem", { name: /\/status/i }).click();
+
+    await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue("/status");
   });
 
   test("Not accepting input message when session is completed", async ({ page }) => {
@@ -768,6 +938,20 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
+  test("canonical github-pr links render as github pr", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4-pr",
+      slots: {
+        title: "Session with GitHub PR",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+  });
+
   test("links open in new tab", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-2",
@@ -782,6 +966,36 @@ test.describe("S4: Links section", () => {
     const link = page.getByRole("link", { name: "docs" });
     await expect(link).toHaveAttribute("target", "_blank");
   });
+
+  test("PR links show compact approval indicator from reviewDecision", async ({ page }) => {
+    const prUrl = "https://github.com/test/repo/pull/42002";
+    const session = makeWorkingSession({
+      id: "detail-s4-pr-1",
+      slots: {
+        title: "Session with PR",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 2,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
+  });
 });
 
 test.describe("S4b: Artifacts section", () => {
@@ -795,6 +1009,7 @@ test.describe("S4b: Artifacts section", () => {
           size: 1024,
           mimeType: "image/png",
           kind: "image",
+          origin: "intentional",
           createdAt: "2026-04-02T10:00:00.000Z",
           updatedAt: "2026-04-02T10:00:00.000Z",
         },
@@ -804,6 +1019,7 @@ test.describe("S4b: Artifacts section", () => {
           size: 2048,
           mimeType: "video/webm",
           kind: "video",
+          origin: "intentional",
           createdAt: "2026-04-02T10:00:00.000Z",
           updatedAt: "2026-04-02T10:00:00.000Z",
         },
@@ -813,6 +1029,7 @@ test.describe("S4b: Artifacts section", () => {
           size: 4096,
           mimeType: "text/plain; charset=utf-8",
           kind: "download",
+          origin: "intentional",
           createdAt: "2026-04-02T10:00:00.000Z",
           updatedAt: "2026-04-02T10:00:00.000Z",
         },
@@ -834,6 +1051,144 @@ test.describe("S4b: Artifacts section", () => {
       "href",
       "/api/sessions/detail-s4b-1/artifacts/screenshot.png",
     );
+  });
+
+  test("shows agent artifacts by default and reveals system artifacts only after toggle", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-2",
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history.jsonl",
+          name: "agent-history.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("button", { name: "Agent (1)" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(page.getByText("agent-output.txt")).toBeVisible();
+    await expect(page.getByText("agent-history.jsonl")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "System (1)" }).click();
+
+    await expect(page.getByText("agent-history.jsonl")).toBeVisible();
+    await expect(page.getByText("agent-output.txt")).toHaveCount(0);
+  });
+
+  test("shows user-added artifacts only in the attached view", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s4b-3",
+      artifacts: [
+        {
+          id: "agent-output.txt",
+          name: "agent-output.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "later-upload.png",
+          name: "later-upload.png",
+          size: 2200,
+          mimeType: "image/png",
+          kind: "image",
+          origin: "intentional",
+          addedByUser: true,
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByText("agent-output.txt")).toBeVisible();
+    await expect(page.getByText("later-upload.png")).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Attached (1)" }).click();
+
+    await expect(page.getByText("later-upload.png")).toBeVisible();
+    await expect(page.getByText("agent-output.txt")).toHaveCount(0);
+  });
+
+  test("resets to agent view after navigating to another session", async ({ page }) => {
+    const firstSession = makeWorkingSession({
+      id: "detail-s4b-4",
+      artifacts: [
+        {
+          id: "agent-first.txt",
+          name: "agent-first.txt",
+          size: 3200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+        {
+          id: "agent-history-first.jsonl",
+          name: "agent-history-first.jsonl",
+          size: 2200,
+          mimeType: "application/octet-stream",
+          kind: "download",
+          origin: "automatic",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    const secondSession = makeWorkingSession({
+      id: "detail-s4b-5",
+      artifacts: [
+        {
+          id: "agent-second.txt",
+          name: "agent-second.txt",
+          size: 4200,
+          mimeType: "text/plain; charset=utf-8",
+          kind: "download",
+          origin: "intentional",
+          createdAt: "2026-04-02T10:00:00.000Z",
+          updatedAt: "2026-04-02T10:00:00.000Z",
+        },
+      ],
+    });
+    await mockSessionDetail(page, firstSession);
+    await mockSessionDetail(page, secondSession);
+
+    await page.goto(`/sessions/${firstSession.id}`);
+    await page.getByRole("button", { name: "System (1)" }).click();
+    await expect(page.getByText("agent-history-first.jsonl")).toBeVisible();
+
+    await page.goto(`/sessions/${secondSession.id}`);
+
+    await expect(page.getByText("agent-second.txt")).toBeVisible();
+    await expect(page.getByText("agent-history-first.jsonl")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /system \(/i })).toHaveCount(0);
   });
 });
 
@@ -1025,14 +1380,14 @@ test.describe("S7: Display state override", () => {
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 
-  test("completed session shows paused label (stopped state), not working", async ({ page }) => {
+  test("completed session shows stopped label, not working", async ({ page }) => {
     const session = makeCompletedSession({ id: "detail-s7-2" });
     await mockSessionDetail(page, session);
     await mockSessionConversation(page, session.id, "working");
     await page.goto(`/sessions/${session.id}`);
 
     const header = page.locator("header").first();
-    await expect(header.getByText("paused", { exact: true }).first()).toBeVisible();
+    await expect(header.getByText("stopped", { exact: true }).first()).toBeVisible();
     await expect(header.getByText("working", { exact: true })).toHaveCount(0);
   });
 

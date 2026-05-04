@@ -2,7 +2,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readSession, readWorkItemRegistry, recordWorkItem } from "../../src/metadata.js";
+import {
+  readSession,
+  readWorkItemRegistry,
+  recordWorkItem,
+  writeSession,
+} from "../../src/metadata.js";
+import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -141,5 +147,28 @@ describe("session metadata PR migration", () => {
     expect(session?.slots).toEqual(original.slots);
 
     expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toEqual(original);
+  });
+
+  it("preserves planMode when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      planMode: true,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled --plan",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
   });
 });

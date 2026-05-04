@@ -76,6 +76,18 @@ function reviewSnapshotFilePath(
   return join(reviewSnapshotDir(dataDir, providerId, projectId, sourceId), `${sessionId}.json`);
 }
 
+function githubMergeConflictRestoreFilePath(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): string {
+  return join(
+    reviewSnapshotDir(dataDir, "github", projectId, sourceId),
+    `${sessionId}.merge-conflict`,
+  );
+}
+
 function hasLegacyNativePrLink(session: SessionRecord): boolean {
   return (
     session.slots?.links.some(
@@ -163,6 +175,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     id: normalizedSession.id,
     project: normalizedSession.project,
     agent: normalizedSession.agent,
+    ...(normalizedSession.planMode !== undefined ? { planMode: normalizedSession.planMode } : {}),
     ...(normalizedSession.agentSessionId
       ? { agentSessionId: normalizedSession.agentSessionId }
       : {}),
@@ -178,6 +191,7 @@ function normalizeSessionRecord(session: SessionRecord): SessionRecord {
     tmuxSession: normalizedSession.tmuxSession,
     launchCommand: normalizedSession.launchCommand,
     status: normalizedSession.status,
+    ...(normalizedSession.stopReason ? { stopReason: normalizedSession.stopReason } : {}),
     createdAt: normalizedSession.createdAt,
     updatedAt: normalizedSession.updatedAt,
     ...(normalizedSession.retainInList ? { retainInList: true } : {}),
@@ -440,6 +454,35 @@ export function deleteGitHubSourceSnapshot(
   sessionId: string,
 ): void {
   deleteReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
+}
+
+export function hasGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): boolean {
+  return existsSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId));
+}
+
+export function requestGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  writeJsonFile(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), true);
+}
+
+export function clearGitHubMergeConflictRestoreReplay(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(githubMergeConflictRestoreFilePath(dataDir, projectId, sourceId, sessionId), {
+    force: true,
+  });
 }
 
 export function readWorkItemRegistry(

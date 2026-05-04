@@ -1,14 +1,29 @@
+import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
 import { gh } from "../gh.js";
-import { readWorkItemRegistry, recordWorkItem } from "../metadata.js";
 import {
   GITHUB_WORK_ITEM_NEW_EVENT,
+  type GitHubCheck,
+  type GitHubPrSummary,
   type GitHubSourceConfig,
+  type ReviewEventData,
+  type ReviewSignal,
+  type ReviewSignalKind,
   type SessionPrBinding,
 } from "../types.js";
-import { normalizeReviewDecision, parseRepoFromUrl } from "../review-providers/github.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
-import { createReviewSourceModule } from "./review-source.js";
+import {
+  clearGitHubMergeConflictRestoreReplay,
+  deleteReviewSourceSnapshot,
+  hasGitHubMergeConflictRestoreReplay,
+  listSessions,
+  readReviewSourceSnapshots,
+  readWorkItemRegistry,
+  recordWorkItem,
+  writeReviewSourceSnapshot,
+} from "../metadata.js";
+import { reviewProvider } from "../review-providers/index.js";
+import { normalizeReviewDecision, parseRepoFromUrl } from "../review-providers/github.js";
 
 export {
   shortText,
@@ -20,8 +35,29 @@ export {
   resolveTrackedBranch,
 } from "../review-providers/github.js";
 
-export type { GitHubCheck, GitHubPrSummary } from "../types.js";
+export type { GitHubCheck, GitHubPrSummary };
+function emitSignalsByKind(
+  deps: SourceStartDeps<GitHubSourceConfig>,
+  data: Omit<ReviewEventData, "signals">,
+  signals: ReviewSignal[],
+): void {
+  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
+  for (const signal of signals) {
+    const existing = grouped.get(signal.kind);
+    if (existing) {
+      existing.push(signal);
+      continue;
+    }
+    grouped.set(signal.kind, [signal]);
+  }
 
+  for (const [kind, items] of grouped) {
+    deps.emit<ReviewEventData>(`github:${kind}`, {
+      ...data,
+      signals: items,
+    });
+  }
+}
 export async function resolveBoundPrSummary(worktreePath: string, pr: SessionPrBinding) {
   const raw = await gh(
     worktreePath,
@@ -49,7 +85,6 @@ export async function resolveBoundPrSummary(worktreePath: string, pr: SessionPrB
     mergeStateStatus: summary.mergeStateStatus ?? "",
   };
 }
-
 async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
   query: string,
@@ -88,21 +123,141 @@ async function pollWorkItems(
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
-  const reviewHandle = await createReviewSourceModule("github").start(deps);
-  const query = deps.config.query;
-  if (!query) {
-    return reviewHandle;
-  }
-
-  const seenWorkItems = readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId);
+  const provider = reviewProvider("github");
+  const snapshots = readReviewSourceSnapshots(
+    deps.dataDir,
+    "github",
+    deps.projectId,
+    deps.sourceId,
+  );
+  const seenWorkItems = deps.config.query
+    ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
+    : null;
   let stopped = false;
+  let polling = false;
   let pollingWorkItems = false;
 
+  const pollSignals = async (emitInitial: boolean): Promise<void> => {
+    if (stopped || deps.signal.aborted || polling) return;
+    polling = true;
+    try {
+      const sessions = listSessions(deps.dataDir).filter(
+        (session) =>
+          session.project === deps.projectId &&
+          session.status === "running" &&
+          Boolean(session.worktreePath) &&
+          existsSync(session.worktreePath),
+      );
+      const currentSessionIds = new Set<string>();
+
+      for (const session of sessions) {
+        currentSessionIds.add(session.id);
+        try {
+          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+          );
+          const collected = await provider.collectSignals(session);
+          if (!collected) {
+            snapshots.delete(session.id);
+            deleteReviewSourceSnapshot(
+              deps.dataDir,
+              "github",
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            if (restoreReplayRequested) {
+              clearGitHubMergeConflictRestoreReplay(
+                deps.dataDir,
+                deps.projectId,
+                deps.sourceId,
+                session.id,
+              );
+            }
+            continue;
+          }
+
+          const previous = snapshots.get(session.id);
+          const next = collected.snapshot;
+          const changed = [...next.values()].filter((signal) => {
+            const prior = previous?.get(signal.key);
+            return !prior || prior.text !== signal.text;
+          });
+
+          snapshots.set(session.id, next);
+          writeReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+            next,
+          );
+
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (mergeConflictSignal) {
+              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
+            }
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            continue;
+          }
+
+          if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
+            emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          deps.logger.warn?.(
+            `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
+          );
+        }
+      }
+
+      for (const sessionId of [...snapshots.keys()]) {
+        if (!currentSessionIds.has(sessionId)) {
+          snapshots.delete(sessionId);
+          deleteReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
+          clearGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
+        }
+      }
+    } finally {
+      polling = false;
+    }
+  };
+
   const syncWorkItems = async (): Promise<void> => {
-    if (stopped || deps.signal.aborted || pollingWorkItems) return;
+    if (
+      !deps.config.query ||
+      !seenWorkItems ||
+      stopped ||
+      deps.signal.aborted ||
+      pollingWorkItems
+    ) {
+      return;
+    }
     pollingWorkItems = true;
     try {
-      await pollWorkItems(deps, query, seenWorkItems);
+      await pollWorkItems(deps, deps.config.query, seenWorkItems);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       deps.logger.warn?.(
@@ -114,13 +269,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   };
 
   const timer = startInterval(() => {
+    void pollSignals(false);
     void syncWorkItems();
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
+      void pollSignals(false);
       void syncWorkItems();
     } else {
+      await pollSignals(false);
       await syncWorkItems();
     }
   }
@@ -129,12 +287,11 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     stop(): void {
       stopped = true;
       clearInterval(timer);
-      reviewHandle.stop();
     },
-    ...(reviewHandle.runOnStart
+    ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            reviewHandle.runOnStart?.();
+            void pollSignals(true);
             void syncWorkItems();
           },
         }

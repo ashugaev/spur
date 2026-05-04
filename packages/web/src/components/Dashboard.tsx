@@ -7,6 +7,7 @@ import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
 import { VoiceStatusHint } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
@@ -19,6 +20,7 @@ import {
   type ImageAttachment,
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -32,11 +34,31 @@ import {
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -147,6 +169,21 @@ function IconCheck() {
     </svg>
   );
 }
+function IconStop() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="5" width="14" height="14" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -188,7 +225,7 @@ export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -200,6 +237,7 @@ export function Dashboard() {
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
@@ -305,8 +343,9 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      pending: [],
       working: [],
+      pending: [],
+      stopped: [],
       done: [],
     };
 
@@ -320,8 +359,9 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      pending: grouped.pending.length,
       working: grouped.working.length,
+      pending: grouped.pending.length,
+      stopped: grouped.stopped.length,
       done: grouped.done.length,
     }),
     [grouped],
@@ -625,6 +665,14 @@ export function Dashboard() {
             onClick={() => toggleStatFilter("pending")}
           />
           <StatItem
+            icon={<IconStop />}
+            label="Stopped"
+            value={stats.stopped}
+            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
+            active={activeStatFilter === "stopped"}
+            onClick={() => toggleStatFilter("stopped")}
+          />
+          <StatItem
             icon={<IconCheck />}
             label="Completed"
             value={stats.done}
@@ -699,12 +747,16 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
+                    aria-label="Spawn agent"
                     className={INPUT_CLASS}
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
                     value={spawnAgent}
                   >
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
+                    {AGENT_OPTIONS.map((agent) => (
+                      <option key={agent} value={agent}>
+                        {getAgentDisplayName(agent)}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="flex gap-2">
@@ -792,6 +844,7 @@ export function Dashboard() {
                     )
                   }
                   placeholder="Prompt for the new session..."
+                  textareaRef={spawnPromptRef}
                   value={spawnPrompt}
                   voice={voice}
                 />
@@ -805,6 +858,16 @@ export function Dashboard() {
                     <VoiceStatusHint voice={voice} />
                   </span>
                   <div className="flex items-center gap-2">
+                    <SlashSuggestions
+                      endpoint={
+                        spawnProjectId.trim()
+                          ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                          : null
+                      }
+                      onSelect={(entry) =>
+                        insertTextAtCursor(spawnPromptRef.current, entry.insertText, setSpawnPrompt)
+                      }
+                    />
                     <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
                     <button
                       className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"

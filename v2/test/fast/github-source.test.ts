@@ -6,6 +6,8 @@ const listSessionsMock = vi.fn();
 const readReviewSourceSnapshotsMock = vi.fn();
 const writeReviewSourceSnapshotMock = vi.fn();
 const deleteReviewSourceSnapshotMock = vi.fn();
+const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
+const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
 
@@ -13,7 +15,9 @@ vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
 vi.mock("../../src/metadata.js", () => ({
+  clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
   deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
+  hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
@@ -55,6 +59,7 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
   });
 

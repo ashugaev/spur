@@ -18,6 +18,9 @@ const logSpurEventMock = vi.fn();
 const buildMergedConfigMock = vi.fn();
 const upsertConfigRegistryPathMock = vi.fn();
 const writeConfigRegistryMock = vi.fn();
+const agentProcessMatchersMock = vi.fn();
+const agentStateStrategyMock = vi.fn();
+const agentWaitsForSubmitAckMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -33,6 +36,10 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentRestorePlan: vi.fn(),
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
+  agentProcessMatchers: agentProcessMatchersMock,
+  agentSessionConfig: vi.fn(() => ({})),
+  agentStateStrategy: agentStateStrategyMock,
+  agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
   parseAgentName: vi.fn((a: string) => a),
   setupAgentHooks: vi.fn(),
 }));
@@ -77,11 +84,13 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
+  captureTmuxPane: vi.fn(),
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
+  sendSubmitKeyToTmux: vi.fn(),
   syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
@@ -220,6 +229,9 @@ describe("PR auto-detect", () => {
     });
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
     writeConfigRegistryMock.mockReset();
+    agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
+    agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
+    agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
   });
 
   afterEach(() => {
