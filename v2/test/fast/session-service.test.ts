@@ -904,8 +904,9 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    const reservedPort = writeSessionMock.mock.calls.find(([, session]) => session.sidecarPorts?.dev)
-      ?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV;
+    const reservedPort = writeSessionMock.mock.calls.find(
+      ([, session]) => session.sidecarPorts?.dev,
+    )?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV;
 
     expect(reservedPort).toBeGreaterThan(occupiedPort);
     expect(reservedPort).toBeLessThanOrEqual(occupiedPort + 10);
@@ -5110,7 +5111,11 @@ describe("SessionService", () => {
               command: "./scripts/dev.sh",
               autoStart: false,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort + 10 },
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: reservedPort,
+                  end: reservedPort + 10,
+                },
               },
             },
           },
@@ -5143,9 +5148,9 @@ describe("SessionService", () => {
     await service.startSidecar("api-1", "dev");
 
     expect(isHostPortFreeMock).not.toHaveBeenCalled();
-    expect(
-      writeSessionMock.mock.calls.at(-1)?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV,
-    ).toBe(reservedPort);
+    expect(writeSessionMock.mock.calls.at(-1)?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV).toBe(
+      reservedPort,
+    );
     expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         env: expect.objectContaining({

@@ -3956,9 +3956,7 @@ projects:
       });
 
       const first = JSON.parse(
-        (
-          await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])
-        ).stdout,
+        (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
       ) as SessionView;
       const firstPort = await pollUntil(
         async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
@@ -3967,9 +3965,8 @@ projects:
       expect(firstPort.trim()).toBe(String(reservedRange.end));
 
       const second = JSON.parse(
-        (
-          await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"])
-        ).stdout,
+        (await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"]))
+          .stdout,
       ) as SessionView;
 
       expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
