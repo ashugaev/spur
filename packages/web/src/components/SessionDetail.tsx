@@ -8,7 +8,7 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceRecordingStrip, VoiceStatusHint, isVoiceActive } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -1349,18 +1349,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       placeholder="Message to the running agent..."
                       textareaRef={messageRef}
                       value={message}
-                      voice={isVoiceActive(voice) ? undefined : voice}
+                      voice={voice}
                     />
-                    {isVoiceActive(voice) ? (
-                      <VoiceRecordingStrip
-                        actions={[
-                          { kind: "cancel", onClick: voice.cancelRecording },
-                          { kind: "stop", onClick: () => voice.stopRecording() },
-                        ]}
-                        className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
-                        voice={voice}
-                      />
-                    ) : null}
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] text-[var(--color-text-tertiary)]">
                         <VoiceStatusHint voice={voice} />{" "}

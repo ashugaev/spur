@@ -14,7 +14,6 @@ import {
   type ProjectInfo,
   type SpurSessionView,
 } from "./fixtures.js";
-import { installMockVoiceRecorder, mockVoiceStatus } from "./voice-fixtures.js";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
@@ -1060,28 +1059,6 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
       "Re-run the flaky deploy",
     );
-  });
-
-  test("spawn modal shows a live recording timer while voice capture is active", async ({
-    page,
-  }) => {
-    await installMockVoiceRecorder(page);
-    await mockVoiceStatus(page);
-
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "spawn-voice-timer-1", project: "my-project" })],
-      [{ id: "my-project", name: "my-project" }],
-    );
-    await page.goto("/");
-
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-
-    await expect(page.getByText("00:00")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /stop and save voice recording/i }),
-    ).toBeVisible();
   });
 
   test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
