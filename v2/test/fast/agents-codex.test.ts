@@ -126,6 +126,16 @@ describe("buildCodexPlan", () => {
       `'-c' 'model_reasoning_effort="high"' '--enable' 'fast_mode'`,
     );
   });
+
+  it("passes startup images on the launch command and skips tmux prompt delivery", () => {
+    const plan = buildCodexPlan("describe this", {
+      startupImagePaths: ["/tmp/one.png", "/tmp/two.webp"],
+    });
+    expect(plan.launchCommand).toContain("--image '/tmp/one.png'");
+    expect(plan.launchCommand).toContain("--image '/tmp/two.webp'");
+    expect(plan.launchCommand).toContain("'describe this'");
+    expect(plan.initialMessage).toBe("");
+  });
 });
 
 describe("buildCodexResumePlan", () => {

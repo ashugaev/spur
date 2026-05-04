@@ -1,6 +1,4 @@
-import type { DashboardSession } from "@/lib/types";
-
-export type AgentName = DashboardSession["agent"];
+import type { AgentName } from "@/lib/agents";
 
 export interface AgentHotkey {
   id: string;
@@ -36,7 +34,6 @@ function command(id: string, label: string, detail: string): AgentHotkey {
 }
 
 const COMMON_HOTKEYS: AgentHotkey[] = [
-  shortcut("slash", "Slash", "/", "/", "Start a slash command"),
   shortcut("escape", "Esc", "Esc", "\x1b", "Back out of the current terminal state"),
   shortcut("switch-mode", "Switch mode", "Shift+Tab", "\x1b[Z", "Switch the current work mode"),
 ];
@@ -63,9 +60,18 @@ const CODEX_HOTKEYS: AgentHotkey[] = [
   command("permissions", "/permissions", "Change approvals in-session"),
 ];
 
+const CURSOR_HOTKEYS: AgentHotkey[] = [
+  shortcut("slash", "Slash", "/", "/", "Start a slash command"),
+  shortcut("escape", "Esc", "Esc", "\x1b", "Back out of the current terminal state"),
+  shortcut("history", "History search", "Ctrl+R", ctrl("R"), "Search previous prompts"),
+  shortcut("clear-screen", "Clear screen", "Ctrl+L", ctrl("L"), "Clear the terminal view"),
+  shortcut("interrupt", "Interrupt / Exit", "Ctrl+C", ctrl("C"), "Stop the current run or exit"),
+];
+
 const HOTKEYS_BY_AGENT: Record<AgentName, AgentHotkey[]> = {
   claude: [...COMMON_HOTKEYS, ...CLAUDE_HOTKEYS],
   codex: [...COMMON_HOTKEYS, ...CODEX_HOTKEYS],
+  cursor: CURSOR_HOTKEYS,
 };
 
 export function getAgentHotkeys(agent: AgentName): AgentHotkey[] {

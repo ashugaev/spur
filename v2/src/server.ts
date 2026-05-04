@@ -1,13 +1,12 @@
+import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
-import { listSessions } from "./metadata.js";
 import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
-import { tmuxSessionExists } from "./runtime-tmux.js";
-import { SessionService } from "./session-service.js";
+import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
@@ -210,7 +209,10 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/sessions") {
-        sendJson(response, 200, await service.list());
+        const includeCompleted =
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
+        sendJson(response, 200, await service.list({ includeCompleted }));
         return;
       }
 
@@ -258,6 +260,19 @@ export async function startServer(
         return;
       }
 
+      const projectSuggestionsId = path.match(/^\/projects\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && projectSuggestionsId) {
+        sendJson(
+          response,
+          200,
+          await service.getProjectSuggestions(
+            projectSuggestionsId,
+            url.searchParams.get("agent")?.trim() || undefined,
+          ),
+        );
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
@@ -295,14 +310,47 @@ export async function startServer(
         return;
       }
 
+      const sessionSuggestionsId = path.match(/^\/sessions\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && sessionSuggestionsId) {
+        sendJson(response, 200, await service.getSessionSuggestions(sessionSuggestionsId));
+        return;
+      }
+
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
+        const artifact = service.getArtifact(
+          decodeURIComponent(artifactMatch[1]),
+          decodeURIComponent(artifactMatch[2]),
+        );
+        response.writeHead(200, {
+          "content-type": artifact.mimeType,
+          "content-length": String(artifact.size),
+          "content-disposition":
+            artifact.kind === "download"
+              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
+              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(artifact.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read artifact");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
-        const body = await readJsonBody<SpawnSessionRequest>(request);
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawn(body));
         return;
       }
 
       if (method === "POST" && path === "/sessions/background") {
-        const body = await readJsonBody<SpawnSessionRequest>(request);
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawnInBackground(body));
         return;
       }
@@ -341,8 +389,8 @@ export async function startServer(
 
       const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
       if (method === "POST" && respawnSessionId) {
-        const body = await readJsonBody<RespawnSessionRequest>(request);
-        const respawned = await service.respawn(respawnSessionId);
+        const body = await readJsonBody<RespawnSessionRequest>(request, 15_000_000);
+        const respawned = await service.respawn(respawnSessionId, body);
         sendJson(response, 200, respawned);
         const terminateSessionId = body.terminateSessionId?.trim();
         if (
@@ -424,6 +472,16 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SessionResourceNotFoundError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
       logEvent("http.request.failed", {
         level: "error",
         ...(method ? { method } : {}),
@@ -467,35 +525,11 @@ export async function startServer(
   }
 
   try {
-    const sessionsOnDisk = listSessions(service.config.dataDir);
-    const candidates = sessionsOnDisk.filter(
-      (s) => s.status === "running" || s.status === "paused" || s.status === "spawning",
-    );
-    let alive = 0;
-    let drifted = 0;
-    for (const session of candidates) {
-      const exists = await tmuxSessionExists(session.tmuxSession);
-      if (exists) {
-        alive += 1;
-        continue;
-      }
-      drifted += 1;
-      logEvent("session.reconcile.drift", {
-        level: "warn",
-        sessionId: session.id,
-        projectId: session.project,
-        message: `Drift: ${session.id} status=${session.status} but tmux ${session.tmuxSession} missing at boot`,
-        details: {
-          status: session.status,
-          tmuxSession: session.tmuxSession,
-          agent: session.agent,
-        },
-      });
-    }
+    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
     logEvent("daemon.startup.reconciled", {
       level: "info",
-      message: `Reconciled sessions at boot: scanned=${candidates.length}, alive=${alive}, drifted=${drifted}`,
-      details: { scanned: candidates.length, alive, drifted },
+      message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
+      details: { scanned, alive, drifted },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

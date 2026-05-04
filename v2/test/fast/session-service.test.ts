@@ -1,13 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
-import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
+import type {
+  ServiceInstanceRecord,
+  SessionRecord,
+  SessionStateTransition,
+} from "../../src/types.js";
+
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
 const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
 const buildAgentRestorePlanMock = vi.fn();
 const buildAgentResumePlanMock = vi.fn();
 const findAgentSessionIdMock = vi.fn();
+const agentProcessMatchersMock = vi.fn();
+const agentBusyQueuedSendAwaitsPromptMock = vi.fn();
+const agentQueuedSendPromptGraceMsMock = vi.fn();
+const agentSessionConfigMock = vi.fn();
+const agentStateStrategyMock = vi.fn();
+const agentWaitsForSubmitAckMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
@@ -19,6 +33,7 @@ const reserveNextSessionIdMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
+const requestGitHubMergeConflictRestoreReplayMock = vi.fn();
 const deleteServiceInstanceMock = vi.fn();
 const deleteServiceInstancesForSessionMock = vi.fn();
 const deleteRuntimeLogCursorsForSessionMock = vi.fn();
@@ -30,9 +45,11 @@ const listServiceInstancesForSessionMock = vi.fn();
 const readServiceInstanceMock = vi.fn();
 const writeServiceInstanceMock = vi.fn();
 const serviceRecords = new Map<string, ServiceInstanceRecord>();
+const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
+const isHostPortFreeMock = vi.fn(() => Promise.resolve(true));
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
@@ -58,14 +75,24 @@ const applySlotsUpdateMock = vi.fn();
 const ensureSessionSlotToolMock = vi.fn();
 const removeSessionSlotToolMock = vi.fn();
 const withSessionSlotInstructionsMock = vi.fn();
+const deleteSessionArtifactsExceptMock = vi.fn();
+const listSessionArtifactsMock = vi.fn();
+const readSessionArtifactMock = vi.fn();
+const setSessionArtifactOriginMock = vi.fn();
+const setSessionArtifactUserAddedMock = vi.fn();
 const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
+const findLatestClaudeSessionFileMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
 const captureCodexRolloutBaselineMock = vi.fn();
+const findLatestCodexSessionFileMock = vi.fn();
+const readCodexRolloutStateMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
+const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
+const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -82,11 +109,21 @@ vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeConversation: readClaudeConversationMock,
 }));
 
+vi.mock("../../src/agents/claude.js", () => ({
+  findLatestSessionFile: findLatestClaudeSessionFileMock,
+}));
+
 vi.mock("../../src/agents/index.js", () => ({
   buildAgentLaunchPlan: buildAgentLaunchPlanMock,
   buildAgentRestorePlan: buildAgentRestorePlanMock,
   buildAgentResumePlan: buildAgentResumePlanMock,
   findAgentSessionId: findAgentSessionIdMock,
+  agentProcessMatchers: agentProcessMatchersMock,
+  agentBusyQueuedSendAwaitsPrompt: agentBusyQueuedSendAwaitsPromptMock,
+  agentQueuedSendPromptGraceMs: agentQueuedSendPromptGraceMsMock,
+  agentSessionConfig: agentSessionConfigMock,
+  agentStateStrategy: agentStateStrategyMock,
+  agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
 }));
@@ -125,6 +162,7 @@ vi.mock("../../src/metadata.js", () => ({
   listSessions: listSessionsMock,
   readServiceInstance: readServiceInstanceMock,
   readSession: readSessionMock,
+  requestGitHubMergeConflictRestoreReplay: requestGitHubMergeConflictRestoreReplayMock,
   writeServiceInstance: writeServiceInstanceMock,
   writeSession: writeSessionMock,
 }));
@@ -137,10 +175,17 @@ vi.mock("../../src/agent-hook-state.js", () => ({
 vi.mock("../../src/agents/codex.js", () => ({
   codexHookHomePath: codexHookHomePathMock,
   captureCodexRolloutBaseline: captureCodexRolloutBaselineMock,
+  findLatestCodexSessionFile: findLatestCodexSessionFileMock,
+  readCodexRolloutState: readCodexRolloutStateMock,
   scanCodexRolloutForMessage: scanCodexRolloutForMessageMock,
 }));
 
+vi.mock("../../src/port-probe.js", () => ({
+  isHostPortFree: isHostPortFreeMock,
+}));
+
 vi.mock("../../src/runtime-tmux.js", () => ({
+  captureTmuxPane: captureTmuxPaneMock,
   createTmuxSession: createTmuxSessionMock,
   createTmuxCommandSession: createTmuxCommandSessionMock,
   createTmuxSidecarSession: createTmuxSidecarSessionMock,
@@ -164,8 +209,38 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: ensureSessionSlotToolMock,
+  normalizeSlotsUpdate: vi.fn(
+    (request: {
+      title?: string;
+      clearTitle?: boolean;
+      links?: Array<{ label: string; url: string }>;
+      unlinkLabels?: string[];
+    }) => ({
+      ...(request.title !== undefined ? { title: request.title } : {}),
+      clearTitle: request.clearTitle === true,
+      links: request.links ?? [],
+      unlinkLabels: request.unlinkLabels ?? [],
+    }),
+  ),
   removeSessionSlotTool: removeSessionSlotToolMock,
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
+}));
+
+vi.mock("../../src/session-artifacts.js", () => ({
+  ensureSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
+    const dir = artifactDirForSession(sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }),
+  deleteSessionArtifactsExcept: deleteSessionArtifactsExceptMock,
+  deleteSessionArtifactsDir: vi.fn((_dataDir: string, sessionId: string) => {
+    rmSync(artifactDirForSession(sessionId), { recursive: true, force: true });
+  }),
+  listSessionArtifacts: listSessionArtifactsMock,
+  readSessionArtifact: readSessionArtifactMock,
+  setSessionArtifactOrigin: setSessionArtifactOriginMock,
+  setSessionArtifactUserAdded: setSessionArtifactUserAddedMock,
+  withSessionArtifactInstructions: vi.fn((prompt: string) => prompt),
 }));
 
 vi.mock("../../src/workspace.js", () => ({
@@ -196,6 +271,8 @@ function baseConfig() {
         worktree: true,
         symlinks: [".env"],
         sidecars: {},
+        sources: {},
+        triggers: {},
       },
     },
   };
@@ -283,7 +360,12 @@ type SessionServiceInternals = {
     baseline: Map<string, number>,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   sendAgentMessage(
-    session: { id: string; tmuxSession: string; agent: "claude" | "codex" },
+    session: {
+      id: string;
+      tmuxSession: string;
+      agent: "claude" | "codex" | "cursor";
+      launchCommand: string;
+    },
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void>;
@@ -293,10 +375,18 @@ function sessionServiceInternals(service: unknown): SessionServiceInternals {
   return service as SessionServiceInternals;
 }
 
+async function createDisposedSessionService() {
+  const { SessionService } = await loadSessionServiceModule();
+  const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+  service.dispose();
+  return service;
+}
+
 describe("SessionService", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
+    rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
 
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
 
@@ -338,10 +428,46 @@ describe("SessionService", () => {
         }),
       );
     findAgentSessionIdMock.mockReset().mockResolvedValue("session-uuid");
+    agentProcessMatchersMock
+      .mockReset()
+      .mockImplementation((agent: string, launchCommand: string) => {
+        const binary = launchCommand.trim().split(/\s+/).find(Boolean);
+        if (binary) {
+          return [binary];
+        }
+        return agent === "cursor" ? ["agent", "cursor-agent"] : [agent];
+      });
+    agentBusyQueuedSendAwaitsPromptMock
+      .mockReset()
+      .mockImplementation((agent: string) => agent === "cursor");
+    agentQueuedSendPromptGraceMsMock
+      .mockReset()
+      .mockImplementation((agent: string) => (agent === "cursor" ? 5_000 : 15_000));
+    agentSessionConfigMock
+      .mockReset()
+      .mockImplementation((agent: string, args?: { dataDir: string; sessionId: string }) =>
+        agent === "cursor"
+          ? {
+              env: {
+                CURSOR_CONFIG_DIR: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+              },
+              planOptions: {
+                cursorConfigDir: `${args?.dataDir ?? "/tmp/spur-data"}/cursor/${args?.sessionId ?? "api-1"}`,
+              },
+            }
+          : {},
+      );
+    agentStateStrategyMock
+      .mockReset()
+      .mockImplementation((agent: string) =>
+        agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
+      );
+    agentWaitsForSubmitAckMock.mockReset().mockImplementation((agent: string) => agent === "codex");
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
     readAgentHookStateMock.mockReset().mockReturnValue(null);
+    findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
@@ -352,6 +478,7 @@ describe("SessionService", () => {
     listSessionsMock.mockReset().mockReturnValue([]);
     readSessionMock.mockReset();
     writeSessionMock.mockReset();
+    requestGitHubMergeConflictRestoreReplayMock.mockReset();
     deleteServiceInstanceMock.mockReset();
     deleteServiceInstancesForSessionMock.mockReset();
     deleteRuntimeLogCursorsForSessionMock.mockReset();
@@ -371,6 +498,7 @@ describe("SessionService", () => {
       .mockReset()
       .mockImplementation((id: string, name: string) => `${id}--${name}`);
     killSidecarTmuxMock.mockReset().mockResolvedValue(undefined);
+    captureTmuxPaneMock.mockReset().mockResolvedValue("");
     getTmuxSessionActivityMock.mockReset().mockResolvedValue(new Date("2026-03-18T10:04:30.000Z"));
     isProcessRunningInTmuxMock.mockReset().mockResolvedValue(true);
     killTmuxSessionMock.mockReset().mockResolvedValue(undefined);
@@ -390,8 +518,15 @@ describe("SessionService", () => {
     syncTmuxStatusMock.mockReset().mockResolvedValue(undefined);
     logSpurEventMock.mockReset();
     sendDesktopNotificationMock.mockReset().mockResolvedValue(undefined);
+    findLatestCodexSessionFileMock.mockReset().mockResolvedValue(null);
+    readCodexRolloutStateMock.mockReset().mockResolvedValue(null);
     ensureSessionSlotToolMock.mockReset().mockReturnValue("/tmp/spur-tools/api-1");
     removeSessionSlotToolMock.mockReset();
+    deleteSessionArtifactsExceptMock.mockReset();
+    listSessionArtifactsMock.mockReset().mockReturnValue([]);
+    readSessionArtifactMock.mockReset().mockReturnValue(null);
+    setSessionArtifactOriginMock.mockReset();
+    setSessionArtifactUserAddedMock.mockReset();
     withSessionSlotInstructionsMock.mockReset().mockImplementation((prompt: string) => {
       return `slot-instructions\n${prompt}`;
     });
@@ -407,11 +542,14 @@ describe("SessionService", () => {
       }
       if (request.links) {
         for (const link of request.links) {
-          const index = links.findIndex((entry) => entry.label === link.label);
+          const normalizedLabel =
+            link.label === "pr" || link.label === "github_pr" ? "github-pr" : link.label;
+          const normalizedLink = { ...link, label: normalizedLabel };
+          const index = links.findIndex((entry) => entry.label === normalizedLabel);
           if (index === -1) {
-            links.push(link);
+            links.push(normalizedLink);
           } else {
-            links[index] = link;
+            links[index] = normalizedLink;
           }
         }
       }
@@ -421,6 +559,7 @@ describe("SessionService", () => {
   });
 
   afterEach(() => {
+    rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -454,13 +593,15 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "hello", {});
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "slot-instructions\nhello", {});
     expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-1", undefined);
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
       "api-1",
@@ -678,7 +819,7 @@ describe("SessionService", () => {
     expect(sent).toContain("Available: `dev`.");
   });
 
-  it("reserves sidecar ports during sidecar start and passes them into sidecar env", async () => {
+  it("assigns sidecar ports when the sidecar starts and passes them into sidecar env", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -729,7 +870,7 @@ describe("SessionService", () => {
     );
   });
 
-  it("keeps spawn running when autostart cannot reserve a sidecar port", async () => {
+  it("keeps spawn running when autostart cannot reserve a sidecar port, and manual start still fails while that port is held", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -747,27 +888,26 @@ describe("SessionService", () => {
         },
       },
     });
-    listSessionsMock.mockReturnValue([
-      {
-        id: "api-existing",
-        project: "api",
-        agent: "claude",
-        prompt: "existing",
-        branch: "api-existing",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-existing",
-        tmuxSession: "api-existing",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T09:00:00.000Z",
-        updatedAt: "2026-03-18T09:01:00.000Z",
-        sidecarPorts: {
-          dev: {
-            SPUR_RESERVED_PORT_DEV: 3000,
-          },
+    const sessions = createSessionStore();
+    sessions.set("api-existing", {
+      id: "api-existing",
+      project: "api",
+      agent: "claude",
+      prompt: "existing",
+      branch: "api-existing",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-existing",
+      tmuxSession: "api-existing",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T09:00:00.000Z",
+      updatedAt: "2026-03-18T09:01:00.000Z",
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
         },
       },
-    ]);
+    });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -777,6 +917,9 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
+    await expect(service.startSidecar(spawned.id, "dev")).rejects.toThrow(
+      "No free reserved port for sidecar dev.http in range 3000-3000",
+    );
     expect(spawned.id).toBe("api-1");
     expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
     expect(spawned.sidecars).toEqual([{ name: "dev", alive: false }]);
@@ -797,7 +940,7 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "claude",
-      expect.stringContaining("hello"),
+      expect.stringContaining("slot-instructions\nhello"),
       {
       planMode: true,
       },
@@ -842,7 +985,7 @@ describe("SessionService", () => {
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
       "codex",
-      expect.stringContaining("hello"),
+      expect.stringContaining("slot-instructions\nhello"),
       {
       planMode: true,
       },
@@ -884,9 +1027,41 @@ describe("SessionService", () => {
       prompt: "hello",
     });
 
-    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "hello", {
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("codex", "slot-instructions\nhello", {
       codexArgs: ["-c", 'model_reasoning_effort="high"', "--enable", "fast_mode"],
     });
+  });
+
+  it("passes startup image paths into codex launch planning and skips tmux prompt send", async () => {
+    buildAgentLaunchPlanMock.mockImplementationOnce(
+      (_agent: string, _initialMessage: string, _options?: { startupImagePaths?: string[] }) => ({
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox --image /tmp/fake.png",
+        initialMessage: "",
+        readyMarkers: ["OpenAI Codex", "›"],
+      }),
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      agent: "codex",
+      prompt: "describe this image",
+      attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
+    });
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+      "codex",
+      "slot-instructions\ndescribe this image",
+      {
+        startupImagePaths: [`${artifactDirForSession("api-1")}/1773828300000-shot.png`],
+      },
+    );
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-shot.png`, "utf8")).toBe(
+      "png-bytes",
+    );
   });
 
   it("starts a pipelined session by sending only the first step immediately", async () => {
@@ -1145,9 +1320,11 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -1179,9 +1356,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
 
     const result = await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
@@ -1239,6 +1414,7 @@ describe("SessionService", () => {
         id: "api-1",
         tmuxSession: "api-1",
         agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
       },
       "follow up",
       { interrupt: false },
@@ -1274,9 +1450,7 @@ describe("SessionService", () => {
       lastScannedFile: "/some/rollout.jsonl",
     });
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
 
     const sendPromise = service.deliver("api-1", "follow up");
     await vi.advanceTimersByTimeAsync(250);
@@ -1290,9 +1464,7 @@ describe("SessionService", () => {
   });
 
   it("retries codex submit with a bare Enter when the first rollout ack does not arrive", async () => {
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
       .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
@@ -1304,6 +1476,7 @@ describe("SessionService", () => {
         id: "api-1",
         tmuxSession: "api-1",
         agent: "codex",
+        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
       },
       "follow up",
     );
@@ -1314,9 +1487,7 @@ describe("SessionService", () => {
   });
 
   it("fails codex delivery when rollout ack never arrives", async () => {
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
       .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
@@ -1328,6 +1499,7 @@ describe("SessionService", () => {
           id: "api-1",
           tmuxSession: "api-1",
           agent: "codex",
+          launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
         },
         "follow up",
       ),
@@ -1371,9 +1543,9 @@ describe("SessionService", () => {
     });
     listSessionsMock.mockReturnValue([]);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
+    await vi.advanceTimersByTimeAsync(0);
+    sendMessageToTmuxMock.mockClear();
 
     await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
@@ -1385,6 +1557,42 @@ describe("SessionService", () => {
     });
 
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps busy cursor send queued until the prompt wait gate opens", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+    captureTmuxPaneMock.mockResolvedValue("Cursor Agent\nComposer 2 Fast");
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    service.dispose();
+    await vi.advanceTimersByTimeAsync(0);
+    sendMessageToTmuxMock.mockClear();
+
+    await service.send("api-1", { message: "follow up" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")?.queuedMessages).toEqual({
+      messages: ["follow up"],
+      awaitingPrompt: true,
+    });
   });
 
   it("delivers a manual send before the next pipeline step when the agent is waiting", async () => {
@@ -1412,9 +1620,8 @@ describe("SessionService", () => {
     });
     listSessionsMock.mockReturnValue([]);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
+    sendMessageToTmuxMock.mockClear();
 
     await service.send("api-1", { message: "follow up" });
     await vi.advanceTimersByTimeAsync(0);
@@ -1482,9 +1689,7 @@ describe("SessionService", () => {
     });
     listSessionsMock.mockReturnValue([]);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
 
     await service.send("api-1", {
       message: "send immediately",
@@ -1498,6 +1703,60 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+  });
+
+  it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
+    mockClaudeJsonlState("working");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    listSessionsMock.mockReturnValue([]);
+
+    const service = await createDisposedSessionService();
+
+    await service.send("api-1", {
+      message: "inspect this",
+      queue: false,
+      interrupt: true,
+      attachments: [{ name: "shot.png", data: Buffer.from("png-bytes").toString("base64") }],
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
+      "api-1",
+      "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-shot.png]\ninspect this",
+      {
+        interrupt: true,
+        agent: "claude",
+      },
+    );
+    const artifactPath = `${artifactDirForSession("api-1")}/1773828300000-shot.png`;
+    expect(existsSync(artifactPath)).toBe(true);
+    expect(readFileSync(artifactPath, "utf8")).toBe("png-bytes");
+    expect(setSessionArtifactOriginMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      "intentional",
+    );
+    expect(setSessionArtifactUserAddedMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api-1",
+      "1773828300000-shot.png",
+      true,
+    );
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
@@ -1609,39 +1868,120 @@ describe("SessionService", () => {
     expect(result.state).toBe("waiting");
   });
 
-  it.fails(
-    "should classify the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes",
-    async () => {
-      vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
-      readSessionMock.mockReturnValue({
-        id: "spur-1c0e",
-        project: "api",
-        agent: "codex",
-        prompt: "header project select",
-        branch: "feature/header-project-select",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/spur-1c0e",
-        tmuxSession: "spur-1c0e",
-        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
-        status: "running",
-        createdAt: "2026-04-14T13:34:40.615Z",
-        updatedAt: "2026-04-14T13:46:31.938Z",
-      });
-      readAgentHookStateMock.mockReturnValue({
-        state: "working",
-        updatedAt: "2026-04-14T13:45:22.442Z",
-        hookEvent: "PreToolUse",
-        turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
-      });
+  it("classifies the stale spur-1c0e PreToolUse snapshot as waiting after the captured tail completes", async () => {
+    vi.setSystemTime(new Date("2026-04-14T19:30:00.000Z"));
+    readSessionMock.mockReturnValue({
+      id: "spur-1c0e",
+      project: "api",
+      agent: "codex",
+      prompt: "header project select",
+      branch: "feature/header-project-select",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/spur-1c0e",
+      tmuxSession: "spur-1c0e",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-14T13:34:40.615Z",
+      updatedAt: "2026-04-14T13:46:31.938Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-14T13:45:22.442Z",
+      hookEvent: "PreToolUse",
+      turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-14T19:27:57.488Z",
+      timestampMs: Date.parse("2026-04-14T19:27:57.488Z"),
+      filePath: "/tmp/spur-1c0e/rollout.jsonl",
+      reason: "task_complete",
+      turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
+    });
 
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-14T13:34:40.615Z");
 
-      const result = await service.get("spur-1c0e");
+    const result = await service.get("spur-1c0e");
 
-      expect(result.state).toBe("waiting");
-    },
-  );
+    expect(result.state).toBe("waiting");
+  });
+
+  it("classifies the interrupted spur-00b0 UserPromptSubmit snapshot as waiting after turn_aborted", async () => {
+    readSessionMock.mockReturnValue({
+      id: "spur-00b0",
+      project: "sp",
+      agent: "codex",
+      prompt: "workflow audit",
+      branch: "feature/agent-workflow-research",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-00b0",
+      tmuxSession: "spur-00b0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-18T08:02:02.020Z",
+      updatedAt: "2026-04-26T16:14:42.805Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-26T16:14:42.761Z",
+      hookEvent: "UserPromptSubmit",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-26T16:14:44.371Z",
+      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+      filePath: "/tmp/spur-00b0/rollout.jsonl",
+      reason: "turn_aborted",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-18T08:02:02.020Z");
+
+    const result = await service.get("spur-00b0");
+
+    expect(result.state).toBe("waiting");
+  });
+
+  it("keeps a working UserPromptSubmit hook when interrupted turn_aborted is from a different turn", async () => {
+    readSessionMock.mockReturnValue({
+      id: "spur-00b0",
+      project: "sp",
+      agent: "codex",
+      prompt: "workflow audit",
+      branch: "feature/agent-workflow-research",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/sp/spur-00b0",
+      tmuxSession: "spur-00b0",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-04-18T08:02:02.020Z",
+      updatedAt: "2026-04-26T16:14:42.805Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-04-26T16:14:42.761Z",
+      hookEvent: "UserPromptSubmit",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "waiting",
+      timestamp: "2026-04-26T16:14:44.371Z",
+      timestampMs: Date.parse("2026-04-26T16:14:44.371Z"),
+      filePath: "/tmp/spur-00b0/rollout.jsonl",
+      reason: "turn_aborted",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e3",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-04-18T08:02:02.020Z");
+
+    const result = await service.get("spur-00b0");
+
+    expect(result.state).toBe("working");
+  });
 
   it("Claude: defaults to working when no JSONL exists yet", async () => {
     readSessionMock.mockReturnValue({
@@ -1692,7 +2032,53 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("stopped");
+    expect(result.status).toBe("stopped");
     expect(result.runtimeAlive).toBe(false);
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        id: "api-1",
+        status: "stopped",
+      }),
+    );
+  });
+
+  it("does not persist stopped on a transient runtime probe miss", async () => {
+    mockClaudeJsonlState("waiting");
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(true);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.status).toBe("running");
+    expect(result.state).toBe("waiting");
+    expect(writeSessionMock).not.toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        id: "api-1",
+        status: "stopped",
+      }),
+    );
   });
 
   it("trusts JSONL waiting state for claude sessions", async () => {
@@ -1770,7 +2156,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
-  it("detects needs_input for Codex from hook state", async () => {
+  it("reports needs_input from hook state for Codex sessions", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -1787,8 +2173,9 @@ describe("SessionService", () => {
     });
     readAgentHookStateMock.mockReturnValue({
       state: "needs_input",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-      hookEvent: "on_agent_question",
+      updatedAt: "2026-03-18T10:05:01.000Z",
+      hookEvent: "NeedsInput",
+      turnId: "api-1-3",
     });
 
     const { SessionService } = await loadSessionServiceModule();
@@ -1797,6 +2184,97 @@ describe("SessionService", () => {
     const result = await service.get("api-1");
 
     expect(result.state).toBe("needs_input");
+  });
+
+  it("promotes needs_input from structured Codex rollout JSONL", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "UserPromptSubmit",
+      turnId: "api-1-2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "needs_input",
+      timestamp: "2026-03-18T10:05:01.000Z",
+      timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+      reason: "input_required",
+      turnId: "api-1-3",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("detects needs_input for Cursor from pane markers", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    captureTmuxPaneMock.mockResolvedValue(
+      "Workspace Trust Required\nDo you trust the contents of this directory?",
+    );
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("needs_input");
+  });
+
+  it("classifies idle Cursor sessions as waiting from pane state", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    captureTmuxPaneMock.mockResolvedValue("Cursor Agent\nComposer 2 Fast");
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:00:00.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("waiting");
   });
 
   it("uses startup attention state as a baseline without notifying immediately", async () => {
@@ -1908,6 +2386,139 @@ describe("SessionService", () => {
     vi.advanceTimersByTime(1_500);
     const fourth = await service.get("api-1");
     expect(fourth.state).toBe("waiting");
+  });
+
+  it("logs state transitions and snapshots agent history for debugging", async () => {
+    const sourceHistoryPath = resolve(TEST_ARTIFACTS_ROOT, "claude-transition-source.jsonl");
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"needs input"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    const jsonlReader = {
+      filePath: sourceHistoryPath,
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    };
+    readClaudeJsonlStateMock
+      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
+      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.get("api-1");
+    await service.get("api-1");
+
+    const transitionCall = logSpurEventMock.mock.calls.find(
+      ([, entry]) => entry.event === "session.state.transition",
+    );
+    expect(transitionCall).toBeTruthy();
+    const transitionEntry = transitionCall?.[1];
+    expect(transitionEntry).toEqual(
+      expect.objectContaining({
+        event: "session.state.transition",
+        message: "Status changed from waiting to needs_input",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({
+          fromState: "waiting",
+          toState: "needs_input",
+          source: "jsonl",
+          historyArtifactId: expect.any(String),
+        }),
+      }),
+    );
+    const artifactId = transitionEntry?.details?.historyArtifactId;
+    expect(typeof artifactId).toBe("string");
+    expect(readFileSync(artifactDirForSession("api-1") + `/${artifactId}`, "utf8")).toBe(
+      '{"type":"assistant","message":"needs input"}\n',
+    );
+  });
+
+  it("logs terminal state transitions without recreating debug artifacts", async () => {
+    const sourceHistoryPath = resolve(
+      TEST_ARTIFACTS_ROOT,
+      "claude-terminal-transition-source.jsonl",
+    );
+    mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+    writeFileSync(sourceHistoryPath, '{"type":"assistant","message":"done"}\n', "utf8");
+
+    const sessions = createSessionStore();
+    sessions.set(
+      "api-1",
+      clone({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+      }),
+    );
+    tmuxSessionExistsMock.mockResolvedValue(false);
+    workspaceExistsMock.mockReturnValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    (
+      service as unknown as {
+        stateHistory: Map<string, SessionStateTransition[]>;
+      }
+    ).stateHistory.set("api-1", [
+      {
+        state: "working",
+        at: "2026-03-18T10:01:00.000Z",
+        source: "jsonl",
+      },
+    ]);
+
+    const view = await service.complete("api-1");
+
+    expect(view.state).toBe("stopped");
+    const transitionCall = [...logSpurEventMock.mock.calls]
+      .reverse()
+      .find(([, entry]) => entry.event === "session.state.transition");
+    expect(transitionCall).toBeTruthy();
+    const transitionEntry = transitionCall?.[1];
+    expect(transitionEntry).toEqual(
+      expect.objectContaining({
+        event: "session.state.transition",
+        message: "Status changed from working to stopped",
+        sessionId: "api-1",
+        projectId: "api",
+        details: expect.objectContaining({
+          fromState: "working",
+          toState: "stopped",
+          source: "status",
+        }),
+      }),
+    );
+    expect(transitionEntry?.details?.historyArtifactId).toBeUndefined();
+    expect(existsSync(artifactDirForSession("api-1"))).toBe(false);
   });
 
   it("notifies once per attention transition and re-notifies only after the session clears", async () => {
@@ -2102,10 +2713,17 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    readAgentHookStateMock.mockReturnValue({
-      state: "working",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-    });
+    readAgentHookStateMock
+      .mockReturnValueOnce({
+        state: "working",
+        updatedAt: "2026-03-18T10:04:59.000Z",
+      })
+      .mockReturnValue({
+        state: "needs_input",
+        updatedAt: "2026-03-18T10:05:01.000Z",
+        hookEvent: "NeedsInput",
+        turnId: "api-1-3",
+      });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2113,11 +2731,6 @@ describe("SessionService", () => {
     const first = await service.get("api-1");
     expect(first.state).toBe("working");
 
-    readAgentHookStateMock.mockReturnValue({
-      state: "needs_input",
-      updatedAt: "2026-03-18T10:04:59.000Z",
-      hookEvent: "on_agent_question",
-    });
     const second = await service.get("api-1");
 
     expect(second.state).toBe("needs_input");
@@ -2153,6 +2766,7 @@ describe("SessionService", () => {
     const second = await service.get("api-1");
 
     expect(second.state).toBe("stopped");
+    expect(second.status).toBe("stopped");
   });
 
   it("runs a bound service and persists its optional port", async () => {
@@ -2272,7 +2886,7 @@ describe("SessionService", () => {
     expect(createTmuxCommandSessionMock).not.toHaveBeenCalled();
   });
 
-  it("hides completed and killed sessions from list while keeping paused sessions", async () => {
+  it("hides terminal sessions from list by default and includes only completed when requested", async () => {
     listSessionsMock.mockReturnValue([
       {
         id: "api-1",
@@ -2339,10 +2953,14 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     const listed = await service.list();
+    const listedWithCompleted = await service.list({ includeCompleted: true });
 
     expect(listed.map((session) => session.id)).toEqual(["api-1", "api-2"]);
     expect(listed[1]?.status).toBe("paused");
     expect(listed[1]?.state).toBe("stopped");
+    expect(listedWithCompleted.map((session) => session.id)).toEqual(["api-1", "api-2", "api-3"]);
+    expect(listedWithCompleted[2]?.status).toBe("completed");
+    expect(listedWithCompleted[2]?.state).toBe("stopped");
   });
 
   it("includes queued manual messages before future pipeline steps in session views", async () => {
@@ -2421,11 +3039,12 @@ describe("SessionService", () => {
       "/tmp/spur-data",
       expect.objectContaining({
         id: "api-1",
-        status: "paused",
+        status: "stopped",
+        stopReason: "manual_pause",
       }),
     );
     expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
-    expect(result.status).toBe("paused");
+    expect(result.status).toBe("stopped");
     expect(result.state).toBe("stopped");
     expect(result.workspaceExists).toBe(true);
     expect(logSpurEventMock).toHaveBeenCalledWith(
@@ -2556,7 +3175,7 @@ describe("SessionService", () => {
     expect(result.status).toBe("completed");
   });
 
-  it("resumes a paused session on send and marks it running again", async () => {
+  it("resumes a manually stopped session on send and marks it running again", async () => {
     mockClaudeJsonlState("waiting");
     const sessions = createSessionStore();
     sessions.set("api-1", {
@@ -2570,16 +3189,18 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     listSessionsMock.mockReturnValue([]);
-    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
 
     const result = await service.send("api-1", { message: "resume work" });
 
@@ -2593,9 +3214,11 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -2613,6 +3236,37 @@ describe("SessionService", () => {
     expect(result.status).toBe("running");
   });
 
+  it("resumes a stopped session on send and marks it running again", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      agentSessionId: "session-uuid",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const service = await createDisposedSessionService();
+
+    const result = await service.send("api-1", { message: "resume work" });
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "resume work", {
+      interrupt: false,
+      agent: "claude",
+    });
+    expect(result.status).toBe("running");
+  });
+
   it("uses planMode from the session as the source of truth during send recovery", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
@@ -2626,7 +3280,8 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand: "claude --dangerously-skip-permissions --permission-mode plan",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -2667,7 +3322,8 @@ describe("SessionService", () => {
       tmuxSession: "api-1",
       launchCommand:
         "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
-      status: "paused",
+      status: "stopped",
+      stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
@@ -2809,25 +3465,27 @@ describe("SessionService", () => {
       prompt: "Fix runtime regression from PR #42",
     });
 
-    expect(runSpawnPreflightMock).toHaveBeenCalledWith({
-      agent: "claude",
-      projectId: "api",
-      project: {
-        path: "/repo/api",
-        defaultBranch: "main",
-        sessionPrefix: "api",
+    expect(runSpawnPreflightMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: "claude",
+        projectId: "api",
+        project: expect.objectContaining({
+          path: "/repo/api",
+          defaultBranch: "main",
+          sessionPrefix: "api",
+          worktree: true,
+          symlinks: [".env"],
+          sidecars: {},
+          defaultAgent: "claude",
+          preflight: {
+            prompt: "Suggest a branch name from the task context.",
+          },
+        }),
+        baseBranch: "main",
         worktree: true,
-        symlinks: [".env"],
-        sidecars: {},
-        defaultAgent: "claude",
-        preflight: {
-          prompt: "Suggest a branch name from the task context.",
-        },
-      },
-      baseBranch: "main",
-      worktree: true,
-      prompt: "Fix runtime regression from PR #42",
-    });
+        prompt: "Fix runtime regression from PR #42",
+      }),
+    );
     expect(createWorktreeMock).toHaveBeenCalledWith({
       repoPath: "/repo/api",
       worktreeBaseDir: "/tmp/spur-worktrees",
@@ -3222,6 +3880,34 @@ describe("SessionService", () => {
     expect(result.status).toBe("killed");
   });
 
+  it("ignores the Spur-managed Cursor trust marker in kill dirty checks", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    hasUnpushedCommitsMock.mockResolvedValue(false);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.kill("api-1", { force: true });
+
+    expect(hasUncommittedChangesMock).toHaveBeenCalledWith("/tmp/spur-worktrees/api/api-1", [
+      ".env",
+      ".cursor/.workspace-trusted",
+    ]);
+  });
+
   it("kills a renamed-project session even when its worktree is already gone", async () => {
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
@@ -3398,25 +4084,19 @@ describe("SessionService", () => {
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
     });
 
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(
-      {
-        title: "Existing title",
-        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
-      },
-      {
-        links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }],
-      },
-    );
+    expect(applySlotsUpdateMock).not.toHaveBeenCalled();
     expect(writeSessionMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
         updatedAt: "2026-03-18T10:01:00.000Z",
+        pr: {
+          number: 1,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/1",
+        },
         slots: {
           title: "Existing title",
-          links: [
-            { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "pr", url: "https://github.com/org/repo/pull/1" },
-          ],
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
         },
       }),
     );
@@ -3427,13 +4107,66 @@ describe("SessionService", () => {
         { label: "pr", url: "https://github.com/org/repo/pull/1" },
       ],
     });
-    expect(result.slots?.links).toHaveLength(2);
+    expect(result.pr).toEqual({
+      number: 1,
+      repo: "org/repo",
+      url: "https://github.com/org/repo/pull/1",
+    });
+    expect(result.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+      { label: "pr", url: "https://github.com/org/repo/pull/1" },
+    ]);
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
         event: "session.slots.updated",
         sessionId: "api-1",
       }),
+    );
+  });
+
+  it("keeps non-GitHub pr links as generic slots", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        title: "Existing title",
+        links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.updateSlots("api-1", {
+      links: [{ label: "pr", url: "https://example.com/claude/pull/1" }],
+    });
+
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        slots: {
+          title: "Existing title",
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "github-pr", url: "https://example.com/claude/pull/1" },
+          ],
+        },
+      }),
+    );
+    expect(result.pr).toBeUndefined();
+    expect(result.slots?.links).toEqual(
+      expect.arrayContaining([{ label: "github-pr", url: "https://example.com/claude/pull/1" }]),
     );
   });
 
@@ -3454,10 +4187,13 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
 
     const restored = await service.restore("api-1");
 
@@ -3477,9 +4213,11 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -3528,10 +4266,13 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
 
     await service.restore("api-1");
 
@@ -3548,6 +4289,68 @@ describe("SessionService", () => {
         agent: "claude",
       }),
     );
+  });
+
+  it("restores a manually stopped session without sending a restore prompt", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sources: {
+            gh: {
+              type: "github",
+            },
+          },
+          triggers: {},
+        },
+      },
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const restored = await service.restore("api-1");
+
+    expect(buildAgentRestorePlanMock).toHaveBeenCalledWith(
+      "claude",
+      "/tmp/spur-worktrees/api/api-1",
+      "",
+      {},
+    );
+    expect(createTmuxSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchCommand: "claude --resume session-uuid --dangerously-skip-permissions",
+        agent: "claude",
+      }),
+    );
+    expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(buildAgentLaunchPlanMock).not.toHaveBeenCalled();
+    expect(requestGitHubMergeConflictRestoreReplayMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "gh",
+      "api-1",
+    );
+    expect(restored.status).toBe("running");
+    expect(restored.runtimeAlive).toBe(true);
   });
 
   it("pins pnpm virtual store to the source repo when node_modules is symlinked into a worktree", async () => {
@@ -3601,11 +4404,16 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     tmuxSessionExistsMock.mockResolvedValue(true);
-    tmuxSessionExistsMock.mockResolvedValueOnce(false);
-    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
     const restored = await service.restore("api-1");
 
     expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
@@ -3624,9 +4432,11 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "claude",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -3646,7 +4456,52 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  });
+  }, 10_000);
+
+  it("falls back to a fresh launch for a manually stopped session without sending a prompt", async () => {
+    // This test uses real timers because waitForRestorePlan polls with
+    // node:timers/promises setTimeout which fake timers do not intercept.
+    vi.useRealTimers();
+    findAgentSessionIdMock.mockResolvedValue(null);
+    buildAgentRestorePlanMock.mockResolvedValue(null);
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "stopped",
+      stopReason: "manual_pause",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxSessionExistsMock.mockResolvedValueOnce(false);
+    isProcessRunningInTmuxMock.mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const restored = await service.restore("api-1");
+
+    expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "", {});
+    expect(buildAgentResumePlanMock).not.toHaveBeenCalled();
+    expect(withSessionSlotInstructionsMock).not.toHaveBeenCalled();
+    expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+    expect(restored.id).toBe("api-1");
+    expect(restored.runtimeAlive).toBe(true);
+    expect(
+      logSpurEventMock.mock.calls.some(
+        ([, entry]) =>
+          entry.event === "session.restore.started" &&
+          entry.message === "No native resume state for api-1, falling back to fresh launch",
+      ),
+    ).toBe(true);
+  }, 10_000);
 
   it("waits for native resume state to appear before restoring", async () => {
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");
@@ -3671,10 +4526,13 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
 
     const restorePromise = service.restore("api-1");
     await vi.advanceTimersByTimeAsync(250);
@@ -3701,10 +4559,13 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    isProcessRunningInTmuxMock.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
 
     await expect(service.restore("api-1")).rejects.toThrow(
       "Failed to restore api-1: Agent claude exited before restore became ready",
@@ -3756,11 +4617,16 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     tmuxSessionExistsMock.mockResolvedValue(true);
-    tmuxSessionExistsMock.mockResolvedValueOnce(false);
-    isProcessRunningInTmuxMock.mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+    const service = await createDisposedSessionService();
     vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
       found: true,
       lastScannedFile: "/some/rollout.jsonl",
@@ -3784,9 +4650,11 @@ describe("SessionService", () => {
         SPUR_PROJECT: "api",
         SPUR_AGENT: "codex",
         SPUR_SESSION_TOOL_DIR: expect.any(String),
+        SPUR_SESSION_ARTIFACTS_DIR: artifactDirForSession("api-1"),
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
     });
@@ -3806,7 +4674,7 @@ describe("SessionService", () => {
           entry.message === "No native resume state for api-1, falling back to fresh launch",
       ),
     ).toBe(true);
-  });
+  }, 10_000);
 
   it("restore throws 'Failed to restore' when codex rollout ack times out", async () => {
     vi.useRealTimers();
@@ -3836,9 +4704,7 @@ describe("SessionService", () => {
     isProcessRunningInTmuxMock.mockResolvedValue(true);
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
 
-    const { SessionService } = await loadSessionServiceModule();
-    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    service.dispose();
+    const service = await createDisposedSessionService();
 
     vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
       found: false,
@@ -4257,7 +5123,15 @@ describe("SessionService", () => {
 
     await expect(service.startSidecar("api-1", "dev")).rejects.toThrow("tmux sidecar boom");
     expect(sessions.get("api-1")).not.toHaveProperty("sidecarPorts");
-    expect(writeSessionMock.mock.calls.at(-1)?.[1]).not.toHaveProperty("sidecarPorts");
+    expect(writeSessionMock).toHaveBeenCalledTimes(2);
+    expect(writeSessionMock.mock.calls[0]?.[1]).toMatchObject({
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: 3000,
+        },
+      },
+    });
+    expect(writeSessionMock.mock.calls[1]?.[1]).not.toHaveProperty("sidecarPorts");
 
     createTmuxSidecarSessionMock.mockResolvedValueOnce(undefined);
     await service.startSidecar("api-1", "dev");
@@ -4269,6 +5143,49 @@ describe("SessionService", () => {
         }),
       }),
     );
+  });
+
+  it("startSidecar fails loudly when the sidecar pane dies immediately after launch", async () => {
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "bash -c 'echo boom; exit 1'",
+              autoStart: false,
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarNames: ["dev"],
+    });
+    tmuxPaneDeadMock.mockResolvedValueOnce(true);
+    captureTmuxPaneMock.mockResolvedValueOnce("boom\n");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      /Sidecar "dev" exited immediately after launch/,
+    );
+    expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1--dev");
   });
 
   it("startSidecar prefers sidecars from the session worktree config", async () => {
@@ -4478,6 +5395,153 @@ describe("SessionService", () => {
       { name: "daemon", alive: false },
       { name: "ui", alive: false },
     ]);
+  });
+
+  it("get exposes derived workspace access from project config", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+              },
+              {
+                label: "Web IDE",
+                kind: "link",
+                value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+              },
+            ],
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess).toEqual({
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur-worktrees/api/api-1'",
+        },
+        {
+          label: "Web IDE",
+          kind: "link",
+          value: "https://code.example.com/?folder=%2Ftmp%2Fspur-worktrees%2Fapi%2Fapi-1",
+        },
+      ],
+    });
+  });
+
+  it("omits workspace access when the workspace is missing", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    workspaceExistsMock.mockReturnValue(false);
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+              },
+            ],
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess).toBeUndefined();
+  });
+
+  it("shell-escapes the cursor workspace path in derived workspace access", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur worktrees/api'space",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          workspaceAccess: {
+            items: [
+              {
+                label: "Cursor",
+                kind: "copy",
+                value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+              },
+            ],
+          },
+          sidecars: {},
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.workspaceAccess?.items[0]?.value).toBe(
+      "cursor --remote ssh-remote+100.80.107.19 '/tmp/spur worktrees/api'\\''space'",
+    );
   });
 
   it("kill calls killSidecarTmux to clean up sidecar sessions", async () => {
@@ -4730,7 +5794,11 @@ describe("SessionService", () => {
       expect(result.status).toBe("running");
       expect(createWorktreeMock).toHaveBeenCalled();
       expect(createTmuxSessionMock).toHaveBeenCalled();
-      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith("claude", "fix the bug", {});
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+        "claude",
+        "slot-instructions\nfix the bug",
+        {},
+      );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "session.respawn.started",
       );
@@ -4912,7 +5980,7 @@ describe("SessionService", () => {
       );
     });
 
-    it("rejects respawn of a paused session", async () => {
+    it("rejects respawn of a manually stopped session", async () => {
       readSessionMock.mockReturnValue({
         id: "api-1",
         project: "api",
@@ -4923,7 +5991,8 @@ describe("SessionService", () => {
         worktreePath: "/tmp/spur-worktrees/api/api-1",
         tmuxSession: "api-1",
         launchCommand: "claude --dangerously-skip-permissions",
-        status: "paused",
+        status: "stopped",
+        stopReason: "manual_pause",
         createdAt: "2026-03-18T10:00:00.000Z",
         updatedAt: "2026-03-18T10:01:00.000Z",
       });
@@ -4934,6 +6003,93 @@ describe("SessionService", () => {
       await expect(service.respawn("api-1")).rejects.toThrow(
         "Session api-1 is not in a terminal state",
       );
+    });
+
+    it("reuses selected startup images and appends new ones on respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      const startupArtifactPath = resolve(TEST_ARTIFACTS_ROOT, "source-startup.png");
+      mkdirSync(TEST_ARTIFACTS_ROOT, { recursive: true });
+      rmSync(startupArtifactPath, { force: true });
+      writeFileSync(startupArtifactPath, "startup-bytes");
+      readSessionArtifactMock.mockReturnValue({
+        id: "1773828300000-source.png",
+        path: startupArtifactPath,
+        name: "1773828300000-source.png",
+        size: 12,
+        mimeType: "image/png",
+        kind: "image",
+        origin: "intentional",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:00:00.000Z",
+      });
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["1773828300000-source.png"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1", {
+        prompt: "edited prompt",
+        startupAttachmentIds: ["1773828300000-source.png"],
+        attachments: [{ name: "new.png", data: Buffer.from("new-bytes").toString("base64") }],
+      });
+
+      expect(buildAgentLaunchPlanMock).toHaveBeenCalledWith(
+        "claude",
+        [
+          "slot-instructions",
+          "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-source.png]",
+          "[Attached file: $SPUR_SESSION_ARTIFACTS_DIR/1773828300000-new.png]",
+          "edited prompt",
+        ].join("\n"),
+        {},
+      );
+      expect(
+        readFileSync(`${artifactDirForSession("api-1")}/1773828300000-source.png`, "utf8"),
+      ).toBe("startup-bytes");
+      expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
+        "new-bytes",
+      );
+    });
+
+    it("rejects unknown startup attachment ids on respawn", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        startupAttachmentIds: ["known.png"],
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(
+        service.respawn("api-1", {
+          startupAttachmentIds: ["unknown.png"],
+        }),
+      ).rejects.toThrow("Unknown startup attachment id: unknown.png");
     });
   });
 

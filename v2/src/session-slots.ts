@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
-const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
+export const SLOT_LABEL_RE = /^[a-z0-9][a-z0-9_-]{0,15}$/;
 const SLOT_TOOL_DIR = "session-tools";
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const DIST_CLI_ENTRYPOINT = resolve(dirname(MODULE_PATH), "../dist/cli.js");
@@ -32,6 +33,9 @@ function normalizeSlotLabel(label: string): string {
   const normalized = collapseWhitespace(label).toLowerCase();
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+  }
+  if (normalized === "pr" || normalized === "github_pr") {
+    return "github-pr";
   }
   return normalized;
 }
@@ -156,14 +160,21 @@ export function withSessionSlotInstructions(prompt: string): string {
 
 Session metadata:
 - Update the session title and related links as soon as you know them.
-- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
+- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link github-pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
+- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link github-pr=https://...\` to add them without changing the title.
 - Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
+}
+
+function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
+  if (!agent) {
+    return true;
+  }
+  return agentStateStrategy(agent) === "hook";
 }
 
 export function ensureSessionSlotTool(args: {
@@ -193,7 +204,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
     { encoding: "utf8", mode: 0o755 },
   );
   // Claude uses JSONL-based state classification — no hook state scripts needed.
-  if (args.agent !== "claude") {
+  if (shouldWriteAgentStateTools(args.agent)) {
     writeFileSync(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node
@@ -231,10 +242,56 @@ function mapHookEventToState(eventName) {
   if (normalized === "userpromptsubmit" || normalized === "pretooluse" || normalized === "posttooluse") {
     return "working";
   }
+  if (
+    normalized === "needsinput" ||
+    normalized === "needs_input" ||
+    normalized === "inputrequired" ||
+    normalized === "requestuserinput" ||
+    normalized === "request_user_input"
+  ) {
+    return "needs_input";
+  }
   if (normalized === "sessionstart" || normalized === "stop") {
     return "waiting";
   }
   return null;
+}
+
+function readExplicitState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  const rawState =
+    typeof hookPayload.state === "string"
+      ? hookPayload.state
+      : typeof hookPayload.session_state === "string"
+        ? hookPayload.session_state
+        : typeof hookPayload.sessionState === "string"
+          ? hookPayload.sessionState
+          : typeof hookPayload.agent_state === "string"
+            ? hookPayload.agent_state
+            : typeof hookPayload.agentState === "string"
+              ? hookPayload.agentState
+              : null;
+  if (!rawState) {
+    return null;
+  }
+  const normalized = String(rawState).toLowerCase();
+  return normalized === "working" || normalized === "waiting" || normalized === "needs_input"
+    ? normalized
+    : null;
+}
+
+function readQuestionMetadataState(hookPayload) {
+  if (!isRecord(hookPayload)) {
+    return null;
+  }
+  if (Array.isArray(hookPayload.questions) && hookPayload.questions.length > 0) {
+    return "needs_input";
+  }
+  return typeof hookPayload.question === "string" && hookPayload.question.trim().length > 0
+    ? "needs_input"
+    : null;
 }
 
 const stateFilePath = process.argv[2];
@@ -248,7 +305,10 @@ const eventName = isRecord(hookPayload) && typeof hookPayload.hook_event_name ==
   : isRecord(hookPayload) && typeof hookPayload.hookEventName === "string"
     ? hookPayload.hookEventName
     : null;
-const state = mapHookEventToState(eventName);
+const state =
+  readExplicitState(hookPayload) ??
+  readQuestionMetadataState(hookPayload) ??
+  mapHookEventToState(eventName);
 if (!state) {
   process.exit(0);
 }

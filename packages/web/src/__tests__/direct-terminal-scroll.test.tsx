@@ -158,6 +158,26 @@ beforeEach(() => {
     if (url === "/api/runtime/voice") {
       return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
     }
+    if (url.endsWith("/slash-commands")) {
+      return new Response(
+        JSON.stringify({
+          agent: url.includes("codex") ? "codex" : "claude",
+          commands: [
+            {
+              id: "cmd-1",
+              label: url.includes("codex") ? "/permissions" : "/compact",
+              insertText: url.includes("codex") ? "/permissions" : "/compact",
+              detail: "Slash command",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   });
   vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
@@ -179,7 +199,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(sessionId = "test-session", agent: "claude" | "codex" = "claude") {
+async function mountTerminal(
+  sessionId = "test-session",
+  agent: "claude" | "codex" | "cursor" = "claude",
+) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {
@@ -271,7 +294,6 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
     expect(screen.getByRole("menu", { name: "claude shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
 
@@ -285,17 +307,20 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
     expect(screen.getByRole("menu", { name: "codex shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Start file picker/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
   });
 
-  it("submits codex slash hotkeys as bracketed paste plus enter", async () => {
+  it("submits codex slash suggestions as bracketed paste plus enter", async () => {
     await mountTerminal("test-codex-hotkey-submit", "codex");
 
-    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
 
     await waitFor(() => {
@@ -304,11 +329,29 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("shows a visible error when codex slash hotkey submit fails", async () => {
+  it("submits claude slash suggestions as bracketed paste plus enter", async () => {
+    await mountTerminal("test-claude-hotkey-submit", "claude");
+
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
+
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~/compact\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("/compact\r");
+    });
+  });
+
+  it("shows a visible error when codex slash suggestion submit fails", async () => {
     await mountTerminal("test-codex-hotkey-submit-error", "codex");
 
     wsInstances[0].readyState = 3;
-    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
 
     await waitFor(() => {
@@ -346,7 +389,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByText("Connected")).toBeInTheDocument();
   });
 
-  it("refreshes the websocket after returning from a hidden tab", async () => {
+  it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
     await mountTerminal("test-visibility");
 
     await waitFor(() => {
@@ -361,8 +404,36 @@ describe("DirectTerminal scroll integration", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "visible",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("reconnects after returning from a hidden tab when the websocket is already closed", async () => {
+    await mountTerminal("test-visibility-closed");
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        value: "hidden",
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    act(() => {
+      wsInstances[0].readyState = 3;
     });
 
     act(() => {

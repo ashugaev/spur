@@ -1,17 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -24,12 +33,32 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 
-const POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const SESSIONS_POLL_INTERVAL_MS = 5_000;
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
+
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -140,6 +169,21 @@ function IconCheck() {
     </svg>
   );
 }
+function IconStop() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="5" width="14" height="14" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -173,18 +217,15 @@ function upsertSession(
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(() => {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -192,9 +233,11 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
+  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
   const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
@@ -233,50 +276,30 @@ export function Dashboard() {
     [locationSearch],
   );
 
-  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-
-    try {
-      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = (await response.json()) as SpurSessionsResponse;
-      setRawSessions(payload.sessions);
-      setProjects(payload.projects ?? []);
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, []);
-
   useEffect(() => {
     setProjectId(requestedProject);
   }, [requestedProject]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async (silent = false) => {
-      if (cancelled) return;
-      await fetchSessions(projectId, silent);
-    };
-
-    void run(false);
-    const timer = setInterval(() => {
-      void run(true);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchSessions, projectId]);
+  const queryClient = useQueryClient();
+  const sessionsQueryKey = ["sessions", projectId] as const;
+  const {
+    data,
+    isPending,
+    error: sessionsError,
+  } = useQuery<SpurSessionsResponse>({
+    queryKey: sessionsQueryKey,
+    queryFn: async ({ signal }) => {
+      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
+      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(`sessions ${response.status}`);
+      return (await response.json()) as SpurSessionsResponse;
+    },
+    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+  const rawSessions = data?.sessions ?? [];
+  const projects = data?.projects ?? [];
+  const loading = isPending;
 
   const filterProjectOptions = useMemo(() => {
     const merged = new Map(projects.map((project) => [project.id, project]));
@@ -320,8 +343,9 @@ export function Dashboard() {
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      pending: [],
       working: [],
+      pending: [],
+      stopped: [],
       done: [],
     };
 
@@ -335,8 +359,9 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      pending: grouped.pending.length,
       working: grouped.working.length,
+      pending: grouped.pending.length,
+      stopped: grouped.stopped.length,
       done: grouped.done.length,
     }),
     [grouped],
@@ -491,6 +516,8 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      const encodedAttachments = encodeImageAttachments(spawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
@@ -504,13 +531,20 @@ export function Dashboard() {
       if (!response.ok) throw new Error(await response.text());
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
-      setRawSessions((current) => upsertSession(current, session, nextProjectId));
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = current?.sessions ?? [];
+        return {
+          sessions: upsertSession(currentSessions, session, nextProjectId),
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
+      setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
       syncProjectFilter(nextProjectId);
@@ -530,8 +564,18 @@ export function Dashboard() {
 
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
     setSpawnOpen(true);
   };
+
+  const addSpawnImages = useCallback((files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setSpawnAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -621,6 +665,14 @@ export function Dashboard() {
             onClick={() => toggleStatFilter("pending")}
           />
           <StatItem
+            icon={<IconStop />}
+            label="Stopped"
+            value={stats.stopped}
+            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
+            active={activeStatFilter === "stopped"}
+            onClick={() => toggleStatFilter("stopped")}
+          />
+          <StatItem
             icon={<IconCheck />}
             label="Completed"
             value={stats.done}
@@ -695,13 +747,16 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
-                    aria-label="spawn agent"
+                    aria-label="Spawn agent"
                     className={INPUT_CLASS}
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
                     value={spawnAgent}
                   >
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
+                    {AGENT_OPTIONS.map((agent) => (
+                      <option key={agent} value={agent}>
+                        {getAgentDisplayName(agent)}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="flex gap-2">
@@ -773,19 +828,26 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <div className="relative flex min-h-0 flex-1 flex-col">
-                  <textarea
-                    className={`h-full min-h-[8rem] w-full flex-1 resize-y ${INPUT_CLASS} pr-12 sm:min-h-[10rem]`}
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                        void handleSpawn();
-                    }}
-                    placeholder="Prompt for the new session..."
-                    value={spawnPrompt}
-                  />
-                  <VoiceButton voice={voice} />
-                </div>
+                <ImageAttachmentTextarea
+                  ariaLabel="Prompt for the new session..."
+                  attachments={spawnAttachments}
+                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                  onAddFiles={addSpawnImages}
+                  onChange={setSpawnPrompt}
+                  onKeyDown={(event) => {
+                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                      void handleSpawn();
+                  }}
+                  onRemoveAttachment={(index) =>
+                    setSpawnAttachments((current) =>
+                      current.filter((_, currentIndex) => currentIndex !== index),
+                    )
+                  }
+                  placeholder="Prompt for the new session..."
+                  textareaRef={spawnPromptRef}
+                  value={spawnPrompt}
+                  voice={voice}
+                />
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
@@ -796,6 +858,16 @@ export function Dashboard() {
                     <VoiceStatusHint voice={voice} />
                   </span>
                   <div className="flex items-center gap-2">
+                    <SlashSuggestions
+                      endpoint={
+                        spawnProjectId.trim()
+                          ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                          : null
+                      }
+                      onSelect={(entry) =>
+                        insertTextAtCursor(spawnPromptRef.current, entry.insertText, setSpawnPrompt)
+                      }
+                    />
                     <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
                     <button
                       className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
@@ -820,9 +892,12 @@ export function Dashboard() {
           </div>
         ) : null}
 
-        {error ? (
+        {error || sessionsError ? (
           <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
-            {error}
+            {error ??
+              (sessionsError instanceof Error
+                ? sessionsError.message
+                : "Failed to load Spur sessions")}
           </div>
         ) : null}
 
@@ -871,7 +946,7 @@ export function Dashboard() {
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
-      <StatusBar sessions={rawSessions} />
+      <StatusBar />
     </>
   );
 }

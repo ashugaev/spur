@@ -94,7 +94,7 @@ describe("Claude JSONL fixture classification", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe(expectedState);
   });
 
-  // ── tool_use: fresh = working, stale = needs_input ──────────────────
+  // ── generic tool_use: fresh = working, stale = needs_input ──────────
 
   it("classifies tool_use within stale window as working", async () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
@@ -111,7 +111,7 @@ describe("Claude JSONL fixture classification", () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Last record embeds ts 2026-04-11T15:02:06.116Z (AskUserQuestion, no timeout).
+    // Last record embeds ts 2026-04-11T15:02:06.116Z (no timeout metadata).
     // +5.9s exceeds the 3s window and fileMtime matches the record → needs_input.
     expect(
       classifyClaudeJsonlState(
@@ -128,7 +128,8 @@ describe("Claude JSONL fixture classification", () => {
    * Real‑session tails exercising the deterministic stale‑window rules:
    *   - Bash with declared `input.timeout` → budget = timeout + 3s
    *   - Bash with `input.run_in_background: true` → always working
-   *   - AskUserQuestion / Bash without timeout → 3s default window
+   *   - AskUserQuestion / questions metadata → immediate `needs_input`
+   *   - Bash without timeout → 3s default window
    *   - `fileMtimeMs` is used as the anchor for "last activity" when > record ts
    *
    * Each case pins an exact `nowMs` and `fileMtimeMs` from its own tail, so
@@ -180,19 +181,27 @@ describe("Claude JSONL fixture classification", () => {
       Date.parse("2026-04-13T11:19:48.036Z"),
       "working",
     ],
-    // AskUserQuestion: no timeout, last tool_use at 2026-04-11T15:02:06.116Z.
+    // AskUserQuestion: last tool_use at 2026-04-11T15:02:06.116Z.
     [
       "needs-input-ask-user-spur-6e9a-tail.jsonl",
-      "within the 3s default window → working",
+      "AskUserQuestion metadata makes it needs_input immediately",
       Date.parse("2026-04-11T15:02:08.000Z"), // +1.9s
       0,
-      "working",
+      "needs_input",
     ],
     [
       "needs-input-ask-user-spur-6e9a-tail.jsonl",
-      "past the 3s default window → needs_input",
+      "AskUserQuestion still stays needs_input later",
       Date.parse("2026-04-11T15:02:10.000Z"), // +3.9s
       Date.parse("2026-04-11T15:02:06.116Z"),
+      "needs_input",
+    ],
+    // spur-36e9: real AskUserQuestion tail from feature/codex-no-subagents.
+    [
+      "needs-input-ask-user-spur-36e9-tail.jsonl",
+      "real spur-36e9 AskUserQuestion tail → needs_input",
+      Date.parse("2026-04-19T09:45:10.500Z"),
+      Date.parse("2026-04-19T09:45:10.348Z"),
       "needs_input",
     ],
   ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {

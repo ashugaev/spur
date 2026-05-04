@@ -33,29 +33,32 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D1: Header renders correctly
 
 - 𖤓 icon + large project title visible at the same size as before
+- Browser tab title is exactly `Spur`
 - Project selection happens in the clickable title control with "All Projects" default and a visible chevron indicator beside the title
 - SPAWN_NEW_SESSION button visible
 
 ### D2: Header stats show correct counts
 
-- Needs Input, Working, Waiting, Completed stat buttons in header after title, before search input
+- Needs Input, Working, Waiting, Stopped, Completed stat buttons in header after title, before search input
 - Labels use secondary text color, values use primary
-- Non-zero values show colored (error/working/attention/ready)
+- Non-zero values show colored (error/working/attention/muted-grey/ready)
 - Clicking a stat button filters sessions to that attention level; clicking again clears filter
+- `Stopped` groups manually paused/stopped sessions and crashed non-terminal sessions whose runtime died unexpectedly
 - Clicking `Completed` switches the dashboard into completed-only view: current sessions are hidden and only the `Completed` zone remains
 - `Completed` stays neutral/white while inactive, even when completed sessions exist; it turns green only when the `Completed` filter is active and the count is non-zero
+- After a session moves into a done/terminal state on the next poll, the `Completed` stat count updates and the session reappears only when the `Completed` filter is active
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, terminal button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
 
-### D4: Terminal button state
+### D4: Dashboard row action button state
 
 - Sessions with `runtimeAlive=true` + `tmuxSession` + `status!=completed|killed`: button enabled (visible border, secondary text color)
 - Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
@@ -64,6 +67,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
+- Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
+- Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
 ### D4b: Merged-PR done button
 
@@ -78,12 +83,35 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
 - Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
+- When approval is received, the second overlapping check is green
+- When approval is still required, the second overlapping check is yellow
+- When no approval is required, the second overlapping check is gray
+- When changes are requested, the second review mark stays red/error
+- Resolved threads alone do not turn the review mark green
+- PR badges stay compact: PR number first, then CI/review mark, then review thread count
+- Sessions with PR link: GitHub icon + PR number (e.g., #3439), including the canonical `github-pr` slot label
+- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
+- When approval is received, the second overlapping check is green
+- When approval is still required, the second overlapping check is yellow
+- When no approval is required, the second overlapping check is gray
+- When changes are requested, the second review mark stays red/error
+- Resolved threads alone do not turn the review mark green
+- PR badges stay compact: PR number first, then CI/review mark, then review thread count
+- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
 - Sessions without links: no icons shown, no empty space
 
+### D5b: PR status survives reload and GitHub errors
+
+- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
+- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
+- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+
 ### D6: Attention zone sections
 
-- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING
+- Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
 - Empty sections are hidden instead of rendering placeholder rows
@@ -94,6 +122,13 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
+- Footer shows a separate GitHub connection indicator that is independent from PR status rows
+- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
+- Healthy GitHub status renders as a green check next to the GitHub icon
+- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
+- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
+- GitHub connection/auth/API failures render the error text directly in the footer
+- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
 
 ### D6c: Footer resource metrics
 
@@ -104,11 +139,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On touch devices, tapping anywhere outside the open system health tooltip closes it
 - On desktop, hover opens the system health tooltip and mouse leave closes it
 - When runtime metrics are unavailable, the footer stays compact and the tooltip shows `unavailable` values instead of inline error chrome
-- Git / PR aggregate stays outside the `HEALTHY` tooltip
+- GitHub connection status stays outside the `HEALTHY` tooltip
 
 ### D7: Spawn modal
 
 - SPAWN_NEW_SESSION button opens centered modal on desktop and a viewport-bounded modal on mobile
+- Mobile slash suggestions stay fully inside the viewport instead of clipping off the right edge of the spawn modal
 - If dashboard filter has a specific project selected, Spawn project select is prefilled with that same project
 - If dashboard filter is `All projects`, Spawn project select restores the last user-selected Spawn project from local storage when still available
 - If stored Spawn project is stale (missing from available options), Spawn project select falls back to the first available project option
@@ -119,14 +155,19 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
 - Plan toggle does not show extra agent-specific hint text
+- Agent selector offers `claude`, `codex`, and `cursor`
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
+- `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Ctrl/Cmd+Enter submits
 - Prompt textarea placeholder is "Prompt for the new session..."
+- The spawn prompt shows an inline image-picker button inside the textarea chrome
+- Pasting, dropping, or picking an image adds a compact thumbnail preview inside the textarea chrome with an inline remove button
+- Spawn payload includes those image attachments, and successful spawn clears the inline preview list
 - On low-height mobile landscape screens, modal stays inside viewport and content scrolls internally so Spawn button remains reachable
 - On mobile, prompt textarea expands to use the remaining modal height when space allows
 - On larger screens, prompt textarea default height is taller than the previous compact size
@@ -156,6 +197,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On failure or no suggestion: branch field stays unchanged (no error shown)
 - User can still manually edit the branch field after auto-population
 
+### D7d: Sessions list cache on revisit
+
+- After the first Dashboard visit loads sessions, navigating away and back renders the list instantly with no "Loading sessions..." text
+- Background refetch on the 5s interval silently replaces the list only when the server response differs
+
 ## Session Detail
 
 ### S1: Header with white underline
@@ -163,6 +209,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
+- Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold
 - Subtitle (prompt) below
@@ -172,12 +220,27 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- `Workspace Access` section appears only when daemon `workspaceAccess.items[]` is present, and link items open in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
 - Kill button (red bordered) when session not terminal
 - Button labels stay on one line
 - All buttons uppercase, bold, disabled when action in progress
 - Kill shows confirm dialog
+- Terminal sessions show an `Edit & Respawn` action that opens a modal with the original first prompt prefilled
+- `Edit & Respawn` allows keeping previously attached startup images, adding new images via paste, drop, or picker button, and respawning with image-only input when text is empty
+
+### S2a: Logs modal
+
+- `Logs` opens a full-screen modal for the current session
+- Modal subtitle reads as Spur orchestrator events plus runtime output, not agent chat history
+- Empty state shows a bordered placeholder instead of raw empty text
+- `session.state.transition` entries render as a dedicated status-transition row with `from -> to`
+- Transition rows show the detection source (`jsonl`, `hook`, or `status`) when present
+- Transition rows show a `History snapshot` download link only when `historyArtifactId` belongs to the currently visible artifact bucket
+- Automatic history snapshots stay hidden in the default Agent view and in Attached, and appear only after switching to the System artifact view
+- Non-transition entries still render in the same stream as generic Spur/runtime events instead of disappearing
+- Runtime output entries label the source as `service <id>` or `sidecar <name>` when those details exist
 
 ### S2b: Conversation dialog (Claude only)
 
@@ -190,6 +253,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - While the conversation state is `working`, append a pending assistant bubble with `...` instead of showing a duplicate status label under the dialog
 - When the conversation state is `working`, the page header status also shows `working`
 - Messages truncated at 500 chars with "..."
+- Long unbroken tokens hard-wrap inside the bubble on mobile instead of widening the dialog
 - Auto-scrolls to bottom when a pending assistant bubble appears or a new assistant message arrives
 - Polls at same interval as session (4s)
 
@@ -200,6 +264,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Messages render the full send stack in FIFO order
 - Manual queued sends appear before future auto-step messages in the same stack
 - Each queued message is shown as its own stacked row with full wrapped text
+- Long unbroken queued tokens hard-wrap inside the row on mobile instead of widening the section
 - When `awaitingPrompt=true`, hint text appears: queued messages will send automatically when agent is ready
 - Hidden when queue is empty and not awaiting prompt
 
@@ -212,6 +277,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
+- `/` button sits with the send actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the message textarea
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
@@ -221,8 +287,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Ctrl/Cmd+Enter triggers the queued send path
 - `Queue` and `Send now` buttons are disabled when empty (no text and no attachments) or action in progress
 - "Not accepting input" message when session cannot receive input
-- Cmd+V paste with image on clipboard adds thumbnail preview below textarea
-- Drag-and-drop image file onto textarea adds thumbnail preview
+- The message textarea shows an inline image-picker button inside the textarea chrome
+- Cmd+V paste with image on clipboard adds a compact thumbnail preview inside the textarea
+- Drag-and-drop image file onto textarea adds a compact thumbnail preview inside the textarea
+- Picking an image from the file chooser adds the same compact inline thumbnail preview
 - Non-image files in paste/drop are silently ignored
 - Each thumbnail has a remove button visible on hover
 - Both `Queue` and `Send now` are enabled when attachments are present even with empty text
@@ -231,12 +299,28 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
+- PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
+- Canonical `github-pr` links render as `github pr` in the raw link list
+- Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
+- Canonical `github-pr` links render as `github pr` in the raw link list
 - Each link clickable, opens in new tab
+
+### S4b: Artifacts section
+
+- Shows when session has persisted artifacts
+- Default artifact view is `Agent`; `Attached` shows only user-added artifacts and `System` shows automatic artifacts
+- `Agent`, `Attached`, and `System` views never mix cards across categories
+- Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
+- Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- Clicking preview opens a full-screen artifact lightbox with close and download actions
+- Non-media artifacts render as file tiles with extension badge and download action only
+- Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
 
 ### S5: Runtime sidebar
 
 - Key-value pairs: Created, Last activity, Worktree, Agent runtime, Workspace
 - Worktree path in bordered box
+- Copy workspace access items show the final text, use an interactive copy icon button, and show a styled success/error toast after copy attempts
 - Error shown in red box when present
 
 ### S6: Terminal modal (dashboard + detail page)
@@ -248,11 +332,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back/forward navigation replays terminal open/close state from query
 - DirectTerminal component renders inside
 - Bottom control bar uses black terminal surface styling, not elevated gray
-- Control bar shows `...` shortcuts menu, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
+- Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that always includes `Slash`, `Esc`, and `Shift+Tab`; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that includes `Esc` and `Shift+Tab`; clicking an item sends the matching control sequence into the terminal and closes the menu
+- `Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
 - Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
-- Confirming terminal voice input submits immediately without an extra manual keypress: `claude` types the reviewed text and sends `Enter`, while `codex` sends the reviewed text as bracketed paste and then a separate `Enter`
+- Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
@@ -263,12 +348,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)
 - On touch devices, dragging the terminal content up/down scrolls in the same visual direction as a native terminal scrollback
-- After switching tabs away or locking/unlocking the screen, the terminal reconnects without reopening the modal or reloading the page
+- After switching tabs away or locking/unlocking the screen, the terminal stays connected when the websocket remains open
+- If the websocket closed while the tab was hidden, returning to the tab reconnects without reopening the modal or reloading the page
 - During reconnect, the header status changes from `Connected` to a reconnecting message and returns to `Connected` once the stream resumes
 
 ### S7: Display state override
 
 - When `session.state` is terminal (`error`, `killed`, or `stopped`), the header state badge shows that state verbatim even when the Claude JSONL conversation endpoint reports `working`
+- A manually paused session now persists `status=stopped` and renders the visible badge text `stopped`, not `paused`
 - When `session.state` is active (`working`, `waiting`, `needs_input`), a Claude conversation endpoint reporting `working` still overrides the badge to `working` (fast in-progress signal)
 
 ## Responsive
@@ -305,7 +392,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Each sidecar shows name and alive/offline status
 - Each sidecar shows an icon-only play button when offline and an icon-only stop button when alive
 - Terminal button visible only when sidecar is alive and session is attachable
-- `isolated-ui` sidecar shows an `Open` link when session links include `sidecar-ui`
+- Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - Clicking play/stop updates the sidecar row state without leaving the page

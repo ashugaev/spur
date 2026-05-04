@@ -335,6 +335,27 @@ export async function findCodexSessionId(
   return null;
 }
 
+export async function findLatestCodexSessionFile(options?: {
+  sessionRootDir?: string;
+  sessionRootDirs?: string[];
+}): Promise<string | null> {
+  let bestMatch: { filePath: string; mtimeMs: number } | null = null;
+  for (const sessionRootDir of resolveSessionRootDirs(options)) {
+    const files = await collectJsonlFiles(sessionRootDir).catch(() => []);
+    for (const filePath of files) {
+      try {
+        const fileStat = await stat(filePath);
+        if (!bestMatch || fileStat.mtimeMs > bestMatch.mtimeMs) {
+          bestMatch = { filePath, mtimeMs: fileStat.mtimeMs };
+        }
+      } catch {
+        // Ignore inaccessible files.
+      }
+    }
+  }
+  return bestMatch?.filePath ?? null;
+}
+
 function withCodexHome(command: string, codexHomePath: string | undefined): string {
   if (!codexHomePath) {
     return command;
@@ -349,18 +370,36 @@ function appendCodexArgs(command: string, codexArgs: string[] | undefined): stri
   return `${command} ${codexArgs.map((arg) => shellEscape(arg)).join(" ")}`;
 }
 
+function appendCodexImages(command: string, imagePaths: string[] | undefined): string {
+  if (!imagePaths || imagePaths.length === 0) {
+    return command;
+  }
+  return `${command} ${imagePaths.map((path) => `--image ${shellEscape(path)}`).join(" ")}`;
+}
+
 export function buildCodexPlan(
   prompt: string,
-  options?: { codexHomePath?: string; codexArgs?: string[] },
+  options?: { codexHomePath?: string; codexArgs?: string[]; startupImagePaths?: string[] },
 ): AgentLaunchPlan {
-  return {
-    launchCommand: withCodexHome(
+  const command = withCodexHome(
+    appendCodexImages(
       appendCodexArgs(
         `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
         options?.codexArgs,
       ),
-      options?.codexHomePath,
+      options?.startupImagePaths,
     ),
+    options?.codexHomePath,
+  );
+  if (options?.startupImagePaths?.length) {
+    return {
+      launchCommand: prompt.trim() ? `${command} ${shellEscape(prompt)}` : command,
+      initialMessage: "",
+      readyMarkers: ["OpenAI Codex", "›"],
+    };
+  }
+  return {
+    launchCommand: command,
     initialMessage: prompt,
     readyMarkers: ["OpenAI Codex", "›"],
   };
@@ -492,6 +531,8 @@ interface RolloutResponseItemPayload {
 interface RolloutEventMsgPayload {
   type?: string;
   message?: string;
+  turn_id?: string;
+  turnId?: string;
 }
 
 function extractUserTextFromLine(line: string): string | null {
@@ -570,4 +611,168 @@ export async function scanCodexRolloutForMessage(
     }
   }
   return { found: false, lastScannedFile };
+}
+
+export interface CodexRolloutStateRecord {
+  state: "waiting" | "needs_input";
+  timestamp: string;
+  timestampMs: number;
+  filePath: string;
+  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
+  turnId?: string;
+}
+
+function readRolloutTurnId(value: unknown): string | undefined {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function extractCodexRolloutStateLine(
+  line: string,
+): Omit<CodexRolloutStateRecord, "filePath"> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) {
+    return null;
+  }
+  const timestamp = typeof parsed["timestamp"] === "string" ? parsed["timestamp"] : null;
+  if (!timestamp) {
+    return null;
+  }
+  const timestampMs = Date.parse(timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    return null;
+  }
+  const type = parsed["type"];
+  const payload = parsed["payload"];
+  if (!isRecord(payload)) {
+    return null;
+  }
+
+  if (type === "event_msg") {
+    const payloadType = payload["type"];
+    if (payloadType === "task_complete") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "task_complete",
+          };
+    }
+    if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+            turnId,
+          }
+        : {
+            state: "waiting",
+            timestamp,
+            timestampMs,
+            reason: "turn_aborted",
+          };
+    }
+    if (payloadType === "input_required") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return turnId
+        ? {
+            state: "needs_input",
+            timestamp,
+            timestampMs,
+            reason: "input_required",
+            turnId,
+          }
+        : {
+            state: "needs_input",
+            timestamp,
+            timestampMs,
+            reason: "input_required",
+          };
+    }
+  }
+
+  const payloadType = payload["type"];
+  const payloadName = payload["name"];
+  if (
+    type === "response_item" &&
+    (payloadType === "function_call" || payloadType === "custom_tool_call") &&
+    payloadName === "request_user_input"
+  ) {
+    const turnId = readRolloutTurnId(parsed["turn_id"]) ?? readRolloutTurnId(payload["turn_id"]);
+    return turnId
+      ? {
+          state: "needs_input",
+          timestamp,
+          timestampMs,
+          reason: "request_user_input",
+          turnId,
+        }
+      : {
+          state: "needs_input",
+          timestamp,
+          timestampMs,
+          reason: "request_user_input",
+        };
+  }
+
+  return null;
+}
+
+export async function readCodexRolloutState(
+  sessionsDir: string,
+): Promise<CodexRolloutStateRecord | null> {
+  let files: string[];
+  try {
+    files = await collectJsonlFiles(sessionsDir);
+  } catch {
+    return null;
+  }
+  const filesWithTimes = await Promise.all(
+    files.map(async (filePath) => {
+      try {
+        const fileStat = await stat(filePath);
+        return { filePath, mtimeMs: fileStat.mtimeMs };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const existingFiles = filesWithTimes.filter(
+    (file): file is { filePath: string; mtimeMs: number } => file !== null,
+  );
+  for (const file of existingFiles.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
+    let content: string;
+    try {
+      content = await readFile(file.filePath, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = content.trim().split("\n").filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const state = extractCodexRolloutStateLine(lines[index] ?? "");
+      if (state) {
+        return {
+          ...state,
+          filePath: file.filePath,
+        };
+      }
+    }
+  }
+  return null;
 }

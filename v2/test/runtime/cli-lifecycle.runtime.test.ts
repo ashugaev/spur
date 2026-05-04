@@ -128,8 +128,10 @@ async function processExists(pid: number): Promise<boolean> {
 }
 
 async function runRestoreScenario(args: {
-  agent?: "claude" | "codex";
+  agent?: "claude" | "codex" | "cursor";
   configName: string;
+  stopMode?: "exit" | "pause";
+  expectRestorePrompt?: boolean;
 }): Promise<{
   context: RuntimeTestContext;
   restored: SessionView[];
@@ -158,9 +160,26 @@ async function runRestoreScenario(args: {
 
   const spawned = JSON.parse((await context.execCli(spawnArgs)).stdout) as SessionView;
   const expectedResumeId =
-    (args.agent ?? "claude") === "codex" ? `thread-${spawned.id}` : `fake-claude-${spawned.id}`;
+    (args.agent ?? "claude") === "codex"
+      ? `thread-${spawned.id}`
+      : (args.agent ?? "claude") === "cursor"
+        ? `chat-${spawned.id}`
+        : `fake-claude-${spawned.id}`;
+  const stopMode = args.stopMode ?? "exit";
+  const expectRestorePrompt = args.expectRestorePrompt ?? true;
+  const restorePrompt = "This session was restored after the agent exited.";
+  const readyMarker = (args.agent ?? "claude") === "codex" ? "›" : "❯";
 
-  await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  if (stopMode === "pause") {
+    const paused = JSON.parse(
+      (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
+    ) as SessionView;
+    expect(paused.status).toBe("stopped");
+    expect(paused.runtimeAlive).toBe(false);
+    expect(paused.workspaceExists).toBe(true);
+  } else {
+    await context.execCli(["--config", configPath, "send", spawned.id, "exit-now", "--json"]);
+  }
 
   const exited = await pollUntil(
     async () =>
@@ -169,33 +188,40 @@ async function runRestoreScenario(args: {
       ) as SessionView[],
     {
       timeoutMs: 15_000,
-      accept: (value) => value[0]?.state === "stopped" && value[0]?.runtimeAlive === true,
+      accept: (value) =>
+        value[0]?.state === "stopped" &&
+        value[0]?.runtimeAlive === (stopMode === "exit") &&
+        value[0]?.status === "stopped",
     },
   );
   expect(exited[0]?.workspaceExists).toBe(true);
 
-  const controllerSessionName = `${sessionPrefix}-ui`;
-  currentActiveContext().controllerSessionName = controllerSessionName;
-  await createTmuxSession({
-    sessionName: controllerSessionName,
-    cwd: context.rootDir,
-    command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
-    env: {
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    },
-  });
+  if (args.agent) {
+    await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
+  } else {
+    const controllerSessionName = `${sessionPrefix}-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
 
-  await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-    timeoutMs: 15_000,
-    accept: (value) => value.includes("Sessions"),
-  });
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Sessions"),
+    });
 
-  await sendKeysToTmux(controllerSessionName, "r");
-  await sleep(1_000);
-  await sendKeysToTmux(controllerSessionName, "q");
+    await sendKeysToTmux(controllerSessionName, "r");
+    await sleep(1_000);
+    await sendKeysToTmux(controllerSessionName, "q");
+  }
 
   const restored = await pollUntil(
     async () =>
@@ -210,7 +236,10 @@ async function runRestoreScenario(args: {
 
   const pane = await pollUntil(async () => captureTmuxPane(spawned.id), {
     timeoutMs: 15_000,
-    accept: (value) => value.includes("This session was restored after the agent exited."),
+    accept: (value) =>
+      expectRestorePrompt
+        ? value.includes(restorePrompt)
+        : value.includes(readyMarker) && !value.includes(restorePrompt),
   });
 
   const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
@@ -221,7 +250,11 @@ async function runRestoreScenario(args: {
   expect(log).toContain(`startup:resume:${expectedResumeId}:`);
   expect(restored[0]?.runtimeAlive).toBe(true);
   expect(existsSync(restored[0]?.worktreePath ?? "")).toBe(true);
-  expect(pane).toContain("Original task:");
+  if (expectRestorePrompt) {
+    expect(pane).toContain("Original task:");
+  } else {
+    expect(pane).not.toContain(restorePrompt);
+  }
 
   return { context, restored, spawned, pane };
 }
@@ -893,7 +926,7 @@ projects:
     expect(stdout.trim()).toBe("release branch");
   });
 
-  it.each(["claude", "codex"] as const)(
+  it.each(["claude", "codex", "cursor"] as const)(
     "uses %s spawn preflight to derive the worktree branch through the built CLI",
     async (agent) => {
       const port = await findFreePort();
@@ -1393,7 +1426,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", spawned.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.runtimeAlive).toBe(false);
     expect(paused.workspaceExists).toBe(true);
     expect(existsSync(spawned.worktreePath)).toBe(true);
@@ -1407,7 +1440,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -1520,7 +1553,7 @@ projects:
 
     await pollUntil(async () => captureTmuxPane(controllerSessionName), {
       timeoutMs: 15_000,
-      accept: (value) => value.includes(`Paused ${spawned.id}.`),
+      accept: (value) => value.includes(`Stopped ${spawned.id}.`),
     });
 
     const pausedList = await pollUntil(
@@ -1532,7 +1565,7 @@ projects:
         timeoutMs: 15_000,
         accept: (value) =>
           value[0]?.id === spawned.id &&
-          value[0]?.status === "paused" &&
+          value[0]?.status === "stopped" &&
           value[0]?.state === "stopped" &&
           value[0]?.runtimeAlive === false &&
           value[0]?.workspaceExists === true,
@@ -1651,7 +1684,7 @@ projects:
       "--link",
       "tracker=https://tracker.example.com/TASK-9",
       "--link",
-      "pr=https://github.com/org/repo/pull/9",
+      "github-pr=https://github.com/org/repo/pull/9",
     ]);
 
     const listed = await pollUntil(
@@ -1680,17 +1713,17 @@ projects:
       title: "Investigate status bar links",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
-        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
     expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("pr ##9");
+    expect(statusRight).toContain("github pr ##9");
     expect(statusRight).toContain(
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
     expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
+      "#[hyperlink=https://github.com/org/repo/pull/9]github pr ##9#[hyperlink=]",
     );
     expect(mouseBinding).toContain("MouseUp1StatusRight");
     expect(mouseBinding).toContain("open-link.js");
@@ -1698,6 +1731,119 @@ projects:
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
+  });
+
+  it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-artifacts-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "artifacts.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "artifact runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const artifactDir = join(context.dataDir, "session-artifacts", spawned.id);
+    const artifactPath = join(artifactDir, "capture.png");
+    await writeFile(artifactPath, "artifact-bytes", "utf8");
+
+    const sessionWithArtifact = await pollUntil(
+      async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.artifacts?.[0]?.id === "capture.png",
+      },
+    );
+    expect(sessionWithArtifact.artifacts?.[0]).toMatchObject({
+      id: "capture.png",
+      kind: "image",
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/capture.png`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-disposition")).toContain("inline");
+    await expect(response.text()).resolves.toBe("artifact-bytes");
+
+    await context.execCli(["--config", configPath, "complete", spawned.id, "--json"]);
+    expect(existsSync(artifactDir)).toBe(false);
+
+    const missing = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/capture.png`,
+    );
+    expect(missing.status).toBe(404);
+  });
+
+  it("serves artifact files whose names require URL encoding", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-artifacts-encoded-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "artifacts-encoded.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "artifact encoded runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const artifactDir = join(context.dataDir, "session-artifacts", spawned.id);
+    await writeFile(join(artifactDir, "my screenshot.png"), "artifact-bytes", "utf8");
+
+    const sessionWithArtifact = await pollUntil(
+      async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
+      {
+        timeoutMs: 15_000,
+        accept: (value) => value.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
+      },
+    );
+    expect(
+      sessionWithArtifact.artifacts?.some((artifact) => artifact.id === "my screenshot.png"),
+    ).toBe(true);
+
+    const response = await fetch(
+      `http://127.0.0.1:${daemon.info.port}/sessions/${spawned.id}/artifacts/my%20screenshot.png`,
+    );
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe("artifact-bytes");
   });
 
   it("runs a session-bound service and opens the live session log view from the TTY list", async () => {
@@ -1813,28 +1959,18 @@ projects:
     expect(detail.port).toBe(3000);
     expect(detail.state).toBe("running");
 
-    const helperLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await execFileAsync(helperPath, ["service", "logs", "--json"], {
-              cwd: spawned.worktreePath,
-              env: {
-                ...context.env,
-                SPUR_SESSION: spawned.id,
-              },
-            })
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "service.output" && entry.message === "SERVICE_BOOT",
-          ),
-      },
-    );
-    expect(helperLogs.some((entry) => entry.event === "service.output")).toBe(true);
+    const helperLogs = JSON.parse(
+      (
+        await execFileAsync(helperPath, ["service", "logs", "--json"], {
+          cwd: spawned.worktreePath,
+          env: {
+            ...context.env,
+            SPUR_SESSION: spawned.id,
+          },
+        })
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(helperLogs).toEqual([]);
 
     const controllerSessionName = `${sessionPrefix}-service-ui`;
     currentActiveContext().controllerSessionName = controllerSessionName;
@@ -1864,10 +2000,12 @@ projects:
         value.includes(`Logs ${spawned.id}`) &&
         value.includes("session.spawn.completed") &&
         value.includes("service.run.completed") &&
-        value.includes("service runtime prompt"),
+        value.includes("(runtime log capture unavailable)"),
     });
     expect(logPane).toContain("service.run.completed");
     expect(logPane).toContain("Agent Output");
+    expect(logPane).toContain("(runtime log capture unavailable)");
+    expect(logPane).not.toContain("SERVICE_BOOT");
 
     await sendKeysToTmux(controllerSessionName, "C-g");
 
@@ -1878,7 +2016,7 @@ projects:
     expect(detachedPane).toContain("l logs");
   });
 
-  it("collects sidecar output into the session log and exposes it through service logs", async () => {
+  it("returns an empty sidecar log result when runtime log capture is disabled", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-sidecar-logs-${port}`;
@@ -1930,38 +2068,21 @@ projects:
         .stdout,
     ) as SessionView;
 
-    const sidecarLogs = await pollUntil(
-      async () =>
-        JSON.parse(
-          (
-            await context.execCli([
-              "--config",
-              configPath,
-              "service",
-              "logs",
-              spawned.id,
-              "browser",
-              "--sidecar",
-              "--json",
-            ])
-          ).stdout,
-        ) as SpurLogEntry[],
-      {
-        timeoutMs: 15_000,
-        accept: (value) =>
-          value.some(
-            (entry) => entry.event === "sidecar.output" && entry.message === "BROWSER_READY",
-          ),
-      },
-    );
-    expect(sidecarLogs).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          event: "sidecar.output",
-          message: "BROWSER_READY",
-        }),
-      ]),
-    );
+    const sidecarLogs = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "service",
+          "logs",
+          spawned.id,
+          "browser",
+          "--sidecar",
+          "--json",
+        ])
+      ).stdout,
+    ) as SpurLogEntry[];
+    expect(sidecarLogs).toEqual([]);
   });
 
   it("surfaces service command errors through the built CLI", async () => {
@@ -2340,6 +2461,7 @@ projects:
   it.each([
     { agent: "claude", expectPlanFlag: true },
     { agent: "codex", expectPlanFlag: false },
+    { agent: "cursor", expectPlanFlag: true },
   ] as const)(
     "accepts --plan for $agent and applies startup behavior only where supported",
     async (row) => {
@@ -2381,8 +2503,12 @@ projects:
         accept: (value) => value.includes("startup:launch::"),
       });
       if (row.expectPlanFlag) {
-        expect(log).toContain("--permission-mode");
         expect(log).toContain("plan");
+        if (row.agent === "claude") {
+          expect(log).toContain("--permission-mode");
+        } else {
+          expect(log).toContain("--plan");
+        }
       } else {
         expect(log).not.toContain("--permission-mode");
       }
@@ -2799,9 +2925,27 @@ projects:
     expect(result.spawned.agent).toBe("claude");
   });
 
+  it("restores a manually stopped session in place without sending a restore prompt", async () => {
+    const result = await runRestoreScenario({
+      configName: "restore-paused.yaml",
+      stopMode: "pause",
+      expectRestorePrompt: false,
+    });
+    expect(result.spawned.agent).toBe("claude");
+    expect(result.pane).not.toContain("This session was restored after the agent exited.");
+  });
+
   it("restores a codex session through the native resume command", async () => {
     const result = await runRestoreScenario({ agent: "codex", configName: "restore-codex.yaml" });
     expect(result.spawned.agent).toBe("codex");
+  });
+
+  it("restores a cursor session through the native resume command", async () => {
+    const result = await runRestoreScenario({
+      agent: "cursor",
+      configName: "restore-cursor.yaml",
+    });
+    expect(result.spawned.agent).toBe("cursor");
   });
 
   it("completes the calling live session after a session-bound respawn succeeds", async () => {
@@ -3055,8 +3199,9 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
 `,
     );
     const daemon = await context.startDaemon(configPath);
@@ -3601,9 +3746,10 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
-      autoStart: true
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
 `,
     );
     const daemon = await context.startDaemon(configPath);
@@ -3831,9 +3977,10 @@ projects:
     sessionPrefix: ${sessionPrefix}
     symlinks:
       - .env
-    devServer:
-      command: "tail -f /dev/null"
-      autoStart: true
+    sidecars:
+      dev:
+        command: "tail -f /dev/null"
+        autoStart: true
 `,
     );
     const daemon = await context.startDaemon(configPath);
@@ -3904,6 +4051,7 @@ projects:
     path: ${context.repoDir}
     defaultBranch: main
     sessionPrefix: ${sessionPrefix}
+    worktree: false
     symlinks:
       - .env
     sidecars:
@@ -3943,7 +4091,7 @@ projects:
     const paused = JSON.parse(
       (await context.execCli(["--config", configPath, "pause", first.id, "--json"])).stdout,
     ) as SessionView;
-    expect(paused.status).toBe("paused");
+    expect(paused.status).toBe("stopped");
     expect(paused.workspaceExists).toBe(true);
 
     const devSessionGone = !(await tmuxSessionExists(devSessionName));

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
   SLOT_TOOL_NAME,
+  AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
@@ -37,8 +38,20 @@ describe("session slots", () => {
       title: "Current task",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-2" },
-        { label: "pr", url: "https://github.com/org/repo/pull/42" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/42" },
       ],
+    });
+  });
+
+  it("normalizes legacy PR aliases to github-pr", () => {
+    expect(
+      normalizeSlotsUpdate({
+        links: [{ label: "github_pr", url: "https://github.com/org/repo/pull/9" }],
+      }),
+    ).toEqual({
+      clearTitle: false,
+      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/9" }],
+      unlinkLabels: [],
     });
   });
 
@@ -73,6 +86,7 @@ describe("session slots", () => {
     expect(prompt).toContain(
       "Update the session title and related links as soon as you know them.",
     );
+    expect(prompt).toContain("--link github-pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
@@ -138,5 +152,53 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
     expect(readFileSync(captureFile, "utf8")).toBe(
       ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
     );
+  });
+
+  it("skips hook-state helper scripts for cursor sessions", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+      agent: "cursor",
+    });
+
+    expect(() => readFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), "utf8")).toThrow();
+  });
+
+  it("maps structured question metadata to needs_input in the agent state helper", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-4",
+      configPath: "/tmp/spur.yaml",
+    });
+
+    execFileSync(join(toolDir, "spur-agent-state"), {
+      env: { ...process.env },
+      input: JSON.stringify({
+        hook_event_name: "UserPromptSubmit",
+        turn_id: "api-4-7",
+        questions: [{ header: "Plan", question: "Which tier should I run next?" }],
+      }),
+    });
+
+    const state = JSON.parse(
+      readFileSync(join(dataDir, "session-agent-state", "api-4.json"), "utf8"),
+    ) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+
+    expect(state).toMatchObject({
+      state: "needs_input",
+      hookEvent: "UserPromptSubmit",
+      turnId: "api-4-7",
+    });
   });
 });

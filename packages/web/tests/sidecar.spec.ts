@@ -161,13 +161,13 @@ test.describe("SC1: Sidecar terminal buttons", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}--my-sidecar`));
   });
 
-  test("isolated-ui sidecar with sidecar-ui link shows Open link", async ({ page }) => {
+  test("sidecar with matching slot link label shows Open link", async ({ page }) => {
     const session = makeWorkingSession({
       id: "sc-open-1",
       sidecars: [{ name: "isolated-ui", alive: true }],
       slots: {
         title: "Session with sidecar UI",
-        links: [{ label: "sidecar-ui", url: "http://example.com:5601" }],
+        links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
       },
     });
     await mockSessionDetail(page, session);
@@ -189,7 +189,7 @@ test.describe("SC1: Sidecar terminal buttons", () => {
       sidecars: [{ name: "isolated-ui", alive: true }],
       slots: {
         title: "Session with ordered sidecar actions",
-        links: [{ label: "sidecar-ui", url: "http://example.com:5601" }],
+        links: [{ label: "isolated-ui", url: "http://example.com:5601" }],
       },
     });
     await mockSessionDetail(page, session);
