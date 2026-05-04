@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord, SessionSlots } from "../../src/types.js";
+import type { SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
 const applySlotsUpdateMock = vi.fn();
+const readCurrentBranchMock = vi.fn();
 const syncTmuxStatusMock = vi.fn();
 const tmuxSessionExistsMock = vi.fn();
 const isProcessRunningInTmuxMock = vi.fn();
@@ -13,6 +14,9 @@ const getTmuxSessionActivityMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const agentProcessMatchersMock = vi.fn();
+const agentStateStrategyMock = vi.fn();
+const agentWaitsForSubmitAckMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -25,6 +29,10 @@ vi.mock("../../src/agents/index.js", () => ({
   buildAgentRestorePlan: vi.fn(),
   buildAgentResumePlan: vi.fn(),
   findAgentSessionId: vi.fn(),
+  agentProcessMatchers: agentProcessMatchersMock,
+  agentSessionConfig: vi.fn(() => ({})),
+  agentStateStrategy: agentStateStrategyMock,
+  agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
   parseAgentName: vi.fn((a: string) => a),
   setupAgentHooks: vi.fn(),
 }));
@@ -69,11 +77,13 @@ vi.mock("../../src/runtime-tmux.js", () => ({
   sidecarTmuxAlive: vi.fn(),
   sidecarTmuxSession: vi.fn((id: string, name: string) => `${id}--${name}`),
   killSidecarTmux: vi.fn(),
+  captureTmuxPane: vi.fn(),
   getTmuxSessionActivity: getTmuxSessionActivityMock,
   isProcessRunningInTmux: isProcessRunningInTmuxMock,
   killTmuxSession: vi.fn(),
   setTmuxSocketName: setTmuxSocketNameMock,
   sendMessageToTmux: vi.fn(),
+  sendSubmitKeyToTmux: vi.fn(),
   syncTmuxStatus: syncTmuxStatusMock,
   tmuxPaneDead: vi.fn(),
   tmuxSessionExists: tmuxSessionExistsMock,
@@ -84,6 +94,19 @@ vi.mock("../../src/session-slots.js", () => ({
   SLOT_TOOL_NAME: "spur-slots",
   applySlotsUpdate: applySlotsUpdateMock,
   ensureSessionSlotTool: vi.fn(),
+  normalizeSlotsUpdate: vi.fn(
+    (request: {
+      title?: string;
+      clearTitle?: boolean;
+      links?: Array<{ label: string; url: string }>;
+      unlinkLabels?: string[];
+    }) => ({
+      ...(request.title !== undefined ? { title: request.title } : {}),
+      clearTitle: request.clearTitle === true,
+      links: request.links ?? [],
+      unlinkLabels: request.unlinkLabels ?? [],
+    }),
+  ),
   removeSessionSlotTool: vi.fn(),
   withSessionSlotInstructions: vi.fn(),
 }));
@@ -91,7 +114,7 @@ vi.mock("../../src/workspace.js", () => ({
   createWorktree: vi.fn(),
   hasUncommittedChanges: vi.fn(),
   hasUnpushedCommits: vi.fn(),
-  readCurrentBranch: vi.fn(),
+  readCurrentBranch: readCurrentBranchMock,
   removeWorktree: vi.fn(),
   resolveRepoPathFromWorktree: vi.fn(),
   workspaceExists: vi.fn().mockReturnValue(true),
@@ -182,6 +205,9 @@ describe("PR auto-detect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
+    agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
+    agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -193,10 +219,15 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
-    applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    } satisfies SessionSlots);
+    ghMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          number: 42,
+          title: "Keep PR binding native",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      ]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -211,22 +242,61 @@ describe("PR auto-detect", () => {
       "--head",
       session.branch,
       "--json",
-      "url",
+      "number,title,url",
       "--limit",
       "1",
     );
-    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+    expect(writeSessionMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        pr: {
+          number: 42,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/42",
+        },
+      }),
+    );
+    expect(syncTmuxStatusMock).toHaveBeenCalledWith("api-a1b2", {
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
     });
-    expect(writeSessionMock).toHaveBeenCalled();
-    expect(syncTmuxStatusMock).toHaveBeenCalled();
 
     service.dispose();
   });
 
-  it("skips check when session already has a pr slot", async () => {
+  it("prefers the live worktree branch for initial PR discovery", async () => {
+    const session = makeSession({ branch: "stale-session-branch" });
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+    ghMock.mockResolvedValue(JSON.stringify([]));
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledWith(
+      session.worktreePath,
+      "pr",
+      "list",
+      "--head",
+      "feature/live",
+      "--json",
+      "number,title,url",
+      "--limit",
+      "1",
+    );
+
+    service.dispose();
+  });
+
+  it("skips check when session already has a PR binding", async () => {
     const session = makeSession({
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/1" }] },
+      pr: {
+        number: 1,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/1",
+      },
     });
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
@@ -261,10 +331,9 @@ describe("PR auto-detect", () => {
     listSessionsMock.mockReturnValue([session]);
     readSessionMock.mockReturnValue({ ...session });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
-    applySlotsUpdateMock.mockReturnValue({
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    } satisfies SessionSlots);
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
@@ -332,35 +401,35 @@ describe("PR auto-detect", () => {
 
   it("resets waiting backoff on state change", async () => {
     const session = makeSession();
-    listSessionsMock.mockReturnValue([session]);
+    listSessionsMock.mockReturnValue([]);
     readSessionMock.mockReturnValue({ ...session });
-    setupEnrich("waiting");
     ghMock.mockResolvedValue(JSON.stringify([]));
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
-
-    // Exhaust the waiting checks
     await vi.advanceTimersByTimeAsync(100);
-    for (let i = ghMock.mock.calls.length; i < PR_WAITING_LIMIT; i++) {
-      await vi.advanceTimersByTimeAsync(35_000);
-    }
-    const callsAfterBackoff = ghMock.mock.calls.length;
-
-    // Confirm backoff is in effect
-    await vi.advanceTimersByTimeAsync(35_000);
-    expect(ghMock).toHaveBeenCalledTimes(callsAfterBackoff);
-
-    // State changes to working → resets backoff
-    readClaudeJsonlStateMock.mockResolvedValue({
-      state: "working",
-      reader: { tailRecords: [] },
+    (
+      service as unknown as {
+        prCheckTrackers: Map<
+          string,
+          { waitingChecks: number; lastState: string | null; lastCheckAt: number; found: boolean }
+        >;
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).prCheckTrackers.set(session.id, {
+      waitingChecks: PR_WAITING_LIMIT,
+      lastState: "waiting",
+      lastCheckAt: Date.now(),
+      found: false,
     });
-    // Advance past throttle so next poll can fire
-    await vi.advanceTimersByTimeAsync(35_000);
-    const callsAfterReset = ghMock.mock.calls.length;
-    // Should have made at least one new call after backoff was lifted
-    expect(callsAfterReset).toBeGreaterThan(callsAfterBackoff);
+
+    (
+      service as unknown as {
+        checkPrForSession(session: SessionRecord, state: string): void;
+      }
+    ).checkPrForSession(session, "working");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ghMock).toHaveBeenCalledTimes(1);
 
     service.dispose();
   });
@@ -390,20 +459,25 @@ describe("PR auto-detect", () => {
   it("does not overwrite a pr slot that was set between check and write", async () => {
     const session = makeSession();
     listSessionsMock.mockReturnValue([session]);
-    // On re-read, session now has a PR slot
+    // On re-read, session now has a PR binding.
     readSessionMock.mockReturnValue({
       ...session,
-      slots: { links: [{ label: "pr", url: "https://github.com/org/repo/pull/99" }] },
+      pr: {
+        number: 99,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/99",
+      },
     });
     setupEnrich();
-    ghMock.mockResolvedValue(JSON.stringify([{ url: "https://github.com/org/repo/pull/42" }]));
+    ghMock.mockResolvedValue(
+      JSON.stringify([{ number: 42, title: "t", url: "https://github.com/org/repo/pull/42" }]),
+    );
 
     const { SessionService } = await loadModule();
     const service = new SessionService();
     await vi.advanceTimersByTimeAsync(100);
 
-    // Should NOT call applySlotsUpdate because re-read shows slot exists
-    expect(applySlotsUpdateMock).not.toHaveBeenCalled();
+    expect(writeSessionMock).not.toHaveBeenCalled();
 
     service.dispose();
   });

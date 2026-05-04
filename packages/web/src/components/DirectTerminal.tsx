@@ -1,15 +1,17 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
-import { cn } from "@/lib/cn";
-import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
 import { TERMINAL_THEME } from "@/design/colors";
+import { cn } from "@/lib/cn";
+import { getAgentHotkeys } from "@/lib/agent-hotkeys";
+import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
 
 interface DirectTerminalProps {
   sessionId: string;
@@ -32,7 +34,6 @@ interface DirectTerminalConfig {
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
 const RECONNECT_DELAY_MS = 1_000;
-const VISIBILITY_REFRESH_AFTER_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
@@ -54,7 +55,10 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
 }
 
-function buildSubmittedTextPayloads(text: string): string[] {
+function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
+  if (!agentUsesBracketedPaste(agent)) {
+    return [`${text}\r`];
+  }
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -210,12 +214,12 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(text)) {
+      for (const payload of buildSubmittedTextPayloads(agent, text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [draftHistory, sendWithAck],
+    [agent, draftHistory, sendWithAck],
   );
 
   const sendHotkey = useCallback(
@@ -223,7 +227,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -235,7 +239,23 @@ export function DirectTerminal({
         );
       }
     },
-    [sendTerminalInput, sendWithAck],
+    [agent, sendTerminalInput, sendWithAck],
+  );
+
+  const submitSlash = useCallback(
+    async (text: string) => {
+      try {
+        setSubmitError(null);
+        for (const payload of buildSubmittedTextPayloads(agent, text)) {
+          await sendWithAck(payload);
+        }
+      } catch (slashError) {
+        setSubmitError(
+          slashError instanceof Error ? slashError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [agent, sendWithAck],
   );
 
   useEffect(() => {
@@ -269,7 +289,6 @@ export function DirectTerminal({
     let resizeHandler: (() => void) | null = null;
     let touchCleanup: (() => void) | null = null;
     let reconnectTimer: number | null = null;
-    let hiddenAt: number | null = null;
     let websocket: WebSocket | null = null;
     let closingForUnmount = false;
 
@@ -391,20 +410,11 @@ export function DirectTerminal({
           }, RECONNECT_DELAY_MS);
         };
 
-        const connect = async (force = false) => {
+        const connect = async () => {
           if (!mounted || !terminal) return;
           const readyState = websocket?.readyState;
-          if (!force && (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)) {
-            return;
-          }
+          if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
           clearReconnectTimer();
-          if (force && websocket && websocket.readyState < WebSocket.CLOSING) {
-            websocket.onopen = null;
-            websocket.onmessage = null;
-            websocket.onerror = null;
-            websocket.onclose = null;
-            websocket.close();
-          }
 
           setStatus((current) =>
             current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
@@ -492,18 +502,7 @@ export function DirectTerminal({
 
         const maybeRefreshConnection = () => {
           if (document.visibilityState === "hidden") return;
-          const wasHiddenLongEnough =
-            hiddenAt !== null && Date.now() - hiddenAt >= VISIBILITY_REFRESH_AFTER_MS;
-          hiddenAt = null;
-
-          if (wasHiddenLongEnough) {
-            connect(true);
-            return;
-          }
-
-          if (!websocket || websocket.readyState === WebSocket.CLOSED) {
-            connect();
-          }
+          connect();
         };
 
         inputDisposable = terminal.onData((data) => {
@@ -518,25 +517,17 @@ export function DirectTerminal({
           }
         });
 
-        const handleVisibilityChange = () => {
-          if (document.visibilityState === "hidden") {
-            hiddenAt = Date.now();
-            return;
-          }
-          maybeRefreshConnection();
-        };
-
         window.addEventListener("resize", resizeHandler);
         window.addEventListener("focus", maybeRefreshConnection);
         window.addEventListener("online", maybeRefreshConnection);
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", maybeRefreshConnection);
 
         touchCleanup = () => {
           touchTarget.removeEventListener("touchstart", onTouchStart);
           touchTarget.removeEventListener("touchmove", onTouchMove);
           window.removeEventListener("focus", maybeRefreshConnection);
           window.removeEventListener("online", maybeRefreshConnection);
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
+          document.removeEventListener("visibilitychange", maybeRefreshConnection);
         };
       })
       .catch(() => {
@@ -652,7 +643,7 @@ export function DirectTerminal({
                 role="menu"
               >
                 <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                  {getAgentDisplayName(agent)}
                 </div>
                 {hotkeys.map((hotkey) => (
                   <button
@@ -683,6 +674,11 @@ export function DirectTerminal({
               </div>
             ) : null}
           </div>
+          <SlashSuggestions
+            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
+            onSelect={(entry) => void submitSlash(entry.insertText)}
+          />
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}

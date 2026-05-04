@@ -4,7 +4,6 @@ This file is only for the current repository shape:
 
 - `v2/` contains Spur's daemon and CLI.
 - `packages/web/` contains the optional UI over Spur's API.
-- No AO/v1 backend, plugin registry, or mobile package remains in-tree.
 
 For the actual Spur command/config reference, use [v2/README.md](v2/README.md).
 
@@ -105,5 +104,3 @@ When updating docs, scripts, or workflows outside `v2/`, keep them limited to:
 - developing `v2/`
 - running the optional `packages/web/` UI
 - validating or dogfooding this repo
-
-Do not add back `ao` configs, parallel examples, plugin docs, or alternate product surfaces.

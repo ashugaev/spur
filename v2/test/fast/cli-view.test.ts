@@ -25,6 +25,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    artifacts: [],
     services: [],
     sidecars: [],
     ...overrides,
@@ -78,14 +79,14 @@ describe("cli-view.describeSession", () => {
       session({
         slots: {
           links: [
-            { label: "pr", url: "https://github.com/acme/api/pull/42" },
+            { label: "github-pr", url: "https://github.com/acme/api/pull/42" },
             { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
           ],
         },
       }),
     );
 
-    expect(output).toContain("pr #42");
+    expect(output).toContain("github pr #42");
     expect(output).toContain("tracker API-7");
     expect(output).not.toContain("https://github.com/acme/api/pull/42");
     expect(output).not.toContain("https://tracker.example.com/browse/API-7");
@@ -93,10 +94,13 @@ describe("cli-view.describeSession", () => {
 });
 
 describe("session-link-display", () => {
-  it("formats pr and tracker links as compact ids", () => {
+  it("formats github-pr and tracker links as compact ids", () => {
     expect(
-      formatSessionLinkDisplay({ label: "pr", url: "https://github.com/acme/api/pull/42" }).text,
-    ).toBe("pr #42");
+      formatSessionLinkDisplay({
+        label: "github-pr",
+        url: "https://github.com/acme/api/pull/42",
+      }).text,
+    ).toBe("github pr #42");
     expect(
       formatSessionLinkDisplay({
         label: "tracker",
