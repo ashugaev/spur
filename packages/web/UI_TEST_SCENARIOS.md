@@ -177,7 +177,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - Successful Spawn closes the modal as soon as the daemon acknowledges the new `spawning` session shell, before background setup finishes
-- Successful Spawn immediately inserts exactly one new `spawning` session shell into the dashboard without waiting for worktree/tmux/prompt delivery
+- Successful Spawn keeps the current dashboard project filter and `?project=` URL unchanged
+- Successful Spawn immediately inserts exactly one new `spawning` session shell only when the dashboard is showing `All Projects` or the spawned project already matches the current filter
+- When the spawned project does not match the current dashboard filter, the current list stays unchanged and the new placeholder shell stays hidden until filters change
 - Rapid repeat submit while the first spawn request is in flight still sends only one spawn request and creates only one new session shell
 - Spawn without a prompt still closes on ack and creates the session shell without waiting for preflight
 - After a successful ack, reloading the dashboard while the session is still `spawning` keeps the same placeholder shell visible
@@ -187,7 +189,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When an explicit branch is already occupied, the placeholder shell transitions to a single failed session without creating a duplicate
 - If the spawn ack fails because the daemon/backend API is unavailable, the modal stays open and preserves the typed fields
 - After an ack failure, clicking `Spawn` again retries from the same open modal with the typed content still intact
-- All new fields reset on successful spawn ack
+- All new fields except project reset on successful spawn ack, and reopening remembers the last selected spawn project
 
 ### D7b: Silent branch preflight
 

@@ -205,10 +205,10 @@ function buildSpawnOverrides(
 function upsertSession(
   sessions: SpurSessionView[],
   nextSession: SpurSessionView,
-  activeProjectId: string,
+  currentFilterProjectId: string,
 ): SpurSessionView[] {
   const filtered = sessions.filter((session) => session.id !== nextSession.id);
-  if (activeProjectId && nextSession.project !== activeProjectId) {
+  if (currentFilterProjectId && nextSession.project !== currentFilterProjectId) {
     return filtered;
   }
   return [nextSession, ...filtered];
@@ -534,7 +534,7 @@ export function Dashboard() {
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
         const currentSessions = current?.sessions ?? [];
         return {
-          sessions: upsertSession(currentSessions, session, nextProjectId),
+          sessions: upsertSession(currentSessions, session, projectId),
           projects: current?.projects ?? [],
         };
       });
@@ -547,7 +547,6 @@ export function Dashboard() {
       setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      syncProjectFilter(nextProjectId);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
