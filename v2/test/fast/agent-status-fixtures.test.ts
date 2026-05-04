@@ -177,11 +177,20 @@ describe("Claude JSONL fixture classification", () => {
     // spur-36e9: ToolSearch result references AskUserQuestion schema but the
     // session itself never invokes AskUserQuestion → not a real question.
     [
-      "needs-input-ask-user-spur-36e9-tail.jsonl",
+      "working-tool-search-ask-user-ref-spur-36e9-tail.jsonl",
       "ToolSearch reference to AskUserQuestion schema is not a real question → working",
       Date.parse("2026-04-19T09:45:10.500Z"),
       Date.parse("2026-04-19T09:45:10.348Z"),
       "working",
+    ],
+    // bg-bash intelas-web: last tool_use at 2026-04-13T11:19:48.036Z. With stale
+    // mtime past the 60s window and no AskUserQuestion, it must classify as waiting.
+    [
+      "working-bg-bash-intelas-web-tail.jsonl",
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-13T11:21:00.000Z"),
+      Date.parse("2026-04-13T11:19:48.036Z"),
+      "waiting",
     ],
   ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
     const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");
