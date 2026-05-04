@@ -194,10 +194,12 @@ describe("SessionDetail voice input", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("Fix the flaky tests before release")).toBeInTheDocument();
@@ -210,6 +212,49 @@ describe("SessionDetail voice input", () => {
       expect.objectContaining({ method: "POST" }),
     );
     expect(fetchMock).not.toHaveBeenCalledWith("/api/sessions/api-a1/send", expect.anything());
+  });
+
+  it("shows a live recording timer while voice capture is active", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("00:00")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Stop and save voice recording" }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    expect(screen.getByText("00:02")).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it("shows an inline error when stopping recording yields no audio", async () => {
@@ -239,10 +284,12 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(() => {
       expect(
@@ -288,10 +335,12 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(() => {
       expect(screen.getByDisplayValue("Mobile PWA voice still works")).toBeInTheDocument();
@@ -338,10 +387,12 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(
       () => {
@@ -390,9 +441,11 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(
       () => {
@@ -434,9 +487,11 @@ describe("SessionDetail voice input", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Stop and save voice recording" }));
 
     await waitFor(
       () => {

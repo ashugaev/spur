@@ -9,7 +9,7 @@ import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceRecordingStrip, VoiceStatusHint, isVoiceActive } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -846,17 +846,31 @@ export function Dashboard() {
                   placeholder="Prompt for the new session..."
                   textareaRef={spawnPromptRef}
                   value={spawnPrompt}
-                  voice={voice}
+                  voice={isVoiceActive(voice) ? undefined : voice}
                 />
+                {isVoiceActive(voice) ? (
+                  <VoiceRecordingStrip
+                    actions={[
+                      { kind: "cancel", onClick: voice.cancelRecording },
+                      { kind: "stop", onClick: () => voice.stopRecording() },
+                    ]}
+                    className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+                    voice={voice}
+                  />
+                ) : null}
                 {voice.voiceError ? (
                   <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
                   </div>
                 ) : null}
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                    <VoiceStatusHint voice={voice} />
-                  </span>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {voice.voiceBusy && !voice.recording ? (
+                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                        <VoiceStatusHint voice={voice} />
+                      </span>
+                    ) : null}
+                  </div>
                   <div className="flex items-center gap-2">
                     <SlashSuggestions
                       endpoint={
