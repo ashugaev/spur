@@ -44,7 +44,7 @@ describe("SessionLinkBadge", () => {
     expect(usePrInfoMock).toHaveBeenCalledWith(undefined);
   });
 
-  it("renders compact PR indicators from reviewDecision", () => {
+  it("renders compact PR indicators from reviewDecision when CI passes", () => {
     usePrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: "approved",
@@ -66,27 +66,91 @@ describe("SessionLinkBadge", () => {
     expect(screen.getByTitle("1 unresolved of 3 threads")).toBeInTheDocument();
   });
 
-  it("renders a gray secondary check when CI passed without approval requirement", () => {
+  it("renders changes-requested composite when CI passes and review requests changes", () => {
     usePrInfoMock.mockReturnValue({
       state: "open",
-      reviewDecision: null,
+      reviewDecision: "changes_requested",
       ciStatus: "success",
-      canMerge: true,
+      canMerge: false,
       totalThreads: 0,
       unresolvedThreads: 0,
     });
 
     render(
       <SessionLinkBadge
-        link={{ label: "pr", url: "https://github.com/org/repo/pull/77" }}
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/55" }}
         variant="row"
       />,
     );
 
-    expect(screen.getByLabelText("No approval required")).toBeInTheDocument();
+    expect(screen.getByLabelText("Changes requested")).toBeInTheDocument();
   });
 
-  it("renders a yellow secondary check when approval is still required", () => {
+  it("suppresses review badge when CI is failing", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "failure",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/60" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
+  });
+
+  it("suppresses review badge when CI is pending", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: "pending",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/61" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
+  });
+
+  it("suppresses review badge and CI dot when CI status is null", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: "approved",
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    const { container } = render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/62" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
+    expect(container.querySelectorAll("svg")).toHaveLength(1); // only the GitHub icon
+  });
+
+  it("renders CI passing dot when CI passes but review_required", () => {
     usePrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: "review_required",
@@ -98,12 +162,36 @@ describe("SessionLinkBadge", () => {
 
     render(
       <SessionLinkBadge
-        link={{ label: "pr", url: "https://github.com/org/repo/pull/78" }}
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/63" }}
         variant="row"
       />,
     );
 
-    expect(screen.getByLabelText("Approval required")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
+  });
+
+  it("renders CI passing dot when CI passes but reviewDecision is null", () => {
+    usePrInfoMock.mockReturnValue({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: true,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    });
+
+    render(
+      <SessionLinkBadge
+        link={{ label: "pr", url: "https://github.com/org/repo/pull/64" }}
+        variant="row"
+      />,
+    );
+
+    expect(screen.queryByLabelText("Approved")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Changes requested")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("CI passing")).toBeInTheDocument();
   });
 
   it("renders tracker badges without PR status indicators", () => {
