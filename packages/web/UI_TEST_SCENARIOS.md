@@ -353,10 +353,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
-- Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
-- `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
+- Confirmation popup actions include a history icon button before compact `Pause and edit voice draft` / `Send voice draft` actions; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
+- `Send voice draft` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
-- While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- While recording or transcribing inside the popup, the `Send voice draft` button is disabled and a status hint appears below the textarea
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it swaps to the same full-width recording strip and appends the transcription back into the existing draft on stop
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly

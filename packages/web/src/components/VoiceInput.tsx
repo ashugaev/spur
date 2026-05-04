@@ -368,10 +368,7 @@ export function VoiceConfirmModal({
               <textarea
                 className={`min-h-40 w-full resize-y ${INPUT_CLASS} ${voiceStripActive ? "pr-3" : "pr-12"}`}
                 onChange={(event) => voice.setVoiceDraft(event.target.value)}
-                placeholder={voicePlaceholder(
-                  "Review the transcription before inserting...",
-                  voice,
-                )}
+                placeholder={voicePlaceholder("Review the transcription before sending...", voice)}
                 ref={textareaRef}
                 value={voice.voiceDraft}
               />
@@ -408,21 +405,26 @@ export function VoiceConfirmModal({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                onClick={voice.dismissModal}
+                aria-label="Pause and edit voice draft"
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                onClick={() => textareaRef.current?.focus()}
+                title="Pause and edit voice draft"
               >
-                Cancel
+                <EditIcon />
               </button>
               <button
-                type="button"
-                className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                aria-label="Send voice draft"
+                className="inline-flex h-8 shrink-0 items-center justify-center gap-2 bg-[var(--color-accent)] px-3 font-bold uppercase whitespace-nowrap text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                 disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
                 onClick={() => voice.confirmDraft(onInsert)}
+                title="Send voice draft now"
+                type="button"
               >
-                <span>Insert</span>
+                <SendIcon />
+                <span>Send</span>
                 <span
                   aria-hidden="true"
-                  className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                  className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
                 >
                   {PRIMARY_SUBMIT_HINT}
                 </span>
