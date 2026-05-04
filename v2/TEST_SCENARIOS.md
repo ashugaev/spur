@@ -221,12 +221,14 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `buildSessionEnv` includes `SPUR_SESSION_TOOL_DIR`, excludes `SPUR_CONFIG`
 - Sidecar env merges session env with sidecar config env and sets `SPUR_SIDECAR_DEPTH`
 - `ensureSessionSlotTool` creates `spur-sidecar` wrapper script
+- Sidecar reserved-port allocation skips TCP ports already bound outside Spur while preserving existing session metadata reservations
 
 **Tier: runtime integration**
 
 - Sidecar auto-starts only on session spawn when `autoStart: true`
 - Multiple sidecars per session get separate tmux panes
 - Reserved sidecar ports are assigned when a sidecar starts, injected into sidecar env, and released after cleanup
+- Reserved sidecar ports skip OS-bound TCP ports, still fail fast when metadata plus bound ports exhaust the range, and succeed after the external bind and Spur reservation are both released
 - Spawn continues when sidecar autostart cannot reserve a port; manual `sidecar start` fails fast until a port is released, then succeeds
 - `isolated-daemon` writes isolated runtime artifacts and registry so sibling sidecars can target the isolated Spur daemon
 - `isolated-ui` allocates a UI port, starts web against the isolated daemon, publishes `sidecar-ui` session link, and removes it on cleanup

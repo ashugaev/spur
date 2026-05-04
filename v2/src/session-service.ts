@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { extname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
@@ -433,6 +434,33 @@ function buildSidecarRuntimeEnv(
     [SPUR_SIDECAR_DEPTH_ENV]: String(sidecarDepth),
     ...sidecarPortEnv(session, sidecarName),
   };
+}
+
+async function canListenOnLocalPort(port: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    const clearErrorListener = (): void => {
+      server.removeAllListeners("error");
+    };
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      clearErrorListener();
+      if (error.code === "EADDRINUSE") {
+        resolve(false);
+        return;
+      }
+      reject(error);
+    });
+    server.listen(port, "0.0.0.0", () => {
+      clearErrorListener();
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(true);
+      });
+    });
+  });
 }
 
 function sessionSidecarNames(
@@ -910,11 +938,11 @@ export class SessionService {
     );
   }
 
-  private ensureSidecarReservation(
+  private async ensureSidecarReservation(
     session: SessionRecord,
     sidecarName: string,
     sidecar: ProjectConfig["sidecars"][string],
-  ): SessionRecord {
+  ): Promise<SessionRecord> {
     if (!sidecar.ports || Object.keys(sidecar.ports).length === 0) {
       return session;
     }
@@ -950,8 +978,12 @@ export class SessionService {
       let selectedPort: number | undefined;
       for (let candidate = portConfig.start; candidate <= portConfig.end; candidate += 1) {
         if (unavailable.has(candidate)) continue;
+        if (!(await canListenOnLocalPort(candidate))) {
+          unavailable.add(candidate);
+          continue;
+        }
         selectedPort = candidate;
-        unavailable.add(candidate);
+        unavailable.add(selectedPort);
         break;
       }
       if (selectedPort === undefined) {
@@ -993,7 +1025,7 @@ export class SessionService {
       return args.session;
     }
 
-    const reservedSession = this.ensureSidecarReservation(
+    const reservedSession = await this.ensureSidecarReservation(
       args.session,
       args.sidecarName,
       args.sidecar,

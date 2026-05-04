@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createServer, type Server } from "node:net";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type { ServiceInstanceRecord, SessionRecord } from "../../src/types.js";
@@ -66,6 +67,7 @@ const sendDesktopNotificationMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
 const captureCodexRolloutBaselineMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
+const occupiedServers: Server[] = [];
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -208,6 +210,53 @@ async function loadSessionServiceModule() {
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+async function bindOccupiedPort(port = 0): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  occupiedServers.push(server);
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected an occupied TCP port");
+  }
+  return address.port;
+}
+
+async function findAvailablePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "0.0.0.0", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("Expected an available TCP port");
+  }
+  const port = address.port;
+  await closeServer(server);
+  return port;
+}
+
+async function closeServer(server: Server): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }
 
 function createSessionStore() {
@@ -420,7 +469,10 @@ describe("SessionService", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    while (occupiedServers.length > 0) {
+      await closeServer(occupiedServers.pop() as Server);
+    }
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -679,6 +731,7 @@ describe("SessionService", () => {
   });
 
   it("reserves sidecar ports during sidecar start and passes them into sidecar env", async () => {
+    const reservedPort = await findAvailablePort();
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -689,7 +742,7 @@ describe("SessionService", () => {
               command: "pnpm dev",
               autoStart: true,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort },
               },
             },
           },
@@ -708,12 +761,12 @@ describe("SessionService", () => {
     expect(writeSessionMock.mock.calls[0]?.[1]).not.toHaveProperty("sidecarPorts");
     expect(
       writeSessionMock.mock.calls.find(
-        ([, session]) => session.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV === 3000,
+        ([, session]) => session.sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV === reservedPort,
       )?.[1],
     ).toMatchObject({
       sidecarPorts: {
         dev: {
-          SPUR_RESERVED_PORT_DEV: 3000,
+          SPUR_RESERVED_PORT_DEV: reservedPort,
         },
       },
     });
@@ -723,10 +776,63 @@ describe("SessionService", () => {
         env: expect.objectContaining({
           SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
-          SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_RESERVED_PORT_DEV: String(reservedPort),
         }),
       }),
     );
+  });
+
+  it("skips an externally bound reserved sidecar port and uses the next candidate", async () => {
+    const occupiedPort = await bindOccupiedPort();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: true,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: occupiedPort,
+                  end: occupiedPort + 10,
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    mockClaudeJsonlState("waiting");
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.spawn({
+      project: "api",
+      prompt: "hello",
+    });
+
+    const reservedPort = writeSessionMock.mock.calls.find(([, session]) => session.sidecarPorts?.dev)
+      ?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV;
+
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          SPUR_RESERVED_PORT_DEV: String(reservedPort),
+        }),
+      }),
+    );
+    expect(reservedPort).toBeGreaterThan(occupiedPort);
+    expect(reservedPort).toBeLessThanOrEqual(occupiedPort + 10);
+    expect(writeSessionMock.mock.calls.find(([, session]) => session.sidecarPorts?.dev)?.[1]).toMatchObject({
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: reservedPort,
+        },
+      },
+    });
   });
 
   it("keeps spawn running when autostart cannot reserve a sidecar port", async () => {
@@ -783,6 +889,51 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.sidecar.autostart.failed",
     );
+  });
+
+  it("fails sidecar reservation when every reserved candidate is externally bound", async () => {
+    const occupiedPort = await bindOccupiedPort();
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: occupiedPort, end: occupiedPort },
+              },
+            },
+          },
+        },
+      },
+    });
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
+      `No free reserved port for sidecar dev.http in range ${occupiedPort}-${occupiedPort}`,
+    );
+    expect(createTmuxSidecarSessionMock).not.toHaveBeenCalled();
+    expect(sessions.get("api-1")).not.toHaveProperty("sidecarPorts");
   });
 
   it("passes planMode to launch planning and persists it on the session", async () => {
@@ -3022,6 +3173,7 @@ describe("SessionService", () => {
   });
 
   it("cleans up sidecar tmux sessions when spawn fails after sidecar autostart", async () => {
+    const reservedPort = await findAvailablePort();
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -3032,7 +3184,7 @@ describe("SessionService", () => {
               command: "pnpm dev",
               autoStart: true,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort },
               },
             },
           },
@@ -4054,6 +4206,7 @@ describe("SessionService", () => {
   });
 
   it("startSidecar reserves ports before launching a sidecar from the session worktree config", async () => {
+    const reservedPort = await findAvailablePort();
     const sessions = createSessionStore();
     findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
     loadProjectConfigMock.mockReturnValue({
@@ -4067,7 +4220,7 @@ describe("SessionService", () => {
               command: "./scripts/dev.sh",
               autoStart: false,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3001 },
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort },
               },
             },
           },
@@ -4099,7 +4252,7 @@ describe("SessionService", () => {
       expect.objectContaining({
         sidecarPorts: {
           dev: {
-            SPUR_RESERVED_PORT_DEV: 3000,
+            SPUR_RESERVED_PORT_DEV: reservedPort,
           },
         },
       }),
@@ -4113,13 +4266,73 @@ describe("SessionService", () => {
         env: expect.objectContaining({
           SPUR_SIDECAR_DEPTH: "1",
           SPUR_SIDECAR_NAME: "dev",
-          SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_RESERVED_PORT_DEV: String(reservedPort),
+        }),
+      }),
+    );
+  });
+
+  it("startSidecar reuses an existing same-session reservation even when the port is externally bound", async () => {
+    const occupiedPort = await bindOccupiedPort();
+    const sessions = createSessionStore();
+    findProjectConfigPathMock.mockReturnValue("/tmp/spur-worktrees/api/api-1/spur.yaml");
+    loadProjectConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          path: "/tmp/spur-worktrees/api/api-1",
+          sidecars: {
+            dev: {
+              command: "./scripts/dev.sh",
+              autoStart: false,
+              ports: {
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: occupiedPort, end: occupiedPort + 10 },
+              },
+            },
+          },
+        },
+      },
+    });
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      sidecarPorts: {
+        dev: {
+          SPUR_RESERVED_PORT_DEV: occupiedPort,
+        },
+      },
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    expect(
+      writeSessionMock.mock.calls.at(-1)?.[1].sidecarPorts?.dev?.SPUR_RESERVED_PORT_DEV,
+    ).toBe(occupiedPort);
+    expect(createTmuxSidecarSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          SPUR_RESERVED_PORT_DEV: String(occupiedPort),
         }),
       }),
     );
   });
 
   it("startSidecar can retry reserved port allocation after another session becomes terminal", async () => {
+    const reservedPort = await findAvailablePort();
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -4130,7 +4343,7 @@ describe("SessionService", () => {
               command: "pnpm dev",
               autoStart: false,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort },
               },
             },
           },
@@ -4154,7 +4367,7 @@ describe("SessionService", () => {
       sidecarNames: ["dev"],
       sidecarPorts: {
         dev: {
-          SPUR_RESERVED_PORT_DEV: 3000,
+          SPUR_RESERVED_PORT_DEV: reservedPort,
         },
       },
     });
@@ -4178,7 +4391,7 @@ describe("SessionService", () => {
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
     await expect(service.startSidecar("api-1", "dev")).rejects.toThrow(
-      "No free reserved port for sidecar dev.http in range 3000-3000",
+      `No free reserved port for sidecar dev.http in range ${reservedPort}-${reservedPort}`,
     );
 
     sessions.set("api-existing", {
@@ -4194,13 +4407,14 @@ describe("SessionService", () => {
         sessionId: "api-1",
         sidecarName: "dev",
         env: expect.objectContaining({
-          SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_RESERVED_PORT_DEV: String(reservedPort),
         }),
       }),
     );
   });
 
   it("startSidecar rolls back a new reservation when tmux launch fails", async () => {
+    const reservedPort = await findAvailablePort();
     loadConfigMock.mockReturnValue({
       ...baseConfig(),
       projects: {
@@ -4211,7 +4425,7 @@ describe("SessionService", () => {
               command: "pnpm dev",
               autoStart: false,
               ports: {
-                http: { env: "SPUR_RESERVED_PORT_DEV", start: 3000, end: 3000 },
+                http: { env: "SPUR_RESERVED_PORT_DEV", start: reservedPort, end: reservedPort },
               },
             },
           },
@@ -4249,7 +4463,7 @@ describe("SessionService", () => {
     expect(createTmuxSidecarSessionMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         env: expect.objectContaining({
-          SPUR_RESERVED_PORT_DEV: "3000",
+          SPUR_RESERVED_PORT_DEV: String(reservedPort),
         }),
       }),
     );
