@@ -104,13 +104,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
-- Footer shows a separate GitHub connection indicator that is independent from PR status rows
-- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
-- Healthy GitHub status renders as a green check next to the GitHub icon
-- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
-- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
-- GitHub connection/auth/API failures render the error text directly in the footer
-- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
+- Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
+- Platform connection indicators stay icon-only on the footer bar: platform icon + status icon, with no inline text label or inline error string
+- Before the first platform health response resolves, the footer shows a neutral icon-only checking state for that platform
+- Healthy platform status renders as a healthy status icon next to the GitHub or GitLab icon
+- Hovering, focusing, or clicking/tapping a platform indicator shows a tooltip with the platform name, text status, and the last request timestamp
+- Clicking/tapping a healthy platform indicator pins the tooltip open until the next click or an outside tap closes it
+- Platform connection/auth/API failures render the error text inside the tooltip, not directly in the footer bar
+- Non-200 `/api/github-status` and `/api/gitlab-status` responses fall back to `<Platform> status unavailable (<status>)` in the tooltip
 
 ### D6c: Footer resource metrics
 

@@ -1266,9 +1266,11 @@ describe("StatusBar", () => {
   function mockStatusBarFetch({
     resources,
     github,
+    gitlab,
   }: {
     resources: Record<string, unknown>;
     github?: Record<string, unknown>;
+    gitlab?: Record<string, unknown>;
   }) {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
@@ -1278,6 +1280,11 @@ describe("StatusBar", () => {
       if (url === "/api/github-status") {
         return new Response(
           JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+        );
+      }
+      if (url === "/api/gitlab-status") {
+        return new Response(
+          JSON.stringify(gitlab ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
         );
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -1411,6 +1418,21 @@ describe("StatusBar", () => {
     expect(screen.getByText(/Last request:/)).toBeInTheDocument();
   });
 
+  it("shows a healthy GitLab footer tooltip with the last request timestamp", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
+    fireEvent.mouseEnter(gitlabStatus);
+
+    expect(screen.getByText("GitLab")).toBeInTheDocument();
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+  });
+
   it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
     mockStatusBarFetch({
       resources: { available: false, daemonAlive: true },
@@ -1431,7 +1453,20 @@ describe("StatusBar", () => {
     expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
   });
 
-  it("shows the temporary checking state before the GitHub request resolves", async () => {
+  it("keeps provider statuses icon-only on the footer bar", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
+    expect(githubStatus).not.toHaveTextContent(/healthy|warning|critical|checking|error/i);
+    expect(gitlabStatus).not.toHaveTextContent(/healthy|warning|critical|checking|error/i);
+  });
+
+  it("shows the temporary checking state inside the GitHub tooltip before the request resolves", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
@@ -1440,15 +1475,20 @@ describe("StatusBar", () => {
       if (url === "/api/github-status") {
         return new Promise<Response>(() => {});
       }
+      if (url === "/api/gitlab-status") {
+        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
     render(<StatusBar />);
 
+    const githubStatus = screen.getByLabelText("GitHub connection checking");
+    fireEvent.mouseEnter(githubStatus);
     expect(screen.getByText("Checking")).toBeInTheDocument();
   });
 
-  it("shows the GitHub error text in the footer when the health check fails", async () => {
+  it("shows the GitHub error text in the tooltip when the health check fails", async () => {
     mockStatusBarFetch({
       resources: { available: false, daemonAlive: true },
       github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
@@ -1456,10 +1496,12 @@ describe("StatusBar", () => {
 
     render(<StatusBar />);
 
-    expect(await screen.findByText("GitHub API 503")).toBeInTheDocument();
+    const githubStatus = await screen.findByLabelText("GitHub connection error");
+    fireEvent.click(githubStatus);
+    expect(screen.getByText("GitHub API 503")).toBeInTheDocument();
   });
 
-  it("shows a synthesized footer error when the GitHub status endpoint returns a non-200 response", async () => {
+  it("shows a synthesized GitHub error in the tooltip when the endpoint returns a non-200 response", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
@@ -1468,11 +1510,16 @@ describe("StatusBar", () => {
       if (url === "/api/github-status") {
         return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
       }
+      if (url === "/api/gitlab-status") {
+        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+      }
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
     render(<StatusBar />);
 
-    expect(await screen.findByText("GitHub status unavailable (503)")).toBeInTheDocument();
+    const githubStatus = await screen.findByLabelText("GitHub connection error");
+    fireEvent.click(githubStatus);
+    expect(screen.getByText("GitHub status unavailable (503)")).toBeInTheDocument();
   });
 });

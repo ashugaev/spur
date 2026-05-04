@@ -9,6 +9,7 @@ import {
   makeSessionWithPR,
   makeSessionWithTracker,
   mockGitHubStatus,
+  mockGitLabStatus,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -637,6 +638,22 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText(/Last request:/)).toBeVisible();
   });
 
+  test("footer shows healthy GitLab status with the last request timestamp in a tooltip", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const gitlabStatus = page.getByRole("button", { name: "GitLab connection healthy" });
+    await expect(gitlabStatus).toBeVisible();
+    await gitlabStatus.hover();
+
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+  });
+
   test("footer keeps the GitHub tooltip pinned after clicking the healthy icon", async ({
     page,
   }) => {
@@ -657,7 +674,17 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText(/Last request:/)).not.toBeVisible();
   });
 
-  test("footer shows the GitHub error text when the health check fails", async ({ page }) => {
+  test("footer keeps GitHub and GitLab status buttons icon-only", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toHaveText("");
+    await expect(page.getByRole("button", { name: "GitLab connection healthy" })).toHaveText("");
+  });
+
+  test("footer shows the GitHub error text in a tooltip when the health check fails", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, {
@@ -667,10 +694,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub API 503")).toBeVisible();
   });
 
-  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({
+  test("footer shows auth and unavailable GitHub errors in a tooltip from mocked responses", async ({
     page,
   }) => {
     await mockSessions(page, []);
@@ -682,12 +710,14 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub auth unavailable")).toBeVisible();
 
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, { error: "ignored" }, { status: 503 });
     await page.reload();
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub status unavailable (503)")).toBeVisible();
   });
 
@@ -844,6 +874,21 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
 
     await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("GitHub")).not.toBeVisible();
+  });
+
+  test("touch tap on the GitLab icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitLab connection healthy" }).tap();
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitLab")).not.toBeVisible();
   });
 });
 

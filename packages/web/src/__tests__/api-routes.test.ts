@@ -45,8 +45,11 @@ import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
 import { resetGitHubApiStateForTests } from "@/lib/github-api";
 import { resetGitHubStatusForTests } from "@/lib/github-status";
+import { resetGitLabApiStateForTests } from "@/lib/gitlab-api";
+import { resetGitLabStatusForTests } from "@/lib/gitlab-status";
 import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
+import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
@@ -128,6 +131,8 @@ describe("Spur web API routes", () => {
     mockedStatfs.mockReset();
     resetGitHubApiStateForTests();
     resetGitHubStatusForTests();
+    resetGitLabApiStateForTests();
+    resetGitLabStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
@@ -1184,6 +1189,101 @@ describe("Spur web API routes", () => {
       await getGitHubStatus(new NextRequest("http://localhost:3000/api/github-status"));
       const response = await getGitHubStatus(
         new NextRequest("http://localhost:3000/api/github-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.ok).toBe(true);
+    });
+  });
+
+  describe("GET /api/gitlab-status", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      resetGitLabStatusForTests();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITLAB_TOKEN"] = "test-token";
+      delete process.env["GLAB_TOKEN"];
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+    });
+
+    it("returns a healthy payload with the request timestamp", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://gitlab.com/api/v4/user",
+        expect.objectContaining({ method: "GET", cache: "no-store" }),
+      );
+    });
+
+    it("returns an error payload when GitLab responds with an error", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitLab API 503");
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("returns an auth error payload when no GitLab token is available", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitLab auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns a network error payload when the request throws", async () => {
+      fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("ECONNREFUSED");
+    });
+
+    it("returns cached results for repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      await getGitLabStatus(new NextRequest("http://localhost:3000/api/gitlab-status"));
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
       );
       const payload = (await response.json()) as { ok: boolean };
 

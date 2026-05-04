@@ -1,10 +1,9 @@
-import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 import { type NextRequest, NextResponse } from "next/server";
 import { getGitHubRateLimitError, ghHeaders, handleGitHubRateLimit } from "@/lib/github-api";
+import { glabHeaders, resolveGlabToken } from "@/lib/gitlab-api";
 import { type CiStatus, type PrInfo, type PrState, isPrInfoShape } from "@/lib/pr-status-shape";
 
 type ReviewProvider = "github" | "gitlab";
@@ -55,10 +54,8 @@ interface CacheEntry {
 
 type LastGoodEntry = Omit<PrInfo, "stale"> & { fetchedAt: number };
 
-const execFileAsync = promisify(execFile);
 const cache = new Map<string, CacheEntry>();
 const lastGoodCache = new Map<string, LastGoodEntry>();
-const resolvedGitlabTokens = new Map<string, string | null>();
 const CACHE_TTL_MS = 120_000;
 const ERROR_CACHE_TTL_MS = 60_000;
 const PERSIST_DEBOUNCE_MS = 1_000;
@@ -216,37 +213,6 @@ function normalizeGitlabState(mergeRequest: GitLabMergeRequestResponse): PrState
   return "open";
 }
 
-async function resolveGitlabToken(hostname: string): Promise<string | null> {
-  if (resolvedGitlabTokens.has(hostname)) {
-    return resolvedGitlabTokens.get(hostname) ?? null;
-  }
-  const envToken = process.env["GITLAB_TOKEN"] ?? process.env["GLAB_TOKEN"] ?? null;
-  if (envToken) {
-    resolvedGitlabTokens.set(hostname, envToken);
-    return envToken;
-  }
-  try {
-    const { stdout } = await execFileAsync(
-      "glab",
-      ["auth", "status", "--show-token", "--hostname", hostname],
-      {
-        timeout: 10_000,
-        maxBuffer: 1024 * 1024,
-      },
-    );
-    const token = stdout
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1);
-    resolvedGitlabTokens.set(hostname, token ?? null);
-    return token ?? null;
-  } catch {
-    resolvedGitlabTokens.set(hostname, null);
-    return null;
-  }
-}
-
 async function fetchGitHubStatus(
   url: string,
 ): Promise<{ cacheKey: string; response: PrStatusResponse }> {
@@ -306,11 +272,10 @@ async function fetchGitlabStatus(
     throw new Error("invalid GitLab merge request URL");
   }
   const cacheKey = `gitlab:${coords.host}:${coords.projectPath}:${coords.mergeRequestIid}`;
-  const token = await resolveGitlabToken(coords.hostname);
-  const headers: Record<string, string> = { accept: "application/json" };
-  if (token) {
-    headers["PRIVATE-TOKEN"] = token;
+  if (!resolveGlabToken(coords.hostname)) {
+    return { cacheKey, response: errorResponse(cacheKey, "GitLab auth unavailable") };
   }
+  const headers = glabHeaders(coords.hostname);
   const projectPath = encodeURIComponent(coords.projectPath);
   const base = `${coords.host}/api/v4/projects/${projectPath}/merge_requests/${coords.mergeRequestIid}`;
   const [mrResponse, discussionsResponse, pipelinesResponse] = await Promise.all([
@@ -399,7 +364,6 @@ if (process.env["NODE_ENV"] === "test") {
   (globalThis as Record<string, unknown>)["__spurResetPrStatusCache"] = (): void => {
     cache.clear();
     lastGoodCache.clear();
-    resolvedGitlabTokens.clear();
     if (persistTimer) {
       clearTimeout(persistTimer);
       persistTimer = null;
