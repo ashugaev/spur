@@ -199,7 +199,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(sessionId = "test-session", agent: "claude" | "codex" = "claude") {
+async function mountTerminal(
+  sessionId = "test-session",
+  agent: "claude" | "codex" | "cursor" = "claude",
+) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {

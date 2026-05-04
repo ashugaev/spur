@@ -83,6 +83,21 @@ projects:
     });
   });
 
+  it("accepts cursor as an instance and project default agent", async () => {
+    const configPath = await writeConfig(`
+defaultAgent: cursor
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: cursor
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.defaultAgent).toBe("cursor");
+    expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
+  });
+
   it("parses explicit project worktree defaults and spawn overrides", async () => {
     const configPath = await writeConfig(`
 projects:

@@ -20,6 +20,7 @@ import {
   type ImageAttachment,
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -224,7 +225,7 @@ export function Dashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -746,12 +747,16 @@ export function Dashboard() {
                     ))}
                   </select>
                   <select
+                    aria-label="Spawn agent"
                     className={INPUT_CLASS}
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
                     value={spawnAgent}
                   >
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
+                    {AGENT_OPTIONS.map((agent) => (
+                      <option key={agent} value={agent}>
+                        {getAgentDisplayName(agent)}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div className="flex gap-2">

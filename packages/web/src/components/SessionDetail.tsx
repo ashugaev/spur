@@ -648,6 +648,27 @@ interface SessionDetailProps {
   projectId?: string;
 }
 
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = JSON.parse(text) as unknown;
+      if (typeof payload === "object" && payload !== null && "error" in payload) {
+        return String((payload as { error?: unknown }).error ?? fallback);
+      }
+    } catch {
+      return fallback;
+    }
+  }
+
+  return text;
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -683,7 +704,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         cache: "no-store",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to load session"));
+      }
       const payload = (await response.json()) as SpurSessionView;
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
@@ -980,12 +1003,12 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
     [visibleArtifacts],
   );
-  const startupArtifacts = useMemo(
-    () =>
-      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ??
-      [],
-    [session],
-  );
+  const startupArtifacts = useMemo(() => {
+    const startupAttachmentIds = session?.startupAttachmentIds ?? [];
+    return (
+      session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
+    );
+  }, [session]);
   const visibleLinks = useMemo(
     () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
     [session, sidecarLinkLabels],
@@ -1024,7 +1047,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
-    setRespawnStartupAttachmentIds(session.startupAttachmentIds);
+    setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnOpen(true);
   }, [session]);
@@ -1845,6 +1868,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             }
           />
         </>
+      ) : error ? (
+        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
+          <p>Unable to load this session.</p>
+          <button
+            type="button"
+            onClick={() => void loadSession()}
+            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
+          >
+            Retry
+          </button>
+        </div>
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}

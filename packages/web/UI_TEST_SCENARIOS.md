@@ -154,6 +154,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
+- Agent selector offers `claude`, `codex`, and `cursor`
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
@@ -207,6 +208,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Back link to dashboard
 - If session detail URL has no `project` query, Back returns to `/` so dashboard restores its default filter from local storage
 - If session detail URL has `?project=<id>`, Back preserves that explicit dashboard filter
+- Missing or deleted sessions replace the loading placeholder with an inline error plus `Retry`
 - Browser tab title is the session id only, with no `| Spur` suffix
 - Project • Agent • Session ID breadcrumb
 - Title uppercase bold

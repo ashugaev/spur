@@ -8,9 +8,10 @@ import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
-import { cn } from "@/lib/cn";
-import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
 import { TERMINAL_THEME } from "@/design/colors";
+import { cn } from "@/lib/cn";
+import { getAgentHotkeys } from "@/lib/agent-hotkeys";
+import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
 
 interface DirectTerminalProps {
   sessionId: string;
@@ -54,7 +55,10 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
 }
 
-function buildSubmittedTextPayloads(text: string): string[] {
+function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
+  if (!agentUsesBracketedPaste(agent)) {
+    return [`${text}\r`];
+  }
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -210,12 +214,12 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(text)) {
+      for (const payload of buildSubmittedTextPayloads(agent, text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [draftHistory, sendWithAck],
+    [agent, draftHistory, sendWithAck],
   );
 
   const sendHotkey = useCallback(
@@ -223,7 +227,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -235,14 +239,14 @@ export function DirectTerminal({
         );
       }
     },
-    [sendTerminalInput, sendWithAck],
+    [agent, sendTerminalInput, sendWithAck],
   );
 
   const submitSlash = useCallback(
     async (text: string) => {
       try {
         setSubmitError(null);
-        for (const payload of buildSubmittedTextPayloads(text)) {
+        for (const payload of buildSubmittedTextPayloads(agent, text)) {
           await sendWithAck(payload);
         }
       } catch (slashError) {
@@ -251,7 +255,7 @@ export function DirectTerminal({
         );
       }
     },
-    [sendWithAck],
+    [agent, sendWithAck],
   );
 
   useEffect(() => {
@@ -639,7 +643,7 @@ export function DirectTerminal({
                 role="menu"
               >
                 <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                  {getAgentDisplayName(agent)}
                 </div>
                 {hotkeys.map((hotkey) => (
                   <button

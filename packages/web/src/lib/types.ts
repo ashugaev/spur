@@ -1,3 +1,5 @@
+import type { AgentName } from "./agents";
+
 export type SpurSessionStatus =
   | "spawning"
   | "running"
@@ -57,7 +59,7 @@ export interface SpurSessionWorkspaceAccess {
 export interface SpurSessionView {
   id: string;
   project: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   prompt: string;
   startupAttachmentIds?: string[];
   branch: string;
@@ -71,12 +73,12 @@ export interface SpurSessionView {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   worktreePath: string;
-  services: SpurServiceView[];
+  services?: SpurServiceView[];
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
   };
-  artifacts: SpurSessionArtifact[];
+  artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -120,7 +122,7 @@ export interface DashboardSession {
   id: string;
   projectId: string;
   projectName: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   title: string | null;
   prompt: string;
   startupAttachmentIds: string[];
@@ -177,8 +179,8 @@ export function toDashboardSession(
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
-    services: session.services,
-    artifacts: session.artifacts,
+    services: session.services ?? [],
+    artifacts: session.artifacts ?? [],
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,

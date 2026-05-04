@@ -1293,10 +1293,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
-    .option("--agent <name>", "Agent to start: claude or codex")
+    .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
       "--plan",
-      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)

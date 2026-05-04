@@ -128,7 +128,7 @@ async function processExists(pid: number): Promise<boolean> {
 }
 
 async function runRestoreScenario(args: {
-  agent?: "claude" | "codex";
+  agent?: "claude" | "codex" | "cursor";
   configName: string;
   stopMode?: "exit" | "pause";
   expectRestorePrompt?: boolean;
@@ -160,7 +160,11 @@ async function runRestoreScenario(args: {
 
   const spawned = JSON.parse((await context.execCli(spawnArgs)).stdout) as SessionView;
   const expectedResumeId =
-    (args.agent ?? "claude") === "codex" ? `thread-${spawned.id}` : `fake-claude-${spawned.id}`;
+    (args.agent ?? "claude") === "codex"
+      ? `thread-${spawned.id}`
+      : (args.agent ?? "claude") === "cursor"
+        ? `chat-${spawned.id}`
+        : `fake-claude-${spawned.id}`;
   const stopMode = args.stopMode ?? "exit";
   const expectRestorePrompt = args.expectRestorePrompt ?? true;
   const restorePrompt = "This session was restored after the agent exited.";
@@ -192,28 +196,32 @@ async function runRestoreScenario(args: {
   );
   expect(exited[0]?.workspaceExists).toBe(true);
 
-  const controllerSessionName = `${sessionPrefix}-ui`;
-  currentActiveContext().controllerSessionName = controllerSessionName;
-  await createTmuxSession({
-    sessionName: controllerSessionName,
-    cwd: context.rootDir,
-    command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
-    env: {
-      HOME: context.env.HOME,
-      PATH: context.env.PATH,
-      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
-      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
-    },
-  });
+  if (args.agent) {
+    await context.fetchJson(`/sessions/${spawned.id}/restore`, { method: "POST" });
+  } else {
+    const controllerSessionName = `${sessionPrefix}-ui`;
+    currentActiveContext().controllerSessionName = controllerSessionName;
+    await createTmuxSession({
+      sessionName: controllerSessionName,
+      cwd: context.rootDir,
+      command: `${process.execPath} ${CLI_PATH} --config ${configPath} list`,
+      env: {
+        HOME: context.env.HOME,
+        PATH: context.env.PATH,
+        SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+        SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+      },
+    });
 
-  await pollUntil(async () => captureTmuxPane(controllerSessionName), {
-    timeoutMs: 15_000,
-    accept: (value) => value.includes("Sessions"),
-  });
+    await pollUntil(async () => captureTmuxPane(controllerSessionName), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("Sessions"),
+    });
 
-  await sendKeysToTmux(controllerSessionName, "r");
-  await sleep(1_000);
-  await sendKeysToTmux(controllerSessionName, "q");
+    await sendKeysToTmux(controllerSessionName, "r");
+    await sleep(1_000);
+    await sendKeysToTmux(controllerSessionName, "q");
+  }
 
   const restored = await pollUntil(
     async () =>
@@ -918,7 +926,7 @@ projects:
     expect(stdout.trim()).toBe("release branch");
   });
 
-  it.each(["claude", "codex"] as const)(
+  it.each(["claude", "codex", "cursor"] as const)(
     "uses %s spawn preflight to derive the worktree branch through the built CLI",
     async (agent) => {
       const port = await findFreePort();
@@ -2450,6 +2458,7 @@ projects:
   it.each([
     { agent: "claude", expectPlanFlag: true },
     { agent: "codex", expectPlanFlag: false },
+    { agent: "cursor", expectPlanFlag: true },
   ] as const)(
     "accepts --plan for $agent and applies startup behavior only where supported",
     async (row) => {
@@ -2491,8 +2500,12 @@ projects:
         accept: (value) => value.includes("startup:launch::"),
       });
       if (row.expectPlanFlag) {
-        expect(log).toContain("--permission-mode");
         expect(log).toContain("plan");
+        if (row.agent === "claude") {
+          expect(log).toContain("--permission-mode");
+        } else {
+          expect(log).toContain("--plan");
+        }
       } else {
         expect(log).not.toContain("--permission-mode");
       }
@@ -2928,6 +2941,14 @@ projects:
   it("restores a codex session through the native resume command", async () => {
     const result = await runRestoreScenario({ agent: "codex", configName: "restore-codex.yaml" });
     expect(result.spawned.agent).toBe("codex");
+  });
+
+  it("restores a cursor session through the native resume command", async () => {
+    const result = await runRestoreScenario({
+      agent: "cursor",
+      configName: "restore-cursor.yaml",
+    });
+    expect(result.spawned.agent).toBe("cursor");
   });
 
   it("completes the calling live session after a session-bound respawn succeeds", async () => {
@@ -4033,6 +4054,7 @@ projects:
     path: ${context.repoDir}
     defaultBranch: main
     sessionPrefix: ${sessionPrefix}
+    worktree: false
     symlinks:
       - .env
     sidecars:

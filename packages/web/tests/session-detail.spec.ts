@@ -158,6 +158,21 @@ function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
 
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
+  test("missing session shows an inline error instead of hanging", async ({ page }) => {
+    await page.route("**/api/sessions/detail-missing", (route) => {
+      void route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "Session not found" }),
+      });
+    });
+    await page.goto("/sessions/detail-missing");
+
+    await expect(page.getByText("Session not found")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByText("Loading session...")).toHaveCount(0);
+  });
+
   test("back link visible", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s1-1" });
     await mockSessionDetail(page, session);

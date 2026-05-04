@@ -101,7 +101,7 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   async function spawnSession(
     context: RuntimeTestContext,
     configPath: string,
-    agent: "claude" | "codex",
+    agent: "claude" | "codex" | "cursor",
     prompt = "status test",
   ): Promise<SessionView> {
     const args = ["--config", configPath, "spawn", "test", prompt, "--agent", agent, "--json"];
@@ -300,5 +300,64 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "stopped");
     expect(view.state).toBe("stopped");
     expect(view.status).toBe("stopped");
+  });
+
+  // ── Cursor pane/activity-based state detection ────────────────────────
+
+  it("Cursor: spawn settles to waiting once the pane goes idle", async () => {
+    const { context, configPath, port } = await setup("cursor-wait");
+    const session = await spawnSession(context, configPath, "cursor");
+
+    const view = await waitForState(port, session.id, "waiting", 45_000);
+    expect(view.state).toBe("waiting");
+    expect(view.status).toBe("running");
+  });
+
+  it("Cursor: trust prompt markers produce needs_input", async () => {
+    const { context, configPath, port } = await setup("cursor-needs");
+    const session = await spawnSession(context, configPath, "cursor");
+
+    await context.execCli(["--config", configPath, "send", session.id, "show-waiting-menu"]);
+
+    const view = await waitForState(port, session.id, "needs_input", 30_000);
+    expect(view.state).toBe("needs_input");
+  });
+
+  it("Cursor: pause → stopped, resume → waiting, kill → killed", async () => {
+    const { context, configPath, port } = await setup("cursor-lifecycle");
+    const session = await spawnSession(context, configPath, "cursor");
+
+    await context.execCli(["--config", configPath, "pause", session.id, "--json"]);
+    const s1 = await waitForState(port, session.id, "stopped");
+    expect(s1.state).toBe("stopped");
+    expect(s1.status).toBe("stopped");
+
+    await context.execCli(["--config", configPath, "send", session.id, "hello"]);
+    const s2 = await waitForState(port, session.id, "waiting", 45_000);
+    expect(s2.state).toBe("waiting");
+
+    await context.execCli(["--config", configPath, "kill", session.id, "--json"]);
+    const s3 = await waitForState(port, session.id, "killed");
+    expect(s3.state).toBe("killed");
+    expect(s3.status).toBe("killed");
+  });
+
+  it("Cursor: complete → stopped", async () => {
+    const { context, configPath, port } = await setup("cursor-cpl");
+    const session = await spawnSession(context, configPath, "cursor");
+
+    await context.execCli(["--config", configPath, "complete", session.id, "--json"]);
+    const view = await waitForState(port, session.id, "stopped");
+    expect(view.state).toBe("stopped");
+    expect(view.status).toBe("completed");
+  });
+
+  it("Cursor: agent exit → stopped", async () => {
+    const { context, configPath, port } = await setup("cursor-exit");
+    const session = await spawnSession(context, configPath, "cursor");
+
+    await context.execCli(["--config", configPath, "send", session.id, "exit-now"]);
+    const view = await waitForState(port, session.id, "stopped");
+    expect(view.state).toBe("stopped");
   });
 });

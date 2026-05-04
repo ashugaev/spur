@@ -448,6 +448,98 @@ describe("SessionDetail voice input", () => {
     );
   });
 
+  it("shows a load error instead of hanging on the loading state", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify({ error: "Session not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Session not found")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Loading session...")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("renders session detail when artifacts exist but startupAttachmentIds is omitted", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            artifacts: [
+              {
+                id: "artifact-1",
+                name: "trace.txt",
+                size: 12,
+                mimeType: "text/plain",
+                kind: "download",
+                createdAt: "2026-04-02T10:00:00.000Z",
+                updatedAt: "2026-04-02T10:00:00.000Z",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("trace.txt")).toBeInTheDocument();
+    });
+  });
+
+  it("renders session detail when artifacts and startupAttachmentIds are both omitted", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+
+      if (url === "/api/sessions/api-a1") {
+        const payload = sessionFixture() as Record<string, unknown>;
+        delete payload["artifacts"];
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Fix auth")).toBeInTheDocument();
+    });
+  });
+
   it("stores sent messages in history after a successful send", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
