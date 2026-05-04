@@ -92,6 +92,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - TTY `list` surfaces `needs_input` prominently with a top alert and `!` row indicator.
 - Session ordering keeps actionable sessions above quiet or terminal ones.
 - GitHub send triggers deliver immediately when the target session is waiting.
+- GitLab send triggers deliver immediately when the target session is waiting.
 - Busy GitHub updates queue, dedupe, drop entries that vanished from the latest source snapshot, and flush once the session returns to `waiting`.
 - Manual queued sends flush one message at a time and enforce a minimum 15 second gap before the next queued delivery after `awaitingPrompt=true`.
 - Manual send requests with `queue=false` bypass the queued stack and can still interrupt immediately when `interrupt=true`.
@@ -100,7 +101,10 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers include built-in generic workflow hints plus event-specific next actions for review changes, CI failures, merge conflicts, and comments.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
-- PR auto-detect piggybacks on the attention monitor to discover a session PR from the live worktree branch first (falling back to persisted `session.branch`), persists the native session PR binding, projects the `pr` link for display, skips sessions that already have a PR binding or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
+- PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
+- PR auto-detect also supports GitLab merge requests through the provider resolver, while preserving the same throttle and backoff behavior.
+- PR auto-detect piggybacks on the attention monitor to discover a session PR from the live worktree branch first (falling back to persisted `session.branch`), persists the native GitHub PR binding when one exists, projects the `pr` link for display, skips sessions that already have a PR binding or no worktree, throttles checks to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles CLI failures.
+- When GitHub has no matching PR, PR auto-detect falls back through the ordered review providers and can still set the `pr` slot from a GitLab merge request URL without changing the throttle/backoff behavior.
 - `isGitHubEventData` and `isServiceProblemEventData` type guards accept valid shapes and reject null, missing fields, and wrong field types.
 - `createSendBatchParser` dispatches `github` and `service` types to their batch parsers and returns a no-op for unknown types.
 - GitHub send batch `merge` deduplicates signals by key and updates PR metadata; `prune` removes signals absent from the latest source snapshot; `format` includes PR number, title, signal texts, and kind-specific action lines (or a custom prompt override).
@@ -112,7 +116,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `hasMergeConflict` detects `CONFLICTING` mergeable or `DIRTY` merge state status.
 - `normalizeLines` splits on newlines, trims trailing whitespace, and removes blank lines.
 - `appendedLines` detects the overlap between previous and next line arrays and returns only the newly appended lines.
-- `formatSessionLinkDisplay` extracts compact PR ids from GitHub URLs, Jira keys from tracker URLs, and falls back to the last path segment or label for unknown URL shapes.
+- `formatSessionLinkDisplay` extracts compact review ids from GitHub and GitLab URLs, Jira keys from tracker URLs, and falls back to the last path segment or label for unknown URL shapes.
 - `appendEventLog` creates the data directory, writes JSONL entries, and auto-fills timestamps; `readEventLog` skips malformed lines; `readSessionEventLog` filters by session and respects a limit parameter.
 - `extractCommandBinary` skips leading env-var assignments, handles single- and double-quoted binaries, and falls back when the command is empty.
 - `parseAgentName` accepts `claude` and `codex` and throws for unsupported agent names.

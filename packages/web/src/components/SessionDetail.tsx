@@ -19,7 +19,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import { isGitHubPrLinkLabel } from "@/lib/link-icons";
+import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -45,8 +45,13 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
-function displayLinkLabel(label: string): string {
-  return isGitHubPrLinkLabel(label) ? "github pr" : label;
+function displayLinkLabel(label: string, url: string): string {
+  if (label === "github-pr") return "github pr";
+  if (label === "gitlab-pr") return "gitlab mr";
+  if (label === "pr") {
+    return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
+  }
+  return label;
 }
 
 function PlayIcon() {
@@ -1145,7 +1150,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
+                .filter((l) => l.label === "tracker" || isReviewLinkLabel(l.label))
                 .map((link) => (
                   <SessionLinkBadge
                     key={`${link.label}-${link.url}`}
@@ -1422,7 +1427,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {displayLinkLabel(link.label)}
+                        {displayLinkLabel(link.label, link.url)}
                       </a>
                     ))}
                   </div>
