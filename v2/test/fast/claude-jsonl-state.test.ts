@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -313,6 +313,37 @@ describe("parseConversationLines", () => {
         throw new Error("expected fixture result");
       }
       expect(result.state).toBe("working");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("classifies the intelas-0763 tail as needs_input past the tool_use stale window", async () => {
+    const fixturePath = join(
+      __dirname,
+      "../fixtures/agent-history/claude/needs-input-intelas-0763-tail.jsonl",
+    );
+    const fixture = await readFile(fixturePath, "utf8");
+    const tempDir = await mkdtemp(join(tmpdir(), "intelas-0763-tail-"));
+    const tempFile = join(tempDir, "intelas-0763-tail.jsonl");
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-04T08:25:34.610Z"));
+
+    try {
+      await writeFile(tempFile, fixture, "utf8");
+      const lastActivity = new Date("2026-05-04T08:25:28.551Z");
+      await utimes(tempFile, lastActivity, lastActivity);
+      const result = await readClaudeJsonlState(tempDir, {
+        filePath: tempFile,
+        lastOffset: 0,
+        lastMtimeMs: 0,
+        tailRecords: [],
+      });
+      expect(result).not.toBeNull();
+      if (!result) {
+        throw new Error("expected fixture result");
+      }
+      expect(result.state).toBe("needs_input");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
