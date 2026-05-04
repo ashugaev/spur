@@ -942,7 +942,7 @@ describe("SessionService", () => {
       "claude",
       expect.stringContaining("slot-instructions\nhello"),
       {
-      planMode: true,
+        planMode: true,
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
@@ -987,7 +987,7 @@ describe("SessionService", () => {
       "codex",
       expect.stringContaining("slot-instructions\nhello"),
       {
-      planMode: true,
+        planMode: true,
       },
     );
     expect(buildAgentLaunchPlanMock.mock.calls[0]?.[1]).toContain(
