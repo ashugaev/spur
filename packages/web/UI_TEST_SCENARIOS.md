@@ -154,6 +154,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
+- Plan toggle does not show extra agent-specific hint text
 - Agent selector offers `claude`, `codex`, and `cursor`
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host

@@ -937,6 +937,14 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("checkbox")).toBeVisible();
   });
 
+  test("plan toggle stays hint-free for codex", async ({ page }) => {
+    await openSpawnModal(page);
+
+    await expect(page.getByText(/codex does not enter a native plan mode/i)).toHaveCount(0);
+    await page.getByRole("combobox", { name: "Spawn agent" }).selectOption("codex");
+    await expect(page.getByText(/codex does not enter a native plan mode/i)).toHaveCount(0);
+  });
+
   test("modal has Spawn button", async ({ page }) => {
     await mockSessions(
       page,
