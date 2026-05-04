@@ -1293,7 +1293,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ).toBeDisabled();
   });
 
-  test("matching project filter keeps the URL and still shows the placeholder", async ({ page }) => {
+  test("matching project filter keeps the URL and still shows the placeholder", async ({
+    page,
+  }) => {
     const currentSession = makeWorkingSession({
       id: "spawn-filter-match-1",
       project: "my-project",
@@ -1331,9 +1333,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
-      "my-project",
-    );
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
@@ -1377,9 +1377,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByText(currentSession.prompt)).toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
-      "my-project",
-    );
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
     await expect(page).toHaveURL(/\/\?project=my-project$/);
   });
 
