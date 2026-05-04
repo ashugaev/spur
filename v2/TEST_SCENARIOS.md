@@ -36,7 +36,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Background spawn keeps sync spawn branch-conflict behavior for explicit worktree branches and stops retrying after an initial prompt was already delivered so one request cannot duplicate agent work.
 - `spawn` accepts an optional positional `[prompt...]`; empty prompt opens a blank session, skips preflight, and ignores default `spawn.steps`.
 - `spawn --step <label>` repeats to override any configured project default `spawn.steps` for one manual session.
-- `spawn --plan` disables request and project-default `spawn.steps`, so the agent receives only the raw task prompt.
+- `spawn --plan` disables request and project-default `spawn.steps`, adds a planning-only instruction to the task prompt, and keeps the plan flag on the launched agent where supported.
 - Config spawn triggers require `spawn.prompt` and may add optional `spawn.steps`.
 - Config can define project default `spawn.steps`, and request or trigger steps override them instead of merging.
 - Pipeline steps wrap one task prompt, then auto-send later phases in order after the agent returns to a prompt with a 30 second delay between auto-steps.
@@ -127,7 +127,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `spawn --json --agent codex` writes the spawned worktree path into the session-local `CODEX_HOME/config.toml` as `trusted`, so worktree launches stay non-interactive.
 - `spawn --json` keeps one task prompt, and configured pipeline steps deliver ordered phases in the same session with a 30 second delay between auto-steps.
 - `spawn --json` without `[prompt...]` creates a blank session, does not deliver an initial message, and does not apply default pipeline steps.
-- `spawn --json --plan` ignores manual and configured spawn steps and sends only the raw prompt to the agent.
+- `spawn --json --plan` ignores manual and configured spawn steps and sends only the planning prompt derived from the task to the agent.
 - `spawn --json` fetches `origin` before worktree creation, so a remote-advanced clean `main` lands in both the new Spur worktree and the local base branch.
 - `spawn --json` with a dirty checked-out `main` still uses the fresh `origin/main` commit as the new worktree base and does not mutate local `main`.
 - `spawn --json --worktree <defaultBranch>` creates a new worktree branch from the requested `defaultBranch` override through the built CLI.

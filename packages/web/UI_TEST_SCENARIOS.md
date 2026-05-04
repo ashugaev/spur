@@ -154,12 +154,15 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Workspace select: Default / Worktree / Shared options
 - When Worktree selected: base branch input appears with placeholder "Base branch"
 - Plan checkbox: labeled "PLAN", toggles plan mode
+- Plan toggle does not show extra agent-specific hint text
 - Agent selector offers `claude`, `codex`, and `cursor`
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
+- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
+- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
+- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
-- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
@@ -273,8 +276,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
-- First microphone click starts recording; button switches to stop state
-- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
+- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
+- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
+- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
@@ -340,9 +344,12 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that includes `Esc` and `Shift+Tab`; clicking an item sends the matching control sequence into the terminal and closes the menu
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) with built-in shortcuts and slash commands; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
+- Microphone button appears after arrow keys with a small gap
+- Starting terminal voice recording hides the normal control bar actions and replaces them with one full-width recording strip inside the footer
+- The terminal recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact icon-only `Cancel`, `Edit`, and `Send` actions
+- `Edit` stops recording and opens the confirmation popup with the transcribed draft; `Send` stops recording, sends straight to the agent, and saves the sent text into draft history for the next popup open
 - `Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
-- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
@@ -350,9 +357,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
 - While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
+- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it swaps to the same full-width recording strip and appends the transcription back into the existing draft on stop
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
-- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
+- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears inside the popup
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)

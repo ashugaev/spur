@@ -1296,7 +1296,7 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
       "--plan",
-      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
+      "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)

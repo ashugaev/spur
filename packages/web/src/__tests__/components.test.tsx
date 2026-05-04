@@ -272,6 +272,65 @@ describe("Dashboard", () => {
     );
   });
 
+  it("shows a live recording timer in the spawn modal while voice capture is active", async () => {
+    vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: vi.fn().mockResolvedValue({
+          getTracks: () => [{ stop: vi.fn() }],
+        }),
+      },
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: true, language: "auto" }), {
+          status: 200,
+        });
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(SPAWN_PROMPT_VOICE_PLACEHOLDER)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("00:00")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Stop and save voice recording" }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(3_000);
+    });
+
+    expect(screen.getByText("00:03")).toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
   it("preserves the explicit project filter in session links", async () => {
     window.history.replaceState(null, "", "/?project=api");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -1099,7 +1158,9 @@ describe("Dashboard", () => {
 
     fireEvent.keyDown(prompt, { key: ".", metaKey: true });
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Stop and save voice recording" }),
+      ).toBeInTheDocument();
     });
 
     fireEvent.keyDown(prompt, { key: ".", metaKey: true });

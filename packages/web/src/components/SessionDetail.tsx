@@ -8,7 +8,12 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { voicePlaceholder, VoiceStatusHint } from "@/components/VoiceInput";
+import {
+  VoiceRecordingStrip,
+  VoiceStatusHint,
+  isVoiceActive,
+  voicePlaceholder,
+} from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -1355,11 +1360,23 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       placeholder={voicePlaceholder("Message to the running agent...", voice)}
                       textareaRef={messageRef}
                       value={message}
-                      voice={voice}
+                      voice={isVoiceActive(voice) ? undefined : voice}
                     />
+                    {isVoiceActive(voice) ? (
+                      <VoiceRecordingStrip
+                        actions={[
+                          { kind: "cancel", onClick: voice.cancelRecording },
+                          { kind: "stop", onClick: () => voice.stopRecording() },
+                        ]}
+                        className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
+                        voice={voice}
+                      />
+                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />
+                        {voice.voiceBusy && !voice.recording ? (
+                          <VoiceStatusHint voice={voice} />
+                        ) : null}
                       </span>
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         <SlashSuggestions
