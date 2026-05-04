@@ -34,7 +34,7 @@ const activityConfig: Record<string, ActivityConfig> = {
   },
   needs_input: { ...errorConfig, label: "needs input" },
   error: errorConfig,
-  stopped: inactiveConfig,
+  stopped: { ...inactiveConfig, label: "stopped" },
   killed: { ...inactiveConfig, label: "killed" },
 };
 

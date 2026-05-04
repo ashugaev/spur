@@ -55,6 +55,7 @@ export function ImageAttachmentTextarea({
   voice,
   minHeightClass = "min-h-24",
   ariaLabel,
+  textareaRef,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -66,6 +67,7 @@ export function ImageAttachmentTextarea({
   voice?: UseVoiceInput;
   minHeightClass?: string;
   ariaLabel?: string;
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const hasVoice = Boolean(voice?.canUseVoice);
@@ -90,6 +92,7 @@ export function ImageAttachmentTextarea({
         }}
         onDragOver={(event) => event.preventDefault()}
         placeholder={placeholder}
+        ref={textareaRef}
         value={value}
       />
 

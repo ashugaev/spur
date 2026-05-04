@@ -104,9 +104,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex"): string {
-  const header = agentName === "claude" ? "Claude Code" : "OpenAI Codex";
-  const prompt = agentName === "claude" ? "❯" : "›";
+function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+  const header =
+    agentName === "claude"
+      ? "Claude Code"
+      : agentName === "codex"
+        ? "OpenAI Codex"
+        : "Cursor Agent";
+  const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
@@ -138,7 +143,8 @@ jsonl_append() {
     printf '%s\n' "$1" >> "$session_dir/$session_uuid.jsonl"
   fi
 }`
-      : `if [[ "\${1:-}" == "exec" ]]; then
+      : agentName === "codex"
+        ? `if [[ "\${1:-}" == "exec" ]]; then
   output_file=""
   args=("$@")
   for ((index = 0; index < \${#args[@]}; index++)); do
@@ -189,18 +195,54 @@ else
   session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
-fi`;
+fi`
+        : `if [[ "\${1:-}" == "-p" || "\${1:-}" == "--print" ]]; then
+  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if [[ -n "$branch_hint" ]]; then
+    printf '%s\n' "$branch_hint"
+  else
+    printf 'NO_PROJECT_RULES\n'
+  fi
+  exit 0
+fi
+cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
+workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
+touch_chat_store() {
+  local chat_id="$1"
+  local chat_dir="$cursor_base/chats/$workspace_hash/$chat_id"
+  mkdir -p "$chat_dir"
+  printf 'cursor-session\n' > "$chat_dir/store.db"
+}
+if [[ "\${1:-}" == "create-chat" ]]; then
+  chat_id="chat-\${SPUR_SESSION:-manual}"
+  touch_chat_store "$chat_id"
+  printf '%s\n' "$chat_id"
+  exit 0
+fi
+mode="launch"
+resume_id=""
+chat_id="chat-\${SPUR_SESSION:-no-session}"
+if [[ "\${1:-}" == "--resume" ]]; then
+  mode="resume"
+  resume_id="\${2:-}"
+  chat_id="$resume_id"
+fi
+touch_chat_store "$chat_id"`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
-      : `emit_hook_event "Stop"`;
+      : agentName === "codex"
+        ? `emit_hook_event "Stop"`
+        : ":";
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
-      : `emit_hook_needs_input
-      emit_rollout_input_required`;
+      : agentName === "codex"
+        ? `emit_hook_needs_input
+      emit_rollout_input_required`
+        : ":";
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -256,7 +298,8 @@ fi`;
       ;;
   esac
 done`
-      : `while IFS= read -r line; do
+      : agentName === "codex"
+        ? `while IFS= read -r line; do
   full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
   # Drain remaining lines from the same paste (arrive within 0.1s).
@@ -290,7 +333,29 @@ $extra"
       ${signalWaiting}
       ;;
   esac
-done`;
+	done`
+        : `while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$log_file"
+  touch_chat_store "$chat_id"
+  case "$line" in
+    show-waiting-menu)
+      printf '%s\\n' "Workspace Trust Required"
+      printf '%s\\n' "Do you trust the contents of this directory?"
+      ;;
+    simulate-work)
+      printf '%s\\n' "• Working (simulated)"
+      sleep 1
+      printf '%s\\n' "${prompt}"
+      ;;
+    exit-now)
+      exit 0
+      ;;
+    *)
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
+      ;;
+  esac
+	done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -315,9 +380,7 @@ emit_rollout_input_required() {
   printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
-if [[ "$mode" == "launch" ]]; then
-  printf '%s\n' "${header}"
-fi
+printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
 ${signalWaiting}
 ${readLoop}
@@ -590,6 +653,8 @@ export async function createRuntimeTestContext(
   if (useFakeTools) {
     await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
     await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
+    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
@@ -603,6 +668,7 @@ export async function createRuntimeTestContext(
           SPUR_TMUX_SOCKET_NAME: `spur-${port}`,
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
+          SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
           SPUR_FAKE_GH_STATE_FILE: ghStateFile,
         }
