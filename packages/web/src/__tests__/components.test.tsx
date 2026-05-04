@@ -1278,7 +1278,7 @@ describe("Dashboard", () => {
     expect(spawnProjectSelect.value).toBe("api");
   });
 
-  it("persists selected spawn project on change and successful spawn", async () => {
+  it("keeps All Projects selected after spawn, shows the placeholder, and remembers the last spawn project", async () => {
     const sessionsData = {
       projects: [
         { id: "api", name: "API" },
@@ -1286,30 +1286,29 @@ describe("Dashboard", () => {
       ],
       sessions: [sessionsPayload().sessions[0]],
     };
+    const spawnedSession = {
+      ...sessionsData.sessions[0],
+      id: "sp-spawn-1",
+      project: "sp",
+      prompt: "Ship it",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "sp-spawn-1",
+      worktreePath: "/tmp/worktrees/sp-spawn-1",
+    };
+
     vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url === "/api/spawn")
-        return new Response(
-          JSON.stringify({
-            ...sessionsData.sessions[0],
-            id: "sp-spawn-1",
-            project: "sp",
-            prompt: "Ship it",
-            status: "spawning",
-            state: "working",
-            runtimeAlive: false,
-            workspaceExists: false,
-            tmuxSession: "sp-spawn-1",
-            worktreePath: "/tmp/worktrees/sp-spawn-1",
-          }),
-          { status: 201 },
-        );
-      if (url === "/api/sessions?project=sp")
-        return new Response(JSON.stringify({ ...sessionsData, sessions: [] }), { status: 200 });
+        return new Response(JSON.stringify(spawnedSession), { status: 201 });
       if (url === "/api/sessions")
         return new Response(JSON.stringify(sessionsData), { status: 200 });
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1327,6 +1326,14 @@ describe("Dashboard", () => {
     const spawnProjectSelect = screen.getByRole("combobox", { name: "Spawn project" });
     fireEvent.change(spawnProjectSelect, { target: { value: "sp" } });
     expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
+    fireEvent.change(screen.getByLabelText("branch name"), {
+      target: { value: "feature/ship-it" },
+    });
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "+ Step" }));
+    fireEvent.change(screen.getByLabelText("step 1"), {
+      target: { value: "Ship the fix" },
+    });
 
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
       target: { value: "Ship it" },
@@ -1336,14 +1343,34 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship it" })).toBeInTheDocument();
     });
+
+    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    expect(window.location.search).toBe("");
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    expect(screen.getByRole("combobox", { name: "Spawn project" })).toHaveValue("sp");
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("");
+    expect(screen.getByLabelText("branch name")).toHaveValue("");
+    expect(screen.getByRole("checkbox")).not.toBeChecked();
+    expect(screen.queryByLabelText("step 1")).not.toBeInTheDocument();
   });
 
-  it("closes spawn modal on early ack and shows the spawning session immediately", async () => {
+  it("keeps a matching project filter and URL unchanged while showing the new placeholder", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API" },
+        { id: "sp", name: "Spur Core" },
+      ],
+      sessions: [sessionsPayload().sessions[0]],
+    };
     const spawned = {
-      ...sessionsPayload().sessions[0],
+      ...sessionsData.sessions[0],
       id: "api-spawn-1",
-      prompt: "Spawn in background",
+      prompt: "Spawn in matching filter",
       status: "spawning",
       state: "working",
       runtimeAlive: false,
@@ -1357,17 +1384,14 @@ describe("Dashboard", () => {
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice")
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
       if (url === "/api/spawn") {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
       }
       if (url === "/api/sessions?project=api") {
-        return new Response(
-          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
-        );
-      }
-      if (url === "/api/sessions") {
-        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+        return new Response(JSON.stringify(sessionsData), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
     });
@@ -1379,16 +1403,88 @@ describe("Dashboard", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
-    fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "api" } });
     fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
-      target: { value: "Spawn in background" },
+      target: { value: "Spawn in matching filter" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
 
     await waitFor(() => {
       expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
-      expect(screen.getByRole("link", { name: "Spawn in background" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Spawn in matching filter" })).toBeInTheDocument();
     });
+
+    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(window.location.search).toBe("?project=api");
+  });
+
+  it("keeps a mismatched project filter and URL unchanged without showing the new placeholder", async () => {
+    window.history.replaceState(null, "", "/?project=api");
+    const sessionsData = {
+      projects: [
+        { id: "api", name: "API" },
+        { id: "sp", name: "Spur Core" },
+      ],
+      sessions: [sessionsPayload().sessions[0]],
+    };
+    const spawned = {
+      ...sessionsData.sessions[0],
+      id: "sp-spawn-hidden-1",
+      project: "sp",
+      prompt: "Spawn in another project",
+      status: "spawning",
+      state: "working",
+      runtimeAlive: false,
+      workspaceExists: false,
+      tmuxSession: "sp-spawn-hidden-1",
+      worktreePath: "/tmp/worktrees/sp-spawn-hidden-1",
+    };
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/preflight")
+        return new Response(JSON.stringify({ branch: null }), { status: 200 });
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        return new Response(JSON.stringify(spawned), { status: 201 });
+      }
+      if (url === "/api/sessions?project=api") {
+        return new Response(JSON.stringify(sessionsData), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "sp" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER), {
+      target: { value: "Spawn in another project" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(screen.queryByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).not.toBeInTheDocument();
+    });
+
+    expect(
+      screen.queryByRole("link", { name: "Spawn in another project" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Project filter" })).toHaveValue("api");
+    expect(window.location.search).toBe("?project=api");
+    expect(window.localStorage.getItem("spur:last-spawn-project")).toBe("sp");
   });
 
   it("keeps spawn modal open and preserves fields when spawn ack fails", async () => {

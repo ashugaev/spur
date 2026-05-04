@@ -1283,18 +1283,22 @@ test.describe("D7b: Silent branch preflight", () => {
 });
 
 test.describe("D7c: Background spawn lifecycle", () => {
-  test("successful spawn ack closes the modal and shows the placeholder session immediately", async ({
+  test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-ack-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Background placeholder session",
       branch: "feature/background-placeholder",
       tmuxSession: "spawn-bg-ack-1",
       worktreePath: "/tmp/worktrees/spawn-bg-ack-1",
     });
     const sessions: SpurSessionView[] = [];
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
 
     await page.route("**/api/spawn", async (route) => {
       sessions.splice(0, sessions.length, placeholder);
@@ -1305,12 +1309,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
-    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await openSpawnModal(page, () => sessions, projects);
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
@@ -1318,17 +1324,111 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ).toBeDisabled();
   });
 
-  test("successful spawn sends the full form payload and resets non-project fields on reopen", async ({
+  test("matching project filter keeps the URL and still shows the placeholder", async ({ page }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-match-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-match-ack-1",
+      project: "my-project",
+      prompt: "Matching project placeholder",
+      branch: "feature/matching-filter",
+      tmuxSession: "spawn-filter-match-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-match-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder, currentSession);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "my-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+      "my-project",
+    );
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("mismatched project filter keeps the current list and hides the spawned placeholder", async ({
+    page,
+  }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-mismatch-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-mismatch-ack-1",
+      project: "other-project",
+      prompt: "Hidden by current filter",
+      branch: "feature/mismatched-filter",
+      tmuxSession: "spawn-filter-mismatch-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-mismatch-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByText(currentSession.prompt)).toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue(
+      "my-project",
+    );
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("successful spawn sends the full form payload, resets non-project fields, and remembers the last selected project", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-payload-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Carry the selected options into the background shell",
       branch: "feature/spawn-payload",
       tmuxSession: "spawn-bg-payload-1",
       worktreePath: "/tmp/worktrees/spawn-bg-payload-1",
     });
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
     const requests: unknown[] = [];
     const sessions: SpurSessionView[] = [];
 
@@ -1342,8 +1442,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
+    await openSpawnModal(page, () => sessions, projects);
     await fillSpawnForm(page, {
+      project: "other-project",
       prompt: placeholder.prompt,
       branch: "feature/spawn-payload",
       workspaceMode: "worktree",
@@ -1356,7 +1457,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     expect(requests).toEqual([
       {
-        projectId: "my-project",
+        projectId: "other-project",
         prompt: placeholder.prompt,
         agent: "claude",
         branch: "feature/spawn-payload",
@@ -1375,7 +1476,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     await expect(page.getByRole("checkbox")).not.toBeChecked();
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
+      "other-project",
+    );
   });
 
   test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
