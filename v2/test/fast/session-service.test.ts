@@ -10,6 +10,7 @@ import type {
 
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
+type IsHostPortFree = (port: number) => Promise<boolean>;
 
 const upsertConfigRegistryPathMock = vi.fn();
 const buildAgentLaunchPlanMock = vi.fn();
@@ -49,7 +50,7 @@ const captureTmuxPaneMock = vi.fn(() => Promise.resolve(""));
 const createTmuxSessionMock = vi.fn();
 const createTmuxCommandSessionMock = vi.fn();
 const createTmuxSidecarSessionMock = vi.fn();
-const isHostPortFreeMock = vi.fn(() => Promise.resolve(true));
+const isHostPortFreeMock = vi.fn<IsHostPortFree>().mockResolvedValue(true);
 const sidecarTmuxAliveMock = vi.fn();
 const sidecarTmuxSessionMock = vi.fn((id: string, name: string) => `${id}--${name}`);
 const killSidecarTmuxMock = vi.fn();
