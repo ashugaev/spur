@@ -245,12 +245,10 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
 function CompositeCiReviewMark({
   className,
   reviewColor,
-  reviewGlyph,
   title,
 }: {
   className?: string;
   reviewColor: string;
-  reviewGlyph: "check" | "cross";
   title: string;
 }) {
   const halo = "var(--color-bg-base)";
@@ -277,14 +275,7 @@ function CompositeCiReviewMark({
         strokeLinecap="round"
         strokeLinejoin="round"
       >
-        {reviewGlyph === "check" ? (
-          strokedPath("M8.75 9.5 11.9 12.65 17.65 5.9", reviewColor, 2.15)
-        ) : (
-          <>
-            {strokedPath("M11 6.1 17.4 12.5", reviewColor, 2.05)}
-            {strokedPath("M17.4 6.1 11 12.5", reviewColor, 2.05)}
-          </>
-        )}
+        {strokedPath("M8.75 9.5 11.9 12.65 17.65 5.9", reviewColor, 2.15)}
         {strokedPath("M2.75 9.5 5.9 12.65 11.65 5.9", "var(--color-status-ready)", 2.15)}
       </svg>
     </span>
@@ -301,21 +292,13 @@ export function ReviewDecisionDot({
   if (decision === "approved")
     return (
       <span className={className} data-pr-review-decision="approved">
-        <CompositeCiReviewMark
-          reviewColor="var(--color-status-ready)"
-          reviewGlyph="check"
-          title="Approved"
-        />
+        <CompositeCiReviewMark reviewColor="var(--color-status-ready)" title="Approved" />
       </span>
     );
 
   return (
     <span className={className} data-pr-review-decision="changes_requested">
-      <CompositeCiReviewMark
-        reviewColor="var(--color-status-error)"
-        reviewGlyph="cross"
-        title="Changes requested"
-      />
+      <CompositeCiReviewMark reviewColor="var(--color-status-error)" title="Changes requested" />
     </span>
   );
 }
