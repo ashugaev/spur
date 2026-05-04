@@ -11,6 +11,8 @@ import {
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type WorkspaceAccessItemConfig,
+  type WorkspaceAccessConfig,
   type SendTriggerConfig,
   type ServiceRuleConfig,
   type ServiceSourceConfig,
@@ -20,6 +22,7 @@ import {
 } from "./types.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "./preflight-contract.js";
 import { parseSpawnOverrides } from "./spawn-overrides.js";
+import { SLOT_LABEL_RE } from "./session-slots.js";
 
 const DEFAULT_PROJECT_CONFIG_FILES = ["spur.yaml", "spur.yml"] as const;
 const DEFAULT_INSTANCE_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
@@ -32,7 +35,11 @@ const DEFAULT_VOICE_MODEL_PATH = "~/.cache/whisper.cpp/ggml-base.bin";
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_VOICE_LANGUAGE = "auto";
 const DEFAULT_VOICE_MODEL = "base";
+const ENV_VAR_RE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
+const ENV_NAME_RE = /\b([A-Z_][A-Z0-9_]*)\b/g;
 const VALID_ID_RE = /^[a-zA-Z0-9_-]+$/;
+const PROJECT_ENV_FILE = ".env";
+const MISSING_ENV_SENTINEL = "__SPUR_MISSING_ENV__";
 
 type ConfigMode = "instance" | "project";
 
@@ -49,6 +56,8 @@ interface ConfigDefaults {
   voiceLanguage: string;
   voiceModel: string;
 }
+
+const projectEnvCache = new Map<string, Record<string, string>>();
 
 function expandHome(value: string): string {
   if (value.startsWith("~/")) {
@@ -74,6 +83,20 @@ function asString(value: unknown, label: string): string {
     throw new Error(`${label} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function asUrlString(value: unknown, label: string): string {
+  const text = asString(value, label);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new Error(`${label} must be an absolute URL`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`${label} must use http or https`);
+  }
+  return url.toString();
 }
 
 function asOptionalString(value: unknown, label: string): string | undefined {
@@ -114,10 +137,96 @@ function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
 
 function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   if (value === undefined) return undefined;
-  if (value === "claude" || value === "codex") {
+  if (value === "claude" || value === "codex" || value === "cursor") {
     return value;
   }
-  throw new Error(`${label} must be "claude" or "codex"`);
+  throw new Error(`${label} must be "claude", "codex", or "cursor"`);
+}
+
+function parseEnvFile(content: string): Record<string, string> {
+  const entries: Record<string, string> = {};
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const separator = line.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const key = line.slice(0, separator).trim();
+    const value = line
+      .slice(separator + 1)
+      .trim()
+      .replace(/^['"]|['"]$/g, "");
+    if (key) {
+      entries[key] = value;
+    }
+  }
+  return entries;
+}
+
+function readProjectEnv(projectPath: string): Record<string, string> {
+  const cached = projectEnvCache.get(projectPath);
+  if (cached) {
+    return cached;
+  }
+  const envPath = join(projectPath, PROJECT_ENV_FILE);
+  if (!existsSync(envPath)) {
+    projectEnvCache.set(projectPath, {});
+    return {};
+  }
+  try {
+    const parsed = parseEnvFile(readFileSync(envPath, "utf8"));
+    projectEnvCache.set(projectPath, parsed);
+    return parsed;
+  } catch {
+    projectEnvCache.set(projectPath, {});
+    return {};
+  }
+}
+
+function readEnvValue(name: string, projectEnv: Record<string, string>): string | undefined {
+  const processValue = process.env[name]?.trim();
+  if (processValue) {
+    return processValue;
+  }
+  const projectValue = projectEnv[name]?.trim();
+  return projectValue || undefined;
+}
+
+function resolveEnvVars(raw: string, projectEnv: Record<string, string>): string | undefined {
+  const withBracedVars = raw.replace(ENV_VAR_RE, (_, name: string) => {
+    const value = readEnvValue(name, projectEnv);
+    return value ?? MISSING_ENV_SENTINEL;
+  });
+  if (withBracedVars.includes(MISSING_ENV_SENTINEL)) {
+    return undefined;
+  }
+  const resolved = withBracedVars.replace(ENV_NAME_RE, (token, name: string) => {
+    const value = readEnvValue(name, projectEnv);
+    return value ?? `${MISSING_ENV_SENTINEL}:${token}`;
+  });
+  return resolved.includes(MISSING_ENV_SENTINEL) ? undefined : resolved;
+}
+
+function resolveOptionalUrl(
+  raw: string,
+  label: string,
+  projectEnv: Record<string, string>,
+): string | undefined {
+  const resolved = resolveEnvVars(raw, projectEnv);
+  if (resolved === undefined) {
+    return undefined;
+  }
+  return asUrlString(resolved, label);
+}
+
+function resolveOptionalTemplate(
+  raw: string,
+  projectEnv: Record<string, string>,
+): string | undefined {
+  return resolveEnvVars(raw, projectEnv);
 }
 
 function defaultTmuxSocketName(port: number): string {
@@ -182,7 +291,11 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
-  return VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
+  const events = VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
+  if (source.query !== undefined) {
+    events.push("github:work_item.new");
+  }
+  return events;
 }
 
 function derivePrefix(projectId: string): string {
@@ -210,10 +323,12 @@ function parseGitHubSource(
   raw: Record<string, unknown>,
 ): GitHubSourceConfig {
   const label = `projects.${projectId}.sources.${sourceId}`;
+  const query = asOptionalString(raw["query"], `${label}.query`);
   return {
     type: "github",
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
+    ...(query !== undefined ? { query } : {}),
   };
 }
 
@@ -335,7 +450,11 @@ function parseDevServer(projectId: string, value: unknown): DevServerConfig | un
   };
 }
 
-function parseSidecars(projectId: string, value: unknown): Record<string, SidecarConfig> {
+function parseSidecars(
+  projectId: string,
+  value: unknown,
+  projectEnv: Record<string, string>,
+): Record<string, SidecarConfig> {
   if (value === undefined) return {};
   const label = `projects.${projectId}.sidecars`;
   const raw = asObject(value, label);
@@ -356,11 +475,16 @@ function parseSidecars(projectId: string, value: unknown): Record<string, Sideca
       const envObj = asObject(envRaw, `${entryLabel}.env`);
       env = {};
       for (const [k, v] of Object.entries(envObj)) {
-        env[k] = asString(v, `${entryLabel}.env.${k}`);
+        const resolved = resolveEnvVars(asString(v, `${entryLabel}.env.${k}`), projectEnv);
+        if (resolved !== undefined) {
+          env[k] = resolved;
+        }
       }
+      if (Object.keys(env).length === 0) env = undefined;
     }
     const portsRaw = entryRaw["ports"];
     let ports: SidecarConfig["ports"];
+    let urlEnabledPortCount = 0;
     if (portsRaw !== undefined) {
       const portsObj = asObject(portsRaw, `${entryLabel}.ports`);
       ports = {};
@@ -377,11 +501,44 @@ function parseSidecars(projectId: string, value: unknown): Record<string, Sideca
         if (end < start) {
           throw new Error(`${portLabel}.end must be greater than or equal to ${portLabel}.start`);
         }
+        const rawUrl = asOptionalString(portObj["url"], `${portLabel}.url`);
+        let url: string | undefined;
+        if (rawUrl !== undefined) {
+          const resolvedUrl = resolveOptionalUrl(rawUrl, `${portLabel}.url`, projectEnv);
+          if (resolvedUrl !== undefined) {
+            const parsed = new URL(resolvedUrl);
+            if (parsed.port !== "") {
+              throw new Error(`${portLabel}.url must not include an explicit port`);
+            }
+            if (parsed.pathname !== "/" && parsed.pathname !== "") {
+              throw new Error(`${portLabel}.url must not include a path`);
+            }
+            if (parsed.search !== "") {
+              throw new Error(`${portLabel}.url must not include a query string`);
+            }
+            if (parsed.hash !== "") {
+              throw new Error(`${portLabel}.url must not include a fragment`);
+            }
+            url = resolvedUrl.replace(/\/$/, "");
+            urlEnabledPortCount += 1;
+          }
+        }
         ports[portId] = {
           env: asString(portObj["env"], `${portLabel}.env`),
           start,
           end,
+          ...(url !== undefined ? { url } : {}),
         };
+      }
+    }
+    if (urlEnabledPortCount > 0) {
+      if (urlEnabledPortCount > 1) {
+        throw new Error(`${entryLabel}.ports: at most one port may define "url"`);
+      }
+      if (!SLOT_LABEL_RE.test(name)) {
+        throw new Error(
+          `${entryLabel}: sidecar name must match ${SLOT_LABEL_RE.source} when any port defines "url"`,
+        );
       }
     }
     result[name] = { command, autoStart, ...(env ? { env } : {}), ...(ports ? { ports } : {}) };
@@ -407,6 +564,50 @@ function parseProjectSpawn(projectId: string, value: unknown): ProjectSpawnConfi
   const raw = asObject(value, label);
   const steps = asOptionalStringArray(raw["steps"], `${label}.steps`);
   return steps !== undefined ? { steps } : {};
+}
+
+function parseWorkspaceAccess(
+  projectId: string,
+  value: unknown,
+  projectEnv: Record<string, string>,
+): WorkspaceAccessConfig | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const label = `projects.${projectId}.workspaceAccess`;
+  const raw = asObject(value, label);
+  const itemsRaw = raw["items"];
+  if (itemsRaw === undefined) {
+    throw new Error(`${label}.items must be an array`);
+  }
+  if (!Array.isArray(itemsRaw)) {
+    throw new Error(`${label}.items must be an array`);
+  }
+
+  const items: WorkspaceAccessItemConfig[] = [];
+  for (const [index, itemRaw] of itemsRaw.entries()) {
+    const itemLabel = `${label}.items[${index}]`;
+    const item = asObject(itemRaw, itemLabel);
+    const kind = asString(item["kind"], `${itemLabel}.kind`);
+    if (kind !== "copy" && kind !== "link") {
+      throw new Error(`${itemLabel}.kind must be "copy" or "link"`);
+    }
+    const resolvedValue = resolveOptionalTemplate(
+      asString(item["value"], `${itemLabel}.value`),
+      projectEnv,
+    );
+    if (resolvedValue === undefined) {
+      continue;
+    }
+    items.push({
+      label: asString(item["label"], `${itemLabel}.label`),
+      kind,
+      value: resolvedValue,
+    });
+  }
+
+  return items.length > 0 ? { items } : undefined;
 }
 
 function parseTrigger(
@@ -477,6 +678,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const label = `projects.${projectId}`;
   const raw = asObject(value, label);
   const path = resolveFrom(configDir, asString(raw["path"], `${label}.path`));
+  const projectEnv = readProjectEnv(path);
   const name = asOptionalString(raw["name"], `${label}.name`);
   const defaultBranch = asOptionalString(raw["defaultBranch"], `${label}.defaultBranch`) ?? "main";
   const sessionPrefix =
@@ -486,6 +688,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const codexArgs = asOptionalStringArray(raw["codexArgs"], `${label}.codexArgs`);
   const spawn = parseProjectSpawn(projectId, raw["spawn"]);
   const preflight = parseProjectPreflight(projectId, raw["preflight"]);
+  const workspaceAccess = parseWorkspaceAccess(projectId, raw["workspaceAccess"], projectEnv);
   const devServer = parseDevServer(projectId, raw["devServer"]);
   const hasDevServerKey = raw["devServer"] !== undefined;
   const hasSidecarsKey = raw["sidecars"] !== undefined;
@@ -493,7 +696,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     throw new Error(`projects.${projectId} defines both "devServer" and "sidecars"; pick one`);
   }
   const sidecars = hasSidecarsKey
-    ? parseSidecars(projectId, raw["sidecars"])
+    ? parseSidecars(projectId, raw["sidecars"], projectEnv)
     : devServer
       ? parseDevServerAsSidecar(devServer)
       : {};
@@ -507,6 +710,19 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
   const triggers: Record<string, TriggerConfig> = {};
   for (const [triggerId, triggerValue] of Object.entries(triggersRaw)) {
     triggers[triggerId] = parseTrigger(projectId, triggerId, triggerValue, sources);
+  }
+
+  const workItemSubs = new Map<string, number>();
+  for (const trigger of Object.values(triggers)) {
+    if (trigger.event !== "github:work_item.new") continue;
+    workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
+  }
+  for (const [src, count] of workItemSubs) {
+    if (count > 1) {
+      throw new Error(
+        `projects.${projectId}: source "${src}" has ${count} triggers subscribed to "github:work_item.new"; at most one is allowed`,
+      );
+    }
   }
 
   if (!VALID_ID_RE.test(sessionPrefix)) {
@@ -523,6 +739,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
     ...(codexArgs !== undefined ? { codexArgs } : {}),
     ...(spawn !== undefined ? { spawn } : {}),
     ...(preflight !== undefined ? { preflight } : {}),
+    ...(workspaceAccess !== undefined ? { workspaceAccess } : {}),
     sidecars,
     ...(defaultAgent !== undefined ? { defaultAgent } : {}),
     sources,

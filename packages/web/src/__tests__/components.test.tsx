@@ -1,10 +1,37 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+  type RenderOptions,
+} from "@testing-library/react";
 import { renderToString } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { type ReactElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "@/components/Dashboard";
 import { StatusBar } from "@/components/StatusBar";
 import manifest from "@/app/manifest";
-import { generateMetadata } from "@/app/layout";
+import { metadata } from "@/app/layout";
+import { generateMetadata as generateSessionMetadata } from "@/app/sessions/[id]/page";
+
+function createTestQueryClient() {
+  return new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, refetchOnWindowFocus: false, staleTime: 0 },
+    },
+  });
+}
+
+function render(ui: ReactElement, options?: RenderOptions) {
+  const client = createTestQueryClient();
+  const Wrapper = ({ children }: { children: ReactNode }) => (
+    <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  );
+  return rtlRender(ui, { wrapper: Wrapper, ...options });
+}
 
 vi.mock("next/font/google", () => ({
   JetBrains_Mono: () => ({ variable: "--font-jetbrains-mono" }),
@@ -229,7 +256,10 @@ describe("Dashboard", () => {
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith("/api/sessions?project=api", { cache: "no-store" });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/sessions?project=api",
+      expect.objectContaining({ cache: "no-store" }),
+    );
   });
 
   it("shows a live recording timer in the spawn modal while voice capture is active", async () => {
@@ -404,6 +434,86 @@ describe("Dashboard", () => {
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
     expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
+  });
+
+  it("shows stopped sessions in a dedicated Stopped category", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-stopped-1",
+                prompt: "Manual stop",
+                status: "stopped",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
+      expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
+    });
+  });
+
+  it("routes crashed non-terminal sessions into Stopped instead of Needs Input", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-crashed-1",
+                prompt: "Crashed run",
+                status: "running",
+                state: "working",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
+      expect(within(header).getByRole("button", { name: /Needs Input/i })).toHaveTextContent("0");
+      expect(screen.getByRole("link", { name: "Crashed run" })).toBeInTheDocument();
+    });
   });
 
   it("keeps completed-only dashboards neutral until Completed is selected", async () => {
@@ -583,7 +693,10 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith("/api/sessions", { cache: "no-store" });
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions",
+        expect.objectContaining({ cache: "no-store" }),
+      );
       expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
     });
 
@@ -665,6 +778,56 @@ describe("Dashboard", () => {
     ).toBeInTheDocument();
   });
 
+  it("lists cursor in spawn agent options and sends it on spawn", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBe(JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }));
+        return new Response(
+          JSON.stringify({ ...sessionsPayload().sessions[0], id: "api-cursor-1", agent: "cursor" }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+
+    const agentSelect = screen.getByRole("combobox", { name: "Spawn agent" });
+    expect(within(agentSelect).getByRole("option", { name: "cursor" })).toBeInTheDocument();
+    fireEvent.change(agentSelect, { target: { value: "cursor" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ projectId: "api", prompt: "", agent: "cursor" }),
+        }),
+      );
+    });
+  });
+
   it("allows spawning from the dashboard without a prompt", async () => {
     const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
       const url = typeof input === "string" ? input : input.url;
@@ -715,6 +878,100 @@ describe("Dashboard", () => {
     });
   });
 
+  it("adds image attachments in the spawn prompt and includes them in the spawn payload", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      if (url === "/api/spawn") {
+        expect(init?.method).toBe("POST");
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        expect(body).toMatchObject({
+          projectId: "api",
+          prompt: "Ship image flow",
+          agent: "claude",
+        });
+        expect(body.attachments).toEqual([{ name: "spawn.png", data: expect.any(String) }]);
+        return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    const prompt = screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER);
+    fireEvent.change(prompt, { target: { value: "Ship image flow" } });
+    fireEvent.paste(prompt, {
+      clipboardData: {
+        files: [new File(["png"], "spawn.png", { type: "image/png" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("spawn.png")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/spawn",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+  });
+
+  it("shows an add-image picker inside the spawn prompt and accepts files from it", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const { container } = render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    expect(screen.getByRole("button", { name: "Add image" })).toBeInTheDocument();
+
+    const fileInput = container.querySelector('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    fireEvent.change(fileInput as HTMLInputElement, {
+      target: { files: [new File(["png"], "picker.png", { type: "image/png" })] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByAltText("picker.png")).toBeInTheDocument();
+    });
+  });
+
   it("restores a saved spawn prompt from history with its timestamp", async () => {
     window.localStorage.setItem(
       "spur:input-history:spawn-prompt",
@@ -751,6 +1008,59 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: /Re-run the flaky deploy/i }));
 
     expect(screen.getByDisplayValue("Re-run the flaky deploy")).toBeInTheDocument();
+  });
+
+  it("inserts a slash suggestion into the spawn prompt", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions")
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      if (url === "/api/projects/api/slash-commands?agent=claude") {
+        return new Response(
+          JSON.stringify({
+            agent: "claude",
+            commands: [
+              {
+                id: "cmd-compact",
+                label: "/compact",
+                insertText: "/compact",
+                detail: "Compact the chat",
+                source: "built-in",
+                kind: "command",
+              },
+            ],
+            skills: [],
+            agents: [],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Spawn Session" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Spawn Session" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Spawn project" }), {
+      target: { value: "api" },
+    });
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
+
+    expect(screen.getByPlaceholderText(SPAWN_PROMPT_PLACEHOLDER)).toHaveValue("/compact");
   });
 
   it.each([
@@ -1176,9 +1486,9 @@ describe("Dashboard", () => {
   });
 
   it("exposes install metadata for PWA installability", async () => {
-    const metadata = await generateMetadata();
     const appManifest = manifest();
 
+    expect(metadata.title).toBe("Spur");
     expect(metadata.manifest).toBe("/manifest.webmanifest");
     expect(metadata.applicationName).toBe("Spur");
     expect(metadata.appleWebApp).toMatchObject({
@@ -1211,6 +1521,14 @@ describe("Dashboard", () => {
       ]),
     );
   });
+
+  it("uses the decoded session id as the session page title", async () => {
+    const metadata = await generateSessionMetadata({
+      params: Promise.resolve({ id: "feature%2Ftest-123" }),
+    });
+
+    expect(metadata.title).toBe("feature/test-123");
+  });
 });
 
 describe("StatusBar", () => {
@@ -1218,25 +1536,44 @@ describe("StatusBar", () => {
     vi.restoreAllMocks();
   });
 
+  function mockStatusBarFetch({
+    resources,
+    github,
+  }: {
+    resources: Record<string, unknown>;
+    github?: Record<string, unknown>;
+  }) {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify(resources));
+      }
+      if (url === "/api/github-status") {
+        return new Response(
+          JSON.stringify(github ?? { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }),
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
   it("renders build version without hydration mismatch", () => {
-    const html = renderToString(<StatusBar sessions={[]} />);
+    const html = renderToString(<StatusBar />);
     expect(html).toContain("dev");
   });
 
   it("renders resource metrics when runtime resources are available", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 12,
-          memoryPercent: 34,
-          diskPercent: 56,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 12,
+        memoryPercent: 34,
+        diskPercent: 56,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1254,11 +1591,11 @@ describe("StatusBar", () => {
   });
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ available: false, daemonAlive: true })),
-    );
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(screen.queryByText(/CPU \d+%/)).not.toBeInTheDocument();
@@ -1275,19 +1612,17 @@ describe("StatusBar", () => {
   });
 
   it("shows warning and error states in the online tooltip", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 88,
-          memoryPercent: 86,
-          diskPercent: 91,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 88,
+        memoryPercent: 86,
+        diskPercent: 91,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1304,19 +1639,17 @@ describe("StatusBar", () => {
   });
 
   it("syncs warning status text in the footer and closes the tooltip when its content is clicked", async () => {
-    vi.spyOn(global, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          available: true,
-          daemonAlive: true,
-          cpuPercent: 86,
-          memoryPercent: 48,
-          diskPercent: 41,
-        }),
-      ),
-    );
+    mockStatusBarFetch({
+      resources: {
+        available: true,
+        daemonAlive: true,
+        cpuPercent: 86,
+        memoryPercent: 48,
+        diskPercent: 41,
+      },
+    });
 
-    render(<StatusBar sessions={[]} />);
+    render(<StatusBar />);
 
     await waitFor(() => {
       expect(
@@ -1333,5 +1666,86 @@ describe("StatusBar", () => {
     fireEvent.click(tooltipHeader!);
 
     expect(screen.queryByText("System")).not.toBeInTheDocument();
+  });
+
+  it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    fireEvent.mouseEnter(githubStatus);
+
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getAllByText("Healthy")).toHaveLength(2);
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+  });
+
+  it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    const githubStatus = await screen.findByLabelText("GitHub connection healthy");
+    fireEvent.click(githubStatus);
+    fireEvent.mouseLeave(githubStatus);
+
+    expect(screen.getByText("GitHub")).toBeInTheDocument();
+    expect(screen.getByText(/Last request:/)).toBeInTheDocument();
+
+    fireEvent.click(githubStatus);
+
+    expect(screen.queryByText("GitHub")).not.toBeInTheDocument();
+  });
+
+  it("shows the temporary checking state before the GitHub request resolves", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Promise<Response>(() => {});
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(screen.getByText("Checking")).toBeInTheDocument();
+  });
+
+  it("shows the GitHub error text in the footer when the health check fails", async () => {
+    mockStatusBarFetch({
+      resources: { available: false, daemonAlive: true },
+      github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
+    });
+
+    render(<StatusBar />);
+
+    expect(await screen.findByText("GitHub API 503")).toBeInTheDocument();
+  });
+
+  it("shows a synthesized footer error when the GitHub status endpoint returns a non-200 response", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+      }
+      if (url === "/api/github-status") {
+        return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<StatusBar />);
+
+    expect(await screen.findByText("GitHub status unavailable (503)")).toBeInTheDocument();
   });
 });

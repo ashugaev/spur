@@ -10,6 +10,10 @@ const STALE_WORKING_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/stale-working-spur-1c0e-tail.jsonl",
 );
+const INTERRUPTED_TAIL_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/interrupted-spur-00b0-tail.jsonl",
+);
 
 const tempDirs: string[] = [];
 
@@ -43,6 +47,41 @@ describe("readCodexRolloutState", () => {
       reason: "task_complete",
       turnId: "019d8c38-fab8-7803-adfe-a984a5518abc",
     });
+  });
+
+  it("reads waiting from a real interrupted turn_aborted tail", async () => {
+    const content = await readFile(INTERRUPTED_TAIL_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-interrupted.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toMatchObject({
+      state: "waiting",
+      reason: "turn_aborted",
+      turnId: "019dca92-5592-7043-bdca-211e6b7c11e2",
+      timestamp: "2026-04-26T16:14:44.371Z",
+    });
+  });
+
+  it("ignores turn_aborted events when the reason is not interrupted", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-04-26T16:14:44.371Z",
+          type: "event_msg",
+          payload: {
+            type: "turn_aborted",
+            turn_id: "spur-abort-1",
+            reason: "tool_error",
+          },
+        }),
+      ].join("\n"),
+      "rollout-non-interrupted-abort.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toBeNull();
   });
 
   it("reads needs_input from request_user_input calls", async () => {

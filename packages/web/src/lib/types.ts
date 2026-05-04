@@ -1,6 +1,9 @@
+import type { AgentName } from "./agents";
+
 export type SpurSessionStatus =
   | "spawning"
   | "running"
+  | "stopped"
   | "paused"
   | "errored"
   | "completed"
@@ -30,11 +33,35 @@ export interface SpurSessionLink {
   url: string;
 }
 
+export type SpurSessionArtifactKind = "image" | "video" | "download";
+export type SpurSessionArtifactOrigin = "intentional" | "automatic";
+
+export interface SpurSessionArtifact {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  kind: SpurSessionArtifactKind;
+  origin: SpurSessionArtifactOrigin;
+  addedByUser?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SpurSessionWorkspaceAccess {
+  items: Array<{
+    label: string;
+    kind: "copy" | "link";
+    value: string;
+  }>;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   prompt: string;
+  startupAttachmentIds?: string[];
   branch: string;
   worktree: boolean;
   tmuxSession: string | null;
@@ -46,16 +73,18 @@ export interface SpurSessionView {
   runtimeAlive: boolean;
   workspaceExists: boolean;
   worktreePath: string;
-  services: SpurServiceView[];
+  services?: SpurServiceView[];
   queuedMessages?: {
     messages: string[];
     awaitingPrompt: boolean;
   };
+  artifacts?: SpurSessionArtifact[];
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
     links: SpurSessionLink[];
   };
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -64,20 +93,39 @@ export interface ProjectInfo {
   name: string;
 }
 
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: "claude" | "codex";
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
+}
+
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
 }
 
-export type AttentionLevel = "respond" | "pending" | "working" | "done";
+export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
 
 export interface DashboardSession {
   id: string;
   projectId: string;
   projectName: string;
-  agent: "claude" | "codex";
+  agent: AgentName;
   title: string | null;
   prompt: string;
+  startupAttachmentIds: string[];
   branch: string | null;
   worktree: boolean;
   tmuxSession: string | null;
@@ -90,12 +138,14 @@ export interface DashboardSession {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  artifacts: SpurSessionArtifact[];
   queuedMessages: {
     messages: string[];
     awaitingPrompt: boolean;
   };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
+  workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
 
@@ -117,6 +167,7 @@ export function toDashboardSession(
     agent: session.agent,
     title: session.slots?.title?.trim() || null,
     prompt: session.prompt,
+    startupAttachmentIds: session.startupAttachmentIds ?? [],
     branch: session.branch?.trim() || null,
     worktree: session.worktree,
     tmuxSession: session.tmuxSession ?? null,
@@ -128,10 +179,12 @@ export function toDashboardSession(
     runtimeAlive: session.runtimeAlive,
     workspaceExists: session.workspaceExists,
     worktreePath: session.worktreePath,
-    services: session.services,
+    services: session.services ?? [],
+    artifacts: session.artifacts ?? [],
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
+    workspaceAccess: session.workspaceAccess,
     error: session.error,
   };
 }
@@ -152,7 +205,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
-  if (session.status === "paused") return true;
+  if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
 }
 
@@ -200,8 +253,7 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     session.state === "error" ||
     Boolean(session.error) ||
     hasServiceProblems(session) ||
-    !session.workspaceExists ||
-    (!session.runtimeAlive && session.status === "running")
+    !session.workspaceExists
   ) {
     return "respond";
   }
@@ -210,7 +262,16 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
     return "working";
   }
 
-  if (session.status === "paused" || session.state === "waiting" || session.state === "stopped") {
+  if (
+    session.status === "paused" ||
+    session.status === "stopped" ||
+    session.state === "stopped" ||
+    !session.runtimeAlive
+  ) {
+    return "stopped";
+  }
+
+  if (session.state === "waiting") {
     return "pending";
   }
 

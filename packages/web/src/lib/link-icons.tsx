@@ -1,17 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import type { SpurSessionLink } from "@/lib/types";
+import {
+  type CiStatus,
+  type PrInfo,
+  type PrState,
+  type ReviewDecision,
+  isCiStatus,
+  isPrInfoShape,
+  isPrState,
+  parseReviewDecision,
+  prInfosEqual,
+} from "@/lib/pr-status-shape";
 
-export type PrState = "draft" | "open" | "merged" | "closed";
-export type CiStatus = "success" | "failure" | "pending" | null;
-
-export interface PrInfo {
-  state: PrState | null;
-  ciStatus: CiStatus;
-  totalThreads: number;
-  unresolvedThreads: number;
-}
+export type { CiStatus, PrInfo, PrState, ReviewDecision };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
   draft: "var(--color-text-tertiary)",
@@ -22,33 +25,16 @@ const PR_STATE_COLORS: Record<PrState, string> = {
 
 const EMPTY_PR_INFO: PrInfo = {
   state: null,
+  reviewDecision: null,
   ciStatus: null,
+  canMerge: false,
   totalThreads: 0,
   unresolvedThreads: 0,
 };
-const CACHE_TTL_MS = 120_000; // match server cache
-const POLL_MS = 120_000; // poll every 2 min, not 30s
-
-let gitErrorMessage: string | null = null;
-const gitErrorListeners = new Set<() => void>();
-
-function setGitError(msg: string | null) {
-  gitErrorMessage = msg;
-  for (const cb of gitErrorListeners) cb();
-}
-
-/** Subscribe to GitHub integration error state. */
-export function useGitError(): string | null {
-  const [err, setErr] = useState(gitErrorMessage);
-  useEffect(() => {
-    const cb = () => setErr(gitErrorMessage);
-    gitErrorListeners.add(cb);
-    return () => {
-      gitErrorListeners.delete(cb);
-    };
-  }, []);
-  return err;
-}
+const POLL_MS = 120_000;
+const FRESH_TTL_MS = 120_000;
+const PR_CACHE_STORAGE_KEY = "spur:pr-status-cache:v1";
+const PR_CACHE_MAX_ENTRIES = 200;
 
 interface CacheEntry {
   data: PrInfo;
@@ -56,43 +42,110 @@ interface CacheEntry {
 }
 
 const prCache = new Map<string, CacheEntry>();
+const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
-function isPrState(value: unknown): value is PrState {
-  return value === "draft" || value === "open" || value === "merged" || value === "closed";
+export function isGitHubPrLinkLabel(label: string): boolean {
+  return label === "github-pr" || label === "pr";
 }
 
-function isCiStatus(value: unknown): value is CiStatus {
-  return value === "success" || value === "failure" || value === "pending" || value === null;
+function hydratePrCacheFromStorage(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(PR_CACHE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return;
+    for (const [url, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value !== "object" || value === null) continue;
+      const entry = value as Record<string, unknown>;
+      const data = entry["data"];
+      const fetchedAt = entry["fetchedAt"];
+      if (typeof fetchedAt !== "number" || !isPrInfoShape(data)) continue;
+      prCache.set(url, { data, fetchedAt });
+    }
+  } catch {
+    /* storage unavailable or malformed */
+  }
+}
+
+let storageWriteTimer: ReturnType<typeof setTimeout> | null = null;
+function persistPrCache(): void {
+  if (typeof window === "undefined") return;
+  if (storageWriteTimer) return;
+  storageWriteTimer = setTimeout(() => {
+    storageWriteTimer = null;
+    try {
+      if (prCache.size > PR_CACHE_MAX_ENTRIES) {
+        const sorted = [...prCache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+        const drop = sorted.length - PR_CACHE_MAX_ENTRIES;
+        for (let i = 0; i < drop; i++) {
+          const item = sorted[i];
+          if (item) prCache.delete(item[0]);
+        }
+      }
+      const obj = Object.fromEntries(prCache.entries());
+      window.localStorage.setItem(PR_CACHE_STORAGE_KEY, JSON.stringify(obj));
+    } catch {
+      /* quota / serialization */
+    }
+  }, 250);
+}
+
+function setPrCache(url: string, data: PrInfo): void {
+  prCache.set(url, { data, fetchedAt: Date.now() });
+  persistPrCache();
+}
+
+hydratePrCacheFromStorage();
+
+function cachedOrEmpty(url: string): PrInfo {
+  const cached = prCache.get(url);
+  return cached ? cached.data : EMPTY_PR_INFO;
+}
+
+export function primePrInfo(url: string, data: PrInfo): void {
+  setPrCache(url, data);
 }
 
 export async function fetchPrInfo(url: string): Promise<PrInfo> {
-  try {
-    const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-      setGitError(typeof body["error"] === "string" ? body["error"] : `GitHub API ${res.status}`);
-      return EMPTY_PR_INFO;
+  const existing = pendingPrRequests.get(url);
+  if (existing) return existing;
+
+  const request = (async () => {
+    try {
+      const res = await fetch(`/api/pr-status?url=${encodeURIComponent(url)}`);
+      if (!res.ok) return cachedOrEmpty(url);
+      const data: unknown = await res.json();
+      if (typeof data !== "object" || data === null) return cachedOrEmpty(url);
+      const obj = data as Record<string, unknown>;
+      const error = typeof obj["error"] === "string" ? obj["error"] : null;
+      const parsed: PrInfo = {
+        state: isPrState(obj["state"]) ? obj["state"] : null,
+        reviewDecision: parseReviewDecision(obj["reviewDecision"]),
+        ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
+        canMerge: typeof obj["canMerge"] === "boolean" ? obj["canMerge"] : false,
+        totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
+        unresolvedThreads:
+          typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
+        fetchedAt: typeof obj["fetchedAt"] === "number" ? obj["fetchedAt"] : undefined,
+        stale: typeof obj["stale"] === "boolean" ? obj["stale"] : undefined,
+      };
+      if (error && parsed.state === null) return cachedOrEmpty(url);
+      return parsed;
+    } catch {
+      return cachedOrEmpty(url);
+    } finally {
+      pendingPrRequests.delete(url);
     }
-    setGitError(null);
-    const data: unknown = await res.json();
-    if (typeof data !== "object" || data === null) return EMPTY_PR_INFO;
-    const obj = data as Record<string, unknown>;
-    return {
-      state: isPrState(obj["state"]) ? obj["state"] : null,
-      ciStatus: isCiStatus(obj["ciStatus"]) ? obj["ciStatus"] : null,
-      totalThreads: typeof obj["totalThreads"] === "number" ? obj["totalThreads"] : 0,
-      unresolvedThreads:
-        typeof obj["unresolvedThreads"] === "number" ? obj["unresolvedThreads"] : 0,
-    };
-  } catch {
-    setGitError("GitHub API unreachable");
-    return EMPTY_PR_INFO;
-  }
+  })();
+
+  pendingPrRequests.set(url, request);
+  return request;
 }
 
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
-  if (link.label === "pr") {
+  if (isGitHubPrLinkLabel(link.label)) {
     const match = url.match(/\/pull\/(\d+)/);
     return match ? `#${match[1]}` : "PR";
   }
@@ -104,38 +157,33 @@ export function extractLinkId(link: SpurSessionLink): string {
 }
 
 export function usePrInfo(url: string | undefined): PrInfo {
-  const [info, setInfo] = useState<PrInfo>(() => {
-    if (!url) return EMPTY_PR_INFO;
-    const cached = prCache.get(url);
-    return cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS ? cached.data : EMPTY_PR_INFO;
-  });
-
-  const doFetch = useCallback(async (target: string) => {
-    const cached = prCache.get(target);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      setInfo(cached.data);
-      return;
-    }
-    const result = await fetchPrInfo(target);
-    prCache.set(target, { data: result, fetchedAt: Date.now() });
-    setInfo(result);
-  }, []);
+  const [info, setInfo] = useState<PrInfo>(() => (url ? cachedOrEmpty(url) : EMPTY_PR_INFO));
 
   useEffect(() => {
     if (!url) return;
     let cancelled = false;
 
-    const run = () => {
-      if (!cancelled) void doFetch(url);
+    const run = async () => {
+      const cached = prCache.get(url);
+      if (cached && Date.now() - cached.fetchedAt < FRESH_TTL_MS && !cached.data.stale) return;
+      const result = await fetchPrInfo(url);
+      if (cancelled) return;
+      const prev = prCache.get(url)?.data;
+      if (prev && prInfosEqual(prev, result)) {
+        setInfo(result);
+        return;
+      }
+      setPrCache(url, result);
+      setInfo(result);
     };
 
-    run();
-    const timer = setInterval(run, POLL_MS);
+    void run();
+    const timer = setInterval(() => void run(), POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, [url, doFetch]);
+  }, [url]);
 
   return info;
 }
@@ -149,6 +197,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   if (status === "success")
     return (
       <svg
+        aria-label="CI passing"
+        role="img"
         className="h-3 w-3"
         viewBox="0 0 24 24"
         fill="none"
@@ -163,6 +213,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   if (status === "failure")
     return (
       <svg
+        aria-label="CI failing"
+        role="img"
         className="h-3 w-3"
         viewBox="0 0 24 24"
         fill="none"
@@ -175,6 +227,8 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
     );
   return (
     <svg
+      aria-label="CI pending"
+      role="img"
       className="h-3 w-3"
       viewBox="0 0 24 24"
       fill="none"
@@ -188,8 +242,69 @@ export function CiStatusDot({ status }: { status: CiStatus }) {
   );
 }
 
+function CompositeCiReviewMark({
+  className,
+  reviewColor,
+  title,
+}: {
+  className?: string;
+  reviewColor: string;
+  title: string;
+}) {
+  const halo = "var(--color-bg-base)";
+
+  const strokedPath = (d: string, color: string, width: number) => (
+    <>
+      <path d={d} stroke={halo} strokeWidth={width + 1.25} />
+      <path d={d} stroke={color} strokeWidth={width} />
+    </>
+  );
+
+  return (
+    <span
+      aria-label={title}
+      className={`inline-flex shrink-0 ${className ?? ""}`.trim()}
+      role="img"
+      title={title}
+    >
+      <svg
+        aria-hidden="true"
+        className="h-3.5 w-[1.15rem]"
+        viewBox="0 0 24 18"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {strokedPath("M8.75 9.5 11.9 12.65 17.65 5.9", reviewColor, 2.15)}
+        {strokedPath("M2.75 9.5 5.9 12.65 11.65 5.9", "var(--color-status-ready)", 2.15)}
+      </svg>
+    </span>
+  );
+}
+
+export function ReviewDecisionDot({
+  decision,
+  className,
+}: {
+  decision: "approved" | "changes_requested";
+  className?: string;
+}) {
+  if (decision === "approved")
+    return (
+      <span className={className} data-pr-review-decision="approved">
+        <CompositeCiReviewMark reviewColor="var(--color-status-ready)" title="Approved" />
+      </span>
+    );
+
+  return (
+    <span className={className} data-pr-review-decision="changes_requested">
+      <CompositeCiReviewMark reviewColor="var(--color-status-error)" title="Changes requested" />
+    </span>
+  );
+}
+
 export function ReviewCommentsBadge({ total, unresolved }: { total: number; unresolved: number }) {
-  if (total <= 0) return <span className="inline-flex w-6" />;
+  if (total <= 0) return null;
   const hasUnresolved = unresolved > 0;
   const color = hasUnresolved
     ? "text-[var(--color-status-attention)]"
@@ -200,7 +315,7 @@ export function ReviewCommentsBadge({ total, unresolved }: { total: number; unre
     : `${total} resolved thread${total === 1 ? "" : "s"}`;
   return (
     <span
-      className={`inline-flex w-6 items-center gap-0.5 text-[10px] font-bold ${color}`}
+      className={`inline-flex items-center gap-0.5 text-[10px] font-bold ${color}`}
       title={title}
     >
       <svg

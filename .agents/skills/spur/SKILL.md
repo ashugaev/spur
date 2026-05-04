@@ -1,29 +1,21 @@
 ---
 name: spur
-description: "Use when working on Spur, the lean v2 orchestrator in `v2/`. Covers its current CLI, daemon, tmux/worktree session flow, cron sources/triggers, config shape, and validation rules."
+description: Use when working on Spur — its CLI, daemon, tmux/worktree session flow, cron sources/triggers, config shape, and validation rules.
 ---
 
 # Spur
 
-## Use this skill when
-
-- The task touches `v2/`.
-- The task is about Spur CLI, local daemon, session lifecycle, `tmux`, `git worktree`, cron source/trigger flow, or the Spur config.
-
 ## Fixed facts
 
-- `v2/` is `Spur`.
-- Spur is separate from the current `ao`.
-- Change only `v2/` for Spur work. Treat `v1` and the current `ao` tree as legacy reference-only and do not wire new Spur behavior to them.
-- Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI layer (thin Next.js frontend over daemon HTTP API).
-- Current human-facing command surface: `spawn`, `list`, `send`, `pause`, `complete`, `kill`.
-  `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` has one form only:
-  `spur spawn <project> <prompt...> [--agent claude|codex] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]`
-- Supported agents are only `claude` and `codex`.
-- Both agents start with full access by default:
+- Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
+- Treat the Spur interface as fixed unless the user asks to change it.
+- Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- Supported agents are only `claude`, `codex`, and `cursor`.
+- Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
   `codex --dangerously-bypass-approvals-and-sandbox`
+  `agent --force --sandbox disabled`
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
 - `list` hides `completed` and `killed` sessions by default.
@@ -107,36 +99,37 @@ cron source
 - Do not add speculative fields or helper layers.
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
+- Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
+- Detect agent state and `Needs Input` from hook state and agent history JSONL for `claude` and `codex`. `cursor` currently uses pane/activity classification for readiness and state.
+- Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention
 
-- Default to human-first output. Structured commands expose `--json` for scripts.
-- Use one theme object only in code.
-  brand accent = `#f04c4c` for ids and tiny loading frames
-  brand mark = `𖤓` for help headers, runtime summary lines, and spinner frames
-  status dot palette = green for `active|ready`, yellow for `idle|waiting_input|spawning`, red for `errored`, gray for `killed|exited`
-- Use only four visual primitives: accent, bold, dim, whitespace.
-- Do not use boxes, wide tables, rainbow status colors, or decorative aliases for states.
-- Use `@clack/prompts` only for transient UI:
-  spinner, select, log, note
-- Keep data rendering custom and flat.
-  `list` is the reference card renderer.
-- Prefer dense stacked cards:
-  primary line = `id`, colored status dot, state, project, agent, branch
-  secondary line = `updated`, runtime/worktree facts, and at most one short exceptional hint
-- `list` is the only session UI.
-  On a TTY it shows runtime summary, the live selector, and selected-session details; `Enter` attaches in place, `p` pauses, `c` completes, `r` restores a restorable exited session, `k` kills, and `Esc` quits.
-  Non-TTY `list` stays a one-shot runtime summary plus session cards.
-- Never silently retarget `Enter`, `p`, `c`, `r`, or `k` after refresh. If the selected id disappears, require explicit reselection.
-- Empty states should be one sentence plus one dim next-step hint.
-- Optional animation is only a one-line transient spinner during wait states, cleared before final output.
+- Human-first output by default; structured commands expose `--json`.
+- Single theme object: brand accent `#f04c4c` (ids, tiny loading frames), brand mark `𖤓` (help headers, runtime summary, spinner). Status dots: green = `active|ready`, yellow = `idle|waiting_input|spawning`, red = `errored`, gray = `killed|exited`.
+- Visual primitives: accent, bold, dim, whitespace. No boxes, wide tables, rainbow status, or decorative state aliases.
+- `@clack/prompts` only for transient UI (spinner, select, log, note); data rendering stays custom and flat — `list` is the reference renderer.
+- Dense stacked cards: primary line = `id`, status dot, state, project, agent, branch; secondary line = `updated`, runtime/worktree facts, at most one short exceptional hint.
+- `list` is the only session UI. On TTY: runtime summary + live selector + selected details; `Enter` attaches, `p` pauses, `c` completes, `r` restores a restorable exited session, `k` kills, `Esc` quits. Non-TTY: one-shot runtime summary + session cards.
+- Never silently retarget keys after refresh — if the selected id disappears, require explicit reselection.
+- Empty states: one sentence + one dim next-step hint.
+- Animation: at most a one-line transient spinner during waits, cleared before final output.
+
+## Agent Isolation
+
+- The `spur` CLI in your PATH targets your isolated instance, not production. Use it as-is.
+- Port 4310 is the production daemon. Never target it with `spur daemon start`, `kill`, or direct HTTP calls.
+- Do not override `--config` to point at `~/.spur/config.yaml` (root config).
+- Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
+- For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`). Do not rely on `spur-sidecar` being in `PATH`; use the helper from `$SPUR_SESSION_TOOL_DIR`.
+- Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
 
 ## Deployment (openclaw-dev VM)
 
 - VM: `openclaw-dev`, Tailscale IP `100.80.107.19`, public IP `136.107.236.142`
 - Nothing binds to `0.0.0.0`. All services on loopback or Tailscale IP only.
 - Instance config: `~/.spur/config.yaml`
-- Project config: `~/projects/ao/spur.yaml`
+- Project config: `~/projects/spur/spur.yaml`
 
 Port map:
 
@@ -148,21 +141,24 @@ Port map:
 | Nginx proxy | `127.0.0.1` + `100.80.107.19` | 5555 |
 
 - Systemd units: `spur-daemon.service`, `spur-web.service`
-- Nginx config: `/etc/nginx/sites-enabled/spur-ao`
+- Nginx config: `/etc/nginx/sites-enabled/spur`
 - Deploy: `pnpm main:deploy` (pulls main, builds, restarts services)
 - `DIRECT_TERMINAL_PUBLIC_PORT=443` matches the external browser origin (Tailscale serve terminates TLS on 443 and forwards to nginx:5555), so the terminal WS URL stays same-origin.
 - Full deploy doc: `docs/ubuntu-vm-deploy.md`
 
 ## Validation
 
-- Spur uses three test tiers:
-  `fast` -> `pnpm --dir v2 test` for mocked and in-process coverage. This is the default root `pnpm test` path and must stay fast.
-  `runtime integration` -> `pnpm --dir v2 test:runtime` for the built CLI, daemon, `git`, worktree, `tmux`, and process boundaries with fake `claude`, `codex`, and `gh`.
-  `real-agent smoke` -> `pnpm --dir v2 test:smoke` for narrow real-agent spawn and send checks. It auto-skips when `tmux`, binaries, or API keys are missing.
+Three tiers; pick the cheapest that crosses the changed boundary:
+
+| Tier | Command | Triggers |
+|---|---|---|
+| `fast` | `pnpm --dir v2 test` | every Spur code change; queueing, dedupe, validation logic |
+| `runtime integration` | `pnpm --dir v2 test:runtime` | CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, automation runtime; source and process boundaries |
+| `real-agent smoke` | `pnpm --dir v2 test:smoke` | agent launch or prompt delivery; against this repo with real `claude`, `codex`, and `cursor` (never fake repos or agents). Auto-skips when `tmux`, binaries, or API keys are missing |
+
 - Always run `pnpm --dir v2 build` after changing Spur code.
-- Run `fast` for every Spur code change.
-- Run `runtime integration` when touching CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, or automation runtime boundaries.
-- Run `real-agent smoke` when touching agent launch or prompt delivery. Cover both `claude` and `codex`.
-- Exercise the touched `spur` CLI commands through positive and negative paths at the cheapest tier that still crosses the changed boundary.
-- Keep queueing, dedupe, and validation logic in `fast`; keep source, process, and `tmux` boundaries in `runtime integration`.
-- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change and rerun the impacted ones.
+- Minimum per touched command: positive path, negative/error path, cleanup verification.
+- Daemon startup or client transport changes -> `runtime integration` must cover both direct daemon start and CLI auto-start.
+- Workspace or runtime behavior changes -> `runtime integration` must cover worktree creation, symlinks, `tmux` session creation, message delivery, teardown.
+- `v2/TEST_SCENARIOS.md` maps each scenario to exactly one tier. Add new scenarios in the same change; rerun impacted ones. `tester` covers existing affected scenarios plus new ones.
+- `tester` also flags hanging logic, stray fallbacks outside boundary/cleanup paths, and loose or bloated type shapes in touched Spur code.
