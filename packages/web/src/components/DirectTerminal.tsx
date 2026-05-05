@@ -57,7 +57,7 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
 
 function StopSquareIcon() {
   return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
       <path d="M4 4h8v8H4z" />
     </svg>
   );
@@ -67,7 +67,7 @@ function PencilIcon() {
   return (
     <svg
       aria-hidden="true"
-      className="h-3.5 w-3.5"
+      className="h-4 w-4"
       fill="none"
       stroke="currentColor"
       strokeLinecap="round"
@@ -782,7 +782,10 @@ export function DirectTerminal({
             <div className="ml-2 flex items-center gap-1">
               <button
                 aria-label="Edit voice transcript"
-                className={cn(terminalControlIconButtonClass)}
+                className={cn(
+                  terminalControlIconButtonClass,
+                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                )}
                 onClick={voice.toggleRecording}
                 type="button"
               >
