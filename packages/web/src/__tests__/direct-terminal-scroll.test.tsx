@@ -469,19 +469,22 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop and edit voice draft" })).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Stop and send voice draft" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
     });
 
     wsInstances[0].readyState = 3;
-    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+      expect(screen.getAllByText("Failed to insert transcription")).toHaveLength(2);
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
-
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
     await mountTerminal("test-terminal-voice-hint");
 
@@ -490,28 +493,5 @@ describe("DirectTerminal scroll integration", () => {
     });
 
     expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
-  });
-
-  it("shows a live recording timer in the terminal controls while recording", async () => {
-    await mountTerminal("test-voice-timer");
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
-    });
-
-    vi.useFakeTimers();
-    fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    expect(screen.getByText("00:00")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop and send voice draft" })).toBeInTheDocument();
-
-    act(() => {
-      vi.advanceTimersByTime(2_000);
-    });
-
-    expect(screen.getByText("00:02")).toBeInTheDocument();
   });
 });

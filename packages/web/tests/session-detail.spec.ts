@@ -1,11 +1,5 @@
 import { test, expect, devices, type Page } from "playwright/test";
 import { makeWorkingSession, makeCompletedSession, makeSpawningSession } from "./fixtures.js";
-import {
-  installMockVoiceRecorder,
-  mockVoiceStatus,
-  mockVoiceTranscribe,
-  mockVoiceTranscribeSequence,
-} from "./voice-fixtures.js";
 
 async function mockTerminalWebSocket(page: Page) {
   await page.addInitScript(() => {
@@ -35,24 +29,7 @@ async function mockTerminalWebSocket(page: Page) {
         });
       }
 
-      send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
-        if (typeof data !== "string") return;
-
-        try {
-          const parsed = JSON.parse(data) as { type?: string; id?: string };
-          if (parsed.type === "input" && typeof parsed.id === "string") {
-            queueMicrotask(() => {
-              this.onmessage?.(
-                new MessageEvent("message", {
-                  data: JSON.stringify({ type: "ack", id: parsed.id }),
-                }),
-              );
-            });
-          }
-        } catch {
-          // Ignore terminal payloads that are not JSON acks.
-        }
-      }
+      send(_data: string | ArrayBufferLike | Blob | ArrayBufferView) {}
 
       close(code?: number, reason?: string) {
         if (this.readyState >= MockWebSocket.CLOSING) return;
@@ -157,6 +134,28 @@ function mockSessionLogs(page: Page, sessionId: string, payload: Array<Record<st
     });
   });
 }
+
+function mockVoiceStatus(page: Page) {
+  return page.route("**/api/runtime/voice", (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+    });
+  });
+}
+
+function mockVoiceTranscribe(page: Page, text: string, onRequest?: () => void) {
+  return page.route("**/api/runtime/voice/transcribe", async (route) => {
+    onRequest?.();
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ text }),
+    });
+  });
+}
+
 // S1: Session detail header
 test.describe("S1: Session detail header", () => {
   test("missing session shows an inline error instead of hanging", async ({ page }) => {
@@ -853,7 +852,61 @@ test.describe("S3 mobile voice", () => {
     let transcribeCalls = 0;
 
     try {
-      await installMockVoiceRecorder(page, { delayedFinalChunk: true });
+      await page.addInitScript(() => {
+        class MobilePwaMediaRecorder {
+          mimeType = "audio/webm";
+          state = "inactive";
+          private listeners = new Map<string, Array<(event?: unknown) => void>>();
+          private requestedFlush = false;
+
+          addEventListener(type: string, listener: (event?: unknown) => void) {
+            this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+          }
+
+          start() {
+            this.state = "recording";
+          }
+
+          requestData() {
+            this.requestedFlush = true;
+          }
+
+          stop() {
+            this.state = "inactive";
+            const blob = new Blob(["voice-audio"], { type: this.mimeType });
+            if (this.requestedFlush) {
+              this.emit("stop");
+              queueMicrotask(() => {
+                this.emit("dataavailable", blob);
+              });
+              return;
+            }
+            this.emit("dataavailable", blob);
+            this.emit("stop");
+          }
+
+          private emit(type: string, data?: Blob) {
+            for (const listener of this.listeners.get(type) ?? []) {
+              listener(data ? { data } : undefined);
+            }
+          }
+        }
+
+        Object.defineProperty(window, "MediaRecorder", {
+          configurable: true,
+          writable: true,
+          value: MobilePwaMediaRecorder,
+        });
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: {
+            getUserMedia: async () => ({
+              getTracks: () => [{ stop() {} }],
+            }),
+          },
+        });
+      });
+
       await mockSessionDetail(page, session);
       await mockSessionConversation(page, session.id, "waiting");
       await mockVoiceStatus(page);
@@ -864,13 +917,8 @@ test.describe("S3 mobile voice", () => {
       await page.goto(`/sessions/${session.id}`);
 
       await page.getByRole("button", { name: /start voice recording/i }).click();
-      await expect(
-        page.getByRole("button", { name: /stop and save voice recording/i }),
-      ).toBeVisible();
-      await expect(page.getByText("00:00", { exact: true })).toBeVisible();
-      await page.waitForTimeout(1_100);
-      await expect(page.getByText("00:01", { exact: true })).toBeVisible();
-      await page.getByRole("button", { name: /stop and save voice recording/i }).click();
+      await expect(page.getByRole("button", { name: /stop voice recording/i })).toBeVisible();
+      await page.getByRole("button", { name: /stop voice recording/i }).click();
 
       await expect(page.getByPlaceholder("Message to the running agent...")).toHaveValue(
         "Mobile PWA voice still works",
@@ -1368,91 +1416,6 @@ test.describe("S6: Terminal modal from detail page", () => {
     });
 
     await expect.poll(async () => getTerminalSocketCount(page)).toBe(1);
-  });
-
-  test("terminal voice popup shows compact edit/send actions after recording", async ({ page }) => {
-    const session = makeWorkingSession({ id: "detail-s6-voice-1" });
-    await installMockVoiceRecorder(page);
-    await mockSessionDetail(page, session);
-    await mockTerminalWebSocket(page);
-    await mockVoiceStatus(page);
-    await mockVoiceTranscribe(page, "Check deployment status");
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
-
-    await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^terminal$/i }).click();
-    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
-    await expect(terminalDialog.getByText("Connected")).toBeVisible();
-
-    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
-    await expect(terminalDialog.getByText("00:00")).toBeVisible();
-    await expect(terminalDialog.getByRole("button", { name: /^enter$/i })).toHaveCount(0);
-    await expect(terminalDialog.getByRole("button", { name: /arrow left/i })).toHaveCount(0);
-    await expect(
-      terminalDialog.getByRole("button", { name: /start voice recording/i }),
-    ).toHaveCount(0);
-    await expect(
-      terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }),
-    ).toBeVisible();
-    await expect(
-      terminalDialog.getByRole("button", { name: /stop and send voice draft/i }),
-    ).toBeVisible();
-    await terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }).click();
-
-    const dialog = page.getByRole("dialog", { name: /confirm voice input/i });
-    await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole("button", { name: /pause and edit voice draft/i })).toBeVisible();
-    await expect(dialog.getByRole("button", { name: /send voice draft/i })).toBeVisible();
-    await expect(dialog.getByRole("textbox")).toHaveValue("Check deployment status");
-  });
-
-  test("terminal quick-send saves the draft into popup history on the next recording", async ({
-    page,
-  }) => {
-    const session = makeWorkingSession({ id: "detail-s6-voice-history-1" });
-    await installMockVoiceRecorder(page);
-    await mockSessionDetail(page, session);
-    await mockTerminalWebSocket(page);
-    await mockVoiceStatus(page);
-    await mockVoiceTranscribeSequence(page, ["Check deployment status", "Open release notes"]);
-    await page.route("**/api/runtime/terminal**", (route) => {
-      void route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ directTerminalPort: 14801 }),
-      });
-    });
-
-    await page.goto(`/sessions/${session.id}`);
-    await page.getByRole("button", { name: /^terminal$/i }).click();
-    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
-    await expect(terminalDialog.getByText("Connected")).toBeVisible();
-
-    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
-    await terminalDialog.getByRole("button", { name: /stop and send voice draft/i }).click();
-    await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toHaveCount(0);
-
-    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
-    await terminalDialog.getByRole("button", { name: /stop and edit voice draft/i }).click();
-
-    const secondPopup = page.getByRole("dialog", { name: /confirm voice input/i });
-    await expect(secondPopup.getByRole("textbox")).toHaveValue("Open release notes");
-    await secondPopup.getByRole("button", { name: /^history$/i }).click();
-
-    const historyDialog = secondPopup.getByRole("dialog", { name: /input history/i });
-    await expect(historyDialog.getByText(/UTC/)).toBeVisible();
-    await expect(
-      historyDialog.getByRole("button", { name: /check deployment status/i }),
-    ).toBeVisible();
-
-    await historyDialog.getByRole("button", { name: /check deployment status/i }).click();
-    await expect(secondPopup.getByRole("textbox")).toHaveValue("Check deployment status");
   });
 });
 

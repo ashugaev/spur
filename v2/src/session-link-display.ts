@@ -45,6 +45,13 @@ function displayPrId(url: URL): string | null {
       return `#${number}`;
     }
   }
+  const mergeRequestIndex = segments.lastIndexOf("merge_requests");
+  if (mergeRequestIndex >= 0) {
+    const number = segments[mergeRequestIndex + 1];
+    if (number) {
+      return `!${number}`;
+    }
+  }
   return fallbackSegment(url);
 }
 
@@ -60,11 +67,20 @@ export function formatSessionLinkDisplay(link: SessionLink): SessionLinkDisplay 
     };
   }
 
-  if (isGitHubPrLinkLabel(link.label)) {
+  if (link.label === "github-pr") {
     const id = displayPrId(url);
     return {
       label: link.label,
       text: id ? `github pr ${shortText(id)}` : "github pr",
+      url: url.toString(),
+    };
+  }
+
+  if (link.label === "pr") {
+    const id = displayPrId(url);
+    return {
+      label: link.label,
+      text: id ? `pr ${shortText(id)}` : "pr",
       url: url.toString(),
     };
   }

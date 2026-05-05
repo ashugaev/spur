@@ -108,6 +108,7 @@ import {
   deriveSessionSlots,
   discoverSessionPrBinding,
   parseSessionPrBinding,
+  resolvePrDiscoveryBranch,
 } from "./session-pr.js";
 import { buildMergedConfig, upsertConfigRegistryPath, writeConfigRegistry } from "./registry.js";
 import {
@@ -161,6 +162,7 @@ import {
   resolveRepoPathFromWorktree,
   workspaceExists,
 } from "./workspace.js";
+import { orderedReviewProviderIds, reviewProvider } from "./review-providers/index.js";
 
 const KILL_CONFIRMATION_REQUIRED_PREFIX = "Kill confirmation required";
 const PIPELINE_POLL_INTERVAL_MS = 1_000;
@@ -1051,9 +1053,51 @@ export class SessionService {
 
   private async runPrCheck(session: SessionRecord): Promise<void> {
     const binding = await discoverSessionPrBinding(session.worktreePath, session.branch);
-    if (!binding) {
+    if (binding) {
+      const tracker = this.prCheckTrackers.get(session.id);
+      if (tracker) {
+        tracker.found = true;
+      }
+
+      const current = readSession(this.config.dataDir, session.id);
+      if (!current?.worktreePath || current.pr) {
+        return;
+      }
+
+      const updated: SessionRecord = {
+        ...current,
+        pr: binding,
+      };
+      writeSession(this.config.dataDir, updated);
+      await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
+      this.logEvent("session.pr_auto_detect.found", {
+        level: "info",
+        sessionId: session.id,
+        projectId: session.project,
+        message: `Auto-detected PR for ${session.id}: ${binding.url}`,
+      });
       return;
     }
+
+    const project = this.config.projects[session.project];
+    const discoveryBranch = await resolvePrDiscoveryBranch(session.worktreePath, session.branch);
+    const providerIds = (await orderedReviewProviderIds(session.worktreePath, project)).filter(
+      (providerId) => providerId !== "github",
+    );
+    if (providerIds.length === 0) {
+      return;
+    }
+    let reviewUrl: string | null = null;
+    for (const providerId of providerIds) {
+      reviewUrl = await reviewProvider(providerId).findReviewUrlByBranch(
+        session.worktreePath,
+        discoveryBranch,
+      );
+      if (reviewUrl) {
+        break;
+      }
+    }
+    if (!reviewUrl) return;
 
     const tracker = this.prCheckTrackers.get(session.id);
     if (tracker) {
@@ -1066,17 +1110,17 @@ export class SessionService {
       return;
     }
 
-    const updated: SessionRecord = {
-      ...current,
-      pr: binding,
-    };
+    const slots = applySlotsUpdate(current.slots, {
+      links: [{ label: "pr", url: reviewUrl }],
+    });
+    const updated: SessionRecord = { ...current, ...(slots ? { slots } : {}) };
     writeSession(this.config.dataDir, updated);
     await syncTmuxStatus(updated.tmuxSession, deriveSessionSlots(updated));
     this.logEvent("session.pr_auto_detect.found", {
       level: "info",
       sessionId: session.id,
       projectId: session.project,
-      message: `Auto-detected PR for ${session.id}: ${binding.url}`,
+      message: `Auto-detected PR for ${session.id}: ${reviewUrl}`,
     });
   }
 

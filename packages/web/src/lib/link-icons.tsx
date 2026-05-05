@@ -14,6 +14,7 @@ import {
   prInfosEqual,
 } from "@/lib/pr-status-shape";
 
+export type ReviewProvider = "github" | "gitlab" | null;
 export type { CiStatus, PrInfo, PrState, ReviewDecision };
 
 const PR_STATE_COLORS: Record<PrState, string> = {
@@ -46,6 +47,14 @@ const pendingPrRequests = new Map<string, Promise<PrInfo>>();
 
 export function isGitHubPrLinkLabel(label: string): boolean {
   return label === "github-pr" || label === "pr";
+}
+
+export function isGitLabPrLinkLabel(label: string): boolean {
+  return label === "gitlab-pr";
+}
+
+export function isReviewLinkLabel(label: string): boolean {
+  return isGitHubPrLinkLabel(label) || isGitLabPrLinkLabel(label);
 }
 
 function hydratePrCacheFromStorage(): void {
@@ -143,11 +152,28 @@ export async function fetchPrInfo(url: string): Promise<PrInfo> {
   return request;
 }
 
+export function reviewProviderFromUrl(url: string): ReviewProvider {
+  try {
+    const parsed = new URL(url);
+    if (/github\.com$/i.test(parsed.hostname) && /\/pull\/\d+/.test(parsed.pathname)) {
+      return "github";
+    }
+    if (/\/merge_requests\/\d+/.test(parsed.pathname)) {
+      return "gitlab";
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function extractLinkId(link: SpurSessionLink): string {
   const url = link.url;
-  if (isGitHubPrLinkLabel(link.label)) {
-    const match = url.match(/\/pull\/(\d+)/);
-    return match ? `#${match[1]}` : "PR";
+  if (isReviewLinkLabel(link.label)) {
+    const githubMatch = url.match(/\/pull\/(\d+)/);
+    if (githubMatch) return `#${githubMatch[1]}`;
+    const gitlabMatch = url.match(/\/merge_requests\/(\d+)/);
+    return gitlabMatch ? `!${gitlabMatch[1]}` : "PR";
   }
   if (link.label === "tracker") {
     const match = url.match(/\/browse\/([A-Z]+-\d+)/) ?? url.match(/([A-Z]+-\d+)/);
@@ -336,6 +362,20 @@ export function GithubIcon() {
   return (
     <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor">
       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  );
+}
+
+export function GitlabIcon() {
+  return (
+    <svg className="h-3 w-3" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M8.001 15.15 10.945 6.09h-5.89L8 15.15Z" />
+      <path d="M8.001 15.15 5.055 6.09H.925l7.076 9.06Z" />
+      <path d="m.925 6.09-.895 2.755a.611.611 0 0 0 .221.683l7.75 5.622L.925 6.09Z" />
+      <path d="M.925 6.09h4.13L3.28.633a.306.306 0 0 0-.581 0L.925 6.09Z" />
+      <path d="M8.001 15.15 10.945 6.09h4.13L8 15.15Z" />
+      <path d="m15.075 6.09.895 2.755a.611.611 0 0 1-.221.683l-7.75 5.622 7.076-9.06Z" />
+      <path d="M15.075 6.09h-4.13L12.72.633a.306.306 0 0 1 .581 0l1.774 5.457Z" />
     </svg>
   );
 }

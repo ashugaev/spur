@@ -1,16 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CiStatusDot, GithubIcon } from "@/lib/link-icons";
+import { type FocusEvent, useEffect, useRef, useState } from "react";
+import { GithubIcon, GitlabIcon } from "@/lib/link-icons";
 import { formatAbsoluteTime } from "@/lib/format";
 import type { GitHubStatusResponse } from "@/lib/github-status";
+import type { GitLabStatusResponse } from "@/lib/gitlab-status";
+import type { PlatformStatusResponse } from "@/lib/platform-status";
 
-const GITHUB_STATUS_POLL_MS = 120_000;
 const RESOURCE_POLL_MS = 15_000;
 const CPU_RAM_ATTENTION_THRESHOLD = 85;
 const DISK_ERROR_THRESHOLD = 85;
+const PLATFORM_STATUS_POLL_MS = 120_000;
 
 type HealthLevel = "ready" | "attention" | "error" | "unknown";
+type PlatformKind = "github" | "gitlab";
 
 type ResourceMetrics =
   | {
@@ -25,27 +28,30 @@ type ResourceMetrics =
       diskPercent: number;
     };
 
-function useGitHubStatus() {
-  const [status, setStatus] = useState<GitHubStatusResponse | null>(null);
+function usePlatformStatus<TStatus extends PlatformStatusResponse>(
+  path: string,
+  unavailableMessage: string,
+) {
+  const [status, setStatus] = useState<TStatus | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     const run = async () => {
       try {
-        const response = await fetch("/api/github-status", { cache: "no-store" });
+        const response = await fetch(path, { cache: "no-store" });
         if (!response.ok) {
           if (!cancelled) {
             setStatus({
               ok: false,
-              error: `GitHub status unavailable (${response.status})`,
+              error: `${unavailableMessage} (${response.status})`,
               requestedAt: null,
-            });
+            } as TStatus);
           }
           return;
         }
 
-        const payload = (await response.json()) as GitHubStatusResponse;
+        const payload = (await response.json()) as TStatus;
         if (!cancelled) {
           setStatus(payload);
         }
@@ -53,20 +59,20 @@ function useGitHubStatus() {
         if (!cancelled) {
           setStatus({
             ok: false,
-            error: error instanceof Error ? error.message : "GitHub status unavailable",
+            error: error instanceof Error ? error.message : unavailableMessage,
             requestedAt: null,
-          });
+          } as TStatus);
         }
       }
     };
 
     void run();
-    const timer = setInterval(() => void run(), GITHUB_STATUS_POLL_MS);
+    const timer = setInterval(() => void run(), PLATFORM_STATUS_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [path, unavailableMessage]);
 
   return status;
 }
@@ -153,6 +159,62 @@ function StatusDot({ level }: { level: HealthLevel }) {
   );
 }
 
+function useFooterPopover() {
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const open = !dismissed && (hovered || pinned);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !open) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (containerRef.current?.contains(target)) return;
+      setDismissed(true);
+      setPinned(false);
+      setHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [open]);
+
+  return {
+    containerRef,
+    open,
+    onBlur(event: FocusEvent<HTMLDivElement>) {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        setPinned(false);
+        setDismissed(false);
+      }
+    },
+    onMouseEnter() {
+      setDismissed(false);
+      setHovered(true);
+    },
+    onMouseLeave() {
+      setDismissed(false);
+      setHovered(false);
+    },
+    toggle() {
+      setDismissed(false);
+      setPinned((current) => !current);
+    },
+    dismiss() {
+      setDismissed(true);
+      setPinned(false);
+    },
+  };
+}
+
 function statusText(level: HealthLevel): string {
   if (level === "error") return "critical";
   if (level === "attention") return "warning";
@@ -186,17 +248,84 @@ function ResourceStatusRow({
   );
 }
 
+function platformStatusLevel(status: PlatformStatusResponse | null): HealthLevel {
+  if (status === null) return "unknown";
+  return status.ok ? "ready" : "error";
+}
+
+function platformStatusText(status: PlatformStatusResponse | null): string {
+  if (status === null) return "Checking";
+  return status.ok ? "Healthy" : "Error";
+}
+
+function PlatformStatusButton({
+  platform,
+  status,
+}: {
+  platform: PlatformKind;
+  status: PlatformStatusResponse | null;
+}) {
+  const popover = useFooterPopover();
+  const label = platform === "github" ? "GitHub" : "GitLab";
+  const Icon = platform === "github" ? GithubIcon : GitlabIcon;
+  const level = platformStatusLevel(status);
+  const statusLabel = platformStatusText(status).toLowerCase();
+
+  return (
+    <div
+      ref={popover.containerRef}
+      className="relative"
+      onBlur={popover.onBlur}
+      onMouseEnter={popover.onMouseEnter}
+      onMouseLeave={popover.onMouseLeave}
+    >
+      <button
+        aria-expanded={popover.open}
+        aria-label={`${label} connection ${statusLabel}`}
+        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+        type="button"
+        onClick={popover.toggle}
+      >
+        <Icon />
+        <StatusDot level={level} />
+      </button>
+      {popover.open ? (
+        <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+          <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
+            <span className="text-[var(--color-text-secondary)]">{label}</span>
+            <span className="font-bold" style={{ color: healthColor(level) }}>
+              {platformStatusText(status)}
+            </span>
+          </div>
+          <div
+            className="normal-case tracking-normal text-[var(--color-text-secondary)]"
+            onClick={popover.dismiss}
+          >
+            {status === null ? (
+              "Checking authentication and API availability."
+            ) : status.ok ? (
+              <>Last request: {formatAbsoluteTime(status.requestedAt)}</>
+            ) : (
+              status.error
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function StatusBar() {
-  const githubStatus = useGitHubStatus();
+  const githubStatus = usePlatformStatus<GitHubStatusResponse>(
+    "/api/github-status",
+    "GitHub status unavailable",
+  );
+  const gitlabStatus = usePlatformStatus<GitLabStatusResponse>(
+    "/api/gitlab-status",
+    "GitLab status unavailable",
+  );
   const resourceMetrics = useResourceMetrics();
-  const [onlineHovered, setOnlineHovered] = useState(false);
-  const [onlinePinned, setOnlinePinned] = useState(false);
-  const [onlineDismissed, setOnlineDismissed] = useState(false);
-  const [githubHovered, setGitHubHovered] = useState(false);
-  const [githubPinned, setGitHubPinned] = useState(false);
-  const [githubDismissed, setGitHubDismissed] = useState(false);
-  const onlineContainerRef = useRef<HTMLDivElement | null>(null);
-  const githubContainerRef = useRef<HTMLDivElement | null>(null);
+  const onlinePopover = useFooterPopover();
   const onlineLevel = aggregateOnlineLevel(resourceMetrics);
   const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
   const onlineLabel =
@@ -207,93 +336,32 @@ export function StatusBar() {
         : onlineLevel === "ready"
           ? "Healthy"
           : "Unavailable";
-  const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
-  const githubOpen = !githubDismissed && (githubHovered || githubPinned);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !onlineOpen) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (onlineContainerRef.current?.contains(target)) return;
-      setOnlineDismissed(true);
-      setOnlinePinned(false);
-      setOnlineHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [onlineOpen]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !githubOpen) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (githubContainerRef.current?.contains(target)) return;
-      setGitHubDismissed(true);
-      setGitHubPinned(false);
-      setGitHubHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [githubOpen]);
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
-          ref={onlineContainerRef}
+          ref={onlinePopover.containerRef}
           className="group/status relative"
-          onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setOnlinePinned(false);
-              setOnlineDismissed(false);
-            }
-          }}
-          onMouseEnter={() => {
-            setOnlineDismissed(false);
-            setOnlineHovered(true);
-          }}
-          onMouseLeave={() => {
-            setOnlineDismissed(false);
-            setOnlineHovered(false);
-          }}
+          onBlur={onlinePopover.onBlur}
+          onMouseEnter={onlinePopover.onMouseEnter}
+          onMouseLeave={onlinePopover.onMouseLeave}
         >
           <button
-            aria-expanded={onlineOpen}
+            aria-expanded={onlinePopover.open}
             aria-label="Show aggregated system status"
             className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
             type="button"
-            onClick={() => {
-              setOnlineDismissed(false);
-              setOnlinePinned((current) => !current);
-            }}
+            onClick={onlinePopover.toggle}
           >
             <StatusDot level={onlineLevel} />
             <span>{onlineLabel}</span>
           </button>
 
-          {onlineOpen ? (
+          {onlinePopover.open ? (
             <div
               className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
-              onClick={() => {
-                setOnlineDismissed(true);
-                setOnlinePinned(false);
-              }}
+              onClick={onlinePopover.dismiss}
             >
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
                 <span className="text-[var(--color-text-secondary)]">System</span>
@@ -344,67 +412,8 @@ export function StatusBar() {
             </div>
           ) : null}
         </div>
-
-        {githubStatus === null ? (
-          <div className="flex items-center gap-1.5 text-[var(--color-text-tertiary)]">
-            <GithubIcon />
-            <span>Checking</span>
-          </div>
-        ) : githubStatus.ok === true ? (
-          <div
-            ref={githubContainerRef}
-            className="relative"
-            onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                setGitHubPinned(false);
-                setGitHubDismissed(false);
-              }
-            }}
-            onMouseEnter={() => {
-              setGitHubDismissed(false);
-              setGitHubHovered(true);
-            }}
-            onMouseLeave={() => {
-              setGitHubDismissed(false);
-              setGitHubHovered(false);
-            }}
-          >
-            <button
-              aria-expanded={githubOpen}
-              aria-label="GitHub connection healthy"
-              className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
-              type="button"
-              onClick={() => {
-                setGitHubDismissed(false);
-                setGitHubPinned((current) => !current);
-              }}
-            >
-              <GithubIcon />
-              <CiStatusDot status="success" />
-            </button>
-            {githubOpen ? (
-              <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
-                <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
-                  <span className="text-[var(--color-text-secondary)]">GitHub</span>
-                  <span className="font-bold text-[var(--color-status-ready)]">Healthy</span>
-                </div>
-                <div className="normal-case tracking-normal text-[var(--color-text-secondary)]">
-                  Last request: {formatAbsoluteTime(githubStatus.requestedAt)}
-                </div>
-              </div>
-            ) : null}
-          </div>
-        ) : githubStatus.ok === false ? (
-          <div className="flex min-w-0 items-center gap-1.5">
-            <GithubIcon />
-            <span
-              className="max-w-[min(24rem,50vw)] truncate font-bold normal-case tracking-normal text-[var(--color-status-error)]"
-              title={githubStatus.error}
-            >
-              {githubStatus.error}
-            </span>
-          </div>
-        ) : null}
+        <PlatformStatusButton platform="github" status={githubStatus} />
+        <PlatformStatusButton platform="gitlab" status={gitlabStatus} />
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">

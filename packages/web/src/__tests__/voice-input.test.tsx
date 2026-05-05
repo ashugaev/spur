@@ -39,11 +39,11 @@ describe("VoiceInput", () => {
 
     render(<VoiceConfirmModal historyEntries={[]} onInsert={onInsert} voice={voice} />);
 
-    expect(screen.getByRole("button", { name: /Pause and edit voice draft/i })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Send voice draft/i })).toHaveTextContent("⌘ + ⏎");
+    expect(screen.getByRole("button", { name: /Cancel/i })).toBeVisible();
+    expect(screen.getByRole("button", { name: /Insert/i })).toHaveTextContent("⌘ + ⏎");
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "placeholder",
-      "Review the transcription before sending... Voice ⌘ + .",
+      "Review the transcription before inserting... Voice ⌘ + .",
     );
     fireEvent.keyDown(screen.getByRole("dialog", { name: "Confirm voice input" }), {
       key: "Enter",

@@ -82,22 +82,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D5: Tracker and PR links
 
 - Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
-- Sessions with PR link: GitHub icon + PR number (e.g., #3439)
+- Sessions with PR link: provider icon + compact review id (GitHub `#3439`, GitLab `!3439`), including the canonical `github-pr` slot label
+- PR badges stay compact: review id first, then CI/review mark, then review thread count
 - PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
 - When approval is received, the second overlapping check is green
 - When approval is still required, the second overlapping check is yellow
 - When no approval is required, the second overlapping check is gray
 - When changes are requested, the second review mark stays red/error
 - Resolved threads alone do not turn the review mark green
-- PR badges stay compact: PR number first, then CI/review mark, then review thread count
-- Sessions with PR link: GitHub icon + PR number (e.g., #3439), including the canonical `github-pr` slot label
-- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
-- When approval is received, the second overlapping check is green
-- When approval is still required, the second overlapping check is yellow
-- When no approval is required, the second overlapping check is gray
-- When changes are requested, the second review mark stays red/error
-- Resolved threads alone do not turn the review mark green
-- PR badges stay compact: PR number first, then CI/review mark, then review thread count
 - Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
 - Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
 - Both open in new tab on click
@@ -122,13 +114,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Footer is visible after page load
 - Footer right side shows `NEXT_PUBLIC_BUILD_VERSION` env var value, or `dev` when not set at build time
 - Footer left side shows Online status when daemon is reachable
-- Footer shows a separate GitHub connection indicator that is independent from PR status rows
-- Before the first GitHub health response resolves, the footer shows a neutral `Checking` state
-- Healthy GitHub status renders as a green check next to the GitHub icon
-- Hovering, focusing, or clicking/tapping the healthy GitHub indicator shows a tooltip with the last GitHub request timestamp
-- Clicking/tapping the healthy GitHub indicator pins the tooltip open until the next click or an outside tap closes it
-- GitHub connection/auth/API failures render the error text directly in the footer
-- Non-200 `/api/github-status` responses fall back to `GitHub status unavailable (<status>)` in the footer
+- Footer shows separate GitHub and GitLab connection indicators that are independent from PR status rows
+- Platform connection indicators stay icon-only on the footer bar: platform icon + status icon, with no inline text label or inline error string
+- Before the first platform health response resolves, the footer shows a neutral icon-only checking state for that platform
+- Healthy platform status renders as a healthy status icon next to the GitHub or GitLab icon
+- Hovering, focusing, or clicking/tapping a platform indicator shows a tooltip with the platform name, text status, and the last request timestamp
+- Clicking/tapping a healthy platform indicator pins the tooltip open until the next click or an outside tap closes it
+- Platform connection/auth/API failures render the error text inside the tooltip, not directly in the footer bar
+- Non-200 `/api/github-status` and `/api/gitlab-status` responses fall back to `<Platform> status unavailable (<status>)` in the tooltip
 
 ### D6c: Footer resource metrics
 
@@ -159,11 +152,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Steps: "+ STEP" button adds step inputs, each with remove (✕) button, scrollable at 4+ steps
 - Microphone button in top-right corner of prompt textarea when voice available on host
 - History icon button sits before `Spawn`, opens the last five saved prompts for that textarea, and each entry shows its saved timestamp
-- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
-- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
-- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
+- Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
@@ -182,7 +173,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Changing Spawn project updates the last selected Spawn project in local storage
 - Successful Spawn persists the selected project so it is restored on the next open
 - Successful Spawn closes the modal as soon as the daemon acknowledges the new `spawning` session shell, before background setup finishes
-- Successful Spawn immediately inserts exactly one new `spawning` session shell into the dashboard without waiting for worktree/tmux/prompt delivery
+- Successful Spawn keeps the current dashboard project filter and `?project=` URL unchanged
+- Successful Spawn immediately inserts exactly one new `spawning` session shell only when the dashboard is showing `All Projects` or the spawned project already matches the current filter
+- When the spawned project does not match the current dashboard filter, the current list stays unchanged and the new placeholder shell stays hidden until filters change
 - Rapid repeat submit while the first spawn request is in flight still sends only one spawn request and creates only one new session shell
 - Spawn without a prompt still closes on ack and creates the session shell without waiting for preflight
 - After a successful ack, reloading the dashboard while the session is still `spawning` keeps the same placeholder shell visible
@@ -192,7 +185,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When an explicit branch is already occupied, the placeholder shell transitions to a single failed session without creating a duplicate
 - If the spawn ack fails because the daemon/backend API is unavailable, the modal stays open and preserves the typed fields
 - After an ack failure, clicking `Spawn` again retries from the same open modal with the typed content still intact
-- All new fields reset on successful spawn ack
+- All new fields except project reset on successful spawn ack, and reopening remembers the last selected spawn project
 
 ### D7b: Silent branch preflight
 
@@ -276,10 +269,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Textarea for sending messages when session accepts input
 - Microphone button appears in the top-right corner of the textarea only when local voice input is available on the host
-- Clicking the microphone swaps the button for a full-width recording strip directly under the textarea
-- The recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact `Cancel` plus `Stop/Save` icon actions
-- Stopping the strip transcribes and inserts text directly into the textarea (no confirmation popup)
 - When voice is available and idle, the message textarea placeholder includes `Voice ⌘ + .`
+- First microphone click starts recording; button switches to stop state
+- Second microphone click stops recording, transcribes, and inserts text directly into the textarea (no confirmation popup)
 - On mobile/PWA, stopping a non-empty recording still inserts the transcription instead of showing a spurious "captured no audio" error
 - During transcription the mic button shows a red spinning loader
 - History icon button sits before the send actions, opens the last five saved messages for that textarea, and each entry shows its saved timestamp
@@ -344,23 +336,19 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Control bar shows `...` shortcuts menu, `Slash`, `ENTER`, arrow buttons, and microphone button (when voice available) with bordered square button styling
 - Terminal control bar does not show a standalone `Voice ⌘ + .` hint before the confirmation popup opens
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
-- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) with built-in shortcuts and slash commands; clicking an item sends the matching control sequence or slash command into the terminal and closes the menu
-- Microphone button appears after arrow keys with a small gap
-- Starting terminal voice recording hides the normal control bar actions and replaces them with one full-width recording strip inside the footer
-- The terminal recording strip shows a live `MM:SS` timer, a reactive red waveform, and compact icon-only `Cancel`, `Edit`, and `Send` actions
-- `Edit` stops recording and opens the confirmation popup with the transcribed draft; `Send` stops recording, sends straight to the agent, and saves the sent text into draft history for the next popup open
+- `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that includes `Esc` and `Shift+Tab`; clicking an item sends the matching control sequence into the terminal and closes the menu
 - `Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
+- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
-- Confirmation popup actions include a history icon button before compact `Pause and edit voice draft` / `Send voice draft` actions; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
-- `Send voice draft` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
+- Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
+- `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup
 - Cmd+. toggles popup voice recording on/off
-- While recording or transcribing inside the popup, the `Send voice draft` button is disabled and a status hint appears below the textarea
-- Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it swaps to the same full-width recording strip and appends the transcription back into the existing draft on stop
+- While recording or transcribing inside the popup, the Insert button is disabled and a status hint appears below the textarea
 - Cancelling or closing the confirmation popup while recording stops the recording without a spurious error
 - Terminal is the only place that uses a confirmation popup for voice input; spawn and session message insert directly
-- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears inside the popup
+- If terminal voice insert fails, the confirmation popup stays open and a visible red error message appears above the terminal controls
 - Helper textarea remains focused for keyboard input but has no visible browser caret/artifacts
 - Mouse wheel scrolling stays within the terminal (does not scroll the page behind the modal)
 - Terminal scrollback works like a native terminal (scroll up/down through history)

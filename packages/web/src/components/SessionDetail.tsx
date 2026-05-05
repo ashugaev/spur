@@ -8,12 +8,7 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import {
-  VoiceRecordingStrip,
-  VoiceStatusHint,
-  isVoiceActive,
-  voicePlaceholder,
-} from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -24,7 +19,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import { isGitHubPrLinkLabel } from "@/lib/link-icons";
+import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -55,8 +50,13 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
-function displayLinkLabel(label: string): string {
-  return isGitHubPrLinkLabel(label) ? "github pr" : label;
+function displayLinkLabel(label: string, url: string): string {
+  if (label === "github-pr") return "github pr";
+  if (label === "gitlab-pr") return "gitlab mr";
+  if (label === "pr") {
+    return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
+  }
+  return label;
 }
 
 function PlayIcon() {
@@ -1155,7 +1155,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
+                .filter((l) => l.label === "tracker" || isReviewLinkLabel(l.label))
                 .map((link) => (
                   <SessionLinkBadge
                     key={`${link.label}-${link.url}`}
@@ -1360,18 +1360,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       placeholder={voicePlaceholder("Message to the running agent...", voice)}
                       textareaRef={messageRef}
                       value={message}
-                      voice={isVoiceActive(voice) ? undefined : voice}
+                      voice={voice}
                     />
-                    {isVoiceActive(voice) ? (
-                      <VoiceRecordingStrip
-                        actions={[
-                          { kind: "cancel", onClick: voice.cancelRecording },
-                          { kind: "stop", onClick: () => voice.stopRecording() },
-                        ]}
-                        className="-mt-px flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
-                        voice={voice}
-                      />
-                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
@@ -1447,7 +1437,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {displayLinkLabel(link.label)}
+                        {displayLinkLabel(link.label, link.url)}
                       </a>
                     ))}
                   </div>

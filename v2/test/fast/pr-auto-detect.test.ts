@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SessionRecord } from "../../src/types.js";
+import type { AppConfig, ProjectConfig, SessionRecord, SessionSlots } from "../../src/types.js";
 
 const ghMock = vi.fn();
+const glabMock = vi.fn();
 const listSessionsMock = vi.fn();
 const readSessionMock = vi.fn();
 const writeSessionMock = vi.fn();
@@ -14,12 +15,18 @@ const getTmuxSessionActivityMock = vi.fn();
 const setTmuxSocketNameMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const buildMergedConfigMock = vi.fn();
+const upsertConfigRegistryPathMock = vi.fn();
+const writeConfigRegistryMock = vi.fn();
 const agentProcessMatchersMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
+}));
+vi.mock("../../src/glab.js", () => ({
+  glab: glabMock,
 }));
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
@@ -123,12 +130,9 @@ vi.mock("../../src/spawn-overrides.js", () => ({
   parseSpawnOverrides: vi.fn(),
 }));
 vi.mock("../../src/registry.js", () => ({
-  buildMergedConfig: vi.fn().mockReturnValue({
-    config: baseConfig(),
-    configPaths: ["/tmp/spur.yaml"],
-  }),
-  upsertConfigRegistryPath: vi.fn().mockReturnValue(["/tmp/spur.yaml"]),
-  writeConfigRegistry: vi.fn(),
+  buildMergedConfig: buildMergedConfigMock,
+  upsertConfigRegistryPath: upsertConfigRegistryPathMock,
+  writeConfigRegistry: writeConfigRegistryMock,
 }));
 vi.mock("../../src/pipeline.js", () => ({
   PIPELINE_STEP_TIMEOUT_MS: 600_000,
@@ -145,7 +149,7 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-function baseConfig() {
+function baseConfig(): AppConfig {
   return {
     configPath: "/tmp/spur.yaml",
     server: { host: "127.0.0.1", port: 4310 },
@@ -154,6 +158,11 @@ function baseConfig() {
     defaultAgent: "claude",
     tmux: { socketName: "spur-4310" },
     ui: { port: 5555 },
+    voice: {
+      provider: "whisper_cpp",
+      language: "en",
+      model: "base",
+    },
     projects: {
       api: {
         path: "/repo/api",
@@ -161,6 +170,15 @@ function baseConfig() {
         sessionPrefix: "api",
         worktree: true,
         symlinks: [],
+        sidecars: {},
+        sources: {
+          review: {
+            type: "github",
+            runOnStart: false,
+            intervalMs: 60_000,
+          },
+        },
+        triggers: {},
       },
     },
   };
@@ -205,6 +223,12 @@ describe("PR auto-detect", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    buildMergedConfigMock.mockReset().mockReturnValue({
+      config: baseConfig(),
+      configPaths: ["/tmp/spur.yaml"],
+    });
+    upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
+    writeConfigRegistryMock.mockReset();
     agentProcessMatchersMock.mockReset().mockImplementation((agent: string) => [agent]);
     agentStateStrategyMock.mockReset().mockReturnValue("claude_jsonl");
     agentWaitsForSubmitAckMock.mockReset().mockReturnValue(false);
@@ -260,6 +284,81 @@ describe("PR auto-detect", () => {
       links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
     });
 
+    service.dispose();
+  });
+
+  it("falls back to GitLab auto-detect and sets slot when GitHub has no review URL", async () => {
+    const { buildMergedConfig } = await import("../../src/registry.js");
+    const baseProject = baseConfig().projects.api;
+    if (!baseProject) {
+      throw new Error("Missing api project fixture");
+    }
+    const apiProject: ProjectConfig = {
+      path: baseProject.path,
+      defaultBranch: baseProject.defaultBranch,
+      sessionPrefix: baseProject.sessionPrefix,
+      worktree: baseProject.worktree,
+      symlinks: baseProject.symlinks,
+      sidecars: baseProject.sidecars,
+      triggers: baseProject.triggers,
+      sources: {
+        github: {
+          type: "github",
+          runOnStart: false,
+          intervalMs: 60_000,
+        },
+        gitlab: {
+          type: "gitlab",
+          runOnStart: false,
+          intervalMs: 60_000,
+        },
+      },
+    };
+    const session = makeSession();
+    listSessionsMock.mockReturnValue([session]);
+    readSessionMock.mockReturnValue({ ...session });
+    setupEnrich();
+    ghMock.mockResolvedValue(JSON.stringify([]));
+    glabMock.mockResolvedValue(
+      JSON.stringify([
+        {
+          iid: 42,
+          title: "Support GitLab provider",
+          web_url: "https://gitlab.com/org/repo/-/merge_requests/42",
+        },
+      ]),
+    );
+    applySlotsUpdateMock.mockReturnValue({
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    } satisfies SessionSlots);
+    vi.mocked(buildMergedConfig).mockReturnValue({
+      config: {
+        ...baseConfig(),
+        projects: {
+          api: apiProject,
+        },
+      },
+      configPaths: ["/tmp/spur.yaml"],
+    });
+
+    const { SessionService } = await loadModule();
+    const service = new SessionService();
+
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(ghMock).toHaveBeenCalledOnce();
+    expect(glabMock).toHaveBeenCalledWith(
+      session.worktreePath,
+      "api",
+      "projects/:fullpath/merge_requests?source_branch=spur%2Fauto-detect-pr-slot&state=all&per_page=1",
+      "--output",
+      "json",
+    );
+    expect(applySlotsUpdateMock).toHaveBeenCalledWith(undefined, {
+      links: [{ label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/42" }],
+    });
+    expect(writeSessionMock).toHaveBeenCalled();
+    expect(syncTmuxStatusMock).toHaveBeenCalled();
     service.dispose();
   });
 

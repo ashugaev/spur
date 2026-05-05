@@ -9,11 +9,11 @@ import {
   makeSessionWithPR,
   makeSessionWithTracker,
   mockGitHubStatus,
+  mockGitLabStatus,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
 } from "./fixtures.js";
-import { installMockVoiceRecorder, mockVoiceStatus } from "./voice-fixtures.js";
 
 const DEFAULT_PROJECTS: ProjectInfo[] = [{ id: "my-project", name: "my-project" }];
 const DASHBOARD_POLL_WAIT_MS = 5_200;
@@ -512,6 +512,35 @@ test.describe("D5: Tracker and PR links", () => {
     await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
   });
 
+  test("session with GitLab MR link shows compact merge request id", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "gitlab-pr-row-1",
+      slots: {
+        title: "Session with GitLab MR",
+        links: [{ label: "pr", url: "https://gitlab.com/test/repo/-/merge_requests/42" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const prLink = page.locator("a[href*='gitlab.com']").first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink).toContainText("!42");
+    await expect(prLink.locator("svg")).toHaveCount(1);
+  });
+
   test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "pr-row-missing-1",
@@ -691,6 +720,22 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText(/Last request:/)).toBeVisible();
   });
 
+  test("footer shows healthy GitLab status with the last request timestamp in a tooltip", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const gitlabStatus = page.getByRole("button", { name: "GitLab connection healthy" });
+    await expect(gitlabStatus).toBeVisible();
+    await gitlabStatus.hover();
+
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+  });
+
   test("footer keeps the GitHub tooltip pinned after clicking the healthy icon", async ({
     page,
   }) => {
@@ -711,7 +756,17 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.getByText(/Last request:/)).not.toBeVisible();
   });
 
-  test("footer shows the GitHub error text when the health check fails", async ({ page }) => {
+  test("footer keeps GitHub and GitLab status buttons icon-only", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toHaveText("");
+    await expect(page.getByRole("button", { name: "GitLab connection healthy" })).toHaveText("");
+  });
+
+  test("footer shows the GitHub error text in a tooltip when the health check fails", async ({
+    page,
+  }) => {
     await mockSessions(page, []);
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, {
@@ -721,10 +776,11 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub API 503")).toBeVisible();
   });
 
-  test("footer shows auth and unavailable GitHub errors from mocked responses", async ({
+  test("footer shows auth and unavailable GitHub errors in a tooltip from mocked responses", async ({
     page,
   }) => {
     await mockSessions(page, []);
@@ -736,12 +792,14 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     });
     await page.goto("/");
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub auth unavailable")).toBeVisible();
 
     await page.unroute("/api/github-status");
     await mockGitHubStatus(page, { error: "ignored" }, { status: 503 });
     await page.reload();
 
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
     await expect(page.getByText("GitHub status unavailable (503)")).toBeVisible();
   });
 
@@ -899,6 +957,21 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("GitHub")).not.toBeVisible();
   });
+
+  test("touch tap on the GitLab icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitLab connection healthy" }).tap();
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitLab")).not.toBeVisible();
+  });
 });
 
 // D7: Spawn modal
@@ -986,28 +1059,6 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
       "Re-run the flaky deploy",
     );
-  });
-
-  test("spawn modal shows a live recording timer while voice capture is active", async ({
-    page,
-  }) => {
-    await installMockVoiceRecorder(page);
-    await mockVoiceStatus(page);
-
-    await mockSessions(
-      page,
-      [makeWorkingSession({ id: "spawn-voice-timer-1", project: "my-project" })],
-      [{ id: "my-project", name: "my-project" }],
-    );
-    await page.goto("/");
-
-    await page.getByRole("button", { name: /spawn session/i }).click();
-    await page.getByRole("button", { name: /start voice recording/i }).click();
-
-    await expect(page.getByText("00:00")).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /stop and save voice recording/i }),
-    ).toBeVisible();
   });
 
   test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
@@ -1304,18 +1355,22 @@ test.describe("D7b: Silent branch preflight", () => {
 });
 
 test.describe("D7c: Background spawn lifecycle", () => {
-  test("successful spawn ack closes the modal and shows the placeholder session immediately", async ({
+  test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-ack-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Background placeholder session",
       branch: "feature/background-placeholder",
       tmuxSession: "spawn-bg-ack-1",
       worktreePath: "/tmp/worktrees/spawn-bg-ack-1",
     });
     const sessions: SpurSessionView[] = [];
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
 
     await page.route("**/api/spawn", async (route) => {
       sessions.splice(0, sessions.length, placeholder);
@@ -1326,12 +1381,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
-    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await openSpawnModal(page, () => sessions, projects);
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
@@ -1339,17 +1396,109 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ).toBeDisabled();
   });
 
-  test("successful spawn sends the full form payload and resets non-project fields on reopen", async ({
+  test("matching project filter keeps the URL and still shows the placeholder", async ({
+    page,
+  }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-match-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-match-ack-1",
+      project: "my-project",
+      prompt: "Matching project placeholder",
+      branch: "feature/matching-filter",
+      tmuxSession: "spawn-filter-match-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-match-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder, currentSession);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "my-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("mismatched project filter keeps the current list and hides the spawned placeholder", async ({
+    page,
+  }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-mismatch-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-mismatch-ack-1",
+      project: "other-project",
+      prompt: "Hidden by current filter",
+      branch: "feature/mismatched-filter",
+      tmuxSession: "spawn-filter-mismatch-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-mismatch-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByText(currentSession.prompt)).toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("successful spawn sends the full form payload, resets non-project fields, and remembers the last selected project", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-payload-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Carry the selected options into the background shell",
       branch: "feature/spawn-payload",
       tmuxSession: "spawn-bg-payload-1",
       worktreePath: "/tmp/worktrees/spawn-bg-payload-1",
     });
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
     const requests: unknown[] = [];
     const sessions: SpurSessionView[] = [];
 
@@ -1363,8 +1512,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
+    await openSpawnModal(page, () => sessions, projects);
     await fillSpawnForm(page, {
+      project: "other-project",
       prompt: placeholder.prompt,
       branch: "feature/spawn-payload",
       workspaceMode: "worktree",
@@ -1377,7 +1527,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     expect(requests).toEqual([
       {
-        projectId: "my-project",
+        projectId: "other-project",
         prompt: placeholder.prompt,
         agent: "claude",
         branch: "feature/spawn-payload",
@@ -1396,7 +1546,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     await expect(page.getByRole("checkbox")).not.toBeChecked();
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
+      "other-project",
+    );
   });
 
   test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
