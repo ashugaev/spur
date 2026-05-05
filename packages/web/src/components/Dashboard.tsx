@@ -9,7 +9,7 @@ import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -21,6 +21,11 @@ import {
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -710,7 +715,20 @@ export function Dashboard() {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div
+              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+              onKeyDown={(event) => {
+                if (isVoiceToggleHotkey(event)) {
+                  event.preventDefault();
+                  voice.toggleRecording();
+                  return;
+                }
+                if (isPrimarySubmitHotkey(event)) {
+                  event.preventDefault();
+                  void handleSpawn();
+                }
+              }}
+            >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -827,15 +845,22 @@ export function Dashboard() {
                   onAddFiles={addSpawnImages}
                   onChange={setSpawnPrompt}
                   onKeyDown={(event) => {
-                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      voice.toggleRecording();
+                      return;
+                    }
+                    if (isPrimarySubmitHotkey(event)) {
+                      event.preventDefault();
                       void handleSpawn();
+                    }
                   }}
                   onRemoveAttachment={(index) =>
                     setSpawnAttachments((current) =>
                       current.filter((_, currentIndex) => currentIndex !== index),
                     )
                   }
-                  placeholder="Prompt for the new session..."
+                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
                   textareaRef={spawnPromptRef}
                   value={spawnPrompt}
                   voice={voice}
@@ -873,7 +898,7 @@ export function Dashboard() {
                           aria-hidden="true"
                           className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                         >
-                          CMD + ⏎
+                          {PRIMARY_SUBMIT_HINT}
                         </span>
                       ) : null}
                     </button>

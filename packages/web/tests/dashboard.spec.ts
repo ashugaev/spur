@@ -1163,7 +1163,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Ctrl+Enter in textarea submits spawn request", async ({ page }) => {
+  test("Cmd+Enter in textarea submits spawn request", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "spawn-ctrlenter-1", project: "my-project" })],
@@ -1206,13 +1206,34 @@ test.describe("D7: Spawn modal", () => {
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
-    await textarea.fill("Test prompt for ctrl enter");
-    await textarea.press("Control+Enter");
+    await textarea.fill("Test prompt for cmd enter");
+    await textarea.press("Meta+Enter");
 
     // Modal should close after spawn
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
       timeout: 5000,
     });
+  });
+
+  test("spawn modal shows the voice shortcut hint when voice is available", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-voice-hint-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+
+    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toBeVisible();
   });
 
   test("spawn ack failure keeps modal open and preserves prompt", async ({ page }) => {
