@@ -4,12 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import {
-  VoiceButton,
-  VoiceConfirmModal,
-  VoiceRecordingStrip,
-  isVoiceActive,
-} from "@/components/VoiceInput";
+import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -204,6 +199,7 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
+  const voice = useVoiceInput();
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const submitVoiceDraft = useCallback(
@@ -225,8 +221,6 @@ export function DirectTerminal({
     },
     [agent, draftHistory, sendWithAck],
   );
-
-  const voice = useVoiceInput({ onQuickSend: submitVoiceDraft });
 
   const sendHotkey = useCallback(
     async (hotkey: (typeof hotkeys)[number]) => {
@@ -623,155 +617,143 @@ export function DirectTerminal({
       <div className="min-h-0 flex-1 p-1.5">
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
-      {(submitError ?? (!voice.voiceModalOpen ? voice.voiceError : null)) ? (
+      {(voice.voiceError ?? submitError) ? (
         <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {submitError ?? voice.voiceError}
+          {voice.voiceError ?? submitError}
         </div>
       ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        {isVoiceActive(voice) ? (
-          <VoiceRecordingStrip
-            actions={[
-              { kind: "cancel", onClick: voice.cancelRecording },
-              { kind: "edit", onClick: () => voice.stopRecording("draft") },
-              { kind: "send", onClick: () => voice.stopRecording("send") },
-            ]}
-            className="flex w-full items-center gap-2 border border-[var(--color-status-error)] bg-[var(--color-status-error)]/6 px-2 py-1.5"
-            voice={voice}
-          />
-        ) : (
-          <div className="flex flex-wrap items-center gap-1">
-            <div className="relative" ref={hotkeyMenuRef}>
-              <button
-                aria-expanded={hotkeysOpen}
-                aria-haspopup="menu"
-                aria-label={`Open ${agent} shortcuts`}
-                className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
-                onClick={() => setHotkeysOpen((current) => !current)}
-                type="button"
-              >
-                ...
-              </button>
-              {hotkeysOpen ? (
-                <div
-                  aria-label={`${agent} shortcuts`}
-                  className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
-                  role="menu"
-                >
-                  <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                    {getAgentDisplayName(agent)}
-                  </div>
-                  {hotkeys.map((hotkey) => (
-                    <button
-                      className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
-                      key={hotkey.id}
-                      onClick={() => {
-                        void sendHotkey(hotkey);
-                        setHotkeysOpen(false);
-                      }}
-                      role="menuitem"
-                      type="button"
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
-                          {hotkey.label}
-                        </span>
-                        <span className="block text-[10px] text-[var(--color-text-secondary)]">
-                          {hotkey.detail}
-                        </span>
-                      </span>
-                      {hotkey.shortcut ? (
-                        <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
-                          {hotkey.shortcut}
-                        </span>
-                      ) : null}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-            <SlashSuggestions
-              buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
-              endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
-              onSelect={(entry) => void submitSlash(entry.insertText)}
-            />
+        <div className="flex items-center gap-1">
+          <div className="relative" ref={hotkeyMenuRef}>
             <button
-              className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
-              onClick={() => sendTerminalInput("\r")}
+              aria-expanded={hotkeysOpen}
+              aria-haspopup="menu"
+              aria-label={`Open ${agent} shortcuts`}
+              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
-              Enter
+              ...
             </button>
-            <div className="ml-auto flex items-center gap-1">
-              <button
-                aria-label="Arrow Left"
-                className={terminalControlIconButtonClass}
-                onClick={() => sendTerminalInput("\x1b[D")}
-                type="button"
+            {hotkeysOpen ? (
+              <div
+                aria-label={`${agent} shortcuts`}
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
+                role="menu"
               >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              <button
-                aria-label="Arrow Up"
-                className={terminalControlIconButtonClass}
-                onClick={() => sendTerminalInput("\x1b[A")}
-                type="button"
-              >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              <button
-                aria-label="Arrow Down"
-                className={terminalControlIconButtonClass}
-                onClick={() => sendTerminalInput("\x1b[B")}
-                type="button"
-              >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              <button
-                aria-label="Arrow Right"
-                className={terminalControlIconButtonClass}
-                onClick={() => sendTerminalInput("\x1b[C")}
-                type="button"
-              >
-                <svg
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  viewBox="0 0 24 24"
-                >
-                  <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </div>
-            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+                <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                  {getAgentDisplayName(agent)}
+                </div>
+                {hotkeys.map((hotkey) => (
+                  <button
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
+                    key={hotkey.id}
+                    onClick={() => {
+                      void sendHotkey(hotkey);
+                      setHotkeysOpen(false);
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate font-bold uppercase text-[var(--color-text-primary)]">
+                        {hotkey.label}
+                      </span>
+                      <span className="block text-[10px] text-[var(--color-text-secondary)]">
+                        {hotkey.detail}
+                      </span>
+                    </span>
+                    {hotkey.shortcut ? (
+                      <span className="self-start font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-accent)]">
+                        {hotkey.shortcut}
+                      </span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
-        )}
+          <SlashSuggestions
+            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
+            onSelect={(entry) => void submitSlash(entry.insertText)}
+          />
+          <button
+            className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
+            onClick={() => sendTerminalInput("\r")}
+            type="button"
+          >
+            Enter
+          </button>
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              aria-label="Arrow Left"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[D")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M15 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Up"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[A")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M5 15l7-7 7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Down"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[B")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M19 9l-7 7-7-7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              aria-label="Arrow Right"
+              className={terminalControlIconButtonClass}
+              onClick={() => sendTerminalInput("\x1b[C")}
+              type="button"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                viewBox="0 0 24 24"
+              >
+                <path d="M9 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+          <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+        </div>
       </div>
       <VoiceConfirmModal
         historyEntries={draftHistory.entries}
