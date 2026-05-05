@@ -63,7 +63,7 @@ import type {
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
-import { readDoctorBranchHint } from "./workspace.js";
+import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -1327,21 +1327,19 @@ export function createProgram(cliEntrypoint: string): Command {
     .command("doctor")
     .description("Scaffold a local Spur project config for this checkout.")
     .option("--json", "Print raw JSON")
-    .action(async (options, command) => {
-      const parentProgram = command.parent as Command;
-      const instance = prepareInstanceConfig(parentProgram);
-      printBootstrapNotice(instance.initialized, Boolean(options.json), instance.configPath);
+    .action(async (options) => {
       await outputResult({
         json: Boolean(options.json),
         label: "writing local config",
         action: async (): Promise<DoctorResult> => {
-          const existingProjectConfigPath = findProjectConfigPath();
+          const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
+          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
           if (existingProjectConfigPath) {
             throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
           }
           const scaffold = createProjectConfigScaffold(
-            process.cwd(),
-            await readDoctorBranchHint(process.cwd()),
+            workspaceRoot,
+            await readDoctorBranchHint(workspaceRoot),
           );
           writeProjectConfigScaffold(scaffold);
           return {

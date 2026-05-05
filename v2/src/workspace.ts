@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -102,6 +102,11 @@ export async function readDoctorBranchHint(repoPath: string): Promise<string> {
 
   return normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch"))
     ?? DEFAULT_BRANCH_HINT;
+}
+
+export async function resolveDoctorRepoRoot(startDir: string): Promise<string> {
+  const repoRoot = await tryGit(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel");
+  return repoRoot ? resolve(repoRoot) : resolve(startDir);
 }
 
 export async function findWorktreePathForBranch(

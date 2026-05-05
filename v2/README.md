@@ -31,10 +31,10 @@ spur list
 spur spawn <project> "Fix the flaky auth test"
 ```
 
-`spur doctor` writes a minimal local `spur.yaml` for the current repo. It does not call `connect`,
-does not start the daemon, and does not invent a second bootstrap flow. The first normal Spur
-command still auto-initializes `~/.spur/config.yaml`, and `spur list` / `spur spawn` auto-connect
-the local project config through the existing registry path.
+`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
+does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
+first normal Spur command still auto-initializes that global instance config, and `spur list` /
+`spur spawn` auto-connect the local project config through the existing registry path.
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. That path is
 for contributors and dogfooding, not the main install flow.

@@ -21,9 +21,9 @@ Registry package install uses the same command shape when a published release ex
 npm install -g @composio/spur
 ```
 
-`spur doctor` writes a local `spur.yaml` for the current repo. The first normal Spur command still
-auto-initializes the global instance config at `~/.spur/config.yaml`, and `spur list` / `spur spawn`
-auto-connect the local project config when present.
+`spur doctor` writes a local `spur.yaml` at the git repo root for the current checkout. It does not
+create `~/.spur/config.yaml`. The first normal Spur command still auto-initializes that global
+instance config, and `spur list` / `spur spawn` auto-connect the local project config when present.
 
 The web UI is optional. It defaults to the instance `ui.port` from that same global config; the default is `5555`.
 

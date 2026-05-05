@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
@@ -367,6 +367,37 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
 
     expect(sessions).toEqual([]);
     expect(projects.map((project) => project.id)).toContain(doctor.projectId);
+  });
+
+  it("doctor scaffolds at the git repo root from nested directories without creating global config", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    const sessionPrefix = `rt-doctor-nested-${context.port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const nestedDir = join(context.repoDir, "packages", "service");
+    const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
+    await mkdir(nestedDir, { recursive: true });
+
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: nestedDir,
+      env: context.env,
+      timeout: 60_000,
+    });
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    expect(doctor.configPath).toBe(join(context.repoDir, "spur.yaml"));
+    expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
+    expect(existsSync(join(nestedDir, "spur.yaml"))).toBe(false);
+    expect(existsSync(globalConfigPath)).toBe(false);
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toContain(
+      `  ${doctor.projectId}:`,
+    );
   });
 
   it("doctor refuses to overwrite an existing local config", async () => {

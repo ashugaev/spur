@@ -21,6 +21,7 @@ import {
   createWorktree,
   findWorktreePathForBranch,
   readDoctorBranchHint,
+  resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
 } from "../../src/workspace.js";
 
@@ -304,5 +305,29 @@ describe("readDoctorBranchHint", () => {
     mockGitFailure("missing");
 
     await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("main");
+  });
+});
+
+describe("resolveDoctorRepoRoot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the git toplevel when doctor runs from a nested repo directory", async () => {
+    mockGitSuccess("/repo/api");
+
+    await expect(resolveDoctorRepoRoot("/repo/api/packages/service")).resolves.toBe("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+      { cwd: "/repo/api/packages/service" },
+    );
+  });
+
+  it("falls back to the current directory when git toplevel resolution fails", async () => {
+    mockGitFailure("not a git repo");
+
+    await expect(resolveDoctorRepoRoot("/tmp/scratch")).resolves.toBe("/tmp/scratch");
   });
 });
