@@ -161,6 +161,7 @@ export interface UseVoiceInput {
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
   toggleRecording: () => void;
+  stopAndSend: (onSend: (text: string) => void | Promise<void>) => void;
   confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
   dismissModal: () => void;
   voiceError: string | null;
@@ -185,6 +186,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const pendingSendCallbackRef = useRef<((text: string) => void | Promise<void>) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,6 +209,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       mediaRecorderRef.current = null;
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
+      pendingSendCallbackRef.current = null;
     };
   }, []);
 
@@ -250,6 +253,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
             ("error" in (event ?? {}) && (event as { error?: DOMException }).error?.message) ||
             "Voice recording failed before transcription";
           dismissedRef.current = false;
+          pendingSendCallbackRef.current = null;
           stopStream();
           setVoiceBusy(null);
           setVoiceError(recorderError);
@@ -260,17 +264,30 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
           const wasDismissed = dismissedRef.current;
           dismissedRef.current = false;
           stopStream();
-          if (wasDismissed) return;
+          if (wasDismissed) {
+            pendingSendCallbackRef.current = null;
+            return;
+          }
           if (chunks.length === 0) {
+            pendingSendCallbackRef.current = null;
             setVoiceError(EMPTY_AUDIO_ERROR);
             return;
           }
+          // Precedence: stopAndSend > onTranscribed > modal.
           void (async () => {
             setVoiceBusy("transcribing");
             try {
               const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
               const text = await transcribeRecording(audio);
-              if (onTranscribedRef.current) {
+              const pendingSend = pendingSendCallbackRef.current;
+              if (pendingSend) {
+                pendingSendCallbackRef.current = null;
+                try {
+                  await pendingSend(text);
+                } catch (error) {
+                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
+                }
+              } else if (onTranscribedRef.current) {
                 try {
                   onTranscribedRef.current(text);
                 } catch (error) {
@@ -286,6 +303,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                 setVoiceModalOpen(true);
               }
             } catch (err) {
+              pendingSendCallbackRef.current = null;
               setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
             } finally {
               setVoiceBusy(null);
@@ -296,6 +314,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         recorder.start();
         setRecording(true);
       } catch (err) {
+        pendingSendCallbackRef.current = null;
         stopStream();
         setVoiceError(readRecordingStartError(err));
       } finally {
@@ -328,11 +347,19 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       dismissedRef.current = true;
       mediaRecorderRef.current.stop();
     }
+    pendingSendCallbackRef.current = null;
     stopStream();
     setVoiceBusy(null);
     setVoiceModalOpen(false);
     setVoiceDraft("");
   }, [stopStream]);
+
+  const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    pendingSendCallbackRef.current = onSend;
+    recorder.stop();
+  }, []);
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),
@@ -342,6 +369,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     voiceDraft,
     setVoiceDraft,
     toggleRecording,
+    stopAndSend,
     confirmDraft,
     dismissModal,
     voiceError,
