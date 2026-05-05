@@ -187,9 +187,7 @@ describe("DirectTerminal voice confirm", () => {
     expect(pencil).toBeInTheDocument();
     expect(stop).toBeInTheDocument();
     // Source order = visual order with flex-row.
-    expect(
-      pencil.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(pencil.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("stop click invokes stopAndSend", async () => {

@@ -1384,9 +1384,15 @@ test.describe("S6: Terminal modal from detail page", () => {
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
 
     // Idle: only mic in terminal control bar.
-    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toBeVisible();
-    await expect(terminalDialog.getByRole("button", { name: /edit voice transcript/i })).toHaveCount(0);
-    await expect(terminalDialog.getByRole("button", { name: /stop and send voice/i })).toHaveCount(0);
+    await expect(
+      terminalDialog.getByRole("button", { name: /start voice recording/i }),
+    ).toBeVisible();
+    await expect(
+      terminalDialog.getByRole("button", { name: /edit voice transcript/i }),
+    ).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop and send voice/i })).toHaveCount(
+      0,
+    );
 
     await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
 
@@ -1395,7 +1401,9 @@ test.describe("S6: Terminal modal from detail page", () => {
     const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
     await expect(pencil).toBeVisible();
     await expect(stop).toBeVisible();
-    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toHaveCount(0);
+    await expect(
+      terminalDialog.getByRole("button", { name: /start voice recording/i }),
+    ).toHaveCount(0);
 
     // Pencil click → opens modal (edit flow).
     await pencil.click();

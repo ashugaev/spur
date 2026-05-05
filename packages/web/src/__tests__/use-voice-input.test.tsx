@@ -188,5 +188,4 @@ describe("useVoiceInput", () => {
     expect(send).not.toHaveBeenCalled();
     expect(result.current.recording).toBe(false);
   });
-
 });
