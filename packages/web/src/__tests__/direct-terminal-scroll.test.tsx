@@ -469,10 +469,10 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
     });

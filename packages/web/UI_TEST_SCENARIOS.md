@@ -331,7 +331,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - There is no standalone `ESC` button in the control bar; `Esc` lives inside the `...` menu
 - `...` opens an agent-specific shortcuts menu (`claude` or `codex`) that includes `Esc` and `Shift+Tab`; clicking an item sends the matching control sequence into the terminal and closes the menu
 - `Slash` opens a suggestion list grouped by Commands / Skills / Agents; selecting an item submits the exact slash text into the terminal as bracketed paste plus a separate `Enter`
-- Microphone button appears after arrow keys with a small gap; click starts recording, second click stops and opens a confirmation popup to review text before typing it into the terminal
+- Microphone button appears after arrow keys with a small gap; click starts recording. While recording the single mic button is replaced by two buttons in the same slot: a pencil on the left and a stop square on the right (red border + red tint)
+- Stop button transcribes and submits the result into the terminal immediately without showing the confirmation popup; pencil button stops recording and opens the confirmation popup so the transcript can be edited before insertion
+- Idle state outside recording shows the single mic button only (no pencil, no stop)
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea

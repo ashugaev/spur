@@ -1318,6 +1318,90 @@ test.describe("S6: Terminal modal from detail page", () => {
     expect(overflowRestored).not.toBe("hidden");
   });
 
+  test("recording state shows pencil and stop buttons; pencil opens edit modal, stop sends without modal", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      class TestMediaRecorder {
+        mimeType = "audio/webm";
+        state = "inactive";
+        private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+        addEventListener(type: string, listener: (event?: unknown) => void) {
+          this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+        }
+
+        start() {
+          this.state = "recording";
+        }
+
+        stop() {
+          this.state = "inactive";
+          const blob = new Blob(["voice-audio"], { type: this.mimeType });
+          this.emit("dataavailable", blob);
+          this.emit("stop");
+        }
+
+        private emit(type: string, data?: Blob) {
+          for (const listener of this.listeners.get(type) ?? []) {
+            listener(data ? { data } : undefined);
+          }
+        }
+      }
+
+      Object.defineProperty(window, "MediaRecorder", {
+        configurable: true,
+        writable: true,
+        value: TestMediaRecorder,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ stop() {} }],
+          }),
+        },
+      });
+    });
+
+    const session = makeWorkingSession({ id: "detail-s6-voice-rec" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await mockVoiceStatus(page);
+    await mockVoiceTranscribe(page, "stop button transcript");
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+
+    const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
+
+    // Idle: only mic in terminal control bar.
+    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toBeVisible();
+    await expect(terminalDialog.getByRole("button", { name: /edit voice transcript/i })).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop and send voice/i })).toHaveCount(0);
+
+    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
+
+    // Recording: pencil + stop replace the mic.
+    const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    await expect(pencil).toBeVisible();
+    await expect(stop).toBeVisible();
+    await expect(terminalDialog.getByRole("button", { name: /start voice recording/i })).toHaveCount(0);
+
+    // Pencil click → opens modal (edit flow).
+    await pencil.click();
+    await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toBeVisible();
+  });
+
   test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
     page,
   }) => {
