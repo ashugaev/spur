@@ -92,8 +92,70 @@ done
   return scriptPath;
 }
 
+async function writeSidecarPortRecorder(
+  context: RuntimeTestContext,
+  scriptName = "record-sidecar-port.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
+tail -f /dev/null
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
+async function writeReservedPortSidecarConfig(
+  context: RuntimeTestContext,
+  options: {
+    configName: string;
+    sessionPrefix: string;
+    serverPort: number;
+    rangeStart: number;
+    rangeEnd: number;
+  },
+): Promise<string> {
+  await writeSidecarPortRecorder(context);
+  return context.writeConfig(
+    options.configName,
+    `server:
+  host: 127.0.0.1
+  port: ${options.serverPort}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${options.sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "./record-sidecar-port.sh"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: ${options.rangeStart}
+            end: ${options.rangeEnd}
+`,
+  );
+}
+
 function sidecarDepthPath(worktreePath: string, sessionId: string, sidecarName: string): string {
   return join(worktreePath, `.sidecar-depth-${sidecarName}-${sessionId}`);
+}
+
+function sidecarPortPath(worktreePath: string, sessionId: string): string {
+  return join(worktreePath, `.sidecar-port-${sessionId}`);
 }
 
 function sessionSidecarHelperPath(context: RuntimeTestContext, sessionId: string): string {
@@ -125,6 +187,33 @@ async function processExists(pid: number): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function findConsecutiveFreePorts(): Promise<{ start: number; end: number }> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const start = await findFreePort();
+    if (start >= 65_535) {
+      continue;
+    }
+    const probe = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+    const available = await new Promise<boolean>((resolve) => {
+      probe.once("error", () => {
+        resolve(false);
+      });
+      probe.listen(start + 1, "127.0.0.1", () => {
+        probe.close((error) => {
+          resolve(!error);
+        });
+      });
+    });
+    if (available) {
+      return { start, end: start + 1 };
+    }
+  }
+  throw new Error("Failed to find consecutive free TCP ports for runtime test");
 }
 
 async function runRestoreScenario(args: {
@@ -3791,44 +3880,13 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const recorderPath = join(context.repoDir, "record-sidecar-port.sh");
-    await writeFile(
-      recorderPath,
-      `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
-tail -f /dev/null
-`,
-      "utf8",
-    );
-    await chmod(recorderPath, 0o755);
-    const configPath = await context.writeConfig(
-      "sidecar-reserved-ports.yaml",
-      `server:
-  host: 127.0.0.1
-  port: ${port}
-dataDir: ${context.dataDir}
-worktreeDir: ${context.worktreeDir}
-defaultAgent: claude
-projects:
-  api:
-    path: ${context.repoDir}
-    defaultBranch: main
-    sessionPrefix: ${sessionPrefix}
-    worktree: false
-    symlinks:
-      - .env
-    sidecars:
-      dev:
-        command: "./record-sidecar-port.sh"
-        autoStart: true
-        ports:
-          http:
-            env: SPUR_RESERVED_PORT_DEV
-            start: 4600
-            end: 4601
-`,
-    );
+    const configPath = await writeReservedPortSidecarConfig(context, {
+      configName: "sidecar-reserved-ports.yaml",
+      sessionPrefix,
+      serverPort: port,
+      rangeStart: 4600,
+      rangeEnd: 4601,
+    });
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -3840,13 +3898,11 @@ projects:
     ) as SessionView;
 
     const firstPort = await pollUntil(
-      async () =>
-        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
     const secondPort = await pollUntil(
-      async () =>
-        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
 
@@ -3858,11 +3914,103 @@ projects:
       (await context.execCli(["--config", configPath, "spawn", "api", "third", "--json"])).stdout,
     ) as SessionView;
     const thirdPort = await pollUntil(
-      async () =>
-        readFile(join(context.repoDir, `.sidecar-port-${third.id}`), "utf8").catch(() => ""),
+      async () => readFile(sidecarPortPath(context.repoDir, third.id), "utf8").catch(() => ""),
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
     expect(thirdPort.trim()).toBe("4600");
+  });
+
+  it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {
+    const port = await findFreePort();
+    const reservedRange = await findConsecutiveFreePorts();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-os-bound-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await writeReservedPortSidecarConfig(context, {
+      configName: "sidecar-os-bound-port.yaml",
+      sessionPrefix,
+      serverPort: port,
+      rangeStart: reservedRange.start,
+      rangeEnd: reservedRange.end,
+    });
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+    const occupiedServer = createServer((_request, response) => {
+      response.writeHead(204);
+      response.end();
+    });
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        occupiedServer.once("error", reject);
+        occupiedServer.listen(reservedRange.start, "0.0.0.0", () => {
+          occupiedServer.off("error", reject);
+          resolve();
+        });
+      });
+
+      const first = JSON.parse(
+        (await context.execCli(["--config", configPath, "spawn", "api", "first", "--json"])).stdout,
+      ) as SessionView;
+      const firstPort = await pollUntil(
+        async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
+        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.end) },
+      );
+      expect(firstPort.trim()).toBe(String(reservedRange.end));
+
+      const second = JSON.parse(
+        (await context.execCli(["--config", configPath, "spawn", "api", "second", "--json"]))
+          .stdout,
+      ) as SessionView;
+
+      expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
+        "session.sidecar.autostart.failed",
+      );
+      await expect(
+        context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+          method: "POST",
+        }),
+      ).rejects.toThrow(
+        `No free reserved port for sidecar dev.http in range ${reservedRange.start}-${reservedRange.end}`,
+      );
+
+      await new Promise<void>((resolve, reject) => {
+        occupiedServer.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await context.execCli(["--config", configPath, "kill", first.id, "--force", "--json"]);
+      await context.fetchJson<SessionView>(`/sessions/${second.id}/sidecars/dev/start`, {
+        method: "POST",
+      });
+      const secondPort = await pollUntil(
+        async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
+        { timeoutMs: 15_000, accept: (value) => value.trim() === String(reservedRange.start) },
+      );
+      expect(secondPort.trim()).toBe(String(reservedRange.start));
+    } finally {
+      if (occupiedServer.listening) {
+        await new Promise<void>((resolve, reject) => {
+          occupiedServer.close((error) => {
+            if (error) {
+              reject(error);
+              return;
+            }
+            resolve();
+          });
+        });
+      }
+    }
   });
 
   it("keeps spawn running when no reserved sidecar ports remain and allows manual retry later", async () => {
@@ -3876,44 +4024,13 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const recorderPath = join(context.repoDir, "record-sidecar-port.sh");
-    await writeFile(
-      recorderPath,
-      `#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "\${SPUR_RESERVED_PORT_DEV:-}" > ".sidecar-port-\${SPUR_SESSION:?}"
-tail -f /dev/null
-`,
-      "utf8",
-    );
-    await chmod(recorderPath, 0o755);
-    const configPath = await context.writeConfig(
-      "sidecar-reserved-ports-full.yaml",
-      `server:
-  host: 127.0.0.1
-  port: ${port}
-dataDir: ${context.dataDir}
-worktreeDir: ${context.worktreeDir}
-defaultAgent: claude
-projects:
-  api:
-    path: ${context.repoDir}
-    defaultBranch: main
-    sessionPrefix: ${sessionPrefix}
-    worktree: false
-    symlinks:
-      - .env
-    sidecars:
-      dev:
-        command: "./record-sidecar-port.sh"
-        autoStart: true
-        ports:
-          http:
-            env: SPUR_RESERVED_PORT_DEV
-            start: 4700
-            end: 4700
-`,
-    );
+    const configPath = await writeReservedPortSidecarConfig(context, {
+      configName: "sidecar-reserved-ports-full.yaml",
+      sessionPrefix,
+      serverPort: port,
+      rangeStart: 4700,
+      rangeEnd: 4700,
+    });
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 
@@ -3925,8 +4042,7 @@ projects:
     ) as SessionView;
 
     await pollUntil(
-      async () =>
-        readFile(join(context.repoDir, `.sidecar-port-${first.id}`), "utf8").catch(() => ""),
+      async () => readFile(sidecarPortPath(context.repoDir, first.id), "utf8").catch(() => ""),
       { timeoutMs: 15_000, accept: (value) => value.trim() === "4700" },
     );
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
@@ -3944,8 +4060,7 @@ projects:
       method: "POST",
     });
     const secondPort = await pollUntil(
-      async () =>
-        readFile(join(context.repoDir, `.sidecar-port-${second.id}`), "utf8").catch(() => ""),
+      async () => readFile(sidecarPortPath(context.repoDir, second.id), "utf8").catch(() => ""),
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
     expect(secondPort.trim()).toBe("4700");
