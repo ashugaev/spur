@@ -1676,14 +1676,23 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Internal session slot updates.")
     .requiredOption("--session <id>", "Session id")
     .option("--title <text>", "Set task title")
+    .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
     .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const titleIfAbsent = options.titleIfAbsent as string | undefined;
+      if (titleIfAbsent !== undefined && (options.title !== undefined || options.clearTitle)) {
+        throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
+      }
       const payload: UpdateSessionSlotsRequest = {
-        ...(options.title !== undefined ? { title: options.title as string } : {}),
+        ...(titleIfAbsent !== undefined
+          ? { title: titleIfAbsent, setTitleIfAbsent: true }
+          : options.title !== undefined
+            ? { title: options.title as string }
+            : {}),
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
