@@ -4265,6 +4265,121 @@ describe("SessionService", () => {
     );
   });
 
+  it("unlinks a generic pr slot before clearing the native GitHub PR binding", async () => {
+    readSessionMock
+      .mockReturnValueOnce({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        pr: {
+          number: 9,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/9",
+        },
+        slots: {
+          title: "Existing title",
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/1" },
+            { label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/7" },
+          ],
+        },
+      })
+      .mockReturnValueOnce({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "hello",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "running",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:01:00.000Z",
+        pr: {
+          number: 9,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/9",
+        },
+        slots: {
+          title: "Existing title",
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+        },
+      });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const mixedResult = await service.updateSlots("api-1", { unlinkLabels: ["pr"] });
+    const nativeOnlyResult = await service.updateSlots("api-1", { unlinkLabels: ["pr"] });
+
+    expect(writeSessionMock).toHaveBeenNthCalledWith(
+      1,
+      "/tmp/spur-data",
+      expect.objectContaining({
+        pr: {
+          number: 9,
+          repo: "org/repo",
+          url: "https://github.com/org/repo/pull/9",
+        },
+        slots: {
+          title: "Existing title",
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+        },
+      }),
+    );
+    expect(mixedResult.pr).toEqual({
+      number: 9,
+      repo: "org/repo",
+      url: "https://github.com/org/repo/pull/9",
+    });
+    expect(mixedResult.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+      { label: "pr", url: "https://github.com/org/repo/pull/9" },
+    ]);
+    expect(syncTmuxStatusMock).toHaveBeenNthCalledWith(1, "api-1", {
+      title: "Existing title",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/1" },
+        { label: "pr", url: "https://github.com/org/repo/pull/9" },
+      ],
+    });
+
+    expect(writeSessionMock).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/spur-data",
+      expect.not.objectContaining({ pr: expect.anything() }),
+    );
+    expect(writeSessionMock).toHaveBeenNthCalledWith(
+      2,
+      "/tmp/spur-data",
+      expect.objectContaining({
+        slots: {
+          title: "Existing title",
+          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+        },
+      }),
+    );
+    expect(nativeOnlyResult.pr).toBeUndefined();
+    expect(nativeOnlyResult.slots?.links).toEqual([
+      { label: "tracker", url: "https://tracker.example.com/1" },
+    ]);
+    expect(syncTmuxStatusMock).toHaveBeenNthCalledWith(2, "api-1", {
+      title: "Existing title",
+      links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
+    });
+  });
+
   it("restores through the agent-specific resume plan and keeps the same session id", async () => {
     mockClaudeJsonlState("waiting");
     findAgentSessionIdMock.mockResolvedValueOnce(null).mockResolvedValue("session-uuid");

@@ -3094,6 +3094,8 @@ export class SessionService {
     }
     const session = currentSession;
     const normalized = normalizeSlotsUpdate(request);
+    const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
+    const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
     const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
     const genericLinks = normalized.links.filter(
@@ -3118,7 +3120,7 @@ export class SessionService {
       ...(slots ? { slots } : {}),
       ...(nativePr
         ? { pr: nativePr }
-        : normalized.unlinkLabels.includes("pr")
+        : unlinksPr && !hasGenericPrSlot
           ? {}
           : session.pr
             ? { pr: session.pr }
@@ -3127,7 +3129,7 @@ export class SessionService {
     if (!slots) {
       delete updated.slots;
     }
-    if (prLink === undefined && normalized.unlinkLabels.includes("pr")) {
+    if (prLink === undefined && unlinksPr && !hasGenericPrSlot) {
       delete updated.pr;
     }
     writeSession(this.config.dataDir, updated);
