@@ -545,7 +545,7 @@ describe("SessionService", () => {
       if (request.links) {
         for (const link of request.links) {
           const normalizedLabel =
-            link.label === "pr" || link.label === "github_pr" ? "github-pr" : link.label;
+            link.label === "github-pr" || link.label === "github_pr" ? "pr" : link.label;
           const normalizedLink = { ...link, label: normalizedLabel };
           const index = links.findIndex((entry) => entry.label === normalizedLabel);
           if (index === -1) {
@@ -4254,14 +4254,14 @@ describe("SessionService", () => {
           title: "Existing title",
           links: [
             { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "github-pr", url: "https://example.com/claude/pull/1" },
+            { label: "pr", url: "https://example.com/claude/pull/1" },
           ],
         },
       }),
     );
     expect(result.pr).toBeUndefined();
     expect(result.slots?.links).toEqual(
-      expect.arrayContaining([{ label: "github-pr", url: "https://example.com/claude/pull/1" }]),
+      expect.arrayContaining([{ label: "pr", url: "https://example.com/claude/pull/1" }]),
     );
   });
 

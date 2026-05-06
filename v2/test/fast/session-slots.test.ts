@@ -38,19 +38,19 @@ describe("session slots", () => {
       title: "Current task",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-2" },
-        { label: "github-pr", url: "https://github.com/org/repo/pull/42" },
+        { label: "pr", url: "https://github.com/org/repo/pull/42" },
       ],
     });
   });
 
-  it("normalizes legacy PR aliases to github-pr", () => {
+  it("normalizes legacy PR aliases to pr", () => {
     expect(
       normalizeSlotsUpdate({
         links: [{ label: "github_pr", url: "https://github.com/org/repo/pull/9" }],
       }),
     ).toEqual({
       clearTitle: false,
-      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/9" }],
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/9" }],
       unlinkLabels: [],
     });
   });
@@ -86,7 +86,7 @@ describe("session slots", () => {
     expect(prompt).toContain(
       "Update the session title and related links as soon as you know them.",
     );
-    expect(prompt).toContain("--link github-pr=https://...");
+    expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });

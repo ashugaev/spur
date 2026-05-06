@@ -149,6 +149,51 @@ describe("session metadata PR migration", () => {
     expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toEqual(original);
   });
 
+  it("rewrites legacy github-pr GitLab links into generic pr slots", async () => {
+    const dataDir = await createTempDir("spur-metadata-test-");
+    const sessionDir = join(dataDir, "sessions", "api");
+    const sessionPath = join(sessionDir, "api-a1b2.json");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      sessionPath,
+      `${JSON.stringify(
+        {
+          id: "api-a1b2",
+          project: "api",
+          agent: "claude",
+          prompt: "fix the bug",
+          branch: "feature/native-pr-binding",
+          worktree: true,
+          worktreePath: "/tmp/spur-worktrees/api-a1b2",
+          tmuxSession: "api-a1b2",
+          launchCommand: "claude",
+          status: "running",
+          createdAt: "2026-04-26T09:00:00.000Z",
+          updatedAt: "2026-04-26T09:00:00.000Z",
+          slots: {
+            links: [
+              { label: "github-pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    expect(readSession(dataDir, "api-a1b2")).toMatchObject({
+      slots: {
+        links: [{ label: "pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
+      },
+    });
+
+    expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toMatchObject({
+      slots: {
+        links: [{ label: "pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
+      },
+    });
+  });
+
   it("preserves planMode when writing and reading a session record", async () => {
     const dataDir = await newDataDir();
     const session: SessionRecord = {

@@ -3,6 +3,48 @@ import type { SessionLink, SessionPrBinding, SessionRecord, SessionSlots } from 
 import { readCurrentBranch } from "./workspace.js";
 
 const GITHUB_PR_PATH_RE = /^\/([^/]+)\/([^/]+)\/pull\/(\d+)(?:\/|$)/;
+const LEGACY_PR_LABELS = new Set(["pr", "github-pr", "github_pr"]);
+
+function isLegacyPrLink(link: SessionLink): boolean {
+  return LEGACY_PR_LABELS.has(link.label);
+}
+
+function normalizeLegacyPrLink(link: SessionLink): SessionLink {
+  if (!isLegacyPrLink(link)) {
+    return link;
+  }
+  return {
+    ...link,
+    label: "pr",
+  };
+}
+
+function normalizeSessionSlots(slots: SessionSlots | undefined): SessionSlots | undefined {
+  if (!slots) {
+    return undefined;
+  }
+  const links = slots.links.map(normalizeLegacyPrLink);
+  if (!slots.title && links.length === 0) {
+    return undefined;
+  }
+  return {
+    ...(slots.title ? { title: slots.title } : {}),
+    links,
+  };
+}
+
+function findLegacyNativePrLink(slots: SessionSlots | undefined): SessionLink | null {
+  if (!slots) {
+    return null;
+  }
+  for (let index = slots.links.length - 1; index >= 0; index -= 1) {
+    const link = slots.links[index];
+    if (link && isLegacyPrLink(link) && parseSessionPrBinding(link.url) !== null) {
+      return link;
+    }
+  }
+  return null;
+}
 
 export function parseSessionPrBinding(url: string): SessionPrBinding | null {
   let parsed: URL;
@@ -37,27 +79,29 @@ export function toSessionPrLink(pr: SessionPrBinding): SessionLink {
 }
 
 function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | undefined {
-  if (!slots) {
+  const normalizedSlots = normalizeSessionSlots(slots);
+  if (!normalizedSlots) {
     return undefined;
   }
-  const links = slots.links.filter(
+  const links = normalizedSlots.links.filter(
     (link) => link.label !== "pr" || parseSessionPrBinding(link.url) === null,
   );
-  if (!slots.title && links.length === 0) {
+  if (!normalizedSlots.title && links.length === 0) {
     return undefined;
   }
   return {
-    ...(slots.title ? { title: slots.title } : {}),
+    ...(normalizedSlots.title ? { title: normalizedSlots.title } : {}),
     links,
   };
 }
 
 export function normalizeSessionPrBinding(session: SessionRecord): SessionRecord {
-  const legacyPrLink = session.slots?.links.find((link) => link.label === "pr");
+  const normalizedSlots = normalizeSessionSlots(session.slots);
+  const legacyPrLink = findLegacyNativePrLink(normalizedSlots);
   const pr =
     session.pr ??
     (legacyPrLink ? (parseSessionPrBinding(legacyPrLink.url) ?? undefined) : undefined);
-  const slots = session.pr || pr ? removeNativePrLinks(session.slots) : session.slots;
+  const slots = session.pr || pr ? removeNativePrLinks(normalizedSlots) : normalizedSlots;
   const normalized: SessionRecord = {
     ...session,
     ...(pr ? { pr } : {}),
@@ -75,7 +119,8 @@ export function normalizeSessionPrBinding(session: SessionRecord): SessionRecord
 export function deriveSessionSlots(
   session: Pick<SessionRecord, "slots" | "pr">,
 ): SessionSlots | undefined {
-  const slots = session.pr ? removeNativePrLinks(session.slots) : session.slots;
+  const normalizedSlots = normalizeSessionSlots(session.slots);
+  const slots = session.pr ? removeNativePrLinks(normalizedSlots) : normalizedSlots;
   const links = [...(slots?.links ?? [])];
   if (session.pr) {
     links.push(toSessionPrLink(session.pr));
@@ -120,7 +165,12 @@ export async function discoverSessionPrBinding(
     "--limit",
     "1",
   );
-  const prs: Array<{ number: number; url: string }> = JSON.parse(raw);
+  let prs: Array<{ number: number; url: string }>;
+  try {
+    prs = JSON.parse(raw) as Array<{ number: number; url: string }>;
+  } catch {
+    return null;
+  }
   const pr = prs[0];
   if (!pr?.url) {
     return null;
