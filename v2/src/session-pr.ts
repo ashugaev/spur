@@ -33,13 +33,13 @@ function normalizeSessionSlots(slots: SessionSlots | undefined): SessionSlots | 
   };
 }
 
-function findLegacyNativePrLink(slots: SessionSlots | undefined): SessionLink | null {
+function findNativePrLink(slots: SessionSlots | undefined): SessionLink | null {
   if (!slots) {
     return null;
   }
   for (let index = slots.links.length - 1; index >= 0; index -= 1) {
     const link = slots.links[index];
-    if (link && isLegacyPrLink(link) && parseSessionPrBinding(link.url) !== null) {
+    if (link && link.label === "pr" && parseSessionPrBinding(link.url) !== null) {
       return link;
     }
   }
@@ -79,28 +79,27 @@ export function toSessionPrLink(pr: SessionPrBinding): SessionLink {
 }
 
 function removeNativePrLinks(slots: SessionSlots | undefined): SessionSlots | undefined {
-  const normalizedSlots = normalizeSessionSlots(slots);
-  if (!normalizedSlots) {
+  if (!slots) {
     return undefined;
   }
-  const links = normalizedSlots.links.filter(
+  const links = slots.links.filter(
     (link) => link.label !== "pr" || parseSessionPrBinding(link.url) === null,
   );
-  if (!normalizedSlots.title && links.length === 0) {
+  if (!slots.title && links.length === 0) {
     return undefined;
   }
   return {
-    ...(normalizedSlots.title ? { title: normalizedSlots.title } : {}),
+    ...(slots.title ? { title: slots.title } : {}),
     links,
   };
 }
 
 export function normalizeSessionPrBinding(session: SessionRecord): SessionRecord {
   const normalizedSlots = normalizeSessionSlots(session.slots);
-  const legacyPrLink = findLegacyNativePrLink(normalizedSlots);
+  const nativePrLink = findNativePrLink(normalizedSlots);
   const pr =
     session.pr ??
-    (legacyPrLink ? (parseSessionPrBinding(legacyPrLink.url) ?? undefined) : undefined);
+    (nativePrLink ? (parseSessionPrBinding(nativePrLink.url) ?? undefined) : undefined);
   const slots = session.pr || pr ? removeNativePrLinks(normalizedSlots) : normalizedSlots;
   const normalized: SessionRecord = {
     ...session,
