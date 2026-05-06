@@ -238,10 +238,6 @@ export function Dashboard() {
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
   const [collapsedLevels, setCollapsedLevels] = useState(readCollapsedCategories);
-  useEffect(() => {
-    if (!isMobile) return;
-    setCollapsedLevels(readCollapsedCategories());
-  }, [isMobile]);
   const toggleCollapsed = useCallback((level: AttentionLevel) => {
     setCollapsedLevels((current) => {
       const next = new Set(current);
