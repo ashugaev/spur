@@ -146,9 +146,8 @@ export function applySlotsUpdate(
     title = undefined;
   }
   if (update.title !== undefined) {
-    const lockExisting =
-      update.setTitleIfAbsent === true && (current?.title?.trim().length ?? 0) > 0;
-    if (!lockExisting) {
+    const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
+    if (!update.setTitleIfAbsent || !hasExistingTitle) {
       title = update.title;
     }
   }

@@ -1684,15 +1684,19 @@ export function createProgram(cliEntrypoint: string): Command {
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
       const titleIfAbsent = options.titleIfAbsent as string | undefined;
-      if (titleIfAbsent !== undefined && (options.title !== undefined || options.clearTitle)) {
+      const title = options.title as string | undefined;
+      if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
         throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
       }
+      const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
+      if (titleIfAbsent !== undefined) {
+        titleFields.title = titleIfAbsent;
+        titleFields.setTitleIfAbsent = true;
+      } else if (title !== undefined) {
+        titleFields.title = title;
+      }
       const payload: UpdateSessionSlotsRequest = {
-        ...(titleIfAbsent !== undefined
-          ? { title: titleIfAbsent, setTitleIfAbsent: true }
-          : options.title !== undefined
-            ? { title: options.title as string }
-            : {}),
+        ...titleFields,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }
