@@ -19,6 +19,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
 - `GET /sessions` keeps hiding terminal sessions by default, while `GET /sessions?includeCompleted=1` includes completed records for web consumers without changing CLI defaults or surfacing killed sessions in the dashboard.
+- `GET /sessions?view=dashboard` returns a lean dashboard payload that keeps attention-critical fields plus `hasServiceIssues`, skips artifact/service/sidecar/workspace/state-history expansion, and still leaves `GET /sessions/:id` on the full detail shape.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
 - Instance bootstrap auto-creates `~/.spur/config.yaml` when missing, applies defaults for daemon host/port, tmux socket, and UI port, and keeps local project discovery separate.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.

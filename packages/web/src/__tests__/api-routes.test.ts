@@ -168,35 +168,11 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
-    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
-  });
-
-  it("GET /api/sessions filters by project", async () => {
-    mockedSpurRequestJson
-      .mockResolvedValueOnce([
-        sessionFixture(),
-        sessionFixture({
-          id: "web-b2",
-          project: "web",
-          tmuxSession: "web-b2",
-          worktreePath: "/tmp/web-b2",
-        }),
-      ])
-      .mockResolvedValueOnce([
-        { id: "api", name: "API" },
-        { id: "web", name: "Web" },
-      ]);
-
-    const response = await listSessions(
-      new NextRequest("http://localhost:3000/api/sessions?project=api"),
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+      1,
+      "/sessions?includeCompleted=1&view=dashboard",
     );
-    const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
-
-    expect(response.status).toBe(200);
-    expect(payload.sessions).toHaveLength(1);
-    expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
+    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {

@@ -3100,6 +3100,76 @@ describe("SessionService", () => {
     });
   });
 
+  it("returns a lean dashboard list view and flags stale running services with dead runtime", async () => {
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "Ship the feature",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["Manual queued follow-up"],
+        awaitingPrompt: true,
+      },
+      sidecarNames: ["dev"],
+    });
+    sessions.set("api-2", {
+      id: "api-2",
+      project: "api",
+      agent: "claude",
+      prompt: "Already done",
+      branch: "api-2",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-2",
+      tmuxSession: "api-2",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "completed",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    serviceRecords.set(serviceKey("api-1", "dev-server"), {
+      sessionId: "api-1",
+      project: "api",
+      serviceId: "dev-server",
+      command: "pnpm dev",
+      cwd: "/repo/api",
+      tmuxSession: "svc-api-1",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockImplementation(async (sessionName: string) => sessionName === "api-1");
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const listed = await service.list({ includeCompleted: true, view: "dashboard" });
+
+    expect(listed).toHaveLength(2);
+    expect(listed[0]).toMatchObject({
+      id: "api-1",
+      state: "working",
+      hasServiceIssues: true,
+    });
+    expect(listed[0]).not.toHaveProperty("queuedMessages");
+    expect(listed[0]).not.toHaveProperty("artifacts");
+    expect(listed[0]).not.toHaveProperty("services");
+    expect(listed[0]).not.toHaveProperty("sidecars");
+    expect(listed[0]).not.toHaveProperty("workspaceAccess");
+    expect(listed[0]).not.toHaveProperty("stateHistory");
+    expect(tmuxSessionExistsMock).toHaveBeenCalledWith("api-1");
+    expect(tmuxSessionExistsMock).toHaveBeenCalledWith("svc-api-1");
+    expect(tmuxSessionExistsMock).not.toHaveBeenCalledWith("api-2");
+  });
+
   it("pauses a session without removing its worktree", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",

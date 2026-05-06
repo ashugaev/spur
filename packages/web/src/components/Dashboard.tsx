@@ -274,7 +274,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions", projectId] as const;
+  const sessionsQueryKey = ["sessions"] as const;
   const {
     data,
     isPending,
@@ -282,8 +282,7 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
@@ -320,10 +319,15 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
+  const projectSessions = useMemo(
+    () => (projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions),
+    [allSessions, projectId],
+  );
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return allSessions;
-    return allSessions.filter(
+    if (!q) return projectSessions;
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -331,7 +335,7 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [allSessions, searchQuery]);
+  }, [projectSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -529,10 +533,7 @@ export function Dashboard() {
           (existingSession) => existingSession.id !== session.id,
         );
         return {
-          sessions:
-            projectId && session.project !== projectId
-              ? currentSessions
-              : [session, ...currentSessions],
+          sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
