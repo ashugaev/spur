@@ -537,7 +537,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             ]),
           );
           if (agent === "codex") {
-            expect(ciEvents).not.toContain("session.codex.submit.timeout");
+            expect(ciEvents).not.toContain("session.submit.timeout");
           }
         } finally {
           abortController.abort();
@@ -983,7 +983,7 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             ]),
           );
           if (agent === "codex") {
-            expect(conflictEvents).not.toContain("session.codex.submit.timeout");
+            expect(conflictEvents).not.toContain("session.submit.timeout");
           }
         } finally {
           abortController.abort();

@@ -146,24 +146,6 @@ describe("runtime-tmux", () => {
     ]);
   });
 
-  it("exits copy-mode before issuing edit keys for the default send path", async () => {
-    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
-
-    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
-
-    await sendMessageToTmux("api-1", "follow up");
-
-    const sequence = execFileAsyncMock.mock.calls.map(([, args]) => ({
-      cmd: args[0],
-      flag: args.includes("-X") ? args[args.indexOf("-X") + 1] : null,
-      tail: args.slice(-1)[0],
-    }));
-    expect(sequence[0]).toEqual({ cmd: "send-keys", flag: "cancel", tail: "cancel" });
-    expect(sequence[1]?.tail).toBe("C-u");
-    expect(sequence[2]?.tail).toBe("follow up");
-    expect(sequence[3]?.tail).toBe("Enter");
-  });
-
   it("exits copy-mode before issuing edit keys for codex bracketed-paste sends", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 

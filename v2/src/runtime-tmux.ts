@@ -317,15 +317,11 @@ export async function sendMessageToTmux(
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
-  // Exit copy-mode before issuing line-edit keys. `send-keys -X cancel` is a
-  // no-op outside copy-mode; if a user accidentally entered it (mouse drag,
-  // PageUp), C-u and Enter would otherwise be interpreted by the copy buffer
-  // and never reach the agent's stdin.
-  try {
-    await tmux("send-keys", "-t", target, "-X", "cancel");
-  } catch {
-    // Best effort only — older tmux builds may not recognize cancel here.
-  }
+  // Exit copy-mode before issuing line-edit keys. `-X cancel` is a no-op
+  // outside copy-mode; if a user accidentally entered it (mouse drag, PageUp),
+  // C-u and Enter would otherwise be interpreted by the copy buffer and never
+  // reach the agent's stdin. Older tmux builds may exit non-zero here — swallow.
+  await tmux("send-keys", "-t", target, "-X", "cancel").catch(() => {});
   await tmux("send-keys", "-t", target, "C-u");
   if (options?.agent && agentSendMode(options.agent) === "bracketed_paste") {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.

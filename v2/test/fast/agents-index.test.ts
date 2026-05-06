@@ -30,11 +30,7 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
-import {
-  agentWaitsForSubmitAck,
-  createAgentSubmitAckBinding,
-  setupAgentHooks,
-} from "../../src/agents/index.js";
+import { createAgentSubmitAckBinding, setupAgentHooks } from "../../src/agents/index.js";
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();
@@ -71,14 +67,6 @@ describe("setupAgentHooks", () => {
     expect(result).toEqual({
       codexHomePath: "/tmp/spur-data/session-tools/api-1/codex-home",
     });
-  });
-});
-
-describe("agentWaitsForSubmitAck", () => {
-  it("returns true for claude and codex, false for cursor", () => {
-    expect(agentWaitsForSubmitAck("claude")).toBe(true);
-    expect(agentWaitsForSubmitAck("codex")).toBe(true);
-    expect(agentWaitsForSubmitAck("cursor")).toBe(false);
   });
 });
 
