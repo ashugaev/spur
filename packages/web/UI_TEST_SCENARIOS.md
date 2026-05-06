@@ -106,6 +106,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
+- On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
 - Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 

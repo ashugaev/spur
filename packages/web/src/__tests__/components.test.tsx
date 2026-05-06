@@ -115,12 +115,42 @@ function sessionsPayload() {
 
 const SPAWN_PROMPT_PLACEHOLDER = "Prompt for the new session...";
 const SPAWN_PROMPT_VOICE_PLACEHOLDER = "Prompt for the new session... Voice ⌘ + .";
+const MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+
+function setMobileViewport(matches: boolean) {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: (query: string): MediaQueryList => ({
+      matches,
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
+  });
+}
+
+function getAttentionZoneToggle(label: string): HTMLElement {
+  const banner = screen.getByRole("banner");
+  const toggle = screen
+    .getAllByRole("button", { name: new RegExp(label, "i") })
+    .find((candidate) => !banner.contains(candidate));
+  if (!toggle) {
+    throw new Error(`Missing attention zone toggle for ${label}`);
+  }
+  return toggle;
+}
 
 describe("Dashboard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     window.localStorage.clear();
     window.history.replaceState(null, "", "/");
+    setMobileViewport(false);
     vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -424,6 +454,91 @@ describe("Dashboard", () => {
       expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
       expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
+    });
+  });
+
+  it("collapses the Stopped category by default on mobile until expanded", async () => {
+    setMobileViewport(true);
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-mobile-stopped-1",
+                prompt: "Collapsed mobile stop",
+                status: "stopped",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      const header = screen.getByRole("banner");
+      expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
+      expect(screen.queryByRole("link", { name: "Collapsed mobile stop" })).not.toBeInTheDocument();
+    });
+
+    fireEvent.click(getAttentionZoneToggle("Stopped"));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Collapsed mobile stop" })).toBeInTheDocument();
+    });
+  });
+
+  it("keeps saved mobile collapse overrides when Stopped was explicitly expanded", async () => {
+    setMobileViewport(true);
+    window.localStorage.setItem(MOBILE_COLLAPSED_CATEGORIES_STORAGE_KEY, JSON.stringify([]));
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "api-mobile-stopped-2",
+                prompt: "Saved expanded stop",
+                status: "stopped",
+                state: "stopped",
+                runtimeAlive: false,
+                tmuxSession: null,
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Saved expanded stop" })).toBeInTheDocument();
     });
   });
 
