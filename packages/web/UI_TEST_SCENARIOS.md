@@ -301,9 +301,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Shows when session has links
 - PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
 - Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
+- Canonical tracker/PR links stay surfaced in the header badge strip
+- A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab
 
 ### S4b: Artifacts section
