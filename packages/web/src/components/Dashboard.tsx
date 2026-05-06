@@ -320,7 +320,8 @@ export function Dashboard() {
   );
 
   const projectSessions = useMemo(
-    () => (projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions),
+    () =>
+      projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions,
     [allSessions, projectId],
   );
 

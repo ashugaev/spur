@@ -3146,7 +3146,9 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    tmuxSessionExistsMock.mockImplementation(async (sessionName: string) => sessionName === "api-1");
+    tmuxSessionExistsMock.mockImplementation(
+      async (sessionName: string) => sessionName === "api-1",
+    );
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

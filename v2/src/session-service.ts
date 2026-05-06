@@ -1484,7 +1484,9 @@ export class SessionService {
     const views: SessionListView[] = [];
     for (const session of sessions) {
       views.push(
-        options?.view === "dashboard" ? await this.enrichDashboard(session) : await this.enrich(session),
+        options?.view === "dashboard"
+          ? await this.enrichDashboard(session)
+          : await this.enrich(session),
       );
     }
     return views;
