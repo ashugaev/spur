@@ -242,7 +242,7 @@ function extractToolUseHints(blocks: unknown[]): {
   };
 }
 
-function extractTextContent(message: Record<string, unknown>): string {
+export function extractTextContent(message: Record<string, unknown>): string {
   const raw = message["content"];
   if (typeof raw === "string") return raw.trim();
   const parts: string[] = [];

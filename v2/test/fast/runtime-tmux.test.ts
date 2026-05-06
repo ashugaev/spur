@@ -123,6 +123,7 @@ describe("runtime-tmux", () => {
 
     expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
       "C-u",
       "follow up",
       "Enter",
@@ -138,10 +139,64 @@ describe("runtime-tmux", () => {
 
     expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
       "C-u",
       "follow up",
       "Enter",
     ]);
+  });
+
+  it("exits copy-mode before issuing edit keys for the default send path", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    const sequence = execFileAsyncMock.mock.calls.map(([, args]) => ({
+      cmd: args[0],
+      flag: args.includes("-X") ? args[args.indexOf("-X") + 1] : null,
+      tail: args.slice(-1)[0],
+    }));
+    expect(sequence[0]).toEqual({ cmd: "send-keys", flag: "cancel", tail: "cancel" });
+    expect(sequence[1]?.tail).toBe("C-u");
+    expect(sequence[2]?.tail).toBe("follow up");
+    expect(sequence[3]?.tail).toBe("Enter");
+  });
+
+  it("exits copy-mode before issuing edit keys for codex bracketed-paste sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
+
+    const cancelIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "send-keys" && args.includes("-X") && args.includes("cancel"),
+    );
+    const cuIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("C-u"));
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
+    expect(cancelIndex).toBeGreaterThanOrEqual(0);
+    expect(cuIndex).toBeGreaterThan(cancelIndex);
+    expect(pasteIndex).toBeGreaterThan(cuIndex);
+  });
+
+  it("swallows tmux cancel failure and continues the send path", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "send-keys" && args.includes("-X") && args.includes("cancel")) {
+        throw new Error("cancel not available");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
   });
 
   it("uses bracketed paste plus a real Enter for codex sends", async () => {

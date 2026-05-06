@@ -67,8 +67,8 @@ describe("agent helpers", () => {
     expect(agentStateStrategy("cursor")).toBe("cursor_pane");
   });
 
-  it("waits for submit ack only for codex", () => {
-    expect(agentWaitsForSubmitAck("claude")).toBe(false);
+  it("waits for submit ack for claude and codex", () => {
+    expect(agentWaitsForSubmitAck("claude")).toBe(true);
     expect(agentWaitsForSubmitAck("codex")).toBe(true);
     expect(agentWaitsForSubmitAck("cursor")).toBe(false);
   });

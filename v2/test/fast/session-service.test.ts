@@ -23,6 +23,7 @@ const agentQueuedSendPromptGraceMsMock = vi.fn();
 const agentSessionConfigMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
+const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
@@ -125,6 +126,7 @@ vi.mock("../../src/agents/index.js", () => ({
   agentSessionConfig: agentSessionConfigMock,
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
+  createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
 }));
@@ -355,10 +357,9 @@ function mockClaudeJsonlState(state: string) {
 }
 
 type SessionServiceInternals = {
-  waitForCodexRolloutAck(
-    sessionsDir: string,
+  waitForSubmitAck(
+    binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
-    baseline: Map<string, number>,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   sendAgentMessage(
     session: {
@@ -366,6 +367,7 @@ type SessionServiceInternals = {
       tmuxSession: string;
       agent: "claude" | "codex" | "cursor";
       launchCommand: string;
+      worktreePath: string;
     },
     message: string,
     options?: { interrupt?: boolean },
@@ -463,7 +465,24 @@ describe("SessionService", () => {
       .mockImplementation((agent: string) =>
         agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
       );
-    agentWaitsForSubmitAckMock.mockReset().mockImplementation((agent: string) => agent === "codex");
+    agentWaitsForSubmitAckMock
+      .mockReset()
+      .mockImplementation((agent: string) => agent === "codex" || agent === "claude");
+    createAgentSubmitAckBindingMock
+      .mockReset()
+      .mockImplementation(async (agent: string, ctx: { codexSessionsDir: string }) => {
+        if (agent !== "codex") {
+          return null;
+        }
+        const baseline: Map<string, number> = await captureCodexRolloutBaselineMock(
+          ctx.codexSessionsDir,
+        );
+        return {
+          async scan(text: string) {
+            return scanCodexRolloutForMessageMock(ctx.codexSessionsDir, text, baseline);
+          },
+        };
+      });
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
@@ -1066,7 +1085,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1111,7 +1130,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1498,7 +1517,7 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1510,6 +1529,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         agent: "codex",
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
       },
       "follow up",
       { interrupt: false },
@@ -1562,7 +1582,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
-      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValueOnce({ found: false, lastScannedFile: null })
       .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
 
@@ -1572,6 +1592,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         agent: "codex",
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
       },
       "follow up",
     );
@@ -1585,7 +1606,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
-      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValue({ found: false, lastScannedFile: "/some/file.jsonl" });
 
     await expect(
@@ -1595,10 +1616,11 @@ describe("SessionService", () => {
           tmuxSession: "api-1",
           agent: "codex",
           launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
         },
         "follow up",
       ),
-    ).rejects.toThrow("Timed out waiting for Codex submit acknowledgment for api-1");
+    ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
@@ -1608,16 +1630,110 @@ describe("SessionService", () => {
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
-        event: "session.codex.submit.timeout",
+        event: "session.submit.timeout",
         level: "warn",
         sessionId: "api-1",
         details: expect.objectContaining({
+          agent: "codex",
           lastScannedFile: "/some/file.jsonl",
           messageLength: "follow up".length,
           elapsedMs: expect.any(Number),
         }),
       }),
     );
+  });
+
+  it("acknowledges claude submit when the JSONL scanner finds the message on first poll", async () => {
+    const claudeScanMock = vi.fn().mockResolvedValue({
+      found: true,
+      lastScannedFile: "/home/test/.claude/projects/api-1/abc.jsonl",
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: claudeScanMock } : null,
+    );
+
+    const service = await createDisposedSessionService();
+
+    await sessionServiceInternals(service).sendAgentMessage(
+      {
+        id: "api-1",
+        tmuxSession: "api-1",
+        agent: "claude",
+        launchCommand: "claude --dangerously-skip-permissions",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      },
+      "follow up",
+    );
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
+    expect(claudeScanMock).toHaveBeenCalledWith("follow up");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("retries claude submit with a bare Enter and throws when the ack never arrives", async () => {
+    const claudeScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/home/test/.claude/abc.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: claudeScanMock } : null,
+    );
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/home/test/.claude/abc.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "claude",
+          launchCommand: "claude --dangerously-skip-permissions",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
+
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "claude",
+          lastScannedFile: "/home/test/.claude/abc.jsonl",
+          messageLength: "follow up".length,
+        }),
+      }),
+    );
+  });
+
+  it("fires-and-forgets a claude send when no JSONL baseline is captured", async () => {
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+
+    const service = await createDisposedSessionService();
+    const waitForAckSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+    await sessionServiceInternals(service).sendAgentMessage(
+      {
+        id: "api-1",
+        tmuxSession: "api-1",
+        agent: "claude",
+        launchCommand: "claude --dangerously-skip-permissions",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      },
+      "follow up",
+    );
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
+    expect(waitForAckSpy).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
   it("queues manual send messages while the agent is busy", async () => {
@@ -3436,7 +3552,7 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: "/tmp/rollout.jsonl",
     });
@@ -4722,7 +4838,7 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(true);
 
     const service = await createDisposedSessionService();
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: "/some/rollout.jsonl",
     });
@@ -4801,7 +4917,7 @@ describe("SessionService", () => {
 
     const service = await createDisposedSessionService();
 
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: false,
       lastScannedFile: "/some/rollout.jsonl",
     });
