@@ -6,7 +6,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
 import { readSession, writeSession } from "../../src/metadata.js";
-import type { RuntimeInfo, ServiceInstanceView, SessionRecord, SessionView } from "../../src/types.js";
+import type {
+  RuntimeInfo,
+  ServiceInstanceView,
+  SessionRecord,
+  SessionView,
+} from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -1841,7 +1846,10 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const configPath = await context.writeConfig("pr-unlink.yaml", baseConfig(context, sessionPrefix));
+    const configPath = await context.writeConfig(
+      "pr-unlink.yaml",
+      baseConfig(context, sessionPrefix),
+    );
     const daemon = await context.startDaemon(configPath);
     currentActiveContext().daemonPid = daemon.info.pid;
 

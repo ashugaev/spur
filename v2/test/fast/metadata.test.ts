@@ -171,9 +171,7 @@ describe("session metadata PR migration", () => {
           createdAt: "2026-04-26T09:00:00.000Z",
           updatedAt: "2026-04-26T09:00:00.000Z",
           slots: {
-            links: [
-              { label: "github-pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" },
-            ],
+            links: [{ label: "github-pr", url: "https://gitlab.com/acme/api/-/merge_requests/42" }],
           },
         },
         null,
