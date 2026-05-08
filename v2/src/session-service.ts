@@ -3885,7 +3885,10 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
         );
-        if (current.agent === "codex" && githubReplaySourceIds(this.config, current.project).length > 0) {
+        if (
+          current.agent === "codex" &&
+          githubReplaySourceIds(this.config, current.project).length > 0
+        ) {
           const codexState = await this.classifyCodexState(current.id);
           codexRestoreReplayBaseline = {
             hookUpdatedAtMs: codexState.hookState
@@ -4408,7 +4411,8 @@ export class SessionService {
       const rolloutUpdatedAtMs = codexState.rolloutState?.timestampMs ?? Number.NaN;
       const changedFromBaseline =
         (Number.isFinite(hookUpdatedAtMs) &&
-          (!Number.isFinite(baseline.hookUpdatedAtMs) || hookUpdatedAtMs > baseline.hookUpdatedAtMs)) ||
+          (!Number.isFinite(baseline.hookUpdatedAtMs) ||
+            hookUpdatedAtMs > baseline.hookUpdatedAtMs)) ||
         (Number.isFinite(rolloutUpdatedAtMs) &&
           (!Number.isFinite(baseline.rolloutUpdatedAtMs) ||
             rolloutUpdatedAtMs > baseline.rolloutUpdatedAtMs)) ||
