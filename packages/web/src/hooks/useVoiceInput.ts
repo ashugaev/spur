@@ -293,8 +293,8 @@ export function useVoiceInput(options: {
   contextKey: VoiceInputContextKey;
   onTranscribed?: (text: string) => void;
 }): UseVoiceInput {
-  const onTranscribedRef = useRef(options?.onTranscribed);
-  onTranscribedRef.current = options?.onTranscribed;
+  const onTranscribedRef = useRef(options.onTranscribed);
+  onTranscribedRef.current = options.onTranscribed;
   const contextKeyRef = useRef<VoiceInputContextKey>(options.contextKey);
   contextKeyRef.current = options.contextKey;
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
@@ -413,7 +413,6 @@ export function useVoiceInput(options: {
         }
         await discardRetainedTake();
         await applyTranscription(text, mode, onSend);
-        setVoiceError(null);
       } catch (error) {
         setVoiceError(error instanceof Error ? error.message : TRANSCRIBE_ERROR);
       } finally {
@@ -455,27 +454,23 @@ export function useVoiceInput(options: {
     setHasRetainedTake(false);
     retainedTakeRef.current = null;
 
-    if (!hasIndexedDbSupport()) {
-      return () => {
-        cancelled = true;
-      };
+    if (hasIndexedDbSupport()) {
+      void (async () => {
+        try {
+          const retainedTake = await readPersistedRetainedTake(options.contextKey);
+          if (!retainedTake || cancelled) {
+            return;
+          }
+          retainedTakeRef.current = retainedTake;
+          setHasRetainedTake(true);
+        } catch {
+          if (!cancelled) {
+            retainedTakeRef.current = null;
+            setHasRetainedTake(false);
+          }
+        }
+      })();
     }
-
-    void (async () => {
-      try {
-        const retainedTake = await readPersistedRetainedTake(options.contextKey);
-        if (!retainedTake || cancelled) {
-          return;
-        }
-        retainedTakeRef.current = retainedTake;
-        setHasRetainedTake(true);
-      } catch {
-        if (!cancelled) {
-          retainedTakeRef.current = null;
-          setHasRetainedTake(false);
-        }
-      }
-    })();
 
     return () => {
       cancelled = true;
