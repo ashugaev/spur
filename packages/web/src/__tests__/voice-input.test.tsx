@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { VoiceConfirmModal, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceConfirmModal, VoiceControls, VoiceStatusHint } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
 function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
@@ -70,5 +70,29 @@ describe("VoiceInput", () => {
     });
 
     expect(voice.toggleRecording).toHaveBeenCalledOnce();
+  });
+
+  it("keeps retained take group spacing on the container instead of each button", () => {
+    const voice = createVoice({ hasRetainedTake: true, voiceModalOpen: false });
+
+    render(
+      <VoiceControls
+        className="terminal-button"
+        groupClassName="ml-2 flex items-center gap-1"
+        voice={voice}
+      />,
+    );
+
+    const playButton = screen.getByRole("button", { name: "Play failed voice recording" });
+    const retryButton = screen.getByRole("button", { name: "Retry failed voice recording" });
+    const discardButton = screen.getByRole("button", { name: "Discard failed voice recording" });
+
+    expect(playButton.parentElement).toHaveClass("ml-2");
+    expect(playButton).toHaveClass("terminal-button");
+    expect(retryButton).toHaveClass("terminal-button");
+    expect(discardButton).toHaveClass("terminal-button");
+    expect(playButton).not.toHaveClass("ml-2");
+    expect(retryButton).not.toHaveClass("ml-2");
+    expect(discardButton).not.toHaveClass("ml-2");
   });
 });

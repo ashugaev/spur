@@ -805,7 +805,8 @@ export function DirectTerminal({
             </div>
           ) : (
             <VoiceControls
-              className={cn(terminalControlIconButtonClass, "ml-2")}
+              className={terminalControlIconButtonClass}
+              groupClassName="ml-2 flex items-center gap-1"
               onRetrySend={submitVoiceDraft}
               voice={voice}
             />

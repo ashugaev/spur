@@ -1123,9 +1123,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         ← Back
       </Link>
 
-      {error || voice.voiceError ? (
+      {error ? (
         <div className="mt-3 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
-          {error || voice.voiceError}
+          {error}
         </div>
       ) : null}
 
@@ -1363,6 +1363,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       value={message}
                       voice={voice}
                     />
+                    {voice.voiceError ? (
+                      <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+                        {voice.voiceError}
+                      </div>
+                    ) : null}
                     <div className="flex flex-wrap items-start justify-between gap-2">
                       <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
                         {voice.voiceBusy && !voice.recording ? (
