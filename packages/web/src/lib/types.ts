@@ -84,6 +84,7 @@ export interface SpurSessionView {
     title?: string;
     links: SpurSessionLink[];
   };
+  hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
@@ -145,6 +146,7 @@ export interface DashboardSession {
   };
   sidecars: { name: string; alive: boolean }[];
   links: SpurSessionLink[];
+  hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   error?: string;
 }
@@ -184,18 +186,24 @@ export function toDashboardSession(
     queuedMessages,
     sidecars: session.sidecars ?? [],
     links,
+    hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
     error: session.error,
   };
 }
 
-export function hasServiceProblems(session: Pick<DashboardSession, "services">): boolean {
-  return session.services.some(
-    (service) =>
-      service.status === "errored" ||
-      service.state === "problem" ||
-      service.state === "error" ||
-      !service.runtimeAlive,
+export function hasServiceProblems(
+  session: Pick<DashboardSession, "hasServiceIssues" | "services">,
+): boolean {
+  return (
+    session.hasServiceIssues ||
+    session.services.some(
+      (service) =>
+        service.status === "errored" ||
+        service.state === "problem" ||
+        service.state === "error" ||
+        !service.runtimeAlive,
+    )
   );
 }
 

@@ -118,6 +118,7 @@ import {
   type AppConfig,
   type BranchSource,
   type ConversationResponse,
+  type DashboardSessionView,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -135,6 +136,7 @@ import {
   type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
+  type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
   type SpawnOverrides,
@@ -652,6 +654,14 @@ function buildWorkspaceAccess(
   });
 
   return items.length > 0 ? { items } : undefined;
+}
+
+function buildLastActivityAt(
+  session: Pick<SessionRecord, "updatedAt">,
+  runtime: Pick<SessionRuntimeSnapshot, "tmuxActivityAt">,
+): string {
+  const updatedAt = new Date(session.updatedAt);
+  return (latestActivityAt(updatedAt, runtime.tmuxActivityAt) ?? updatedAt).toISOString();
 }
 
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
@@ -1461,16 +1471,23 @@ export class SessionService {
     };
   }
 
-  async list(options?: { includeCompleted?: boolean }): Promise<SessionView[]> {
+  async list(options?: {
+    includeCompleted?: boolean;
+    view?: "full" | "dashboard";
+  }): Promise<SessionListView[]> {
     const sessions = listSessions(this.config.dataDir).filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views: SessionView[] = [];
+    const views: SessionListView[] = [];
     for (const session of sessions) {
-      views.push(await this.enrich(session));
+      views.push(
+        options?.view === "dashboard"
+          ? await this.enrichDashboard(session)
+          : await this.enrich(session),
+      );
     }
     return views;
   }
@@ -4466,6 +4483,76 @@ export class SessionService {
     };
   }
 
+  private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
+    const cached = this.stateCache.get(sessionId);
+    const now = Date.now();
+    if (cached && nextState !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
+      if (
+        nextState !== "needs_input" &&
+        nextState !== "stopped" &&
+        nextState !== "killed" &&
+        nextState !== "error"
+      ) {
+        return cached.state;
+      }
+    }
+    this.stateCache.set(sessionId, { state: nextState, classifiedAt: now });
+    return nextState;
+  }
+
+  private async updateStateHistory(
+    session: SessionRecord,
+    state: SessionState,
+    stateSource: StateSource,
+    historySourcePath: string | null,
+  ): Promise<SessionStateTransition[]> {
+    const history = this.stateHistory.get(session.id) ?? [];
+    const lastEntry = history[history.length - 1];
+    if (history.length === 0 || lastEntry?.state !== state) {
+      const transitionAt = new Date().toISOString();
+      history.push({ state, at: transitionAt, source: stateSource });
+      if (history.length > STATE_HISTORY_LIMIT) {
+        history.splice(0, history.length - STATE_HISTORY_LIMIT);
+      }
+      this.stateHistory.set(session.id, history);
+      if (lastEntry) {
+        await this.logStateTransition(
+          session,
+          {
+            at: transitionAt,
+            fromState: lastEntry.state,
+            toState: state,
+            source: stateSource,
+          },
+          historySourcePath,
+        );
+      }
+    }
+    return history;
+  }
+
+  private async hasServiceIssues(session: Pick<SessionRecord, "id" | "project">): Promise<boolean> {
+    for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
+      if (service.status !== "running") {
+        return true;
+      }
+      if (!(await tmuxSessionExists(service.tmuxSession))) {
+        return true;
+      }
+      if (
+        listActiveServiceProblems(
+          this.config.dataDir,
+          session.project,
+          session.id,
+          service.serviceId,
+        ).length > 0
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async reconcileUnexpectedStop(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
@@ -4526,7 +4613,13 @@ export class SessionService {
   }
 
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
-    let runtime = await this.readRuntimeSnapshot(session);
+    let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
+      ? {
+          runtimeAlive: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+        }
+      : await this.readRuntimeSnapshot(session);
     let effectiveSession = session;
     let state: SessionState;
     let stateSource: StateSource = "status";
@@ -4636,57 +4729,51 @@ export class SessionService {
     };
   }
 
+  private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
+    const classified = await this.classifySessionRecord(session);
+    session = classified.session;
+    const {
+      queuedMessages: _queuedMessages,
+      pipeline: _pipeline,
+      sidecarNames: _sidecarNames,
+      sidecarPorts: _sidecarPorts,
+      ...dashboardSession
+    } = session;
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const state = this.stabilizeState(session.id, classified.state);
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+    );
+    const displaySlots = deriveSessionSlots(session);
+
+    return {
+      ...dashboardSession,
+      planMode: resolvePlanMode(dashboardSession),
+      ...(displaySlots ? { slots: displaySlots } : {}),
+      runtimeAlive: classified.runtime.runtimeAlive,
+      workspaceExists: workspacePresent,
+      state,
+      lastActivityAt,
+      ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+    };
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
-    const updatedAt = new Date(session.updatedAt);
-    const tmuxActivityAt = classified.runtime.tmuxActivityAt;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
-    let state = classified.state;
-    const stateSource = classified.source;
-    const historySourcePath = classified.historySourcePath ?? null;
-
-    // State debounce: suppress single-poll flicker for running sessions.
-    const cached = this.stateCache.get(session.id);
-    const now = Date.now();
-    let classifiedAt = now;
-    if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
-      if (
-        state !== "needs_input" &&
-        state !== "stopped" &&
-        state !== "killed" &&
-        state !== "error"
-      ) {
-        state = cached.state;
-        classifiedAt = cached.classifiedAt;
-      }
-    }
-    this.stateCache.set(session.id, { state, classifiedAt });
-
-    // State history: ring buffer of transitions.
-    const history = this.stateHistory.get(session.id) ?? [];
-    const lastEntry = history[history.length - 1];
-    if (history.length === 0 || lastEntry?.state !== state) {
-      const transitionAt = new Date(now).toISOString();
-      history.push({ state, at: transitionAt, source: stateSource });
-      if (history.length > STATE_HISTORY_LIMIT) {
-        history.splice(0, history.length - STATE_HISTORY_LIMIT);
-      }
-      this.stateHistory.set(session.id, history);
-      if (lastEntry) {
-        await this.logStateTransition(
-          session,
-          {
-            at: transitionAt,
-            fromState: lastEntry.state,
-            toState: state,
-            source: stateSource,
-          },
-          historySourcePath,
-        );
-      }
-    }
+    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const state = this.stabilizeState(session.id, classified.state);
+    const history = await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+    );
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {

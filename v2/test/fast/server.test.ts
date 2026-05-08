@@ -84,7 +84,7 @@ describe("startServer", () => {
     );
 
     const originalList = SessionService.prototype.list;
-    const calls: Array<{ includeCompleted?: boolean }> = [];
+    const calls: Array<{ includeCompleted?: boolean; view?: "full" | "dashboard" }> = [];
     SessionService.prototype.list = async function mockList(options = {}) {
       calls.push(options);
       return [
@@ -127,12 +127,20 @@ describe("startServer", () => {
       await expect(completedResponse.json()).resolves.toMatchObject([
         { id: "demo-done", status: "completed" },
       ]);
+
+      const dashboardResponse = await fetch(`http://127.0.0.1:${port}/sessions?view=dashboard`);
+      expect(dashboardResponse.status).toBe(200);
+      await expect(dashboardResponse.json()).resolves.toMatchObject([{ id: "demo-done" }]);
     } finally {
       SessionService.prototype.list = originalList;
       await server.stop();
     }
 
-    expect(calls).toEqual([{ includeCompleted: false }, { includeCompleted: true }]);
+    expect(calls).toEqual([
+      { includeCompleted: false, view: "full" },
+      { includeCompleted: true, view: "full" },
+      { includeCompleted: false, view: "dashboard" },
+    ]);
   });
 
   it("routes POST /sessions/background to background spawn", async () => {

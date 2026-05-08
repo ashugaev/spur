@@ -7,7 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type {
   ReviewProviderId,
   ReviewSignal,
@@ -22,6 +22,10 @@ import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.j
 
 function sessionFilePath(dataDir: string, projectId: string, sessionId: string): string {
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
+}
+
+function sessionIndexFilePath(dataDir: string): string {
+  return join(dataDir, "sessions", ".index.json");
 }
 
 function reviewSnapshotDir(
@@ -96,8 +100,27 @@ function hasLegacyNativePrLink(session: SessionRecord): boolean {
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isSessionRecord(value: unknown): value is SessionRecord {
+  return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+}
+
 function readSessionFile(path: string): SessionRecord {
-  const rawSession = JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  let rawSession: unknown;
+  try {
+    rawSession = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid session metadata JSON at ${path}: ${message}`, {
+      cause: error,
+    });
+  }
+  if (!isSessionRecord(rawSession)) {
+    throw new Error(`Invalid session metadata shape at ${path}`);
+  }
   const normalizedSession = normalizeSessionRecord(rawSession);
   if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
     writeJsonFile(path, normalizedSession);
@@ -117,19 +140,73 @@ function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
+function readSessionIndex(dataDir: string): Record<string, string> {
+  const path = sessionIndexFilePath(dataDir);
+  if (!existsSync(path)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === "string" && typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
+  const index = readSessionIndex(dataDir);
+  index[sessionId] = relative(dataDir, filePath);
+  writeJsonFile(sessionIndexFilePath(dataDir), index);
+}
+
+function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
+  const index = readSessionIndex(dataDir);
+  if (!(sessionId in index)) {
+    return;
+  }
+  const { [sessionId]: _removed, ...nextIndex } = index;
+  writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+}
+
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
+  const indexedPath = readSessionIndex(dataDir)[sessionId];
+  if (indexedPath) {
+    const resolvedPath = join(dataDir, indexedPath);
+    if (existsSync(resolvedPath)) {
+      return resolvedPath;
+    }
+  }
+
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return null;
+  if (!existsSync(rootDir)) {
+    if (indexedPath) {
+      deleteSessionIndexEntry(dataDir, sessionId);
+    }
+    return null;
+  }
 
   const fileName = `${sessionId}.json`;
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const path = join(rootDir, entry.name, fileName);
     if (existsSync(path)) {
+      writeSessionIndexEntry(dataDir, sessionId, path);
       return path;
     }
   }
 
+  if (indexedPath) {
+    deleteSessionIndexEntry(dataDir, sessionId);
+  }
   return null;
 }
 
@@ -225,10 +302,9 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
 }
 
 export function writeSession(dataDir: string, session: SessionRecord): void {
-  writeJsonFile(
-    sessionFilePath(dataDir, session.project, session.id),
-    normalizeSessionRecord(session),
-  );
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  writeJsonFile(path, normalizeSessionRecord(session));
+  writeSessionIndexEntry(dataDir, session.id, path);
 }
 
 export function listSessions(dataDir: string): SessionRecord[] {

@@ -253,7 +253,7 @@ describe("Dashboard", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
-      if (url === "/api/sessions?project=api") {
+      if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -267,7 +267,7 @@ describe("Dashboard", () => {
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/sessions?project=api",
+      "/api/sessions",
       expect.objectContaining({ cache: "no-store" }),
     );
   });
@@ -281,7 +281,7 @@ describe("Dashboard", () => {
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
-      if (url === "/api/sessions?project=api") {
+      if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
@@ -291,6 +291,58 @@ describe("Dashboard", () => {
 
     const sessionLink = await screen.findByRole("link", { name: "Fix auth" });
     expect(sessionLink).toHaveAttribute("href", "/sessions/api-a1?project=api");
+  });
+
+  it("switches project filters without refetching sessions", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice")
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [
+              { id: "api", name: "API" },
+              { id: "web", name: "Web" },
+            ],
+            sessions: [
+              sessionsPayload().sessions[0],
+              {
+                ...sessionsPayload().sessions[0],
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Project filter" }), {
+      target: { value: "web" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
+    });
+
+    const sessionFetchCalls = fetchMock.mock.calls.filter(
+      ([input]) => (typeof input === "string" ? input : input.url) === "/api/sessions",
+    );
+    expect(sessionFetchCalls).toHaveLength(1);
   });
 
   it("shows a reset-filters empty state when stat filters hide all sessions", async () => {
@@ -606,23 +658,27 @@ describe("Dashboard", () => {
 
   it("resets search and project filters from the empty state action", async () => {
     window.history.replaceState(null, "", "/?project=api");
-    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources")
         return new Response(JSON.stringify({ available: false }));
       if (url === "/api/runtime/voice") {
         return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
       }
-      if (url === "/api/sessions?project=api") {
-        return new Response(
-          JSON.stringify({ projects: [{ id: "api", name: "API" }], sessions: [] }),
-        );
-      }
       if (url === "/api/sessions") {
         return new Response(
           JSON.stringify({
             projects: [{ id: "api", name: "API" }],
-            sessions: [sessionsPayload().sessions[0]],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                id: "web-a1",
+                project: "web",
+                prompt: "Ship web",
+                tmuxSession: "web-a1",
+                worktreePath: "/tmp/web-a1",
+              },
+            ],
           }),
         );
       }
@@ -644,11 +700,7 @@ describe("Dashboard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Reset Filters" }));
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/sessions",
-        expect.objectContaining({ cache: "no-store" }),
-      );
-      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Ship web" })).toBeInTheDocument();
     });
 
     expect(searchInput).toHaveValue("");
@@ -1031,8 +1083,6 @@ describe("Dashboard", () => {
           return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
         if (url === "/api/sessions")
           return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
-        if (url === "/api/sessions?project=api")
-          return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
         if (url === "/api/spawn")
           return new Response(JSON.stringify(sessionsPayload().sessions[0]), { status: 201 });
         throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1378,7 +1428,7 @@ describe("Dashboard", () => {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
       }
-      if (url === "/api/sessions?project=api") {
+      if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsData), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
@@ -1439,7 +1489,7 @@ describe("Dashboard", () => {
         expect(init?.method).toBe("POST");
         return new Response(JSON.stringify(spawned), { status: 201 });
       }
-      if (url === "/api/sessions?project=api") {
+      if (url === "/api/sessions") {
         return new Response(JSON.stringify(sessionsData), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url} ${JSON.stringify(init)}`);
