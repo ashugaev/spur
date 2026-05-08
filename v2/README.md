@@ -2,7 +2,7 @@
 
 Local daemon + CLI orchestrator.
 
-- Spawns agents (`claude` / `codex`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
+- Spawns agents (`claude` / `codex` / `cursor`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
@@ -59,14 +59,14 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
-- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and sends the task prompt as-is. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and appends a planning-only instruction to the task prompt. Claude startup adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -88,7 +88,7 @@ spawn:
     - "test"
 ```
 
-When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is. With an empty prompt, Spur just opens the session and waits at the agent prompt.
+When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
@@ -115,7 +115,7 @@ Use it inside the session to update the task title and any named links shown in 
 
 ```bash
 spur-slots --title "Fix flaky auth test"
-spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
+spur-slots --link tracker=https://tracker.example.com/TASK-123 --link github-pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
 
@@ -137,7 +137,7 @@ For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sid
 
 `autoStart` applies only when the main session spawns. From inside a sidecar, starting another sidecar is always manual through the same helper, and nesting stops after one more level: `session -> sidecar -> nested sidecar`. Nested sidecars never auto-start.
 
-If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env. Reservation also probes each candidate port on the host, so sibling sessions and unrelated host processes cannot race onto the same port range before anything starts listening.
+If a sidecar defines `ports`, Spur reserves those ports when that sidecar starts and injects them into the sidecar env. Reservation also probes each candidate port on the host, so sibling sessions and unrelated host processes cannot race onto the same port range before anything starts listening.
 
 Spur commands run through `bash -lc`, so sidecar commands may start with `VAR=value other_cmd ...` and may rely on login-shell initialization. If the launching agent runs in a sandbox that remaps `$HOME` to a scratch directory (e.g. `/tmp/spur-runtime-*`), the sidecar inherits that `$HOME`. To reach the real user home from a sidecar command, use `$SPUR_REAL_HOME` — Spur resolves it from `/etc/passwd` and exports it into every session and sidecar env. For example: `source "$SPUR_REAL_HOME/.nvm/nvm.sh"` instead of `source "$HOME/.nvm/nvm.sh"`.
 
@@ -397,7 +397,7 @@ Field reference:
 - `server.port`: optional, default `4310`.
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
-- `defaultAgent`: optional, `claude|codex`, default `claude`.
+- `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
 - `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
@@ -410,7 +410,7 @@ Field reference:
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
 - `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
-- `projects.<id>.defaultAgent`: optional per-project `claude|codex`, falls back to top-level `defaultAgent`.
+- `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
@@ -427,8 +427,8 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, sends the raw task prompt, and makes Claude startup enter plan mode; Codex currently accepts the flag but launch behavior is unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
+- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.

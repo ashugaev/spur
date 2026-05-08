@@ -8,6 +8,10 @@ export interface SessionLinkDisplay {
   url: string;
 }
 
+export function isGitHubPrLinkLabel(label: string): boolean {
+  return label === "github-pr" || label === "pr";
+}
+
 function readUrlPathSegments(url: URL): string[] {
   return url.pathname
     .split("/")
@@ -41,6 +45,13 @@ function displayPrId(url: URL): string | null {
       return `#${number}`;
     }
   }
+  const mergeRequestIndex = segments.lastIndexOf("merge_requests");
+  if (mergeRequestIndex >= 0) {
+    const number = segments[mergeRequestIndex + 1];
+    if (number) {
+      return `!${number}`;
+    }
+  }
   return fallbackSegment(url);
 }
 
@@ -53,6 +64,15 @@ export function formatSessionLinkDisplay(link: SessionLink): SessionLinkDisplay 
       label: link.label,
       text: shortText(link.label),
       url: link.url,
+    };
+  }
+
+  if (link.label === "github-pr") {
+    const id = displayPrId(url);
+    return {
+      label: link.label,
+      text: id ? `github pr ${shortText(id)}` : "github pr",
+      url: url.toString(),
     };
   }
 

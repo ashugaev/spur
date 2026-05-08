@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { agentStateStrategy } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionLink, SessionSlots, UpdateSessionSlotsRequest } from "./types.js";
 
@@ -20,6 +21,7 @@ const SPUR_WRAPPER_NAME = "spur";
 interface NormalizedSlotsUpdate {
   title?: string;
   clearTitle: boolean;
+  setTitleIfAbsent?: boolean;
   links: SessionLink[];
   unlinkLabels: string[];
 }
@@ -32,6 +34,9 @@ function normalizeSlotLabel(label: string): string {
   const normalized = collapseWhitespace(label).toLowerCase();
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
+  }
+  if (normalized === "pr" || normalized === "github_pr") {
+    return "github-pr";
   }
   return normalized;
 }
@@ -63,8 +68,14 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   if (request.clearTitle !== undefined && typeof request.clearTitle !== "boolean") {
     throw new Error("clearTitle must be a boolean");
   }
+  if (request.setTitleIfAbsent !== undefined && typeof request.setTitleIfAbsent !== "boolean") {
+    throw new Error("setTitleIfAbsent must be a boolean");
+  }
   if (request.title !== undefined && request.clearTitle) {
     throw new Error("title and clearTitle cannot be used together");
+  }
+  if (request.setTitleIfAbsent === true && request.title === undefined) {
+    throw new Error("setTitleIfAbsent requires a title");
   }
 
   const linksRaw: unknown = request.links ?? [];
@@ -111,6 +122,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   return {
     ...(request.title !== undefined ? { title: normalizeTitle(request.title) } : {}),
     clearTitle: request.clearTitle === true,
+    ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
     links,
     unlinkLabels,
   };
@@ -134,7 +146,10 @@ export function applySlotsUpdate(
     title = undefined;
   }
   if (update.title !== undefined) {
-    title = update.title;
+    const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
+    if (!update.setTitleIfAbsent || !hasExistingTitle) {
+      title = update.title;
+    }
   }
 
   const nextLinks = [...links.values()];
@@ -155,15 +170,21 @@ export function withSessionSlotInstructions(prompt: string): string {
   return `${prompt}
 
 Session metadata:
-- Update the session title and related links as soon as you know them.
-- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\` to add them without changing the title.
-- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link github-pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
+- Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link github-pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 
 function slotToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
+}
+
+function shouldWriteAgentStateTools(agent: AgentName | undefined): boolean {
+  if (!agent) {
+    return true;
+  }
+  return agentStateStrategy(agent) === "hook";
 }
 
 export function ensureSessionSlotTool(args: {
@@ -193,7 +214,7 @@ exec "$SCRIPT_DIR/${SPUR_WRAPPER_NAME}" slots --session ${shellEscape(args.sessi
     { encoding: "utf8", mode: 0o755 },
   );
   // Claude uses JSONL-based state classification — no hook state scripts needed.
-  if (args.agent !== "claude") {
+  if (shouldWriteAgentStateTools(args.agent)) {
     writeFileSync(
       join(toolDir, AGENT_STATE_UPDATER_NAME),
       `#!/usr/bin/env node

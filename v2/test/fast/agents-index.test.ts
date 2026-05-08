@@ -8,6 +8,7 @@ vi.mock("../../src/agents/codex.js", () => ({
   buildCodexPlan: vi.fn(),
   buildCodexRestorePlan: vi.fn(),
   buildCodexResumePlan: vi.fn(),
+  codexCommand: vi.fn(() => "codex"),
   ensureCodexHooksConfig: ensureCodexHooksConfigMock,
   findCodexSessionId: vi.fn(),
 }));

@@ -2,12 +2,20 @@ import { describe, expect, it } from "vitest";
 import { formatSessionLinkDisplay } from "../../src/session-link-display.js";
 
 describe("formatSessionLinkDisplay", () => {
-  it("formats PR link with /pull/123 as pr #123", () => {
+  it("formats GitHub PR link with /pull/123 as github pr #123", () => {
     const display = formatSessionLinkDisplay({
-      label: "pr",
+      label: "github-pr",
       url: "https://github.com/acme/api/pull/123",
     });
-    expect(display.text).toBe("pr #123");
+    expect(display.text).toBe("github pr #123");
+  });
+
+  it("formats GitLab merge request links as pr !123", () => {
+    const display = formatSessionLinkDisplay({
+      label: "pr",
+      url: "https://gitlab.com/acme/api/-/merge_requests/123",
+    });
+    expect(display.text).toBe("pr !123");
   });
 
   it("extracts Jira key from tracker URL", () => {

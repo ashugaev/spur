@@ -158,6 +158,26 @@ beforeEach(() => {
     if (url === "/api/runtime/voice") {
       return new Response(JSON.stringify({ available: true, language: "auto" }), { status: 200 });
     }
+    if (url.endsWith("/slash-commands")) {
+      return new Response(
+        JSON.stringify({
+          agent: url.includes("codex") ? "codex" : "claude",
+          commands: [
+            {
+              id: "cmd-1",
+              label: url.includes("codex") ? "/permissions" : "/compact",
+              insertText: url.includes("codex") ? "/permissions" : "/compact",
+              detail: "Slash command",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+        { status: 200 },
+      );
+    }
     throw new Error(`Unexpected fetch: ${url}`);
   });
   vi.stubGlobal("MediaRecorder", MockMediaRecorder as unknown as typeof MediaRecorder);
@@ -179,7 +199,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(sessionId = "test-session", agent: "claude" | "codex" = "claude") {
+async function mountTerminal(
+  sessionId = "test-session",
+  agent: "claude" | "codex" | "cursor" = "claude",
+) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {
@@ -271,7 +294,6 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
     expect(screen.getByRole("menu", { name: "claude shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
 
@@ -285,17 +307,20 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
     expect(screen.getByRole("menu", { name: "codex shortcuts" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /Slash/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /^Esc /i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Switch mode/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /Start file picker/i })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
   });
 
-  it("submits codex slash hotkeys as bracketed paste plus enter", async () => {
+  it("submits codex slash suggestions as bracketed paste plus enter", async () => {
     await mountTerminal("test-codex-hotkey-submit", "codex");
 
-    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    const slashButton = screen.getByRole("button", { name: "Slash" });
+    expect(slashButton).toHaveTextContent("/");
+    fireEvent.click(slashButton);
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
 
     await waitFor(() => {
@@ -304,10 +329,13 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("submits claude slash hotkeys as bracketed paste plus enter", async () => {
+  it("submits claude slash suggestions as bracketed paste plus enter", async () => {
     await mountTerminal("test-claude-hotkey-submit", "claude");
 
-    fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/compact/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: /\/compact/i }));
 
     await waitFor(() => {
@@ -316,11 +344,14 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("shows a visible error when codex slash hotkey submit fails", async () => {
+  it("shows a visible error when codex slash suggestion submit fails", async () => {
     await mountTerminal("test-codex-hotkey-submit-error", "codex");
 
     wsInstances[0].readyState = 3;
-    fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Slash" }));
+    await waitFor(() => {
+      expect(screen.getByRole("menuitem", { name: /\/permissions/i })).toBeInTheDocument();
+    });
     fireEvent.click(screen.getByRole("menuitem", { name: /\/permissions/i }));
 
     await waitFor(() => {
@@ -438,10 +469,10 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
     });
@@ -450,8 +481,17 @@ describe("DirectTerminal scroll integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Insert" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+      expect(screen.getAllByText("Failed to insert transcription")).toHaveLength(2);
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+  });
+  it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
+    await mountTerminal("test-terminal-voice-hint");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
   });
 });

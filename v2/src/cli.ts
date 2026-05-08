@@ -1038,7 +1038,7 @@ async function runInteractiveSessionList(
     if (!session) return;
 
     busy = true;
-    statusMessage = brandLine(`Pausing ${session.id}...`);
+    statusMessage = brandLine(`Stopping ${session.id}...`);
     render();
 
     try {
@@ -1046,7 +1046,7 @@ async function runInteractiveSessionList(
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
       pendingKillConfirmationSessionId = null;
-      statusMessage = brandLine(`Paused ${paused.id}.`);
+      statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -1359,10 +1359,10 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
-    .option("--agent <name>", "Agent to start: claude or codex")
+    .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
       "--plan",
-      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+      "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1564,7 +1564,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "pausing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
-        success: (session) => `Paused ${session.id}.`,
+        success: (session) => `Stopped ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1742,14 +1742,27 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Internal session slot updates.")
     .requiredOption("--session <id>", "Session id")
     .option("--title <text>", "Set task title")
+    .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
     .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const titleIfAbsent = options.titleIfAbsent as string | undefined;
+      const title = options.title as string | undefined;
+      if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
+        throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
+      }
+      const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
+      if (titleIfAbsent !== undefined) {
+        titleFields.title = titleIfAbsent;
+        titleFields.setTitleIfAbsent = true;
+      } else if (title !== undefined) {
+        titleFields.title = title;
+      }
       const payload: UpdateSessionSlotsRequest = {
-        ...(options.title !== undefined ? { title: options.title as string } : {}),
+        ...titleFields,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }

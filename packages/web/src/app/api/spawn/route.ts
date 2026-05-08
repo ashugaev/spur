@@ -1,12 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides, SpurSessionView } from "@/lib/types";
 
 interface SpawnBody {
   projectId?: string;
   prompt?: string;
+  agent?: AgentName;
   attachments?: Array<{ name: string; data: string }>;
-  agent?: "claude" | "codex";
   branch?: string;
   planMode?: boolean;
   steps?: string[];

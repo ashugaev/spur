@@ -10,11 +10,12 @@ description: Use when working on Spur — its CLI, daemon, tmux/worktree session
 - Spur is CLI plus local HTTP daemon. `packages/web` is the only supported UI — a thin Next.js frontend over the daemon HTTP API that must not grow its own backend or runtime logic.
 - Treat the Spur interface as fixed unless the user asks to change it.
 - Discover the current human-facing command surface from `v2/src/cli.ts` and `spur --help`. Do not hard-code a command list in prompts. `daemon start` stays as the internal daemon command and is hidden from `spur --help`.
-- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
-- Supported agents are only `claude` and `codex`.
-- Both agents start with full access by default:
+- `spawn` is positional: `spur spawn <project> [prompt...]` with optional `--agent claude|codex|cursor`, `--branch <name>`, repeatable `--step <label>`, and either `--worktree [defaultBranch]` or `--shared`. Empty prompt opens a blank session and skips default pipeline steps and initial message injection.
+- Supported agents are only `claude`, `codex`, and `cursor`.
+- Supported agents start with full access by default:
   `claude --dangerously-skip-permissions`
   `codex --dangerously-bypass-approvals-and-sandbox`
+  `agent --force --sandbox disabled`
 - Workspace setup is only:
   `git worktree` + configured symlinks + detached `tmux` + agent launch.
 - `list` hides `completed` and `killed` sessions by default.
@@ -99,7 +100,7 @@ cron source
 - If code is not part of current Spur behavior, remove it.
 - Defaults belong at config parsing boundaries, not inside runtime hot paths.
 - Prefer the smallest type shape that preserves safety. Concision beats type-level cleverness.
-- Detect agent state and `Needs Input` only from hook state and agent history JSONL. Never infer from `tmux` pane capture, terminal text, or other screen-content heuristics.
+- Detect agent state and `Needs Input` from hook state and agent history JSONL for `claude` and `codex`. `cursor` currently uses pane/activity classification for readiness and state.
 - Do not commit machine-specific hosts, public URLs, or other environment-local values into repo config. Use `${VAR}` placeholders and keep real values in the environment.
 
 ## CLI Convention
@@ -153,7 +154,7 @@ Three tiers; pick the cheapest that crosses the changed boundary:
 |---|---|---|
 | `fast` | `pnpm --dir v2 test` | every Spur code change; queueing, dedupe, validation logic |
 | `runtime integration` | `pnpm --dir v2 test:runtime` | CLI, daemon startup, client transport, session lifecycle, worktree setup, `tmux`, automation runtime; source and process boundaries |
-| `real-agent smoke` | `pnpm --dir v2 test:smoke` | agent launch or prompt delivery; against this repo with real `claude` and `codex` (never fake repos or agents). Auto-skips when `tmux`, binaries, or API keys are missing |
+| `real-agent smoke` | `pnpm --dir v2 test:smoke` | agent launch or prompt delivery; against this repo with real `claude`, `codex`, and `cursor` (never fake repos or agents). Auto-skips when `tmux`, binaries, or API keys are missing |
 
 - Always run `pnpm --dir v2 build` after changing Spur code.
 - Minimum per touched command: positive path, negative/error path, cleanup verification.

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ensureSessionSlotTool,
   SLOT_TOOL_NAME,
+  AGENT_STATE_TOOL_NAME,
   applySlotsUpdate,
   normalizeSlotsUpdate,
   withSessionSlotInstructions,
@@ -37,8 +38,20 @@ describe("session slots", () => {
       title: "Current task",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-2" },
-        { label: "pr", url: "https://github.com/org/repo/pull/42" },
+        { label: "github-pr", url: "https://github.com/org/repo/pull/42" },
       ],
+    });
+  });
+
+  it("normalizes legacy PR aliases to github-pr", () => {
+    expect(
+      normalizeSlotsUpdate({
+        links: [{ label: "github_pr", url: "https://github.com/org/repo/pull/9" }],
+      }),
+    ).toEqual({
+      clearTitle: false,
+      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/9" }],
+      unlinkLabels: [],
     });
   });
 
@@ -67,12 +80,45 @@ describe("session slots", () => {
     expect(() => normalizeSlotsUpdate({})).toThrow("slot update requires at least one change");
   });
 
+  it("sets title once when no current title exists", () => {
+    const updated = applySlotsUpdate(undefined, { title: "T", setTitleIfAbsent: true });
+    expect(updated?.title).toBe("T");
+  });
+
+  it("preserves existing title when setTitleIfAbsent is true", () => {
+    const updated = applySlotsUpdate(
+      { title: "Old", links: [] },
+      { title: "New", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("Old");
+  });
+
+  it("overwrites title without setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate({ title: "Old", links: [] }, { title: "New" });
+    expect(updated?.title).toBe("New");
+  });
+
+  it("treats empty current title as absent for setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate(
+      { title: "", links: [] },
+      { title: "First", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("First");
+  });
+
+  it("rejects setTitleIfAbsent without a title", () => {
+    expect(() => normalizeSlotsUpdate({ setTitleIfAbsent: true })).toThrow(
+      "setTitleIfAbsent requires a title",
+    );
+  });
+
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
-    expect(prompt).toContain(
-      "Update the session title and related links as soon as you know them.",
-    );
+    expect(prompt).toContain("Set the session title once at task start");
+    expect(prompt).toContain("--title-if-absent");
+    expect(prompt).toContain("describe the whole task end-to-end");
+    expect(prompt).toContain("--link github-pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
   });
@@ -138,6 +184,20 @@ printf '%s\n' "$@" > ${JSON.stringify(captureFile)}
     expect(readFileSync(captureFile, "utf8")).toBe(
       ["sidecar", "stop", "--session", "api-3", "--name", "isolated-ui", ""].join("\n"),
     );
+  });
+
+  it("skips hook-state helper scripts for cursor sessions", async () => {
+    const dataDir = await createTempDir("spur-slots-fast-");
+    tempDirs.push(dataDir);
+
+    const toolDir = ensureSessionSlotTool({
+      dataDir,
+      sessionId: "api-3",
+      configPath: "/tmp/spur.yaml",
+      agent: "cursor",
+    });
+
+    expect(() => readFileSync(join(toolDir, AGENT_STATE_TOOL_NAME), "utf8")).toThrow();
   });
 
   it("maps structured question metadata to needs_input in the agent state helper", async () => {

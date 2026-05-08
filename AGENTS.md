@@ -39,6 +39,7 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 | [`shallow-scoring`](.agents/skills/shallow-scoring/SKILL.md)       | Score task complexity 1-5                                        |
 | [`self-verify`](.agents/skills/self-verify/SKILL.md)               | Final close-out gate validation                                  |
 | [`telegram`](.agents/skills/telegram/SKILL.md)                     | Send Telegram notification or fetch updates                      |
+| [`pr-comments-fix`](.agents/skills/pr-comments-fix/SKILL.md)       | Fix and resolve PR review comments                               |
 
 ## Response style
 

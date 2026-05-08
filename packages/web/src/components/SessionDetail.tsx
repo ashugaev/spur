@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
+import { SessionLinkBadge } from "@/components/SessionLinkBadge";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -17,15 +19,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import {
-  CiStatusDot,
-  ReviewCommentsBadge,
-  extractLinkId,
-  GithubIcon,
-  JiraIcon,
-  prStateColor,
-  usePrInfo,
-} from "@/lib/link-icons";
+import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -37,6 +31,11 @@ import {
   imageAttachmentsFromFiles,
   type ImageAttachment,
 } from "@/lib/image-attachments";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   canComplete,
   canPause,
@@ -51,30 +50,13 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
-function LinkBadge({ link }: { link: { label: string; url: string } }) {
-  const prUrl = link.label === "pr" ? link.url : undefined;
-  const prInfo = usePrInfo(prUrl);
-  const color = prStateColor(prInfo.state);
-
-  return (
-    <a
-      className="inline-flex items-center gap-1 border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"
-      href={link.url}
-      rel="noreferrer"
-      target="_blank"
-    >
-      {link.label === "pr" ? <GithubIcon /> : <JiraIcon />}
-      <span className="text-[10px]" style={color ? { color } : undefined}>
-        {extractLinkId(link)}
-      </span>
-      {link.label === "pr" ? (
-        <>
-          <CiStatusDot status={prInfo.ciStatus} />
-          <ReviewCommentsBadge total={prInfo.totalThreads} unresolved={prInfo.unresolvedThreads} />
-        </>
-      ) : null}
-    </a>
-  );
+function displayLinkLabel(label: string, url: string): string {
+  if (label === "github-pr") return "github pr";
+  if (label === "gitlab-pr") return "gitlab mr";
+  if (label === "pr") {
+    return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
+  }
+  return label;
 }
 
 function PlayIcon() {
@@ -214,6 +196,7 @@ interface LogEntry {
 }
 
 type ArtifactPreviewState = "loading" | "ready" | "error";
+type ArtifactCategory = "agent" | "attached" | "system";
 
 type SessionArtifact = DashboardSession["artifacts"][number];
 
@@ -446,6 +429,26 @@ interface DialogMessage {
   pending?: boolean;
 }
 
+function insertTextAtCursor(
+  element: HTMLTextAreaElement | null,
+  value: string,
+  setValue: (value: string) => void,
+) {
+  if (!element) {
+    setValue(value);
+    return;
+  }
+  const start = element.selectionStart ?? element.value.length;
+  const end = element.selectionEnd ?? element.value.length;
+  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
+  setValue(next);
+  queueMicrotask(() => {
+    element.focus();
+    const cursor = start + value.length;
+    element.setSelectionRange(cursor, cursor);
+  });
+}
+
 interface ToastState {
   id: number;
   tone: "success" | "error";
@@ -538,7 +541,15 @@ function logBadgeClass(level: string): string {
   return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
 }
 
-function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string }) {
+function LogEntryRow({
+  entry,
+  sessionId,
+  visibleArtifactIds,
+}: {
+  entry: LogEntry;
+  sessionId: string;
+  visibleArtifactIds: ReadonlySet<string>;
+}) {
   const fromState = readLogDetail(entry.details, "fromState");
   const toState = readLogDetail(entry.details, "toState");
   const source = readLogDetail(entry.details, "source");
@@ -557,6 +568,8 @@ function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string 
           ? `sidecar ${sidecarName}`
           : "sidecar"
         : null;
+  const showHistorySnapshot =
+    historyArtifactId !== null && visibleArtifactIds.has(historyArtifactId);
 
   return (
     <article
@@ -589,7 +602,7 @@ function LogEntryRow({ entry, sessionId }: { entry: LogEntry; sessionId: string 
               {formatStateLabel(toState ?? "")}
             </span>
           </div>
-          {historyArtifactId ? (
+          {showHistorySnapshot ? (
             <a
               className="ml-auto border border-[var(--color-border-strong)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] hover:no-underline"
               download={historyArtifactId}
@@ -645,6 +658,27 @@ interface SessionDetailProps {
   projectId?: string;
 }
 
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return fallback;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = JSON.parse(text) as unknown;
+      if (typeof payload === "object" && payload !== null && "error" in payload) {
+        return String((payload as { error?: unknown }).error ?? fallback);
+      }
+    } catch {
+      return fallback;
+    }
+  }
+
+  return text;
+}
+
 export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const router = useRouter();
   const [session, setSession] = useState<DashboardSession | null>(null);
@@ -669,16 +703,20 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     Record<string, ArtifactPreviewState>
   >({});
   const [selectedArtifact, setSelectedArtifact] = useState<SessionArtifact | null>(null);
+  const [artifactCategory, setArtifactCategory] = useState<ArtifactCategory>("agent");
   const [toast, setToast] = useState<ToastState | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
 
   const loadSession = useCallback(async () => {
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
         cache: "no-store",
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to load session"));
+      }
       const payload = (await response.json()) as SpurSessionView;
       const nextSession = toDashboardSession(payload);
       setSession(nextSession);
@@ -753,6 +791,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   }, []);
 
   useEffect(() => {
+    setArtifactCategory("agent");
+  }, [sessionId]);
+
+  useEffect(() => {
     if (!session) return;
     setArtifactPreviewStates((current) => {
       const next: Record<string, ArtifactPreviewState> = {};
@@ -771,13 +813,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedArtifact]);
-
-  useEffect(() => {
-    if (!selectedArtifact || !session) return;
-    if (!session.artifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
-      setSelectedArtifact(null);
-    }
-  }, [selectedArtifact, session]);
 
   const handleAction = async (
     action: "send" | "pause" | "restore" | "complete" | "kill",
@@ -892,7 +927,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
-    if (!trimmed && attachments.length === 0) return;
+    if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
     const encoded = encodeImageAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
@@ -947,17 +982,67 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const selectedArtifactHref =
     session && selectedArtifact ? artifactUrl(session.id, selectedArtifact.id) : null;
-  const startupArtifacts = useMemo(
+  const agentArtifacts = useMemo(
     () =>
-      session?.artifacts.filter((artifact) => session.startupAttachmentIds.includes(artifact.id)) ??
-      [],
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser !== true,
+      ) ?? [],
     [session],
   );
+  const attachedArtifacts = useMemo(
+    () =>
+      session?.artifacts.filter(
+        (artifact) => artifact.origin !== "automatic" && artifact.addedByUser === true,
+      ) ?? [],
+    [session],
+  );
+  const systemArtifacts = useMemo(
+    () => session?.artifacts.filter((artifact) => artifact.origin === "automatic") ?? [],
+    [session],
+  );
+  const visibleArtifacts = useMemo(
+    () =>
+      artifactCategory === "attached"
+        ? attachedArtifacts
+        : artifactCategory === "system"
+          ? systemArtifacts
+          : agentArtifacts,
+    [artifactCategory, agentArtifacts, attachedArtifacts, systemArtifacts],
+  );
+  const visibleArtifactIds = useMemo(
+    () => new Set(visibleArtifacts.map((artifact) => artifact.id)),
+    [visibleArtifacts],
+  );
+  const startupArtifacts = useMemo(() => {
+    const startupAttachmentIds = session?.startupAttachmentIds ?? [];
+    return (
+      session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
+    );
+  }, [session]);
   const visibleLinks = useMemo(
     () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
     [session, sidecarLinkLabels],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
+
+  useEffect(() => {
+    if (!selectedArtifact || !session) return;
+    if (!visibleArtifacts.some((artifact) => artifact.id === selectedArtifact.id)) {
+      setSelectedArtifact(null);
+    }
+  }, [selectedArtifact, session, visibleArtifacts]);
+
+  useEffect(() => {
+    const activeCount =
+      artifactCategory === "attached"
+        ? attachedArtifacts.length
+        : artifactCategory === "system"
+          ? systemArtifacts.length
+          : agentArtifacts.length;
+    if (artifactCategory !== "agent" && activeCount === 0) {
+      setArtifactCategory("agent");
+    }
+  }, [artifactCategory, agentArtifacts.length, attachedArtifacts.length, systemArtifacts.length]);
 
   const canAttach =
     session && session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -972,7 +1057,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
-    setRespawnStartupAttachmentIds(session.startupAttachmentIds);
+    setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
     setRespawnOpen(true);
   }, [session]);
@@ -1070,9 +1155,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.links
-                .filter((l) => l.label === "tracker" || l.label === "pr")
+                .filter((l) => l.label === "tracker" || isReviewLinkLabel(l.label))
                 .map((link) => (
-                  <LinkBadge key={`${link.label}-${link.url}`} link={link} />
+                  <SessionLinkBadge
+                    key={`${link.label}-${link.url}`}
+                    link={link}
+                    variant="detail"
+                  />
                 ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
@@ -1253,8 +1342,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       onAddFiles={addImageFiles}
                       onChange={setMessage}
                       onKeyDown={(event) => {
-                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                          void doSend({ queue: true });
+                        if (isVoiceToggleHotkey(event)) {
+                          event.preventDefault();
+                          voice.toggleRecording();
+                          return;
+                        }
+                        if (isPrimarySubmitHotkey(event)) {
+                          event.preventDefault();
+                          void doSend({ queue: false, interrupt: true });
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -1262,16 +1357,28 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           current.filter((_, currentIndex) => currentIndex !== index),
                         )
                       }
-                      placeholder="Message to the running agent..."
+                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
+                      textareaRef={messageRef}
                       value={message}
                       voice={voice}
                     />
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />{" "}
-                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                        {voice.voiceBusy && !voice.recording ? (
+                          <VoiceStatusHint voice={voice} />
+                        ) : null}
                       </span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <SlashSuggestions
+                          endpoint={
+                            session
+                              ? `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+                              : null
+                          }
+                          onSelect={(entry) =>
+                            insertTextAtCursor(messageRef.current, entry.insertText, setMessage)
+                          }
+                        />
                         <InputHistoryButton
                           entries={messageHistory.entries}
                           onSelect={setMessage}
@@ -1282,9 +1389,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Queueing..." : "Queue"}
+                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
                           type="button"
@@ -1292,9 +1399,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Sending..." : "Send now"}
+                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
+                          {busyAction !== "send" ? (
+                            <span
+                              aria-hidden="true"
+                              className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                            >
+                              {PRIMARY_SUBMIT_HINT}
+                            </span>
+                          ) : null}
                         </button>
                       </div>
                     </div>
@@ -1322,7 +1437,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {link.label}
+                        {displayLinkLabel(link.label, link.url)}
                       </a>
                     ))}
                   </div>
@@ -1334,37 +1449,83 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   <h2 className="flex items-center gap-2 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
                     Artifacts
                     <span className="text-[var(--color-text-secondary)]">
-                      {session.artifacts.length}
+                      {visibleArtifacts.length}
                     </span>
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                    {session.artifacts.map((artifact) => {
-                      const artifactHref = artifactUrl(session.id, artifact.id);
-                      const previewState = artifactPreviewStates[artifact.id] ?? "loading";
-                      return (
-                        <ArtifactCard
-                          key={`${session.id}-${artifact.id}`}
-                          artifact={artifact}
-                          artifactHref={artifactHref}
-                          onPreview={setSelectedArtifact}
-                          onPreviewError={(artifactId) =>
-                            setArtifactPreviewStates((current) => ({
-                              ...current,
-                              [artifactId]: "error",
-                            }))
-                          }
-                          onPreviewReady={(artifactId) =>
-                            setArtifactPreviewStates((current) => ({
-                              ...current,
-                              [artifactId]: "ready",
-                            }))
-                          }
-                          previewState={previewState}
-                        />
-                      );
-                    })}
-                  </div>
+                  {attachedArtifacts.length > 0 || systemArtifacts.length > 0 ? (
+                    <div
+                      aria-label="Artifact category"
+                      className="mb-3 inline-flex border border-[var(--color-border-default)]"
+                      role="tablist"
+                    >
+                      {(
+                        [
+                          ["agent", `Agent (${agentArtifacts.length})`],
+                          ...(attachedArtifacts.length > 0
+                            ? ([["attached", `Attached (${attachedArtifacts.length})`]] as const)
+                            : []),
+                          ...(systemArtifacts.length > 0
+                            ? ([["system", `System (${systemArtifacts.length})`]] as const)
+                            : []),
+                        ] as ReadonlyArray<readonly [ArtifactCategory, string]>
+                      ).map(([value, label]) => {
+                        const active = artifactCategory === value;
+                        return (
+                          <button
+                            key={value}
+                            aria-pressed={active}
+                            className={`border-r border-[var(--color-border-default)] px-3 py-1.5 font-bold uppercase tracking-[0.12em] last:border-r-0 ${
+                              active
+                                ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+                                : "text-[var(--color-text-secondary)] hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+                            }`}
+                            onClick={() => setArtifactCategory(value)}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  {visibleArtifacts.length > 0 ? (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                      {visibleArtifacts.map((artifact) => {
+                        const artifactHref = artifactUrl(session.id, artifact.id);
+                        const previewState = artifactPreviewStates[artifact.id] ?? "loading";
+                        return (
+                          <ArtifactCard
+                            key={`${session.id}-${artifact.id}`}
+                            artifact={artifact}
+                            artifactHref={artifactHref}
+                            onPreview={setSelectedArtifact}
+                            onPreviewError={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "error",
+                              }))
+                            }
+                            onPreviewReady={(artifactId) =>
+                              setArtifactPreviewStates((current) => ({
+                                ...current,
+                                [artifactId]: "ready",
+                              }))
+                            }
+                            previewState={previewState}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="py-2 text-[var(--color-text-secondary)]">
+                      {artifactCategory === "attached"
+                        ? "No attached artifacts yet."
+                        : artifactCategory === "system"
+                          ? "No system artifacts yet."
+                          : "No agent artifacts yet."}
+                    </p>
+                  )}
                 </section>
               ) : null}
 
@@ -1587,6 +1748,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         key={`${entry.timestamp}-${entry.event}-${i}`}
                         entry={entry}
                         sessionId={session.id}
+                        visibleArtifactIds={visibleArtifactIds}
                       />
                     ))}
                   </div>
@@ -1731,6 +1893,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
             }
           />
         </>
+      ) : error ? (
+        <div className="mt-5 max-w-xl border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-3 text-[var(--color-chip-error-text)]">
+          <p>Unable to load this session.</p>
+          <button
+            type="button"
+            onClick={() => void loadSession()}
+            className="mt-3 border border-[var(--color-chip-error-border)] px-3 py-1.5 font-bold uppercase text-[var(--color-chip-error-text)] transition hover:bg-[var(--color-status-error)]/10"
+          >
+            Retry
+          </button>
+        </div>
       ) : (
         <p className="mt-5 text-[var(--color-text-secondary)]">Loading session...</p>
       )}

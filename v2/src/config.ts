@@ -3,14 +3,16 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
-  GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
+  REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
+  type GitLabSourceConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ReviewProviderId,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -145,10 +147,10 @@ function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
 
 function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   if (value === undefined) return undefined;
-  if (value === "claude" || value === "codex") {
+  if (value === "claude" || value === "codex" || value === "cursor") {
     return value;
   }
-  throw new Error(`${label} must be "claude" or "codex"`);
+  throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -337,8 +339,8 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
-  const events = VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
-  if (source.query !== undefined) {
+  const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
+  if (source.type === "github" && source.query !== undefined) {
     events.push("github:work_item.new");
   }
   return events;
@@ -363,19 +365,20 @@ function parseCronSource(
   };
 }
 
-function parseGitHubSource(
+function parseReviewSource<TProvider extends ReviewProviderId>(
+  provider: TProvider,
   projectId: string,
   sourceId: string,
   raw: Record<string, unknown>,
-): GitHubSourceConfig {
+): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
   return {
-    type: "github",
+    type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     ...(query !== undefined ? { query } : {}),
-  };
+  } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
 function parseServiceRule(
@@ -438,8 +441,8 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "cron") {
     return parseCronSource(projectId, sourceId, raw);
   }
-  if (type === "github") {
-    return parseGitHubSource(projectId, sourceId, raw);
+  if (type === "github" || type === "gitlab") {
+    return parseReviewSource(type, projectId, sourceId, raw);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);

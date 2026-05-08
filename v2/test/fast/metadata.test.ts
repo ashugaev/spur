@@ -2,7 +2,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readSession, readWorkItemRegistry, recordWorkItem } from "../../src/metadata.js";
+import {
+  readSession,
+  readWorkItemRegistry,
+  recordWorkItem,
+  writeSession,
+} from "../../src/metadata.js";
+import type { SessionRecord } from "../../src/types.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
@@ -53,6 +59,36 @@ describe("work-item registry", () => {
 });
 
 describe("session metadata PR migration", () => {
+  it("repairs the session index after a fallback scan", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+    writeFileSync(
+      join(dataDir, "sessions", ".index.json"),
+      JSON.stringify({ "api-1": "sessions/missing/api-1.json" }, null, 2),
+      "utf8",
+    );
+
+    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ id: "api-1" }));
+    expect(JSON.parse(readFileSync(join(dataDir, "sessions", ".index.json"), "utf-8"))).toEqual({
+      "api-1": "sessions/api/api-1.json",
+    });
+  });
+
   it("persists a native session.pr binding when reading a legacy GitHub pr slot", async () => {
     const dataDir = await createTempDir("spur-metadata-test-");
     const sessionDir = join(dataDir, "sessions", "api");
@@ -141,5 +177,28 @@ describe("session metadata PR migration", () => {
     expect(session?.slots).toEqual(original.slots);
 
     expect(JSON.parse(readFileSync(sessionPath, "utf-8"))).toEqual(original);
+  });
+
+  it("preserves planMode when writing and reading a session record", async () => {
+    const dataDir = await newDataDir();
+    const session: SessionRecord = {
+      id: "api-1",
+      project: "api",
+      agent: "cursor",
+      planMode: true,
+      prompt: "ship it",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "agent --force --sandbox disabled --plan",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    };
+
+    writeSession(dataDir, session);
+
+    expect(readSession(dataDir, "api-1")).toEqual(expect.objectContaining({ planMode: true }));
   });
 });

@@ -24,7 +24,7 @@ jobs:
   onboarding-test:
     name: Test Fresh Onboarding
     runs-on: self-hosted
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       COMPOSE_PROJECT_NAME: onboarding-${{ github.run_id }}-${{ github.run_attempt }}
 

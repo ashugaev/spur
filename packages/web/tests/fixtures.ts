@@ -3,6 +3,7 @@ import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
 const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
+const DEFAULT_GITLAB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
 
 function baseSession(id: string): SpurSessionView {
   return {
@@ -59,7 +60,7 @@ export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSe
     ...baseSession("session-stopped-1"),
     runtimeAlive: false,
     tmuxSession: null,
-    status: "paused",
+    status: "stopped",
     state: "stopped",
     ...overrides,
   };
@@ -107,7 +108,7 @@ export function makeSessionWithPR(overrides?: Partial<SpurSessionView>): SpurSes
     state: "working",
     slots: {
       title: "Session with PR",
-      links: [{ label: "pr", url: "https://github.com/test/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
     },
     ...overrides,
   };
@@ -154,7 +155,7 @@ export async function mockSessions(
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
   projects?: ProjectInfo[] | (() => ProjectInfo[]),
 ): Promise<void> {
-  // Match /api/sessions and /api/sessions?project=... but NOT /api/sessions/<id>
+  // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
     void route.fulfill({
       status: 200,
@@ -175,6 +176,7 @@ export async function mockSessions(
   });
 
   await mockGitHubStatus(page, DEFAULT_GITHUB_STATUS);
+  await mockGitLabStatus(page, DEFAULT_GITLAB_STATUS);
 }
 
 export async function mockGitHubStatus(
@@ -183,6 +185,20 @@ export async function mockGitHubStatus(
   options?: { status?: number },
 ): Promise<void> {
   await page.route("/api/github-status", (route) => {
+    void route.fulfill({
+      status: options?.status ?? 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+}
+
+export async function mockGitLabStatus(
+  page: Page,
+  body: Record<string, unknown>,
+  options?: { status?: number },
+): Promise<void> {
+  await page.route("/api/gitlab-status", (route) => {
     void route.fulfill({
       status: options?.status ?? 200,
       contentType: "application/json",
