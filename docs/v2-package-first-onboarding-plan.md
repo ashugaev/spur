@@ -1,6 +1,7 @@
 ## Plan: v2 package-first install + doctor + onboarding shift
 
 Steps
+
 1. `v2/package.json`: turn `v2` into the real install boundary. Remove `private`, add a pack-time build hook, and add an explicit publish whitelist that keeps only runtime assets in the tarball: `dist/**`, `tmux.conf`, `README.md`, `spur.yaml.example`, and package metadata. Exclude `src/`, `test/`, fixtures, and repo-local `bin/` symlink baggage.
 2. `v2/src/config.ts`: add a pure scaffold helper that can render and write a project-only `spur.yaml` without calling `loadProjectConfig()` first. Keep the generated file minimal: one `projects.<id>` entry, `path: .`, derived `defaultBranch`, and derived `sessionPrefix`.
 3. `v2/src/workspace.ts`: add a doctor-safe branch hint helper for the current repo that handles empty repos and detached HEAD cleanly. Do not change the semantics of existing `readCurrentBranch()` call sites used by session/runtime flows.
@@ -21,6 +22,7 @@ Steps
 18. `tests/integration/onboarding-test.sh`: replace `./scripts/setup.sh` and global-link verification with `pnpm install`, `npm pack` in `v2`, global install of the tarball, `spur doctor`, and then the existing daemon and optional web smoke.
 
 Acceptance criteria
+
 - Package boundary: `npm pack` from `v2` produces an installable tarball that contains built runtime assets only, global tarball install exposes `spur`, and installed runtime can still resolve `tmux.conf`.
 - Doctor command: `spur doctor` succeeds in a fresh repo checkout, creates a minimal local `spur.yaml`, never overwrites an existing local config silently, and does not call `connect`, `daemon start`, or any new bootstrap path outside the existing instance auto-init.
 - Auto-connect contract: after `spur doctor`, the next `spur list` or `spur spawn` auto-connects the new local config through the existing `maybeAutoConnectProject()` path. `send`, `pause`, `complete`, `kill`, `service`, and hidden `daemon` commands keep their current no-auto-connect behavior.
@@ -28,6 +30,7 @@ Acceptance criteria
 - Onboarding integration: the repo smoke no longer depends on `npm link`, installs the packed tarball instead, runs `spur doctor`, and still validates the optional `packages/web` UI against the repo checkout.
 
 Risks
+
 - Package whitelist risk: installed runtime reads `tmux.conf` from a relative asset path in `v2/src/runtime-tmux.ts`. Missing it from the tarball breaks live session startup even if `spur --help` works.
 - Pack hook risk: `v2/package.json` currently has no `dist/` in git and `npm pack --dry-run` shows source and test files. The pack hook must build before pack without broadening package contents again.
 - Branch detection risk: onboarding creates empty repos. Existing `readCurrentBranch()` is not safe to reuse blindly for `doctor` because empty repos and detached HEAD can yield unusable values.
@@ -37,6 +40,7 @@ Risks
 - Onboarding split risk: the integration smoke still needs repo dependencies for `packages/web`, so the tarball replaces only the CLI install boundary, not the repo dependency install needed for the UI smoke.
 
 Trade-offs
+
 - Minimal scope: keep `scripts/setup.sh` behavior largely intact and demote it in docs instead of rewriting contributor tooling away from `npm link` in the same change.
 - Minimal scope: `spur doctor` only scaffolds local project config. It does not manage the global instance config beyond current auto-init, and it does not auto-connect or start the daemon itself.
 - Minimal scope: use a local packed tarball in onboarding to prove the install boundary. Do not add a second wrapper package, release automation, or registry-publish requirements in this step.
@@ -45,11 +49,13 @@ Trade-offs
 
 Test coverage
 Unit
+
 - `v2/test/fast/config.test.ts`
 - `v2/test/fast/workspace.test.ts`
 - `v2/test/fast/cli-help.test.ts`
 
 E2E
+
 - `v2/test/runtime/cli-lifecycle.runtime.test.ts`
 - `v2/TEST_SCENARIOS.md`
 - `tests/integration/onboarding-test.sh`

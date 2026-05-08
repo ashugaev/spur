@@ -100,8 +100,10 @@ export async function readDoctorBranchHint(repoPath: string): Promise<string> {
     return remoteDefaultBranch;
   }
 
-  return normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch"))
-    ?? DEFAULT_BRANCH_HINT;
+  return (
+    normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch")) ??
+    DEFAULT_BRANCH_HINT
+  );
 }
 
 export async function resolveDoctorRepoRoot(startDir: string): Promise<string> {
