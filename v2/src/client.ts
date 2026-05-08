@@ -276,9 +276,7 @@ export async function restartDaemonIfRunning(
 
   // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
-  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS).catch(
-    () => null,
-  );
+  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
   if (!runtime) {
     spawnDaemon(cliEntrypoint, resolvedConfigPath);
     runtime = await waitForReadyDaemon(baseUrl);
