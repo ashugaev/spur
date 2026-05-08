@@ -122,7 +122,10 @@ git -C "$deploy_root" checkout -B main origin/main
 git -C "$deploy_root" reset --hard "$remote_head"
 git -C "$deploy_root" clean -fd
 pnpm -C "$deploy_root" install --frozen-lockfile
-pnpm -C "$deploy_root" build
+# Build with managed-prod autostart disabled so the build-triggered daemon
+# restart path cannot fork a rogue listener outside systemd during the
+# service restart window.
+SPUR_DISABLE_AUTOSTART=1 pnpm -C "$deploy_root" build
 install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.
