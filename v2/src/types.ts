@@ -404,6 +404,7 @@ export interface RespawnSessionRequest {
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
+  setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
 }
