@@ -212,7 +212,9 @@ export async function startServer(
         const includeCompleted =
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
           (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
-        sendJson(response, 200, await service.list({ includeCompleted }));
+        const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
+        const view = requestedView === "dashboard" ? "dashboard" : "full";
+        sendJson(response, 200, await service.list({ includeCompleted, view }));
         return;
       }
 

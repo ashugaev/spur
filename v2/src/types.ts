@@ -326,6 +326,17 @@ export interface SessionView extends SessionRecord {
   workspaceAccess?: SessionWorkspaceAccess;
 }
 
+export interface DashboardSessionView extends SessionRecord {
+  runtimeAlive: boolean;
+  workspaceExists: boolean;
+  state: SessionState;
+  lastActivityAt: string;
+  slots?: SessionSlots;
+  hasServiceIssues?: boolean;
+}
+
+export type SessionListView = SessionView | DashboardSessionView;
+
 export interface SessionWorkspaceAccessItem {
   label: string;
   kind: WorkspaceAccessItemKind;
@@ -404,6 +415,7 @@ export interface RespawnSessionRequest {
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
+  setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
 }

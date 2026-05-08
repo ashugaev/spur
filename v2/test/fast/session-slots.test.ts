@@ -80,12 +80,44 @@ describe("session slots", () => {
     expect(() => normalizeSlotsUpdate({})).toThrow("slot update requires at least one change");
   });
 
+  it("sets title once when no current title exists", () => {
+    const updated = applySlotsUpdate(undefined, { title: "T", setTitleIfAbsent: true });
+    expect(updated?.title).toBe("T");
+  });
+
+  it("preserves existing title when setTitleIfAbsent is true", () => {
+    const updated = applySlotsUpdate(
+      { title: "Old", links: [] },
+      { title: "New", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("Old");
+  });
+
+  it("overwrites title without setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate({ title: "Old", links: [] }, { title: "New" });
+    expect(updated?.title).toBe("New");
+  });
+
+  it("treats empty current title as absent for setTitleIfAbsent", () => {
+    const updated = applySlotsUpdate(
+      { title: "", links: [] },
+      { title: "First", setTitleIfAbsent: true },
+    );
+    expect(updated?.title).toBe("First");
+  });
+
+  it("rejects setTitleIfAbsent without a title", () => {
+    expect(() => normalizeSlotsUpdate({ setTitleIfAbsent: true })).toThrow(
+      "setTitleIfAbsent requires a title",
+    );
+  });
+
   it("injects helper instructions only once", () => {
     const prompt = withSessionSlotInstructions("Fix the build");
     expect(prompt).toContain(SLOT_TOOL_NAME);
-    expect(prompt).toContain(
-      "Update the session title and related links as soon as you know them.",
-    );
+    expect(prompt).toContain("Set the session title once at task start");
+    expect(prompt).toContain("--title-if-absent");
+    expect(prompt).toContain("describe the whole task end-to-end");
     expect(prompt).toContain("--link pr=https://...");
     expect(prompt).toContain("Use `spur service logs` to inspect service and sidecar logs");
     expect(withSessionSlotInstructions(prompt)).toBe(prompt);
