@@ -1,5 +1,5 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
+import { makeStoppedSession, makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
@@ -57,6 +57,36 @@ test.describe("R1: Mobile viewport", () => {
 
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).toBeVisible();
+  });
+
+  test("Stopped can start collapsed on mobile and expands on tap", async ({ page }) => {
+    await gotoMocked(page, "/", [
+      makeStoppedSession({
+        id: "mob-stop-1",
+        prompt: "Stopped mobile session",
+      }),
+    ]);
+    await page.evaluate(() => {
+      window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
+    });
+    await page.reload();
+    await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+      timeout: 8000,
+    });
+
+    const zoneToggle = page
+      .locator("section button")
+      .filter({ hasText: /stopped/i })
+      .first();
+    await expect(zoneToggle).toBeVisible({ timeout: 5000 });
+    await expect(zoneToggle).toContainText("Stopped");
+    await expect(zoneToggle).toContainText("1");
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).toBeVisible();
+
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
   });
 
   test("spawn slash suggestions stay within the viewport on mobile", async ({ page }) => {
