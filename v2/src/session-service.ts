@@ -577,15 +577,23 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
+  const project = config.projects[projectId];
+  if (!project) return [];
+  const sourceIds: string[] = [];
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    sourceIds.push(sourceId);
+  }
+  return sourceIds;
+}
+
 function requestGitHubMergeConflictRestoreReplays(
   config: AppConfig,
   projectId: string,
   sessionId: string,
 ): void {
-  const project = config.projects[projectId];
-  if (!project) return;
-  for (const [sourceId, source] of Object.entries(project.sources)) {
-    if (source.type !== "github") continue;
+  for (const sourceId of githubReplaySourceIds(config, projectId)) {
     requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
   }
 }
@@ -608,6 +616,13 @@ function buildSidecarRuntimeEnv(
 
 const SIDECAR_STARTUP_VERIFY_MS = 600;
 const SIDECAR_STARTUP_TAIL_LINES = 40;
+
+type CodexRestoreReplayBaseline = {
+  hookUpdatedAtMs: number;
+  rolloutUpdatedAtMs: number;
+  hookTurnId?: string;
+  rolloutTurnId?: string;
+};
 
 async function verifySidecarStartup(sessionId: string, sidecarName: string): Promise<void> {
   const tmuxSession = sidecarTmuxSession(sessionId, sidecarName);
@@ -3755,6 +3770,7 @@ export class SessionService {
       },
     });
     let restoredLaunchCommand: string;
+    let codexRestoreReplayBaseline: CodexRestoreReplayBaseline | null = null;
 
     try {
       const sessionToolDir = this.prepareSessionTools(current.id, current.agent);
@@ -3869,6 +3885,19 @@ export class SessionService {
           effectivePlan.initialMessage,
           restoreSidecarNames,
         );
+        if (current.agent === "codex" && githubReplaySourceIds(this.config, current.project).length > 0) {
+          const codexState = await this.classifyCodexState(current.id);
+          codexRestoreReplayBaseline = {
+            hookUpdatedAtMs: codexState.hookState
+              ? Date.parse(codexState.hookState.updatedAt)
+              : Number.NaN,
+            rolloutUpdatedAtMs: codexState.rolloutState?.timestampMs ?? Number.NaN,
+            ...(codexState.hookState?.turnId ? { hookTurnId: codexState.hookState.turnId } : {}),
+            ...(codexState.rolloutState?.turnId
+              ? { rolloutTurnId: codexState.rolloutState.turnId }
+              : {}),
+          };
+        }
         await this.sendAgentMessage(current, restoreInitialMessage);
       }
     } catch (error) {
@@ -3897,6 +3926,9 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
+    if (codexRestoreReplayBaseline) {
+      await this.waitForCodexRestoreReplayReady(persistedRestored, codexRestoreReplayBaseline);
+    }
     requestGitHubMergeConflictRestoreReplays(
       this.config,
       persistedRestored.project,
@@ -4355,6 +4387,55 @@ export class SessionService {
 
       await sleep(PIPELINE_POLL_INTERVAL_MS);
     }
+  }
+
+  private async waitForCodexRestoreReplayReady(
+    session: SessionRecord,
+    baseline: CodexRestoreReplayBaseline,
+  ): Promise<void> {
+    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
+    let sawPostAckBusyState = false;
+
+    while (Date.now() < deadline) {
+      if (await this.confirmAgentExited(session)) {
+        return;
+      }
+
+      const codexState = await this.classifyCodexState(session.id);
+      const hookUpdatedAtMs = codexState.hookState
+        ? Date.parse(codexState.hookState.updatedAt)
+        : Number.NaN;
+      const rolloutUpdatedAtMs = codexState.rolloutState?.timestampMs ?? Number.NaN;
+      const changedFromBaseline =
+        (Number.isFinite(hookUpdatedAtMs) &&
+          (!Number.isFinite(baseline.hookUpdatedAtMs) || hookUpdatedAtMs > baseline.hookUpdatedAtMs)) ||
+        (Number.isFinite(rolloutUpdatedAtMs) &&
+          (!Number.isFinite(baseline.rolloutUpdatedAtMs) ||
+            rolloutUpdatedAtMs > baseline.rolloutUpdatedAtMs)) ||
+        codexState.hookState?.turnId !== baseline.hookTurnId ||
+        codexState.rolloutState?.turnId !== baseline.rolloutTurnId;
+      if (codexState.state === "waiting" && (changedFromBaseline || sawPostAckBusyState)) {
+        return;
+      }
+      if (codexState.state === "working" || codexState.state === "needs_input") {
+        if (changedFromBaseline) {
+          sawPostAckBusyState = true;
+        }
+        await sleep(PIPELINE_POLL_INTERVAL_MS);
+        continue;
+      }
+      await sleep(PIPELINE_POLL_INTERVAL_MS);
+    }
+
+    this.logEvent("session.restore.replay_wait_timeout", {
+      level: "warn",
+      sessionId: session.id,
+      projectId: session.project,
+      message: `Timed out waiting for ${session.id} to become ready before replaying GitHub merge conflicts`,
+      details: {
+        agent: session.agent,
+      },
+    });
   }
 
   private async confirmAgentExited(
