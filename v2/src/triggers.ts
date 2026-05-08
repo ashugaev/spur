@@ -11,7 +11,11 @@ import {
   type SpawnTriggerConfig,
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
-import type { SessionService } from "./session-service.js";
+import {
+  IDLE_WAIT_BEFORE_FLUSH_MS,
+  isIdleEnoughToReceive,
+  type SessionService,
+} from "./session-service.js";
 
 interface TriggerLogger {
   info?: (message: string) => void;
@@ -127,7 +131,10 @@ function isSendTrigger(
 }
 
 function isDeliverableState(session: SessionView): boolean {
-  return session.state === "waiting";
+  return (
+    session.state === "waiting" &&
+    isIdleEnoughToReceive(session.lastActivityAt, IDLE_WAIT_BEFORE_FLUSH_MS)
+  );
 }
 
 function isClosedState(session: SessionView): boolean {

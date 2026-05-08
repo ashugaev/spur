@@ -216,6 +216,14 @@ function serviceEvent(ruleId = "crash") {
   };
 }
 
+function staleActivity(): string {
+  return new Date(Date.now() - 60_000).toISOString();
+}
+
+function recentActivity(): string {
+  return new Date(Date.now() - 10_000).toISOString();
+}
+
 async function loadTriggersModule() {
   vi.resetModules();
   return import("../../src/triggers.js");
@@ -238,6 +246,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -287,6 +296,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -330,6 +340,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -439,6 +450,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     };
     const getMock = vi
@@ -491,6 +503,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -570,6 +583,7 @@ describe("startConfiguredTriggers", () => {
       id: "api-1",
       status: "running",
       state: "waiting",
+      lastActivityAt: staleActivity(),
       workspaceExists: true,
     });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -615,6 +629,7 @@ describe("startConfiguredTriggers", () => {
         id: "api-1",
         status: "running",
         state: "waiting",
+        lastActivityAt: staleActivity(),
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -677,6 +692,7 @@ describe("startConfiguredTriggers", () => {
         id: "api-1",
         status: "running",
         state: "waiting",
+        lastActivityAt: staleActivity(),
         workspaceExists: true,
       });
     const deliverMock = vi.fn().mockResolvedValue(undefined);
@@ -778,6 +794,98 @@ describe("startConfiguredTriggers", () => {
         prompt: "Take this work item.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("holds delivery in handleSendEvent fast path while the agent was active in the last 30s", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: recentActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers via flushPending after lastActivityAt ages past 30s", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: recentActivity(),
+        workspaceExists: true,
+      })
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        lastActivityAt: staleActivity(),
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("A new comment arrived."),
+        { interrupt: false },
+      );
     } finally {
       await controller.stop();
     }
