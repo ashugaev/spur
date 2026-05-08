@@ -234,6 +234,7 @@ export function Dashboard() {
   const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
+    contextKey: "spawn",
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
   });

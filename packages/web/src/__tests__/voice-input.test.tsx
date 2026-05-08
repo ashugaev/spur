@@ -7,12 +7,17 @@ function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
   const voice = {
     canUseVoice: true,
     recording: false,
+    hasRetainedTake: false,
+    retainedTakePlaying: false,
     voiceBusy: null,
     voiceModalOpen: true,
     voiceDraft: "terminal hotkey insert",
     voiceError: null,
     setVoiceDraft: vi.fn(),
     toggleRecording: vi.fn(),
+    playRetainedTake: vi.fn(),
+    discardRetainedTake: vi.fn(),
+    retryRetainedTake: vi.fn(),
     confirmDraft: vi.fn((onInsert: (text: string) => void) => {
       onInsert(voice.voiceDraft);
     }),

@@ -157,6 +157,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the composer actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the prompt textarea
 - When voice is available and idle, the prompt textarea placeholder includes `Voice ⌘ + .`
 - Click starts recording, second click stops and inserts transcribed text directly into textarea (no confirmation popup)
+- If a non-empty spawn recording fails to transcribe, the same textarea chrome swaps the mic for `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
+- Refreshing the page preserves those retained spawn-recording controls for the same spawn composer
 - Saved prompt history selection restores the chosen prompt back into the textarea without spawning immediately
 - Enter in textarea creates newline (not submit)
 - Cmd+Enter submits
@@ -280,6 +282,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `/` button sits with the send actions, opens a suggestion list grouped by Commands / Skills / Agents, and selecting an item inserts its text into the message textarea
 - If stop/transcribe/insert fails or no audio was captured, an inline red error message appears instead of failing silently
 - Retryable transcription failures retry automatically up to three attempts; if all attempts fail, the final inline error names the exhausted retry count instead of failing silently
+- If a non-empty message recording fails to transcribe, the same textarea chrome swaps the mic for `Play`, `Retry`, and `Discard` controls until transcription succeeds or the user discards the take
+- Refreshing the page preserves those retained message-recording controls for the same session composer
 - If microphone startup is blocked by browser permission or insecure context, an inline red error message explains whether to allow microphone access or switch to HTTPS/localhost
 - `Queue` button adds the message to the queued stack
 - `Send now` button bypasses the queue and sends immediately
@@ -343,6 +347,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Microphone button appears after arrow keys with a small gap; click starts recording. While recording the single mic button is replaced by two buttons in the same slot: a pencil on the left and a stop square on the right (red border + red tint)
 - Stop button transcribes and submits the result into the terminal immediately without showing the confirmation popup; pencil button stops recording and opens the confirmation popup so the transcript can be edited before insertion
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
+- If a non-empty terminal recording fails to transcribe, the idle control slot shows `Play`, `Retry`, and `Discard` buttons for that same terminal context until transcription succeeds or the user discards the take
+- Retained terminal recordings survive refresh and retry with the original stop-send vs edit-modal behavior intact
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle

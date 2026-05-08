@@ -3,7 +3,7 @@
 import { useRef } from "react";
 import { INPUT_CLASS } from "@/design/classes";
 import { IMAGE_ACCEPT, type ImageAttachment } from "@/lib/image-attachments";
-import { VoiceButton } from "@/components/VoiceInput";
+import { VoiceControls } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 
 function ImageIcon() {
@@ -141,10 +141,7 @@ export function ImageAttachmentTextarea({
             <ImageIcon />
           </button>
           {voice ? (
-            <VoiceButton
-              className={`${TOOL_BUTTON_CLASS} ${voice.recording || voice.voiceBusy === "transcribing" ? "" : ""}`}
-              voice={voice}
-            />
+            <VoiceControls className={TOOL_BUTTON_CLASS} voice={voice} />
           ) : null}
         </div>
       </div>

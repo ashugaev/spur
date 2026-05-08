@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
+import { VoiceConfirmModal, VoiceControls } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
 import type { Terminal as TerminalType } from "xterm";
@@ -225,7 +225,7 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
-  const voice = useVoiceInput();
+  const voice = useVoiceInput({ contextKey: `terminal:${sessionId}` });
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
   const submitVoiceDraft = useCallback(
@@ -804,7 +804,11 @@ export function DirectTerminal({
               </button>
             </div>
           ) : (
-            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+            <VoiceControls
+              className={cn(terminalControlIconButtonClass, "ml-2")}
+              onRetrySend={submitVoiceDraft}
+              voice={voice}
+            />
           )}
         </div>
       </div>

@@ -687,6 +687,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const messageHistory = useInputHistory(SESSION_MESSAGE_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
+    contextKey: `session:${sessionId}`,
     onTranscribed: (text) =>
       setMessage((current) => (current.trim() ? `${current}\n${text}` : text)),
   });
