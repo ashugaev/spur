@@ -1019,9 +1019,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
+  const surfacedLinks = useMemo(
+    () =>
+      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
+      [],
+    [session],
+  );
+  const surfacedLinkUrls = useMemo(
+    () => new Set(surfacedLinks.map((link) => link.url)),
+    [surfacedLinks],
+  );
   const visibleLinks = useMemo(
-    () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
-    [session, sidecarLinkLabels],
+    () =>
+      session?.links.filter(
+        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
+      ) ?? [],
+    [session, sidecarLinkLabels, surfacedLinkUrls],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1154,15 +1167,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
-              {session.links
-                .filter((l) => l.label === "tracker" || isReviewLinkLabel(l.label))
-                .map((link) => (
-                  <SessionLinkBadge
-                    key={`${link.label}-${link.url}`}
-                    link={link}
-                    variant="detail"
-                  />
-                ))}
+              {surfacedLinks.map((link) => (
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} variant="detail" />
+              ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
                   offline

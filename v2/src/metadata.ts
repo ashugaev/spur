@@ -92,10 +92,13 @@ function githubMergeConflictRestoreFilePath(
   );
 }
 
-function hasLegacyNativePrLink(session: SessionRecord): boolean {
+function hasLegacyPrSlotAlias(session: SessionRecord): boolean {
   return (
     session.slots?.links.some(
-      (link) => link.label === "pr" && parseSessionPrBinding(link.url) !== null,
+      (link) =>
+        link.label === "github-pr" ||
+        link.label === "github_pr" ||
+        (link.label === "pr" && parseSessionPrBinding(link.url) !== null),
     ) ?? false
   );
 }
@@ -122,7 +125,7 @@ function readSessionFile(path: string): SessionRecord {
     throw new Error(`Invalid session metadata shape at ${path}`);
   }
   const normalizedSession = normalizeSessionRecord(rawSession);
-  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
+  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
     writeJsonFile(path, normalizedSession);
   }
   return normalizedSession;

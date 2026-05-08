@@ -998,7 +998,7 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
-  test("canonical github-pr links render as github pr", async ({ page }) => {
+  test("canonical github-pr links stay surfaced as header badges", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-pr",
       slots: {
@@ -1009,7 +1009,55 @@ test.describe("S4: Links section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/test/repo/pull/42"]')).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "#42" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+  });
+
+  test("surfaced badge URLs are not repeated in the Links section", async ({ page }) => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+    const gitlabUrl = "https://gitlab.com/test/repo/-/merge_requests/7";
+    const trackerUrl = "https://jira.example.com/browse/WEBDEV-4617";
+    const docsUrl = "https://example.com/docs";
+    const session = makeWorkingSession({
+      id: "detail-s4-dedupe",
+      slots: {
+        title: "Session with surfaced links",
+        links: [
+          { label: "github-pr", url: githubUrl },
+          { label: "docs", url: githubUrl },
+          { label: "gitlab-pr", url: gitlabUrl },
+          { label: "docs", url: gitlabUrl },
+          { label: "tracker", url: trackerUrl },
+          { label: "docs", url: trackerUrl },
+          { label: "docs", url: docsUrl },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          canMerge: false,
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${githubUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${gitlabUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${trackerUrl}"]`)).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "docs" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "gitlab mr" })).toHaveCount(0);
   });
 
   test("links open in new tab", async ({ page }) => {

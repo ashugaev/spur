@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
-import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
+import { readSession, writeSession } from "../../src/metadata.js";
+import type {
+  RuntimeInfo,
+  ServiceInstanceView,
+  SessionRecord,
+  SessionView,
+} from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -47,6 +53,14 @@ function popActiveContext(): (typeof activeContexts)[number] {
     throw new Error("Expected an active runtime context to clean up");
   }
   return current;
+}
+
+function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
+  const session = readSession(dataDir, sessionId);
+  if (!session) {
+    throw new Error(`Expected persisted session record for ${sessionId}`);
+  }
+  return session;
 }
 
 function baseConfig(
@@ -1802,17 +1816,17 @@ projects:
       title: "Investigate status bar links",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
-        { label: "github-pr", url: "https://github.com/org/repo/pull/9" },
+        { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
     expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("github pr ##9");
+    expect(statusRight).toContain("pr ##9");
     expect(statusRight).toContain(
       "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
     );
     expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]github pr ##9#[hyperlink=]",
+      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
     );
     expect(mouseBinding).toContain("MouseUp1StatusRight");
     expect(mouseBinding).toContain("open-link.js");
@@ -1820,6 +1834,107 @@ projects:
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
+  });
+
+  it("unlinks a generic pr slot before clearing the native GitHub PR binding in runtime flows", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-pr-unlink-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "pr-unlink.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "mixed pr unlink runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
+    expect(existsSync(helperPath)).toBe(true);
+
+    const githubPrUrl = "https://github.com/org/repo/pull/9";
+    const gitlabPrUrl = "https://gitlab.com/org/repo/-/merge_requests/7";
+    writeSession(context.dataDir, {
+      ...requireSessionRecord(context.dataDir, spawned.id),
+      pr: {
+        number: 9,
+        repo: "org/repo",
+        url: githubPrUrl,
+      },
+      slots: {
+        title: "Investigate mixed pr bindings",
+        links: [
+          { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+          { label: "pr", url: gitlabPrUrl },
+        ],
+      },
+    });
+
+    const mixedResult = JSON.parse(
+      (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
+    ) as SessionView;
+    const afterFirstUnlink = requireSessionRecord(context.dataDir, spawned.id);
+    const statusRightAfterFirstUnlink = await readTmuxOption(spawned.id, "status-right");
+
+    expect(mixedResult.pr).toEqual({
+      number: 9,
+      repo: "org/repo",
+      url: githubPrUrl,
+    });
+    expect(mixedResult.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+        { label: "pr", url: githubPrUrl },
+      ],
+    });
+    expect(afterFirstUnlink.pr).toEqual({
+      number: 9,
+      repo: "org/repo",
+      url: githubPrUrl,
+    });
+    expect(afterFirstUnlink.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(statusRightAfterFirstUnlink).toContain("tracker TASK-9");
+    expect(statusRightAfterFirstUnlink).toContain("pr ##9");
+
+    const nativeOnlyResult = JSON.parse(
+      (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
+    ) as SessionView;
+    const afterSecondUnlink = requireSessionRecord(context.dataDir, spawned.id);
+    const statusRightAfterSecondUnlink = await readTmuxOption(spawned.id, "status-right");
+
+    expect(nativeOnlyResult.pr).toBeUndefined();
+    expect(nativeOnlyResult.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(afterSecondUnlink.pr).toBeUndefined();
+    expect(afterSecondUnlink.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(statusRightAfterSecondUnlink).toContain("tracker TASK-9");
+    expect(statusRightAfterSecondUnlink).not.toContain("pr ##9");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {
