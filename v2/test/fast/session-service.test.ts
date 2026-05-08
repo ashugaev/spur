@@ -4338,57 +4338,33 @@ describe("SessionService", () => {
   });
 
   it("unlinks a generic pr slot before clearing the native GitHub PR binding", async () => {
-    readSessionMock
-      .mockReturnValueOnce({
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "hello",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:01:00.000Z",
-        pr: {
-          number: 9,
-          repo: "org/repo",
-          url: "https://github.com/org/repo/pull/9",
-        },
-        slots: {
-          title: "Existing title",
-          links: [
-            { label: "tracker", url: "https://tracker.example.com/1" },
-            { label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/7" },
-          ],
-        },
-      })
-      .mockReturnValueOnce({
-        id: "api-1",
-        project: "api",
-        agent: "claude",
-        prompt: "hello",
-        branch: "api-1",
-        worktree: true,
-        worktreePath: "/tmp/spur-worktrees/api/api-1",
-        tmuxSession: "api-1",
-        launchCommand: "claude --dangerously-skip-permissions",
-        status: "running",
-        createdAt: "2026-03-18T10:00:00.000Z",
-        updatedAt: "2026-03-18T10:01:00.000Z",
-        pr: {
-          number: 9,
-          repo: "org/repo",
-          url: "https://github.com/org/repo/pull/9",
-        },
-        slots: {
-          title: "Existing title",
-          links: [{ label: "tracker", url: "https://tracker.example.com/1" }],
-        },
-      });
-
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      pr: {
+        number: 9,
+        repo: "org/repo",
+        url: "https://github.com/org/repo/pull/9",
+      },
+      slots: {
+        title: "Existing title",
+        links: [
+          { label: "tracker", url: "https://tracker.example.com/1" },
+          { label: "pr", url: "https://gitlab.com/org/repo/-/merge_requests/7" },
+        ],
+      },
+    });
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
