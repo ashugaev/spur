@@ -42,12 +42,7 @@ const Spinner = () => (
 );
 
 const PlayIcon = () => (
-  <svg
-    aria-hidden="true"
-    className="h-4 w-4"
-    fill="currentColor"
-    viewBox="0 0 16 16"
-  >
+  <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
     <path d="M4 3.5v9l8-4.5-8-4.5Z" />
   </svg>
 );
@@ -170,9 +165,7 @@ export function VoiceControls({
     <div className={groupClassName ?? "flex items-center gap-1"}>
       <VoiceControlButton
         ariaLabel={
-          voice.retainedTakePlaying
-            ? "Stop failed voice playback"
-            : "Play failed voice recording"
+          voice.retainedTakePlaying ? "Stop failed voice playback" : "Play failed voice recording"
         }
         className={buttonClass}
         disabled={disabled}

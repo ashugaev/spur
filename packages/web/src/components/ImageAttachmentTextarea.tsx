@@ -140,9 +140,7 @@ export function ImageAttachmentTextarea({
           >
             <ImageIcon />
           </button>
-          {voice ? (
-            <VoiceControls className={TOOL_BUTTON_CLASS} voice={voice} />
-          ) : null}
+          {voice ? <VoiceControls className={TOOL_BUTTON_CLASS} voice={voice} /> : null}
         </div>
       </div>
     </div>

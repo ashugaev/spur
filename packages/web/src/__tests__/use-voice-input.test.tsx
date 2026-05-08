@@ -267,9 +267,7 @@ describe("useVoiceInput", () => {
   it("stopAndSend invokes callback with transcript and skips modal", async () => {
     buildFetch([{ text: "hello world" }]);
     const send = vi.fn();
-    const { result } = renderHook(() =>
-      useVoiceInput({ contextKey: "terminal:voice-session" }),
-    );
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
 
     await waitFor(() => expect(result.current.canUseVoice).toBe(true));
 
@@ -291,9 +289,7 @@ describe("useVoiceInput", () => {
   it("failed transcription persists the take across remount and retries the same send path", async () => {
     buildFetch([{ error: "boom", status: 400 }, { text: "recovered take" }]);
     const send = vi.fn();
-    const firstRender = renderHook(() =>
-      useVoiceInput({ contextKey: "terminal:voice-session" }),
-    );
+    const firstRender = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
 
     await waitFor(() => expect(firstRender.result.current.canUseVoice).toBe(true));
 
@@ -312,9 +308,7 @@ describe("useVoiceInput", () => {
 
     firstRender.unmount();
 
-    const secondRender = renderHook(() =>
-      useVoiceInput({ contextKey: "terminal:voice-session" }),
-    );
+    const secondRender = renderHook(() => useVoiceInput({ contextKey: "terminal:voice-session" }));
 
     await waitFor(() => expect(secondRender.result.current.hasRetainedTake).toBe(true));
 
@@ -330,9 +324,7 @@ describe("useVoiceInput", () => {
   it("successful retry clears the retained take before a later send failure", async () => {
     buildFetch([{ text: "recovered take" }]);
     fakeIndexedDb.seed("terminal:send-failure", "send");
-    const { result } = renderHook(() =>
-      useVoiceInput({ contextKey: "terminal:send-failure" }),
-    );
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:send-failure" }));
 
     await waitFor(() => expect(result.current.hasRetainedTake).toBe(true));
 
@@ -349,9 +341,7 @@ describe("useVoiceInput", () => {
   it("retrying a retained modal take opens the confirm modal", async () => {
     buildFetch([{ text: "modal path" }]);
     fakeIndexedDb.seed("terminal:modal-path", "modal");
-    const { result } = renderHook(() =>
-      useVoiceInput({ contextKey: "terminal:modal-path" }),
-    );
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:modal-path" }));
 
     await waitFor(() => expect(result.current.hasRetainedTake).toBe(true));
 
