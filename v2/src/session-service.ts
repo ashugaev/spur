@@ -1960,7 +1960,7 @@ export class SessionService {
         kind: "spawn_attachment",
         metadata: { source: "spawn" },
       });
-      this.recordTextInput(sessionId, {
+      appendDedicatedTextInput(this.config.dataDir, sessionId, {
         kind: options?.promptKind ?? "spawn_prompt",
         text: prompt,
         metadata: {
@@ -2342,7 +2342,7 @@ export class SessionService {
         kind: "spawn_attachment",
         metadata: { source: "spawn_background" },
       });
-      this.recordTextInput(sessionId, {
+      appendDedicatedTextInput(this.config.dataDir, sessionId, {
         kind: "spawn_prompt",
         text: prompt,
         metadata: { source: "spawn_background" },
@@ -2808,7 +2808,7 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
     const finalMessage = this.prepareSendMessage(session, request);
-    this.recordTextInput(sessionId, {
+    appendDedicatedTextInput(this.config.dataDir, sessionId, {
       kind: "send_message",
       text: typeof request.message === "string" ? request.message : "",
       metadata: { source: request.queue === false ? "send_direct" : "send" },
@@ -2921,21 +2921,10 @@ export class SessionService {
     }
   }
 
-  private recordTextInput(
-    sessionId: string,
-    input: {
-      kind: DedicatedTextInputKind;
-      text: string;
-      metadata?: DedicatedInputMetadata;
-    },
-  ): void {
-    appendDedicatedTextInput(this.config.dataDir, sessionId, input);
-  }
-
   private storeImageAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
-    dedicatedInput?: {
+    dedicatedInput: {
       kind: DedicatedAttachmentInputKind;
       metadata?: DedicatedInputMetadata;
     },
@@ -2973,14 +2962,12 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
-      if (dedicatedInput) {
-        appendDedicatedAttachmentInput(this.config.dataDir, sessionId, {
-          kind: dedicatedInput.kind,
-          sourcePath: filePath,
-          name: att.name,
-          ...(dedicatedInput.metadata ? { metadata: dedicatedInput.metadata } : {}),
-        });
-      }
+      appendDedicatedAttachmentInput(this.config.dataDir, sessionId, {
+        kind: dedicatedInput.kind,
+        sourcePath: filePath,
+        name: att.name,
+        ...(dedicatedInput.metadata ? { metadata: dedicatedInput.metadata } : {}),
+      });
       stored.push({ id: filename, path: filePath });
     }
     return stored;

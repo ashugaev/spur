@@ -143,6 +143,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `POST /sessions/background` returns the placeholder session immediately, closes the web spawn modal on ack, and leaves the modal open when the daemon/API ack fails.
 - `spawn --json` can also start a shared workspace session through the built CLI, keep the project path intact on kill, and reject `--shared --branch <name>` for a shared repo.
 - `send --json` reaches the same `tmux`-backed session and the pane keeps both the initial prompt and the follow-up message.
+- Dedicated storage is available inside the live `tmux` session, records the runtime spawn prompt, records a runtime send prompt, and copies accepted send attachments under `dataDir/dedicated-storage/<sessionId>`.
 - `send --json` queues while the fake agent is busy and delivers the queued message before the next pipeline step.
 - `pause --json` stops runtime, keeps the worktree, keeps the session visible in `list --json`, and a later `send --json` can resume it in place.
 - `complete --json` stops runtime, removes the owned worktree, persists `completed`, and disappears from `list --json`.

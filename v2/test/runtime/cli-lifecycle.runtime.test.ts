@@ -63,6 +63,38 @@ function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord
   return session;
 }
 
+function parseJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSONL record: ${message}`, { cause: error });
+  }
+}
+
+async function readDedicatedInputRecords(dataDir: string, sessionId: string): Promise<unknown[]> {
+  const file = join(dataDir, "dedicated-storage", sessionId, "inputs.jsonl");
+  if (!existsSync(file)) {
+    return [];
+  }
+  return (await readFile(file, "utf8")).trim().split("\n").filter(Boolean).map(parseJsonLine);
+}
+
+function isSendAttachmentRecord(
+  value: unknown,
+): value is { kind: "send_attachment"; name: string; relativePath: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "send_attachment" &&
+    "name" in value &&
+    typeof value.name === "string" &&
+    "relativePath" in value &&
+    typeof value.relativePath === "string"
+  );
+}
+
 function baseConfig(
   context: RuntimeTestContext,
   sessionPrefix: string,
@@ -1520,6 +1552,102 @@ projects:
     expect(listed).toEqual([]);
     expect(killed.worktree).toBe(false);
     expect(existsSync(context.repoDir)).toBe(true);
+  });
+
+  it("persists dedicated storage records for spawn and send with runtime attachments", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-dedicated-storage-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "dedicated-storage.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        project: "api",
+        prompt: "dedicated spawn prompt",
+        agent: "claude",
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("dedicated spawn prompt"),
+    });
+
+    const dedicatedDir = join(context.dataDir, "dedicated-storage", spawned.id);
+    const tmuxEnv = await execTmux([
+      "show-environment",
+      "-t",
+      spawned.id,
+      "SPUR_DEDICATED_STORAGE_DIR",
+    ]);
+    expect(tmuxEnv.stdout.trim()).toBe(`SPUR_DEDICATED_STORAGE_DIR=${dedicatedDir}`);
+
+    await context.fetchJson<SessionView>(`/sessions/${spawned.id}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "dedicated send prompt",
+        queue: false,
+        interrupt: true,
+        attachments: [
+          {
+            name: "runtime-send.png",
+            data: Buffer.from("send-bytes").toString("base64"),
+          },
+        ],
+      }),
+    });
+
+    await pollUntil(async () => captureTmuxPane(spawned.id), {
+      timeoutMs: 15_000,
+      accept: (value) => value.includes("dedicated send prompt"),
+    });
+
+    const records = await readDedicatedInputRecords(context.dataDir, spawned.id);
+    expect(records).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "spawn_prompt",
+        text: "dedicated spawn prompt",
+        metadata: { source: "spawn" },
+      }),
+      expect.objectContaining({
+        type: "attachment",
+        kind: "send_attachment",
+        name: "runtime-send.png",
+        size: "send-bytes".length,
+        metadata: { source: "send" },
+      }),
+      expect.objectContaining({
+        type: "text",
+        kind: "send_message",
+        text: "dedicated send prompt",
+        metadata: { source: "send_direct" },
+      }),
+    ]);
+
+    const attachmentRecord = records.find(isSendAttachmentRecord);
+    expect(attachmentRecord?.name).toBe("runtime-send.png");
+    if (!attachmentRecord || attachmentRecord.name !== "runtime-send.png") {
+      throw new Error("Expected dedicated send attachment record");
+    }
+    await expect(readFile(join(dedicatedDir, attachmentRecord.relativePath), "utf8")).resolves.toBe(
+      "send-bytes",
+    );
   });
 
   it("pauses, resumes, and completes a worktree session through the built CLI", async () => {
