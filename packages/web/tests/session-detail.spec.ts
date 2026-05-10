@@ -1388,7 +1388,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
-  test("terminal header shows session title and preserves sidecar suffix", async ({ page }) => {
+  test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s6-title",
       slots: { title: "Header title from slot", links: [] },
@@ -1407,9 +1407,83 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
     const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    const header = terminalDialog.locator(":scope > div > div").first();
     await expect(terminalDialog).toBeVisible();
     await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
-    await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+    await expect(header.locator(":scope > div:nth-child(2) > div:nth-child(2)")).toContainText(
+      "isolated-ui",
+    );
+  });
+
+  test("terminal header wraps long sidecar titles without overlapping controls at desktop or 320px", async ({
+    page,
+  }) => {
+    const title = "Terminal header title uses available space and wraps without clipping";
+    const session = makeWorkingSession({
+      id: "detail-s6-wrap",
+      project: "Terminal header project name uses available space and wraps without clipping",
+      slots: { title, links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    const overlaps = (
+      a: { x: number; y: number; width: number; height: number },
+      b: { x: number; y: number; width: number; height: number },
+    ) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 320, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+      const terminalDialog = page.getByRole("dialog", {
+        name: new RegExp(`Terminal ${session.id}`),
+      });
+      await expect(terminalDialog).toBeVisible();
+
+      const header = terminalDialog.locator(":scope > div > div").first();
+      const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
+      const statusText = terminalDialog.getByText("Connected", { exact: true });
+      const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
+
+      await expect(titleText).toContainText("isolated-ui");
+
+      const [titleBox, statusBox, closeBox] = await Promise.all([
+        titleText.boundingBox(),
+        statusText.boundingBox(),
+        closeButton.boundingBox(),
+      ]);
+
+      expect(titleBox).not.toBeNull();
+      expect(statusBox).not.toBeNull();
+      expect(closeBox).not.toBeNull();
+      if (!titleBox || !statusBox || !closeBox) {
+        throw new Error("Expected terminal header title and controls to have bounding boxes");
+      }
+
+      expect(overlaps(titleBox, statusBox)).toBe(false);
+      expect(overlaps(titleBox, closeBox)).toBe(false);
+
+      const headerMetrics = await header.evaluate((element) => {
+        const headerElement = element as HTMLDivElement;
+        return {
+          clientWidth: headerElement.clientWidth,
+          scrollWidth: headerElement.scrollWidth,
+        };
+      });
+      expect(headerMetrics.scrollWidth).toBeLessThanOrEqual(headerMetrics.clientWidth + 1);
+    }
   });
 
   test("URL gets terminal=<id> when terminal opened, removed when closed", async ({ page }) => {

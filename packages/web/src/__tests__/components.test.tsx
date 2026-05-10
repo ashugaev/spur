@@ -225,7 +225,7 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
-      expect(screen.getByText("Direct terminal title API • claude")).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
     });
 
     expect(window.location.search).toContain("terminal=api-a1");

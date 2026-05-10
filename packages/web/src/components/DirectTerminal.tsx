@@ -606,38 +606,48 @@ export function DirectTerminal({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
-      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
-        <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
+      <div
+        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]"
+        data-testid="direct-terminal-header"
+      >
+        <div className={cn("row-span-2 mt-1 h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
         <div className="min-w-0">
-          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
+          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)]">
             {label ?? sessionId}
           </div>
           {title ? (
-            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
+            <div
+              className="break-words whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)]"
+              data-testid="direct-terminal-header-title"
+            >
+              {title}
+            </div>
           ) : null}
         </div>
-        <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-          {statusText}
-        </div>
-        {onClose ? (
-          <button
-            aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-span-2 sm:row-start-1 sm:pl-2">
+          <div className="text-right text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+            {statusText}
+          </div>
+          {onClose ? (
+            <button
+              aria-label="Close terminal"
+              className="inline-flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
             >
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
-        ) : null}
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 p-1.5">

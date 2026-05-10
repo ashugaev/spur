@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { DirectTerminal } from "@/components/DirectTerminal";
+import { getSessionTitle } from "@/lib/format";
 import type { DashboardSession } from "@/lib/types";
 
 interface TerminalModalProps {
@@ -20,9 +21,10 @@ function normalizeTitleSuffix(titleSuffix?: string): string | undefined {
 
 function buildTerminalTitle(session: DashboardSession, titleSuffix?: string): string | undefined {
   const normalizedTitleSuffix = normalizeTitleSuffix(titleSuffix);
+  const sessionTitle = getSessionTitle(session);
 
-  if (session.title) {
-    return normalizedTitleSuffix ? `${session.title} • ${normalizedTitleSuffix}` : session.title;
+  if (sessionTitle) {
+    return normalizedTitleSuffix ? `${sessionTitle} • ${normalizedTitleSuffix}` : sessionTitle;
   }
 
   return `${session.projectName} • ${normalizedTitleSuffix ?? session.agent}`;

@@ -957,8 +957,8 @@ describe("SessionDetail voice input", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1--")).toBeInTheDocument();
-      expect(screen.getByText("Direct terminal title api • claude")).toBeInTheDocument();
-      expect(screen.queryByText("Direct terminal title api • ")).not.toBeInTheDocument();
+      expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
+      expect(screen.queryByText("Direct terminal title Fix auth • ")).not.toBeInTheDocument();
     });
   });
 
