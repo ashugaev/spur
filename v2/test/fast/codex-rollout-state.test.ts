@@ -14,6 +14,14 @@ const INTERRUPTED_TAIL_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/interrupted-spur-00b0-tail.jsonl",
 );
+const WORKING_CURRENT_SESSION_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/working-spur-67c0-rollout-tail.jsonl",
+);
+const WORKING_BB_F95E_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/working-bb-f95e-active-tail.jsonl",
+);
 
 const tempDirs: string[] = [];
 
@@ -36,6 +44,32 @@ async function makeSessionsDir(content: string, filename = "rollout-test.jsonl")
 }
 
 describe("readCodexRolloutState", () => {
+  it("reads working from the current Codex rollout tail after an older interrupted turn", async () => {
+    const content = await readFile(WORKING_CURRENT_SESSION_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-working-current.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toMatchObject({
+      state: "working",
+      reason: "function_call",
+      timestamp: "2026-05-10T09:34:55.113Z",
+    });
+  });
+
+  it("reads working from a Codex active turn after an older task_complete marker", async () => {
+    const content = await readFile(WORKING_BB_F95E_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-working-bb-f95e.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toMatchObject({
+      state: "working",
+      reason: "function_call_output",
+      timestamp: "2026-05-10T09:26:55.521Z",
+    });
+  });
+
   it("reads waiting from a real task_complete rollout tail", async () => {
     const content = await readFile(STALE_WORKING_FIXTURE, "utf8");
     const sessionsDir = await makeSessionsDir(content, "rollout-stale.jsonl");
