@@ -480,7 +480,9 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     await expect(trackerLink).toHaveCount(0);
   });
 
-  test("session with PR link keeps row actions but does not render a PR badge", async ({ page }) => {
+  test("session with PR link keeps row actions but does not render a PR badge", async ({
+    page,
+  }) => {
     const prUrl = "https://github.com/test/repo/pull/42001";
     const session = makeSessionWithPR({
       id: "pr-row-1",

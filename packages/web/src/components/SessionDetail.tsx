@@ -1036,7 +1036,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const { surfacedLinks, visibleLinks } = splitSessionLinks(session?.links ?? [], sidecarLinkLabels);
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(
+    session?.links ?? [],
+    sidecarLinkLabels,
+  );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {
