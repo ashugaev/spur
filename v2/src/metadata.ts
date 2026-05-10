@@ -7,9 +7,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type {
-  GitHubSignal,
+  ReviewProviderId,
+  ReviewSignal,
   RuntimeLogCursorState,
   SessionQueuedMessagesState,
   ServiceInstanceRecord,
@@ -23,8 +24,17 @@ function sessionFilePath(dataDir: string, projectId: string, sessionId: string):
   return join(dataDir, "sessions", projectId, `${sessionId}.json`);
 }
 
-function githubSnapshotDir(dataDir: string, projectId: string, sourceId: string): string {
-  return join(dataDir, "source-state", "github", projectId, sourceId);
+function sessionIndexFilePath(dataDir: string): string {
+  return join(dataDir, "sessions", ".index.json");
+}
+
+function reviewSnapshotDir(
+  dataDir: string,
+  providerId: ReviewProviderId,
+  projectId: string,
+  sourceId: string,
+): string {
+  return join(dataDir, "source-state", providerId, projectId, sourceId);
 }
 
 function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
@@ -60,13 +70,14 @@ function serviceSourceStateFilePath(
   return join(serviceSourceStateDir(dataDir, projectId, sourceId), `${sessionId}.json`);
 }
 
-function githubSnapshotFilePath(
+function reviewSnapshotFilePath(
   dataDir: string,
+  providerId: ReviewProviderId,
   projectId: string,
   sourceId: string,
   sessionId: string,
 ): string {
-  return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.json`);
+  return join(reviewSnapshotDir(dataDir, providerId, projectId, sourceId), `${sessionId}.json`);
 }
 
 function githubMergeConflictRestoreFilePath(
@@ -75,21 +86,46 @@ function githubMergeConflictRestoreFilePath(
   sourceId: string,
   sessionId: string,
 ): string {
-  return join(githubSnapshotDir(dataDir, projectId, sourceId), `${sessionId}.merge-conflict`);
+  return join(
+    reviewSnapshotDir(dataDir, "github", projectId, sourceId),
+    `${sessionId}.merge-conflict`,
+  );
 }
 
-function hasLegacyNativePrLink(session: SessionRecord): boolean {
+function hasLegacyPrSlotAlias(session: SessionRecord): boolean {
   return (
     session.slots?.links.some(
-      (link) => link.label === "pr" && parseSessionPrBinding(link.url) !== null,
+      (link) =>
+        link.label === "github-pr" ||
+        link.label === "github_pr" ||
+        (link.label === "pr" && parseSessionPrBinding(link.url) !== null),
     ) ?? false
   );
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isSessionRecord(value: unknown): value is SessionRecord {
+  return isRecord(value) && typeof value["id"] === "string" && typeof value["project"] === "string";
+}
+
 function readSessionFile(path: string): SessionRecord {
-  const rawSession = JSON.parse(readFileSync(path, "utf-8")) as SessionRecord;
+  let rawSession: unknown;
+  try {
+    rawSession = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid session metadata JSON at ${path}: ${message}`, {
+      cause: error,
+    });
+  }
+  if (!isSessionRecord(rawSession)) {
+    throw new Error(`Invalid session metadata shape at ${path}`);
+  }
   const normalizedSession = normalizeSessionRecord(rawSession);
-  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyNativePrLink(rawSession)) {
+  if ((!rawSession.pr && normalizedSession.pr) || hasLegacyPrSlotAlias(rawSession)) {
     writeJsonFile(path, normalizedSession);
   }
   return normalizedSession;
@@ -107,19 +143,73 @@ function readRuntimeLogCursorFile(path: string): RuntimeLogCursorState {
   return JSON.parse(readFileSync(path, "utf-8")) as RuntimeLogCursorState;
 }
 
+function readSessionIndex(dataDir: string): Record<string, string> {
+  const path = sessionIndexFilePath(dataDir);
+  if (!existsSync(path)) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!isRecord(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed).filter(
+        (entry): entry is [string, string] =>
+          typeof entry[0] === "string" && typeof entry[1] === "string",
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeSessionIndexEntry(dataDir: string, sessionId: string, filePath: string): void {
+  const index = readSessionIndex(dataDir);
+  index[sessionId] = relative(dataDir, filePath);
+  writeJsonFile(sessionIndexFilePath(dataDir), index);
+}
+
+function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
+  const index = readSessionIndex(dataDir);
+  if (!(sessionId in index)) {
+    return;
+  }
+  const { [sessionId]: _removed, ...nextIndex } = index;
+  writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+}
+
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
+  const indexedPath = readSessionIndex(dataDir)[sessionId];
+  if (indexedPath) {
+    const resolvedPath = join(dataDir, indexedPath);
+    if (existsSync(resolvedPath)) {
+      return resolvedPath;
+    }
+  }
+
   const rootDir = join(dataDir, "sessions");
-  if (!existsSync(rootDir)) return null;
+  if (!existsSync(rootDir)) {
+    if (indexedPath) {
+      deleteSessionIndexEntry(dataDir, sessionId);
+    }
+    return null;
+  }
 
   const fileName = `${sessionId}.json`;
   for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const path = join(rootDir, entry.name, fileName);
     if (existsSync(path)) {
+      writeSessionIndexEntry(dataDir, sessionId, path);
       return path;
     }
   }
 
+  if (indexedPath) {
+    deleteSessionIndexEntry(dataDir, sessionId);
+  }
   return null;
 }
 
@@ -130,9 +220,9 @@ function writeJsonFile(path: string, value: unknown): void {
   renameSync(tmpPath, path);
 }
 
-function parseGitHubSignals(path: string): Map<string, GitHubSignal> {
-  const signals = JSON.parse(readFileSync(path, "utf-8")) as GitHubSignal[];
-  return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, GitHubSignal]));
+function parseReviewSignals(path: string): Map<string, ReviewSignal> {
+  const signals = JSON.parse(readFileSync(path, "utf-8")) as ReviewSignal[];
+  return new Map(signals.map((signal) => [signal.key, signal] satisfies [string, ReviewSignal]));
 }
 
 function normalizePipelineState(pipeline: SessionPipelineState): SessionPipelineState {
@@ -215,10 +305,9 @@ function normalizeServiceInstanceRecord(service: ServiceInstanceRecord): Service
 }
 
 export function writeSession(dataDir: string, session: SessionRecord): void {
-  writeJsonFile(
-    sessionFilePath(dataDir, session.project, session.id),
-    normalizeSessionRecord(session),
-  );
+  const path = sessionFilePath(dataDir, session.project, session.id);
+  writeJsonFile(path, normalizeSessionRecord(session));
+  writeSessionIndexEntry(dataDir, session.id, path);
 }
 
 export function listSessions(dataDir: string): SessionRecord[] {
@@ -356,21 +445,66 @@ export function listRuntimeLogCursorKeys(
   return keys;
 }
 
+export function readReviewSourceSnapshots(
+  dataDir: string,
+  providerId: ReviewProviderId,
+  projectId: string,
+  sourceId: string,
+): Map<string, Map<string, ReviewSignal>> {
+  const dir = reviewSnapshotDir(dataDir, providerId, projectId, sourceId);
+  if (!existsSync(dir)) return new Map();
+
+  const snapshots = new Map<string, Map<string, ReviewSignal>>();
+  for (const fileName of readdirSync(dir)) {
+    if (!fileName.endsWith(".json")) continue;
+    const sessionId = fileName.slice(0, -".json".length);
+    snapshots.set(sessionId, parseReviewSignals(join(dir, fileName)));
+  }
+  return snapshots;
+}
+
+export function readReviewSourceSnapshot(
+  dataDir: string,
+  providerId: ReviewProviderId,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): Map<string, ReviewSignal> | null {
+  const path = reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId);
+  return existsSync(path) ? parseReviewSignals(path) : null;
+}
+
+export function writeReviewSourceSnapshot(
+  dataDir: string,
+  providerId: ReviewProviderId,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+  snapshot: Map<string, ReviewSignal>,
+): void {
+  writeJsonFile(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), [
+    ...snapshot.values(),
+  ]);
+}
+
+export function deleteReviewSourceSnapshot(
+  dataDir: string,
+  providerId: ReviewProviderId,
+  projectId: string,
+  sourceId: string,
+  sessionId: string,
+): void {
+  rmSync(reviewSnapshotFilePath(dataDir, providerId, projectId, sourceId, sessionId), {
+    force: true,
+  });
+}
+
 export function readGitHubSourceSnapshots(
   dataDir: string,
   projectId: string,
   sourceId: string,
-): Map<string, Map<string, GitHubSignal>> {
-  const dir = githubSnapshotDir(dataDir, projectId, sourceId);
-  if (!existsSync(dir)) return new Map();
-
-  const snapshots = new Map<string, Map<string, GitHubSignal>>();
-  for (const fileName of readdirSync(dir)) {
-    if (!fileName.endsWith(".json")) continue;
-    const sessionId = fileName.slice(0, -".json".length);
-    snapshots.set(sessionId, parseGitHubSignals(join(dir, fileName)));
-  }
-  return snapshots;
+): Map<string, Map<string, ReviewSignal>> {
+  return readReviewSourceSnapshots(dataDir, "github", projectId, sourceId);
 }
 
 export function readGitHubSourceSnapshot(
@@ -378,9 +512,8 @@ export function readGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-): Map<string, GitHubSignal> | null {
-  const path = githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId);
-  return existsSync(path) ? parseGitHubSignals(path) : null;
+): Map<string, ReviewSignal> | null {
+  return readReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
 export function writeGitHubSourceSnapshot(
@@ -388,11 +521,9 @@ export function writeGitHubSourceSnapshot(
   projectId: string,
   sourceId: string,
   sessionId: string,
-  snapshot: Map<string, GitHubSignal>,
+  snapshot: Map<string, ReviewSignal>,
 ): void {
-  writeJsonFile(githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId), [
-    ...snapshot.values(),
-  ]);
+  writeReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId, snapshot);
 }
 
 export function deleteGitHubSourceSnapshot(
@@ -401,9 +532,7 @@ export function deleteGitHubSourceSnapshot(
   sourceId: string,
   sessionId: string,
 ): void {
-  rmSync(githubSnapshotFilePath(dataDir, projectId, sourceId, sessionId), {
-    force: true,
-  });
+  deleteReviewSourceSnapshot(dataDir, "github", projectId, sourceId, sessionId);
 }
 
 export function hasGitHubMergeConflictRestoreReplay(

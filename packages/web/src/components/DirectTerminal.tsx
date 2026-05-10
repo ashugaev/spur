@@ -55,6 +55,32 @@ function normalizeTerminalPort(value: string | number | undefined, fallback: str
   return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
 }
 
+function StopSquareIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M4 20h4l10-10-4-4L4 16v4z" />
+      <path d="M14 6l4 4" />
+    </svg>
+  );
+}
+
 function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
   if (!agentUsesBracketedPaste(agent)) {
     return [`${text}\r`];
@@ -752,7 +778,34 @@ export function DirectTerminal({
               </svg>
             </button>
           </div>
-          <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          {voice.recording ? (
+            <div className="ml-2 flex items-center gap-1">
+              <button
+                aria-label="Edit voice transcript"
+                className={cn(
+                  terminalControlIconButtonClass,
+                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                )}
+                onClick={voice.toggleRecording}
+                type="button"
+              >
+                <PencilIcon />
+              </button>
+              <button
+                aria-label="Stop and send voice"
+                className={cn(
+                  terminalControlIconButtonClass,
+                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                )}
+                onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                type="button"
+              >
+                <StopSquareIcon />
+              </button>
+            </div>
+          ) : (
+            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          )}
         </div>
       </div>
       <VoiceConfirmModal

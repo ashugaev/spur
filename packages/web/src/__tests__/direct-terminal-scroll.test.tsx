@@ -469,10 +469,10 @@ describe("DirectTerminal scroll integration", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Start voice recording" }));
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Stop voice recording" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Edit voice transcript" })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop voice recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
     });
@@ -481,8 +481,17 @@ describe("DirectTerminal scroll integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Insert" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Failed to insert transcription")).toBeInTheDocument();
+      expect(screen.getAllByText("Failed to insert transcription")).toHaveLength(2);
     });
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
+  });
+  it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
+    await mountTerminal("test-terminal-voice-hint");
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
   });
 });

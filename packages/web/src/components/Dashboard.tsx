@@ -9,7 +9,7 @@ import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { INPUT_CLASS } from "@/design/classes";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
@@ -21,6 +21,11 @@ import {
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
 import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -36,6 +41,7 @@ import {
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
@@ -63,7 +69,7 @@ function insertTextAtCursor(
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
-  if (!raw) return new Set();
+  if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -202,18 +208,6 @@ function buildSpawnOverrides(
   return undefined;
 }
 
-function upsertSession(
-  sessions: SpurSessionView[],
-  nextSession: SpurSessionView,
-  activeProjectId: string,
-): SpurSessionView[] {
-  const filtered = sessions.filter((session) => session.id !== nextSession.id);
-  if (activeProjectId && nextSession.project !== activeProjectId) {
-    return filtered;
-  }
-  return [nextSession, ...filtered];
-}
-
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
@@ -281,7 +275,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions", projectId] as const;
+  const sessionsQueryKey = ["sessions"] as const;
   const {
     data,
     isPending,
@@ -289,8 +283,7 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
@@ -327,10 +320,16 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
+  const projectSessions = useMemo(
+    () =>
+      projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions,
+    [allSessions, projectId],
+  );
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return allSessions;
-    return allSessions.filter(
+    if (!q) return projectSessions;
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -338,7 +337,7 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [allSessions, searchQuery]);
+  }, [projectSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -532,9 +531,11 @@ export function Dashboard() {
       spawnHistory.saveEntry(nextPrompt);
       const session = (await response.json()) as SpurSessionView;
       queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
-        const currentSessions = current?.sessions ?? [];
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== session.id,
+        );
         return {
-          sessions: upsertSession(currentSessions, session, nextProjectId),
+          sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
@@ -547,7 +548,6 @@ export function Dashboard() {
       setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      syncProjectFilter(nextProjectId);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
@@ -718,7 +718,20 @@ export function Dashboard() {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div
+              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+              onKeyDown={(event) => {
+                if (isVoiceToggleHotkey(event)) {
+                  event.preventDefault();
+                  voice.toggleRecording();
+                  return;
+                }
+                if (isPrimarySubmitHotkey(event)) {
+                  event.preventDefault();
+                  void handleSpawn();
+                }
+              }}
+            >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -835,15 +848,22 @@ export function Dashboard() {
                   onAddFiles={addSpawnImages}
                   onChange={setSpawnPrompt}
                   onKeyDown={(event) => {
-                    if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      voice.toggleRecording();
+                      return;
+                    }
+                    if (isPrimarySubmitHotkey(event)) {
+                      event.preventDefault();
                       void handleSpawn();
+                    }
                   }}
                   onRemoveAttachment={(index) =>
                     setSpawnAttachments((current) =>
                       current.filter((_, currentIndex) => currentIndex !== index),
                     )
                   }
-                  placeholder="Prompt for the new session..."
+                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
                   textareaRef={spawnPromptRef}
                   value={spawnPrompt}
                   voice={voice}
@@ -881,7 +901,7 @@ export function Dashboard() {
                           aria-hidden="true"
                           className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
                         >
-                          CMD + ⏎
+                          {PRIMARY_SUBMIT_HINT}
                         </span>
                       ) : null}
                     </button>

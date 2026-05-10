@@ -1,9 +1,16 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+  VOICE_TOGGLE_HINT,
+} from "@/lib/submit-hotkeys";
 
 const MicIcon = () => (
   <svg
@@ -50,12 +57,16 @@ export function VoiceButton({ voice, className }: { voice: UseVoiceInput; classN
   const baseClass =
     className ??
     `absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center border ${active ? "" : IDLE_STYLE}`;
+  const label = voice.recording ? "Stop voice recording" : "Start voice recording";
+
   return (
     <button
-      aria-label={voice.recording ? "Stop voice recording" : "Start voice recording"}
+      aria-label={label}
+      aria-keyshortcuts="Meta+."
       className={`${baseClass} transition ${active ? ACTIVE_STYLE : ""} disabled:cursor-not-allowed disabled:opacity-50`}
-      disabled={voice.voiceBusy === "transcribing"}
+      disabled={voice.voiceBusy === "starting" || voice.voiceBusy === "transcribing"}
       onClick={voice.toggleRecording}
+      title={`${label} (${VOICE_TOGGLE_HINT})`}
       type="button"
     >
       <MicOrSpinner voice={voice} />
@@ -66,8 +77,15 @@ export function VoiceButton({ voice, className }: { voice: UseVoiceInput; classN
 export function VoiceStatusHint({ voice }: { voice: UseVoiceInput }) {
   if (voice.voiceBusy === "starting") return <>Starting microphone...</>;
   if (voice.voiceBusy === "transcribing") return <>Transcribing audio...</>;
-  if (voice.recording) return <>Recording... click the mic to stop</>;
+  if (voice.recording) return <>Recording... {VOICE_TOGGLE_HINT} to stop</>;
   return null;
+}
+
+export function voicePlaceholder(base: string, voice: UseVoiceInput) {
+  if (voice.canUseVoice && !voice.recording && !voice.voiceBusy) {
+    return `${base} Voice ${VOICE_TOGGLE_HINT}`;
+  }
+  return base;
 }
 
 export function VoiceConfirmModal({
@@ -79,12 +97,37 @@ export function VoiceConfirmModal({
   onInsert: (text: string) => void;
   historyEntries?: InputHistoryEntry[];
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (voice.voiceModalOpen) {
+      textareaRef.current?.focus();
+    }
+  }, [voice.voiceModalOpen]);
+
   if (!voice.voiceModalOpen) return null;
+
   return (
     <div
       aria-label="Confirm voice input"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)] p-4"
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          voice.dismissModal();
+          return;
+        }
+        if (isVoiceToggleHotkey(event)) {
+          event.preventDefault();
+          voice.toggleRecording();
+          return;
+        }
+        if (isPrimarySubmitHotkey(event)) {
+          event.preventDefault();
+          void voice.confirmDraft(onInsert);
+        }
+      }}
       role="dialog"
     >
       <div className="w-full max-w-2xl border border-[var(--color-border-default)] bg-[var(--color-bg-base)]">
@@ -93,9 +136,11 @@ export function VoiceConfirmModal({
             Confirm voice input
           </span>
           <button
-            type="button"
+            aria-label="Close voice draft"
             className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
             onClick={voice.dismissModal}
+            title="Close voice draft"
+            type="button"
           >
             ✕
           </button>
@@ -108,13 +153,15 @@ export function VoiceConfirmModal({
             <textarea
               className={`min-h-40 w-full resize-y ${INPUT_CLASS}`}
               onChange={(event) => voice.setVoiceDraft(event.target.value)}
+              placeholder={voicePlaceholder("Review the transcription before inserting...", voice)}
+              ref={textareaRef}
               value={voice.voiceDraft}
             />
             <VoiceButton
-              voice={voice}
               className={`absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center border ${
                 voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
               }`}
+              voice={voice}
             />
           </div>
           {(voice.recording || voice.voiceBusy) && (
@@ -122,22 +169,33 @@ export function VoiceConfirmModal({
               <VoiceStatusHint voice={voice} />
             </p>
           )}
+          {voice.voiceError ? (
+            <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-[var(--color-chip-error-text)]">
+              {voice.voiceError}
+            </div>
+          ) : null}
           <div className="flex items-center justify-end gap-2">
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
-              type="button"
               className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
               onClick={voice.dismissModal}
+              type="button"
             >
               Cancel
             </button>
             <button
-              type="button"
-              className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+              className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
               disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
-              onClick={() => voice.confirmDraft(onInsert)}
+              onClick={() => void voice.confirmDraft(onInsert)}
+              type="button"
             >
-              Insert
+              <span>Insert</span>
+              <span
+                aria-hidden="true"
+                className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-inverse)]/72"
+              >
+                {PRIMARY_SUBMIT_HINT}
+              </span>
             </button>
           </div>
         </div>

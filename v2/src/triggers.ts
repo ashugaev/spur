@@ -419,7 +419,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
         merged,
       },
     });
-    if (eventName === "github:ci_failed") {
+    if (eventName.endsWith(":ci_failed")) {
       ensureRetryState(queueKey, trigger.send.interrupt);
     }
     scheduleFlushLoop();

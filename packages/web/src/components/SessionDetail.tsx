@@ -8,7 +8,7 @@ import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
-import { VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
@@ -19,7 +19,7 @@ import {
   getSessionTitle,
   truncateMiddle,
 } from "@/lib/format";
-import { isGitHubPrLinkLabel } from "@/lib/link-icons";
+import { isReviewLinkLabel, reviewProviderFromUrl } from "@/lib/link-icons";
 import {
   buildDashboardPath,
   buildSessionPath,
@@ -31,6 +31,11 @@ import {
   imageAttachmentsFromFiles,
   type ImageAttachment,
 } from "@/lib/image-attachments";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   canComplete,
   canPause,
@@ -45,8 +50,13 @@ import {
   type SpurSessionView,
 } from "@/lib/types";
 
-function displayLinkLabel(label: string): string {
-  return isGitHubPrLinkLabel(label) ? "github pr" : label;
+function displayLinkLabel(label: string, url: string): string {
+  if (label === "github-pr") return "github pr";
+  if (label === "gitlab-pr") return "gitlab mr";
+  if (label === "pr") {
+    return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
+  }
+  return label;
 }
 
 function PlayIcon() {
@@ -917,7 +927,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
 
   const doSend = async (options?: { queue?: boolean; interrupt?: boolean }) => {
     const trimmed = message.trim();
-    if (!trimmed && attachments.length === 0) return;
+    if (busyAction !== null || (!trimmed && attachments.length === 0)) return;
     const encoded = encodeImageAttachments(attachments);
     const body: Record<string, unknown> = { message: trimmed };
     if (encoded.length > 0) body.attachments = encoded;
@@ -1009,9 +1019,22 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
+  const surfacedLinks = useMemo(
+    () =>
+      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
+      [],
+    [session],
+  );
+  const surfacedLinkUrls = useMemo(
+    () => new Set(surfacedLinks.map((link) => link.url)),
+    [surfacedLinks],
+  );
   const visibleLinks = useMemo(
-    () => session?.links.filter((link) => !sidecarLinkLabels.has(link.label)) ?? [],
-    [session, sidecarLinkLabels],
+    () =>
+      session?.links.filter(
+        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
+      ) ?? [],
+    [session, sidecarLinkLabels, surfacedLinkUrls],
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1144,15 +1167,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   {session.branch}
                 </span>
               ) : null}
-              {session.links
-                .filter((l) => l.label === "tracker" || isGitHubPrLinkLabel(l.label))
-                .map((link) => (
-                  <SessionLinkBadge
-                    key={`${link.label}-${link.url}`}
-                    link={link}
-                    variant="detail"
-                  />
-                ))}
+              {surfacedLinks.map((link) => (
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} variant="detail" />
+              ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
                   offline
@@ -1332,8 +1349,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       onAddFiles={addImageFiles}
                       onChange={setMessage}
                       onKeyDown={(event) => {
-                        if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                          void doSend({ queue: true });
+                        if (isVoiceToggleHotkey(event)) {
+                          event.preventDefault();
+                          voice.toggleRecording();
+                          return;
+                        }
+                        if (isPrimarySubmitHotkey(event)) {
+                          event.preventDefault();
+                          void doSend({ queue: false, interrupt: true });
                         }
                       }}
                       onRemoveAttachment={(index) =>
@@ -1341,17 +1364,18 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           current.filter((_, currentIndex) => currentIndex !== index),
                         )
                       }
-                      placeholder="Message to the running agent..."
+                      placeholder={voicePlaceholder("Message to the running agent...", voice)}
                       textareaRef={messageRef}
                       value={message}
                       voice={voice}
                     />
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-[var(--color-text-tertiary)]">
-                        <VoiceStatusHint voice={voice} />{" "}
-                        {!voice.voiceBusy && !voice.recording ? "⌘/Ctrl + Enter" : null}
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <span className="min-w-0 flex-1 text-[10px] text-[var(--color-text-tertiary)]">
+                        {voice.voiceBusy && !voice.recording ? (
+                          <VoiceStatusHint voice={voice} />
+                        ) : null}
                       </span>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center justify-end gap-2">
                         <SlashSuggestions
                           endpoint={
                             session
@@ -1372,9 +1396,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: true })}
-                          className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                          className="inline-flex items-center border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Queueing..." : "Queue"}
+                          <span>{busyAction === "send" ? "Queueing..." : "Queue"}</span>
                         </button>
                         <button
                           type="button"
@@ -1382,9 +1406,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                             busyAction !== null || (!message.trim() && attachments.length === 0)
                           }
                           onClick={() => void doSend({ queue: false, interrupt: true })}
-                          className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                          className="inline-flex items-center bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
                         >
-                          {busyAction === "send" ? "Sending..." : "Send now"}
+                          <span>{busyAction === "send" ? "Sending..." : "Send now"}</span>
+                          {busyAction !== "send" ? (
+                            <span
+                              aria-hidden="true"
+                              className="ml-2 whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                            >
+                              {PRIMARY_SUBMIT_HINT}
+                            </span>
+                          ) : null}
                         </button>
                       </div>
                     </div>
@@ -1412,7 +1444,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         rel="noreferrer"
                         target="_blank"
                       >
-                        {displayLinkLabel(link.label)}
+                        {displayLinkLabel(link.label, link.url)}
                       </a>
                     ))}
                   </div>

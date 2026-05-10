@@ -733,6 +733,66 @@ test.describe("S3: Message section", () => {
     expect(body).toEqual({ message: "Queued follow up", queue: true });
   });
 
+  test("composer buttons show inline hotkey hints", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-1", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("button", { name: /^queue$/i })).not.toContainText("⌘ + ⏎");
+    await expect(page.getByRole("button", { name: /^send now$/i })).toContainText("⌘ + ⏎");
+  });
+
+  test("Cmd+Enter posts the direct-send payload", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-2", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let body: Record<string, unknown> | null = null;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      body = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByRole("textbox");
+    await textarea.fill("Direct with hotkey");
+    await textarea.press("Meta+Enter");
+
+    await expect.poll(() => body).not.toBeNull();
+    expect(body).toEqual({
+      message: "Direct with hotkey",
+      queue: false,
+      interrupt: true,
+    });
+  });
+
+  test("plain Enter keeps the newline and does not submit", async ({ page }) => {
+    const session = makeWorkingSession({ id: "detail-s3-hotkeys-3", runtimeAlive: true });
+    await mockSessionDetail(page, session);
+    let sendCalls = 0;
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      sendCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+
+    const textarea = page.getByRole("textbox");
+    await textarea.fill("first line");
+    await textarea.press("Enter");
+    await textarea.type("second line");
+
+    await expect(textarea).toHaveValue("first line\nsecond line");
+    expect(sendCalls).toBe(0);
+  });
+
   test("Send now posts a direct-send payload", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s3-8", runtimeAlive: true });
     await mockSessionDetail(page, session);
@@ -938,7 +998,7 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
-  test("canonical github-pr links render as github pr", async ({ page }) => {
+  test("canonical github-pr links stay surfaced as header badges", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-pr",
       slots: {
@@ -949,7 +1009,55 @@ test.describe("S4: Links section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/test/repo/pull/42"]')).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "#42" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+  });
+
+  test("surfaced badge URLs are not repeated in the Links section", async ({ page }) => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+    const gitlabUrl = "https://gitlab.com/test/repo/-/merge_requests/7";
+    const trackerUrl = "https://jira.example.com/browse/WEBDEV-4617";
+    const docsUrl = "https://example.com/docs";
+    const session = makeWorkingSession({
+      id: "detail-s4-dedupe",
+      slots: {
+        title: "Session with surfaced links",
+        links: [
+          { label: "github-pr", url: githubUrl },
+          { label: "docs", url: githubUrl },
+          { label: "gitlab-pr", url: gitlabUrl },
+          { label: "docs", url: gitlabUrl },
+          { label: "tracker", url: trackerUrl },
+          { label: "docs", url: trackerUrl },
+          { label: "docs", url: docsUrl },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          canMerge: false,
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${githubUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${gitlabUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${trackerUrl}"]`)).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "docs" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "gitlab mr" })).toHaveCount(0);
   });
 
   test("links open in new tab", async ({ page }) => {
@@ -1316,6 +1424,98 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.getByRole("button", { name: /close terminal/i }).click();
     const overflowRestored = await page.evaluate(() => document.body.style.overflow);
     expect(overflowRestored).not.toBe("hidden");
+  });
+
+  test("recording state shows pencil and stop buttons; pencil opens edit modal, stop sends without modal", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      class TestMediaRecorder {
+        mimeType = "audio/webm";
+        state = "inactive";
+        private listeners = new Map<string, Array<(event?: unknown) => void>>();
+
+        addEventListener(type: string, listener: (event?: unknown) => void) {
+          this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+        }
+
+        start() {
+          this.state = "recording";
+        }
+
+        stop() {
+          this.state = "inactive";
+          const blob = new Blob(["voice-audio"], { type: this.mimeType });
+          this.emit("dataavailable", blob);
+          this.emit("stop");
+        }
+
+        private emit(type: string, data?: Blob) {
+          for (const listener of this.listeners.get(type) ?? []) {
+            listener(data ? { data } : undefined);
+          }
+        }
+      }
+
+      Object.defineProperty(window, "MediaRecorder", {
+        configurable: true,
+        writable: true,
+        value: TestMediaRecorder,
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia: async () => ({
+            getTracks: () => [{ stop() {} }],
+          }),
+        },
+      });
+    });
+
+    const session = makeWorkingSession({ id: "detail-s6-voice-rec" });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await mockVoiceStatus(page);
+    await mockVoiceTranscribe(page, "stop button transcript");
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+
+    const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
+
+    // Idle: only mic in terminal control bar.
+    await expect(
+      terminalDialog.getByRole("button", { name: /start voice recording/i }),
+    ).toBeVisible();
+    await expect(
+      terminalDialog.getByRole("button", { name: /edit voice transcript/i }),
+    ).toHaveCount(0);
+    await expect(terminalDialog.getByRole("button", { name: /stop and send voice/i })).toHaveCount(
+      0,
+    );
+
+    await terminalDialog.getByRole("button", { name: /start voice recording/i }).click();
+
+    // Recording: pencil + stop replace the mic.
+    const pencil = terminalDialog.getByRole("button", { name: /edit voice transcript/i });
+    const stop = terminalDialog.getByRole("button", { name: /stop and send voice/i });
+    await expect(pencil).toBeVisible();
+    await expect(stop).toBeVisible();
+    await expect(
+      terminalDialog.getByRole("button", { name: /start voice recording/i }),
+    ).toHaveCount(0);
+
+    // Pencil click → opens modal (edit flow).
+    await pencil.click();
+    await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toBeVisible();
   });
 
   test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({

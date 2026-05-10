@@ -5,10 +5,12 @@ import {
   CiStatusDot,
   extractLinkId,
   GithubIcon,
-  isGitHubPrLinkLabel,
+  GitlabIcon,
+  isReviewLinkLabel,
   JiraIcon,
   type PrInfo,
   prStateColor,
+  reviewProviderFromUrl,
   ReviewCommentsBadge,
   ReviewDecisionDot,
   usePrInfo,
@@ -42,7 +44,7 @@ function hoverClassForLink(link: SpurSessionLink): string {
 }
 
 export function useSessionLinkPrInfo(link: SpurSessionLink | undefined) {
-  return usePrInfo(link && isGitHubPrLinkLabel(link.label) ? link.url : undefined);
+  return usePrInfo(link && isReviewLinkLabel(link.label) ? link.url : undefined);
 }
 
 export function SessionLinkBadge({
@@ -51,7 +53,8 @@ export function SessionLinkBadge({
   prInfo: providedPrInfo,
   variant,
 }: SessionLinkBadgeProps) {
-  const isPr = isGitHubPrLinkLabel(link.label);
+  const isPr = isReviewLinkLabel(link.label);
+  const reviewProvider = isPr ? reviewProviderFromUrl(link.url) : null;
   const fetchedPrInfo = useSessionLinkPrInfo(providedPrInfo ? undefined : link);
   const prInfo = providedPrInfo ?? fetchedPrInfo;
   const labelStyle: CSSProperties | undefined = isPr
@@ -71,7 +74,15 @@ export function SessionLinkBadge({
 
   return (
     <a className={classes} href={link.url} rel="noreferrer" target="_blank">
-      {isPr ? <GithubIcon /> : link.label === "tracker" ? <JiraIcon /> : null}
+      {isPr ? (
+        reviewProvider === "gitlab" ? (
+          <GitlabIcon />
+        ) : (
+          <GithubIcon />
+        )
+      ) : link.label === "tracker" ? (
+        <JiraIcon />
+      ) : null}
       <span className="text-[10px]" style={labelStyle}>
         {extractLinkId(link)}
       </span>
