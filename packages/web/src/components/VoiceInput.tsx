@@ -2,9 +2,15 @@
 
 import { useEffect, useRef } from "react";
 import { InputHistoryButton } from "@/components/InputHistory";
+import {
+  ImageAttachmentPreviewStrip,
+  ImagePickerButton,
+  IMAGE_TOOL_BUTTON_CLASS,
+} from "@/components/ImageAttachmentControls";
 import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
+import type { ImageAttachment } from "@/lib/image-attachments";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -92,12 +98,32 @@ export function VoiceConfirmModal({
   voice,
   onInsert,
   historyEntries = [],
+  attachments = [],
+  onAddFiles,
+  onRemoveAttachment,
+  onDismiss,
 }: {
   voice: UseVoiceInput;
   onInsert: (text: string) => void;
   historyEntries?: InputHistoryEntry[];
+  attachments?: ImageAttachment[];
+  onAddFiles?: (files: FileList | null) => void;
+  onRemoveAttachment?: (index: number) => void;
+  onDismiss?: () => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const hasAttachments = attachments.length > 0;
+  const dismiss = () => {
+    onDismiss?.();
+    voice.dismissModal();
+  };
+  const confirmDraft = () => {
+    if (hasAttachments) {
+      void voice.confirmDraft(onInsert, { allowEmpty: true });
+      return;
+    }
+    void voice.confirmDraft(onInsert);
+  };
 
   useEffect(() => {
     if (voice.voiceModalOpen) {
@@ -115,7 +141,7 @@ export function VoiceConfirmModal({
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
-          voice.dismissModal();
+          dismiss();
           return;
         }
         if (isVoiceToggleHotkey(event)) {
@@ -125,7 +151,7 @@ export function VoiceConfirmModal({
         }
         if (isPrimarySubmitHotkey(event)) {
           event.preventDefault();
-          void voice.confirmDraft(onInsert);
+          confirmDraft();
         }
       }}
       role="dialog"
@@ -138,7 +164,7 @@ export function VoiceConfirmModal({
           <button
             aria-label="Close voice draft"
             className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
-            onClick={voice.dismissModal}
+            onClick={dismiss}
             title="Close voice draft"
             type="button"
           >
@@ -147,22 +173,50 @@ export function VoiceConfirmModal({
         </div>
         <div className="space-y-3 px-4 py-4">
           <p className="text-[var(--color-text-secondary)]">
-            Review the transcription before inserting it into the message box.
+            Review the draft before inserting it.
           </p>
           <div className="relative">
             <textarea
-              className={`min-h-40 w-full resize-y ${INPUT_CLASS}`}
+              className={`min-h-40 w-full resize-y ${INPUT_CLASS} pb-14 ${
+                onAddFiles ? "pr-[6rem]" : "pr-[3.25rem]"
+              }`}
               onChange={(event) => voice.setVoiceDraft(event.target.value)}
+              onDragOver={(event) => {
+                if (onAddFiles) event.preventDefault();
+              }}
+              onDrop={(event) => {
+                if (!onAddFiles) return;
+                event.preventDefault();
+                onAddFiles(event.dataTransfer.files);
+              }}
+              onPaste={(event) => {
+                if (!onAddFiles) return;
+                const files = event.clipboardData.files;
+                if (files.length === 0) return;
+                event.preventDefault();
+                onAddFiles(files);
+              }}
               placeholder={voicePlaceholder("Review the transcription before inserting...", voice)}
               ref={textareaRef}
               value={voice.voiceDraft}
             />
-            <VoiceButton
-              className={`absolute bottom-2 right-2 inline-flex h-8 w-8 items-center justify-center border ${
-                voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
-              }`}
-              voice={voice}
-            />
+            <div className="pointer-events-none absolute inset-x-2 bottom-2 flex items-end justify-between gap-2">
+              <div className="pointer-events-auto flex min-w-0 max-w-[calc(100%-6rem)] gap-1.5 overflow-x-auto">
+                <ImageAttachmentPreviewStrip
+                  attachments={attachments}
+                  onRemoveAttachment={onRemoveAttachment ?? (() => {})}
+                />
+              </div>
+              <div className="pointer-events-auto flex items-center gap-1.5">
+                {onAddFiles ? <ImagePickerButton onAddFiles={onAddFiles} /> : null}
+                <VoiceButton
+                  className={`${onAddFiles ? IMAGE_TOOL_BUTTON_CLASS : "inline-flex h-8 w-8 items-center justify-center border"} ${
+                    voice.recording || voice.voiceBusy === "transcribing" ? "" : IDLE_STYLE
+                  }`}
+                  voice={voice}
+                />
+              </div>
+            </div>
           </div>
           {(voice.recording || voice.voiceBusy) && (
             <p className="text-xs text-[var(--color-text-tertiary)]">
@@ -178,15 +232,19 @@ export function VoiceConfirmModal({
             <InputHistoryButton entries={historyEntries} onSelect={voice.setVoiceDraft} />
             <button
               className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-              onClick={voice.dismissModal}
+              onClick={dismiss}
               type="button"
             >
               Cancel
             </button>
             <button
               className="inline-flex items-center gap-2 bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-              disabled={!voice.voiceDraft.trim() || voice.recording || !!voice.voiceBusy}
-              onClick={() => void voice.confirmDraft(onInsert)}
+              disabled={
+                (!voice.voiceDraft.trim() && !hasAttachments) ||
+                voice.recording ||
+                !!voice.voiceBusy
+              }
+              onClick={confirmDraft}
               type="button"
             >
               <span>Insert</span>

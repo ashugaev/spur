@@ -160,9 +160,13 @@ export interface UseVoiceInput {
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
+  openDraft: (value?: string) => void;
   toggleRecording: () => void;
   stopAndSend: (onSend: (text: string) => void | Promise<void>) => void;
-  confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
+  confirmDraft: (
+    onInsert: (text: string) => unknown,
+    options?: { allowEmpty?: boolean },
+  ) => Promise<void>;
   dismissModal: () => void;
   voiceError: string | null;
   clearVoiceError: () => void;
@@ -324,9 +328,9 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   }, [recording, stopStream, voiceStatus]);
 
   const confirmDraft = useCallback(
-    async (onInsert: (text: string) => unknown) => {
+    async (onInsert: (text: string) => unknown, options?: { allowEmpty?: boolean }) => {
       const trimmed = voiceDraft.trim();
-      if (!trimmed) return;
+      if (!trimmed && !options?.allowEmpty) return;
       try {
         const inserted = await onInsert(trimmed);
         if (inserted === false) {
@@ -368,6 +372,11 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     voiceModalOpen,
     voiceDraft,
     setVoiceDraft,
+    openDraft: useCallback((value = "") => {
+      setVoiceError(null);
+      setVoiceDraft(value);
+      setVoiceModalOpen(true);
+    }, []),
     toggleRecording,
     stopAndSend,
     confirmDraft,

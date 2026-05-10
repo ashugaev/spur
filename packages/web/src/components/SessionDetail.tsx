@@ -1019,23 +1019,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const surfacedLinks = useMemo(
-    () =>
-      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
-      [],
-    [session],
-  );
-  const surfacedLinkUrls = useMemo(
-    () => new Set(surfacedLinks.map((link) => link.url)),
-    [surfacedLinks],
-  );
-  const visibleLinks = useMemo(
-    () =>
-      session?.links.filter(
-        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
-      ) ?? [],
-    [session, sidecarLinkLabels, surfacedLinkUrls],
-  );
+  const { surfacedLinks, visibleLinks } = useMemo(() => {
+    const surfaced: DashboardSession["links"] = [];
+    const visible: DashboardSession["links"] = [];
+    const surfacedUrls = new Set<string>();
+    for (const link of session?.links ?? []) {
+      if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+        if (!surfacedUrls.has(link.url)) {
+          surfaced.push(link);
+          surfacedUrls.add(link.url);
+        }
+        continue;
+      }
+      if (!sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url)) {
+        visible.push(link);
+      }
+    }
+    return { surfacedLinks: surfaced, visibleLinks: visible };
+  }, [session, sidecarLinkLabels]);
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
   useEffect(() => {

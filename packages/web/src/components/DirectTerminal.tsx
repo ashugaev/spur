@@ -1,6 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type ClipboardEvent as ReactClipboardEvent,
+} from "react";
 import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
@@ -12,9 +18,16 @@ import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 
 interface DirectTerminalProps {
   sessionId: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
   agent?: AgentName;
   label?: string;
   title?: string;
@@ -126,6 +139,8 @@ interface PendingInputAck {
 
 export function DirectTerminal({
   sessionId,
+  apiSessionId,
+  agentInputEnabled = true,
   agent = "claude",
   label,
   title,
@@ -143,6 +158,8 @@ export function DirectTerminal({
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [voiceAttachments, setVoiceAttachments] = useState<ImageAttachment[]>([]);
+  const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -228,8 +245,94 @@ export function DirectTerminal({
   const voice = useVoiceInput();
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
+  const addVoiceImageFiles = useCallback((files: FileList | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setVoiceAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
+
+  const sendSessionMessage = useCallback(
+    async (text: string, attachments: ImageAttachment[]) => {
+      const encodedAttachments = encodeImageAttachments(attachments);
+      const message = text.trim();
+      if (!message && encodedAttachments.length === 0) return;
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          attachments: encodedAttachments,
+          queue: false,
+          interrupt: true,
+        }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to send image attachment");
+      }
+      setSubmitError(null);
+    },
+    [sessionApiId],
+  );
+
+  const openAttachmentDraft = useCallback(
+    (files: FileList | null) => {
+      if (!agentInputEnabled) return;
+      void imageAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          setVoiceAttachments((current) => [...current, ...attachments]);
+          voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
+        })
+        .catch(() => {});
+    },
+    [agentInputEnabled, voice],
+  );
+
+  const handleTerminalPaste = useCallback(
+    (event: ReactClipboardEvent<HTMLDivElement>) => {
+      if (!agentInputEnabled) return;
+      const files = event.clipboardData.files;
+      if (files.length === 0) return;
+      event.preventDefault();
+      openAttachmentDraft(files);
+    },
+    [agentInputEnabled, openAttachmentDraft],
+  );
+
+  useEffect(() => {
+    const target = terminalRef.current;
+    if (!target || !agentInputEnabled) return;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!(event.target instanceof Node) || !target.contains(event.target)) return;
+      const files = event.clipboardData?.files;
+      if (!files || files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAttachmentDraft(files);
+    };
+    target.addEventListener("paste", onPaste, { capture: true });
+    document.addEventListener("paste", onPaste, { capture: true });
+    return () => {
+      target.removeEventListener("paste", onPaste, { capture: true });
+      document.removeEventListener("paste", onPaste, { capture: true });
+    };
+  }, [agentInputEnabled, openAttachmentDraft]);
+
   const submitVoiceDraft = useCallback(
     async (text: string) => {
+      if (voiceAttachments.length > 0) {
+        await sendSessionMessage(text, voiceAttachments);
+        setVoiceAttachments([]);
+        if (text.trim()) {
+          draftHistory.saveEntry(text);
+        }
+        return;
+      }
       const socket = websocketRef.current;
       if (
         !socket ||
@@ -245,7 +348,7 @@ export function DirectTerminal({
       }
       draftHistory.saveEntry(text);
     },
-    [agent, draftHistory, sendWithAck],
+    [agent, draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
   );
 
   const sendHotkey = useCallback(
@@ -640,7 +743,11 @@ export function DirectTerminal({
         ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 p-1.5">
+      <div
+        className="min-h-0 flex-1 p-1.5"
+        data-testid="direct-terminal-surface"
+        onPasteCapture={handleTerminalPaste}
+      >
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
       {(voice.voiceError ?? submitError) ? (
@@ -702,7 +809,11 @@ export function DirectTerminal({
           </div>
           <SlashSuggestions
             buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
-            endpoint={`/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`}
+            endpoint={
+              agentInputEnabled
+                ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
+                : null
+            }
             onSelect={(entry) => void submitSlash(entry.insertText)}
           />
           <button
@@ -809,8 +920,16 @@ export function DirectTerminal({
         </div>
       </div>
       <VoiceConfirmModal
+        attachments={voiceAttachments}
         historyEntries={draftHistory.entries}
+        onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
+        onDismiss={() => setVoiceAttachments([])}
         onInsert={submitVoiceDraft}
+        onRemoveAttachment={(index) =>
+          setVoiceAttachments((current) =>
+            current.filter((_, currentIndex) => currentIndex !== index),
+          )
+        }
         voice={voice}
       />
     </div>
