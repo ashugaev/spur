@@ -3,7 +3,10 @@ projects:
     path: /home/alek/projects/ao
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: [.env]
+    symlinks:
+      - .env
+      - node_modules
+      - v2/node_modules
     workspaceAccess:
       items:
         - label: Cursor
