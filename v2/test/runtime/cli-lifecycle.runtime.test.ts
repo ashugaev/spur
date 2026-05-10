@@ -19,7 +19,6 @@ import {
   createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
-  execTmux,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
@@ -1783,7 +1782,7 @@ projects:
     expect(listed).toEqual([]);
   });
 
-  it("updates live session slots through the helper command and refreshes tmux status", async () => {
+  it("updates live session slots through the helper command and only shows tmux status for titled sessions", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-slots-${port}`;
@@ -1812,6 +1811,8 @@ projects:
 
     const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
     expect(existsSync(helperPath)).toBe(true);
+    const initialStatus = await readTmuxOption(spawned.id, "status");
+    expect(initialStatus).toBe("status off");
 
     await execFileAsync(helperPath, [
       "--title",
@@ -1836,13 +1837,7 @@ projects:
     );
 
     const statusLeft = await readTmuxOption(spawned.id, "status-left");
-    const statusRight = await readTmuxOption(spawned.id, "status-right");
-    const { stdout: mouseBinding } = await execTmux([
-      "list-keys",
-      "-T",
-      "root",
-      "MouseUp1StatusRight",
-    ]);
+    const status = await readTmuxOption(spawned.id, "status");
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
@@ -1851,12 +1846,9 @@ projects:
         { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
+    expect(status).toBe("status on");
     expect(statusLeft).toContain("Investigate status bar links");
     expect(statusLeft).not.toContain(spawned.id);
-    expect(statusRight).toBe("status-right ''");
-    expect(mouseBinding).toContain("MouseUp1StatusRight");
-    expect(mouseBinding).toContain("open-link.js");
-    expect(mouseBinding).toContain("q:mouse_hyperlink");
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
@@ -1917,7 +1909,7 @@ projects:
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterFirstUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusRightAfterFirstUnlink = await readTmuxOption(spawned.id, "status-right");
+    const statusAfterFirstUnlink = await readTmuxOption(spawned.id, "status");
 
     expect(mixedResult.pr).toEqual({
       number: 9,
@@ -1940,13 +1932,13 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusRightAfterFirstUnlink).toBe("status-right ''");
+    expect(statusAfterFirstUnlink).toBe("status on");
 
     const nativeOnlyResult = JSON.parse(
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
     ) as SessionView;
     const afterSecondUnlink = requireSessionRecord(context.dataDir, spawned.id);
-    const statusRightAfterSecondUnlink = await readTmuxOption(spawned.id, "status-right");
+    const statusAfterSecondUnlink = await readTmuxOption(spawned.id, "status");
 
     expect(nativeOnlyResult.pr).toBeUndefined();
     expect(nativeOnlyResult.slots).toEqual({
@@ -1958,7 +1950,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusRightAfterSecondUnlink).toBe("status-right ''");
+    expect(statusAfterSecondUnlink).toBe("status on");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {

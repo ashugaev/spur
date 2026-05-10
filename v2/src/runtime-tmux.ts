@@ -24,7 +24,6 @@ import type { AgentName, SessionSlots } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 const TMUX_CONFIG_PATH = fileURLToPath(new URL("../tmux.conf", import.meta.url));
-const OPEN_LINK_ENTRYPOINT = fileURLToPath(new URL("./open-link.js", import.meta.url));
 let activeTmuxSocketName: string | null = null;
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
@@ -79,18 +78,9 @@ function truncateStatusText(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
-function buildOpenLinkTmuxCommand(): string {
-  return `run-shell -b "${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)} #{q:mouse_hyperlink}"`;
-}
-
 function renderStatusLeft(slots: SessionSlots | undefined): string {
   const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
   return title ? `#[bold]${title}#[default]` : "";
-}
-
-function renderStatusRight(slots: SessionSlots | undefined): string {
-  void slots;
-  return "";
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
@@ -231,21 +221,11 @@ export async function createTmuxCommandSession(input: {
 
 export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots): Promise<void> {
   const target = exactPaneTarget(sessionName);
+  const statusLeft = renderStatusLeft(slots);
   try {
-    await tmux(
-      "bind-key",
-      "-n",
-      "MouseUp1StatusRight",
-      "if-shell",
-      "-F",
-      "#{mouse_hyperlink}",
-      buildOpenLinkTmuxCommand(),
-    );
-    await tmux("set-option", "-t", target, "status", "on");
     await tmux("set-option", "-t", target, "status-left-length", "120");
-    await tmux("set-option", "-t", target, "status-right-length", "160");
-    await tmux("set-option", "-t", target, "status-left", renderStatusLeft(slots));
-    await tmux("set-option", "-t", target, "status-right", renderStatusRight(slots));
+    await tmux("set-option", "-t", target, "status-left", statusLeft);
+    await tmux("set-option", "-t", target, "status", statusLeft ? "on" : "off");
   } catch {
     // Best effort only.
   }
