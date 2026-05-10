@@ -1388,6 +1388,30 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
   });
 
+  test("terminal header shows session title and preserves sidecar suffix", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s6-title",
+      slots: { title: "Header title from slot", links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+    await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
+    await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+  });
+
   test("URL gets terminal=<id> when terminal opened, removed when closed", async ({ page }) => {
     const session = makeWorkingSession({ id: "detail-s6-2" });
     await mockSessionDetail(page, session);

@@ -13,6 +13,14 @@ interface TerminalModalProps {
   titleSuffix?: string;
 }
 
+function buildTerminalTitle(session: DashboardSession, titleSuffix?: string): string | undefined {
+  if (session.title) {
+    return titleSuffix ? `${session.title} • ${titleSuffix}` : session.title;
+  }
+
+  return `${session.projectName} • ${titleSuffix ?? session.agent}`;
+}
+
 export function TerminalModal({
   session,
   onClose,
@@ -39,7 +47,7 @@ export function TerminalModal({
         label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
-        title={`${session.projectName} • ${titleSuffix ?? session.agent}`}
+        title={buildTerminalTitle(session, titleSuffix)}
       />
     </div>
   );

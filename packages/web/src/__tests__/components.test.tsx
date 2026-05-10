@@ -42,13 +42,16 @@ vi.mock("@/components/DirectTerminal", () => ({
     label,
     onClose,
     sessionId,
+    title,
   }: {
     label?: string;
     onClose?: () => void;
     sessionId: string;
+    title?: string;
   }) => (
     <div>
       <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -222,6 +225,7 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal title API • claude")).toBeInTheDocument();
     });
 
     expect(window.location.search).toContain("terminal=api-a1");
@@ -271,6 +275,47 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+  });
+
+  it("uses session title in the terminal header when available", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                slots: { title: "Fix auth header", links: [] },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Direct terminal title Fix auth header")).toBeInTheDocument();
     });
   });
 

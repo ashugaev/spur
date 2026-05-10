@@ -395,6 +395,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 

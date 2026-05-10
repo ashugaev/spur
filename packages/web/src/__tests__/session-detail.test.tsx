@@ -16,13 +16,16 @@ vi.mock("@/components/DirectTerminal", () => ({
     label,
     onClose,
     sessionId,
+    title,
   }: {
     label?: string;
     onClose?: () => void;
     sessionId: string;
+    title?: string;
   }) => (
     <div>
       <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -902,6 +905,37 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+  });
+
+  it("uses session title and sidecar suffix in the restored terminal header", async () => {
+    window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1--isolated-ui");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            sidecars: [{ name: "isolated-ui", alive: true }],
+            slots: { title: "Fix auth header", links: [] },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal api-a1--isolated-ui")).toBeInTheDocument();
+      expect(
+        screen.getByText("Direct terminal title Fix auth header • isolated-ui"),
+      ).toBeInTheDocument();
     });
   });
 
