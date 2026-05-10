@@ -299,6 +299,7 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.delivered",
       );
+      expect(readDedicatedInputRecords("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }
@@ -353,6 +354,204 @@ describe("startConfiguredTriggers", () => {
             triggerId: "send",
             eventName: "github:comment",
           },
+        }),
+      ]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record custom send prompts dropped for closed sessions", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "stopped",
+      state: "stopped",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(readDedicatedInputRecords("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not record custom send prompts pruned before delivery", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(new Map());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      await Promise.resolve();
+      expect(deliverMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).not.toHaveBeenCalled();
+      expect(readDedicatedInputRecords("api-1")).toEqual([]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("records a custom send prompt once for merged trigger events", async () => {
+    const getMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValueOnce({
+        id: "api-1",
+        status: "running",
+        state: "working",
+        workspaceExists: true,
+      })
+      .mockResolvedValue({
+        id: "api-1",
+        status: "running",
+        state: "waiting",
+        workspaceExists: true,
+      });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "comment:1",
+          {
+            key: "comment:1",
+            kind: "comment",
+            text: "A new comment arrived.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ prompt: "Read the active PR feedback and fix it." }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(githubEvent());
+      bus.emit(githubEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledTimes(2);
+      });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      expect(readDedicatedInputRecords("api-1")).toEqual([
+        expect.objectContaining({
+          type: "text",
+          kind: "trigger_send_prompt",
+          text: "Read the active PR feedback and fix it.",
+        }),
+      ]);
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("does not duplicate custom send prompt records on delivery retry", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "working",
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockImplementation(() => ciSnapshot());
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({
+        event: "github:ci_failed",
+        interrupt: true,
+        prompt: "Read the failing CI report and fix it.",
+      }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(ciFailedEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+      expect(deliverMock).toHaveBeenCalledTimes(3);
+      expect(readDedicatedInputRecords("api-1")).toEqual([
+        expect.objectContaining({
+          type: "text",
+          kind: "trigger_send_prompt",
+          text: "Read the failing CI report and fix it.",
         }),
       ]);
     } finally {

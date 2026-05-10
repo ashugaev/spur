@@ -34,6 +34,9 @@ interface PendingBatch {
   projectId: string;
   triggerId: string;
   sourceId: string;
+  eventName: string;
+  customPrompt: string | undefined;
+  customPromptRecorded: boolean;
   batch: SendBatch;
 }
 
@@ -144,13 +147,23 @@ function mergeIntoBatch(
   projectId: string,
   triggerId: string,
   sourceId: string,
+  eventName: string,
+  customPrompt: string | undefined,
   incoming: SendBatch,
 ): PendingBatch {
   if (existing) {
     existing.batch.merge(incoming);
     return existing;
   }
-  return { projectId, triggerId, sourceId, batch: incoming };
+  return {
+    projectId,
+    triggerId,
+    sourceId,
+    eventName,
+    customPrompt,
+    customPromptRecorded: false,
+    batch: incoming,
+  };
 }
 
 function logTriggerEvent(
@@ -206,6 +219,19 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     }
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
+      if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
+        appendDedicatedTextInput(deps.config.dataDir, batch.batch.sessionId, {
+          kind: "trigger_send_prompt",
+          text: batch.customPrompt,
+          metadata: {
+            projectId: batch.projectId,
+            sourceId: batch.sourceId,
+            triggerId: batch.triggerId,
+            eventName: batch.eventName,
+          },
+        });
+        batch.customPromptRecorded = true;
+      }
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
         level: "info",
         sessionId: batch.batch.sessionId,
@@ -404,6 +430,8 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       projectId,
       triggerId,
       trigger.source,
+      eventName,
+      trigger.send.prompt,
       sendBatch,
     );
     pendingBatches.set(queueKey, batch);
@@ -505,16 +533,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             );
             return;
           }
-          appendDedicatedTextInput(deps.config.dataDir, sendBatch.sessionId, {
-            kind: "trigger_send_prompt",
-            text: trigger.send.prompt ?? "",
-            metadata: {
-              projectId,
-              sourceId: event.sourceId,
-              triggerId,
-              eventName: event.name,
-            },
-          });
           const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
           enqueue(queueKey, async () => {
             await handleSendEvent(projectId, triggerId, event.name, trigger, sendBatch);
