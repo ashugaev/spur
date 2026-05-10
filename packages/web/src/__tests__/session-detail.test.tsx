@@ -939,6 +939,29 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("falls back to the agent when restored terminal suffix is empty", async () => {
+    window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1--");
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(JSON.stringify(sessionFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal api-a1--")).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal title api • claude")).toBeInTheDocument();
+      expect(screen.queryByText("Direct terminal title api • ")).not.toBeInTheDocument();
+    });
+  });
+
   it("ignores terminal query params when session is not attachable", async () => {
     window.history.replaceState(null, "", "/sessions/api-a1?terminal=api-a1");
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {

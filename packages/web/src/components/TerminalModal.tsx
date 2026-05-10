@@ -13,12 +13,19 @@ interface TerminalModalProps {
   titleSuffix?: string;
 }
 
+function normalizeTitleSuffix(titleSuffix?: string): string | undefined {
+  const normalizedTitleSuffix = titleSuffix?.trim();
+  return normalizedTitleSuffix ? normalizedTitleSuffix : undefined;
+}
+
 function buildTerminalTitle(session: DashboardSession, titleSuffix?: string): string | undefined {
+  const normalizedTitleSuffix = normalizeTitleSuffix(titleSuffix);
+
   if (session.title) {
-    return titleSuffix ? `${session.title} • ${titleSuffix}` : session.title;
+    return normalizedTitleSuffix ? `${session.title} • ${normalizedTitleSuffix}` : session.title;
   }
 
-  return `${session.projectName} • ${titleSuffix ?? session.agent}`;
+  return `${session.projectName} • ${normalizedTitleSuffix ?? session.agent}`;
 }
 
 export function TerminalModal({
