@@ -14,11 +14,11 @@ type RetainedVoiceTakeMode = "insert" | "modal" | "send";
 
 interface RetainedVoiceTake {
   blob: Blob;
-  contextKey: VoiceInputContextKey;
   mode: RetainedVoiceTakeMode;
 }
 
 interface PersistedRetainedVoiceTake extends RetainedVoiceTake {
+  contextKey: VoiceInputContextKey;
   updatedAt: number;
 }
 
@@ -109,7 +109,6 @@ async function readPersistedRetainedTake(
     }
     return {
       blob: result.blob,
-      contextKey: result.contextKey,
       mode: result.mode,
     };
   } finally {
@@ -117,13 +116,17 @@ async function readPersistedRetainedTake(
   }
 }
 
-async function persistRetainedTake(retainedTake: RetainedVoiceTake): Promise<void> {
+async function persistRetainedTake(
+  contextKey: VoiceInputContextKey,
+  retainedTake: RetainedVoiceTake,
+): Promise<void> {
   const database = await openVoiceRetentionDatabase();
   try {
     const transaction = database.transaction(VOICE_RETENTION_STORE_NAME, "readwrite");
     const store = transaction.objectStore(VOICE_RETENTION_STORE_NAME);
     store.put({
       ...retainedTake,
+      contextKey,
       updatedAt: Date.now(),
     } satisfies PersistedRetainedVoiceTake);
     await waitForTransaction(transaction);
@@ -353,7 +356,7 @@ export function useVoiceInput(options: {
         return;
       }
       try {
-        await persistRetainedTake(retainedTake);
+        await persistRetainedTake(contextKeyRef.current, retainedTake);
       } catch {
         // Keep the in-memory take even if persistence fails.
       }
@@ -408,7 +411,6 @@ export function useVoiceInput(options: {
         } catch (error) {
           await setRetainedTake({
             blob: audio,
-            contextKey: contextKeyRef.current,
             mode,
           });
           throw error;
