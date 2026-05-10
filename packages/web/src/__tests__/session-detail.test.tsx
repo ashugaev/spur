@@ -2505,4 +2505,56 @@ describe("SessionDetail links", () => {
     expect(screen.queryByRole("link", { name: "github pr" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "gitlab mr" })).not.toBeInTheDocument();
   });
+
+  it("shows a canonical PR URL only in the header badge strip", async () => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              slots: {
+                title: "Canonical PR session",
+                links: [{ label: "github-pr", url: githubUrl }],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/pr-status?url=")) {
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            reviewDecision: "approved",
+            ciStatus: "success",
+            totalThreads: 0,
+            unresolvedThreads: 0,
+            canMerge: false,
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("link").filter((link) => link.getAttribute("href") === githubUrl),
+      ).toHaveLength(1);
+    });
+
+    expect(screen.queryByRole("heading", { name: "Links" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "github pr" })).not.toBeInTheDocument();
+  });
 });

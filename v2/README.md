@@ -65,7 +65,7 @@ If that preflight-suggested branch is already checked out in another worktree, S
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
-Use it inside the session to update the task title and any named links shown in the tmux status line. In attached tmux sessions, clicking a status-right link label opens its URL:
+Use it inside the session to update the task title shown in the tmux status line and any named links stored with the session:
 
 ```bash
 spur-slots --title "Fix flaky auth test"

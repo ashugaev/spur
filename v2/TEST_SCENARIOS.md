@@ -206,7 +206,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Real `codex` startup image attachments use the native `--image` launch path, while real `claude` startup image attachments arrive through artifact-path references in the first prompt.
 - Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
 - Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
-- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
+- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
 - When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
 
