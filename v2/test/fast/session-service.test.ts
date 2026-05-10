@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type {
   ServiceInstanceRecord,
@@ -94,6 +94,25 @@ const readCodexRolloutStateMock = vi.fn();
 const scanCodexRolloutForMessageMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
+const dedicatedStorageDirForSession = (sessionId: string) =>
+  join("/tmp/spur-data", "dedicated-storage", sessionId);
+
+function parseJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSONL record: ${message}`, { cause: error });
+  }
+}
+
+function readDedicatedInputRecords(sessionId: string): unknown[] {
+  const file = join(dedicatedStorageDirForSession(sessionId), "inputs.jsonl");
+  if (!existsSync(file)) {
+    return [];
+  }
+  return readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(parseJsonLine);
+}
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -388,6 +407,7 @@ describe("SessionService", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-18T10:05:00.000Z"));
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
+    rmSync(join("/tmp/spur-data", "dedicated-storage"), { recursive: true, force: true });
 
     upsertConfigRegistryPathMock.mockReset().mockReturnValue(["/tmp/spur.yaml"]);
 
@@ -562,6 +582,7 @@ describe("SessionService", () => {
 
   afterEach(() => {
     rmSync(TEST_ARTIFACTS_ROOT, { recursive: true, force: true });
+    rmSync(join("/tmp/spur-data", "dedicated-storage"), { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -599,6 +620,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -622,6 +644,14 @@ describe("SessionService", () => {
     expect(result.worktree).toBe(true);
     expect(result.planMode).toBe(false);
     expect(result.branch).toBe("api-1");
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "spawn_prompt",
+        text: "hello",
+        metadata: { source: "spawn" },
+      }),
+    ]);
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
     expect(
       logSpurEventMock.mock.calls
@@ -723,6 +753,14 @@ describe("SessionService", () => {
         ([, session]) => session.id === "api-1" && session.status === "running",
       ),
     ).toBe(true);
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "spawn_prompt",
+        text: "hello",
+        metadata: { source: "spawn_background" },
+      }),
+    ]);
   });
 
   it("rejects an explicit branch conflict during background spawn", async () => {
@@ -1157,6 +1195,21 @@ describe("SessionService", () => {
     expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-shot.png`, "utf8")).toBe(
       "png-bytes",
     );
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "attachment",
+        kind: "spawn_attachment",
+        name: "shot.png",
+        size: "png-bytes".length,
+        metadata: { source: "spawn" },
+      }),
+      expect.objectContaining({
+        type: "text",
+        kind: "spawn_prompt",
+        text: "describe this image",
+        metadata: { source: "spawn" },
+      }),
+    ]);
   });
 
   it("starts a pipelined session by sending only the first step immediately", async () => {
@@ -1419,6 +1472,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -1474,6 +1528,14 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "send_message",
+        text: "follow up",
+        metadata: { source: "send" },
+      }),
+    ]);
     expect(result.id).toBe("api-1");
   });
 
@@ -1650,6 +1712,14 @@ describe("SessionService", () => {
       messages: ["follow up"],
       awaitingPrompt: false,
     });
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "send_message",
+        text: "follow up",
+        metadata: { source: "send" },
+      }),
+    ]);
 
     expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
   });
@@ -1798,6 +1868,14 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "text",
+        kind: "send_message",
+        text: "send immediately",
+        metadata: { source: "send_direct" },
+      }),
+    ]);
   });
 
   it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
@@ -1852,6 +1930,21 @@ describe("SessionService", () => {
       "1773828300000-shot.png",
       true,
     );
+    expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect.objectContaining({
+        type: "attachment",
+        kind: "send_attachment",
+        name: "shot.png",
+        size: "png-bytes".length,
+        metadata: { source: "send" },
+      }),
+      expect.objectContaining({
+        type: "text",
+        kind: "send_message",
+        text: "inspect this",
+        metadata: { source: "send_direct" },
+      }),
+    ]);
   });
 
   it("classifies waiting state from JSONL for claude sessions", async () => {
@@ -3385,6 +3478,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -4475,6 +4569,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -4497,6 +4592,7 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
     );
+    expect(readDedicatedInputRecords("api-1")).toEqual([]);
   });
 
   it("passes planMode through restore planning and native resume", async () => {
@@ -4694,6 +4790,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -4912,6 +5009,7 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: "/tmp/spur-data/session-agent-state/api-1.json",
+        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -6386,6 +6484,28 @@ describe("SessionService", () => {
       expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
         "new-bytes",
       );
+      expect(readDedicatedInputRecords("api-1")).toEqual([
+        expect.objectContaining({
+          type: "attachment",
+          kind: "spawn_attachment",
+          name: "source.png",
+          size: "startup-bytes".length,
+          metadata: { source: "spawn" },
+        }),
+        expect.objectContaining({
+          type: "attachment",
+          kind: "spawn_attachment",
+          name: "new.png",
+          size: "new-bytes".length,
+          metadata: { source: "spawn" },
+        }),
+        expect.objectContaining({
+          type: "text",
+          kind: "respawn_override_prompt",
+          text: "edited prompt",
+          metadata: { source: "respawn" },
+        }),
+      ]);
     });
 
     it("rejects unknown startup attachment ids on respawn", async () => {

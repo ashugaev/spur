@@ -1,8 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { EventBus } from "../../src/event-bus.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
 const logSpurEventMock = vi.fn();
+const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
+
+function parseJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSONL record: ${message}`, { cause: error });
+  }
+}
+
+function readDedicatedInputRecords(sessionId: string): unknown[] {
+  const file = join(DATA_DIR, "dedicated-storage", sessionId, "inputs.jsonl");
+  if (!existsSync(file)) {
+    return [];
+  }
+  return readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(parseJsonLine);
+}
 
 vi.mock("../../src/event-log.js", () => ({
   logSpurEvent: logSpurEventMock,
@@ -17,7 +37,7 @@ function config(options?: { event?: string; interrupt?: boolean; prompt?: string
   const interrupt = options?.interrupt ?? false;
   const prompt = options?.prompt;
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -42,7 +62,7 @@ function config(options?: { event?: string; interrupt?: boolean; prompt?: string
 
 function spawnConfig() {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -70,7 +90,7 @@ function spawnConfig() {
 
 function workItemSpawnConfig() {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -95,7 +115,7 @@ function workItemSpawnConfig() {
 
 function serviceConfig(options?: { prompt?: string }) {
   return {
-    dataDir: "/tmp/spur-data",
+    dataDir: DATA_DIR,
     projects: {
       api: {
         sources: {
@@ -224,11 +244,13 @@ async function loadTriggersModule() {
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    rmSync(join(DATA_DIR, "dedicated-storage"), { recursive: true, force: true });
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
     logSpurEventMock.mockReset();
   });
 
   afterEach(() => {
+    rmSync(join(DATA_DIR, "dedicated-storage"), { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -320,6 +342,19 @@ describe("startConfiguredTriggers", () => {
       expect(delivered).not.toContain(
         "Review the latest GitHub updates on the active PR and act on them.",
       );
+      expect(readDedicatedInputRecords("api-1")).toEqual([
+        expect.objectContaining({
+          type: "text",
+          kind: "trigger_send_prompt",
+          text: "Run $manager and $github. Address the latest requested review changes on the active PR.",
+          metadata: {
+            projectId: "api",
+            sourceId: "pr-watch",
+            triggerId: "send",
+            eventName: "github:comment",
+          },
+        }),
+      ]);
     } finally {
       await controller.stop();
     }

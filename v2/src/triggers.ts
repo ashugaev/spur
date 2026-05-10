@@ -1,4 +1,5 @@
 import { writeStderr } from "./io.js";
+import { appendDedicatedTextInput } from "./dedicated-storage.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import {
@@ -504,6 +505,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
             );
             return;
           }
+          appendDedicatedTextInput(deps.config.dataDir, sendBatch.sessionId, {
+            kind: "trigger_send_prompt",
+            text: trigger.send.prompt ?? "",
+            metadata: {
+              projectId,
+              sourceId: event.sourceId,
+              triggerId,
+              eventName: event.name,
+            },
+          });
           const queueKey = createQueueKey(projectId, triggerId, sendBatch.sessionId);
           enqueue(queueKey, async () => {
             await handleSendEvent(projectId, triggerId, event.name, trigger, sendBatch);

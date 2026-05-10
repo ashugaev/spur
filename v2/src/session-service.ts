@@ -47,6 +47,14 @@ import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
+  appendDedicatedAttachmentInput,
+  appendDedicatedTextInput,
+  ensureDedicatedStorageDir,
+  type DedicatedAttachmentInputKind,
+  type DedicatedInputMetadata,
+  type DedicatedTextInputKind,
+} from "./dedicated-storage.js";
+import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -540,6 +548,7 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
+    SPUR_DEDICATED_STORAGE_DIR: ensureDedicatedStorageDir(args.dataDir, args.sessionId),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
     // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
     SPUR_REAL_HOME: userInfo().homedir,
@@ -727,6 +736,7 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   placeholder: SessionRecord;
   sessionToolDir: string;
+  startupAttachments: Array<{ id: string; path: string }>;
 }
 
 function resolveRespawnRequest(
@@ -1755,7 +1765,10 @@ export class SessionService {
     return { branch: result.branch ?? null };
   }
 
-  async spawn(request: SpawnSessionRequest): Promise<SessionView> {
+  async spawn(
+    request: SpawnSessionRequest,
+    options?: { promptKind?: DedicatedTextInputKind },
+  ): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
     let project: ProjectConfig | undefined;
@@ -1943,7 +1956,17 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments, {
+        kind: "spawn_attachment",
+        metadata: { source: "spawn" },
+      });
+      this.recordTextInput(sessionId, {
+        kind: options?.promptKind ?? "spawn_prompt",
+        text: prompt,
+        metadata: {
+          source: options?.promptKind === "respawn_override_prompt" ? "respawn" : "spawn",
+        },
+      });
       const startupAttachmentLines =
         agent === "codex"
           ? []
@@ -2315,6 +2338,16 @@ export class SessionService {
         },
       });
 
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments, {
+        kind: "spawn_attachment",
+        metadata: { source: "spawn_background" },
+      });
+      this.recordTextInput(sessionId, {
+        kind: "spawn_prompt",
+        text: prompt,
+        metadata: { source: "spawn_background" },
+      });
+
       return {
         request,
         project,
@@ -2328,6 +2361,7 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent),
+        startupAttachments,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2510,7 +2544,7 @@ export class SessionService {
         prepared.steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, prepared.steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      const startupAttachments = prepared.startupAttachments;
       const startupAttachmentLines =
         agent === "codex"
           ? []
@@ -2774,6 +2808,11 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
     const finalMessage = this.prepareSendMessage(session, request);
+    this.recordTextInput(sessionId, {
+      kind: "send_message",
+      text: typeof request.message === "string" ? request.message : "",
+      metadata: { source: request.queue === false ? "send_direct" : "send" },
+    });
     if (request.queue === false) {
       return this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
@@ -2882,9 +2921,24 @@ export class SessionService {
     }
   }
 
+  private recordTextInput(
+    sessionId: string,
+    input: {
+      kind: DedicatedTextInputKind;
+      text: string;
+      metadata?: DedicatedInputMetadata;
+    },
+  ): void {
+    appendDedicatedTextInput(this.config.dataDir, sessionId, input);
+  }
+
   private storeImageAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
+    dedicatedInput?: {
+      kind: DedicatedAttachmentInputKind;
+      metadata?: DedicatedInputMetadata;
+    },
   ): Array<{ id: string; path: string }> {
     if (!attachments || attachments.length === 0) {
       return [];
@@ -2919,6 +2973,14 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
+      if (dedicatedInput) {
+        appendDedicatedAttachmentInput(this.config.dataDir, sessionId, {
+          kind: dedicatedInput.kind,
+          sourcePath: filePath,
+          name: att.name,
+          ...(dedicatedInput.metadata ? { metadata: dedicatedInput.metadata } : {}),
+        });
+      }
       stored.push({ id: filename, path: filePath });
     }
     return stored;
@@ -3020,7 +3082,10 @@ export class SessionService {
       return message;
     }
 
-    const stored = this.storeImageAttachments(session.id, request.attachments);
+    const stored = this.storeImageAttachments(session.id, request.attachments, {
+      kind: "send_attachment",
+      metadata: { source: "send" },
+    });
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
   }
@@ -3968,6 +4033,7 @@ export class SessionService {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
       }),
+      request.prompt !== undefined ? { promptKind: "respawn_override_prompt" } : undefined,
     );
   }
 
