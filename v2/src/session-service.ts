@@ -398,7 +398,7 @@ function shouldUseCodexRolloutState(
     hookState.turnId === rolloutState.turnId;
   const hookUpdatedAtMs = hookState ? new Date(hookState.updatedAt).getTime() : 0;
   const rolloutNewerThanHook = !hookState || rolloutState.timestampMs >= hookUpdatedAtMs;
-  if (rolloutState.state === "needs_input") {
+  if (rolloutState.state === "working" || rolloutState.state === "needs_input") {
     return sameTurn || rolloutNewerThanHook;
   }
   return !hookState || sameTurn || hookState.state === "needs_input";

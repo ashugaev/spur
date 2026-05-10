@@ -2319,6 +2319,44 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
+  it("promotes working from newer Codex rollout JSONL", async () => {
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    readAgentHookStateMock.mockReturnValue({
+      state: "waiting",
+      updatedAt: "2026-03-18T10:04:59.000Z",
+      hookEvent: "Stop",
+      turnId: "api-1-2",
+    });
+    readCodexRolloutStateMock.mockResolvedValue({
+      state: "working",
+      timestamp: "2026-03-18T10:05:01.000Z",
+      timestampMs: Date.parse("2026-03-18T10:05:01.000Z"),
+      filePath: "/tmp/spur-data/session-tools/api-1/codex-home/sessions/rollout.jsonl",
+      reason: "task_started",
+      turnId: "api-1-3",
+    });
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    const result = await service.get("api-1");
+
+    expect(result.state).toBe("working");
+  });
+
   it("detects needs_input for Cursor from pane markers", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
