@@ -1852,14 +1852,8 @@ projects:
       ],
     });
     expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("pr ##9");
-    expect(statusRight).toContain(
-      "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
-    );
-    expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]pr ##9#[hyperlink=]",
-    );
+    expect(statusLeft).not.toContain(spawned.id);
+    expect(statusRight).toBe("status-right ''");
     expect(mouseBinding).toContain("MouseUp1StatusRight");
     expect(mouseBinding).toContain("open-link.js");
     expect(mouseBinding).toContain("q:mouse_hyperlink");
@@ -1946,8 +1940,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusRightAfterFirstUnlink).toContain("tracker TASK-9");
-    expect(statusRightAfterFirstUnlink).toContain("pr ##9");
+    expect(statusRightAfterFirstUnlink).toBe("status-right ''");
 
     const nativeOnlyResult = JSON.parse(
       (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
@@ -1965,8 +1958,7 @@ projects:
       title: "Investigate mixed pr bindings",
       links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
     });
-    expect(statusRightAfterSecondUnlink).toContain("tracker TASK-9");
-    expect(statusRightAfterSecondUnlink).not.toContain("pr ##9");
+    expect(statusRightAfterSecondUnlink).toBe("status-right ''");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {

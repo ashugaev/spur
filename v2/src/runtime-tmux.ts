@@ -9,7 +9,6 @@ import { promisify } from "node:util";
 import { agentSendMode } from "./agents/index.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
-import { formatSessionLinkDisplay } from "./session-link-display.js";
 import type { AgentName, SessionSlots } from "./types.js";
 
 // ── Session survival across daemon restarts ──
@@ -80,31 +79,18 @@ function truncateStatusText(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 3)}...` : text;
 }
 
-function escapeHyperlinkUrl(url: string): string {
-  return encodeURI(url).replaceAll("#", "%23").replaceAll(",", "%2C").replaceAll("]", "%5D");
-}
-
 function buildOpenLinkTmuxCommand(): string {
   return `run-shell -b "${shellEscape(process.execPath)} ${shellEscape(OPEN_LINK_ENTRYPOINT)} #{q:mouse_hyperlink}"`;
 }
 
-function renderStatusLeft(sessionName: string, slots: SessionSlots | undefined): string {
+function renderStatusLeft(slots: SessionSlots | undefined): string {
   const title = slots?.title ? truncateStatusText(escapeStatusText(slots.title), 80) : "";
-  return title
-    ? `#[bold]${escapeStatusText(sessionName)}#[default] | ${title}`
-    : `#[bold]${escapeStatusText(sessionName)}#[default]`;
+  return title ? `#[bold]${title}#[default]` : "";
 }
 
 function renderStatusRight(slots: SessionSlots | undefined): string {
-  const links = slots?.links ?? [];
-  return links
-    .map((link) => {
-      const display = formatSessionLinkDisplay(link);
-      const text = truncateStatusText(escapeStatusText(display.text), 18);
-      const url = escapeHyperlinkUrl(display.url);
-      return `#[fg=cyan]#[hyperlink=${url}]${text}#[hyperlink=]#[default]`;
-    })
-    .join(" | ");
+  void slots;
+  return "";
 }
 
 export async function captureTmuxPane(sessionName: string, lines = 200): Promise<string> {
@@ -258,7 +244,7 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
     await tmux("set-option", "-t", target, "status", "on");
     await tmux("set-option", "-t", target, "status-left-length", "120");
     await tmux("set-option", "-t", target, "status-right-length", "160");
-    await tmux("set-option", "-t", target, "status-left", renderStatusLeft(sessionName, slots));
+    await tmux("set-option", "-t", target, "status-left", renderStatusLeft(slots));
     await tmux("set-option", "-t", target, "status-right", renderStatusRight(slots));
   } catch {
     // Best effort only.
