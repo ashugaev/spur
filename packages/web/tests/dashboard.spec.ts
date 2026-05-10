@@ -498,6 +498,7 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
           state: "open",
           reviewDecision: "approved",
           ciStatus: "success",
+          canMerge: true,
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
@@ -508,9 +509,14 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     await expect(page.locator(`a[href='${prUrl}']`)).toHaveCount(0);
     await expect(
       page.getByRole("button", {
-        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+        name: new RegExp(`Merge PR for ${session.id}`, "i"),
       }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
   });
 
   test("session with GitLab MR link does not render a PR badge in the row", async ({ page }) => {
