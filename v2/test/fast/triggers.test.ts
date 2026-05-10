@@ -746,6 +746,67 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("re-delivers an interrupting trigger after the session was restarted", async () => {
+    vi.useRealTimers();
+    const initial = {
+      id: "api-1",
+      status: "running" as const,
+      state: "working" as const,
+      workspaceExists: true,
+    };
+    const getMock = vi.fn().mockResolvedValue(initial);
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(mergeConflictEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+
+      // Simulate a kill + restore: the session went through `stopped` and is
+      // now back to `working` after restore. The state history records the
+      // closed-state transition with a timestamp newer than the first
+      // interrupt delivery.
+      const restoredAt = new Date(Date.now() + 10).toISOString();
+      const stoppedAt = new Date(Date.now() + 5).toISOString();
+      getMock.mockResolvedValue({
+        ...initial,
+        state: "working",
+        stateHistory: [
+          { state: "working", at: new Date(Date.now() - 1000).toISOString(), source: "jsonl" },
+          { state: "stopped", at: stoppedAt, source: "status" },
+          { state: "working", at: restoredAt, source: "jsonl" },
+        ],
+      });
+
+      bus.emit(mergeConflictEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(2);
+      });
+      expect(deliverMock.mock.calls[1]).toEqual([
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      ]);
+    } finally {
+      await controller.stop();
+      vi.useFakeTimers();
+    }
+  });
+
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const { startConfiguredTriggers } = await loadTriggersModule();

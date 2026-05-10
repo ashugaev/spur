@@ -134,6 +134,29 @@ function isClosedState(session: SessionView): boolean {
   return session.state === "stopped" || session.state === "error" || session.state === "killed";
 }
 
+function isClosedSessionState(state: SessionView["state"]): boolean {
+  return state === "stopped" || state === "error" || state === "killed";
+}
+
+/**
+ * True when the session went through a closed state (stopped/error/killed)
+ * after the given timestamp. Used to detect that a previously interrupted
+ * session was restarted (for example via `service.restore`) so the trigger
+ * runtime can deliver again instead of dropping as a duplicate interrupt.
+ */
+function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
+  const history = session.stateHistory;
+  if (!history) return false;
+  for (const entry of history) {
+    if (!isClosedSessionState(entry.state)) continue;
+    const transitionMs = Date.parse(entry.at);
+    if (Number.isFinite(transitionMs) && transitionMs >= sinceMs) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createQueueKey(projectId: string, triggerId: string, sessionId: string): string {
   return `${projectId}:${triggerId}:${sessionId}`;
 }
@@ -165,7 +188,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
-  const interruptedKeys = new Set<string>();
+  const interruptedKeys = new Map<string, number>();
   const retryStates = new Map<string, RetryState>();
   const serialByKey = new Map<string, Promise<void>>();
   let flushTimer: NodeJS.Timeout | null = null;
@@ -465,9 +488,18 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    if (interruptedKeys.has(queueKey)) return;
+    const interruptedAt = interruptedKeys.get(queueKey);
+    if (interruptedAt !== undefined) {
+      // Session restarted (for example via restore) since the last interrupt
+      // delivery: treat it as a fresh session and deliver again.
+      if (sessionRestartedSince(session, interruptedAt)) {
+        interruptedKeys.delete(queueKey);
+      } else {
+        return;
+      }
+    }
 
-    interruptedKeys.add(queueKey);
+    interruptedKeys.set(queueKey, Date.now());
     await deliverBatch(queueKey, batch, true);
   };
 
