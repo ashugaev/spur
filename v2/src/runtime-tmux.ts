@@ -225,7 +225,13 @@ export async function syncTmuxStatus(sessionName: string, slots?: SessionSlots):
   try {
     await tmux("set-option", "-t", target, "status-left-length", "120");
     await tmux("set-option", "-t", target, "status-left", statusLeft);
+    await tmux("set-option", "-t", target, "status-right", "");
     await tmux("set-option", "-t", target, "status", statusLeft ? "on" : "off");
+  } catch {
+    // Best effort only.
+  }
+  try {
+    await tmux("unbind-key", "-n", "MouseUp1StatusRight");
   } catch {
     // Best effort only.
   }

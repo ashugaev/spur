@@ -79,11 +79,14 @@ describe("runtime-tmux", () => {
       ([, args]) => args[0] === "set-option" && args.includes("status"),
     );
     expect(statusCall?.[1]?.at(-1)).toBe("off");
-    expect(
-      execFileAsyncMock.mock.calls.some(
-        ([, args]) => args[0] === "bind-key" || args.includes("status-right"),
-      ),
-    ).toBe(false);
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
+    ]);
   });
 
   it("renders only the slot title in tmux status", async () => {
@@ -117,11 +120,14 @@ describe("runtime-tmux", () => {
     }
     const [, args] = statusCall;
     expect(args.at(-1)).toBe("on");
-    expect(
-      execFileAsyncMock.mock.calls.some(
-        ([, setArgs]) => setArgs[0] === "bind-key" || setArgs.includes("status-right"),
-      ),
-    ).toBe(false);
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, setArgs]) => setArgs[0] === "set-option" && setArgs.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
+    ]);
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {
