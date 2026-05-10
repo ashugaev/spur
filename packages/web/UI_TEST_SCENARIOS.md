@@ -54,7 +54,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, branch (hidden <lg), time, trailing action button
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -80,27 +80,19 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On error: button re-enables
 - On success: button stays disabled until dashboard poll refreshes session to done zone
 
-### D5: Tracker and PR links
+### D5: Dashboard rows hide tracker and PR links
 
-- Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
-- Sessions with PR link: provider icon + compact review id (GitHub `#3439`, GitLab `!3439`), including the canonical `github-pr` slot label
-- PR badges stay compact: review id first, then CI/review mark, then review thread count
-- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
-- When approval is received, the second overlapping check is green
-- When approval is still required, the second overlapping check is yellow
-- When no approval is required, the second overlapping check is gray
-- When changes are requested, the second review mark stays red/error
-- Resolved threads alone do not turn the review mark green
-- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
-- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
-- Both open in new tab on click
+- Sessions with tracker and/or PR links do not render tracker/PR badges in the dashboard row
+- Row layout stays aligned when link metadata exists: no green strip, no empty spacer
 - Sessions without links: no icons shown, no empty space
+- Stale/missing PR status payloads do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to row action state and do not replace the footer GitHub connection indicator
 
 ### D5b: PR status survives reload and GitHub errors
 
-- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
-- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
-- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+- After PR status populates, a full page reload renders the same row merge/done action immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response
+- When GitHub responds with an error after a previous successful fetch, the row action keeps the last known state and the footer `Git Error` badge appears alongside it
+- A first-ever load with GitHub down keeps the default row action plus the `Git Error` footer; subsequent successful fetches can still upgrade the row action
 
 ### D6: Attention zone sections
 

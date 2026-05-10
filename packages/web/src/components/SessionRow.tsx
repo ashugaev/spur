@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { type ReactNode, useState } from "react";
-import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
+import { useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -50,7 +50,6 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
-  const trackerLink = session.links.find((l) => l.label === "tracker");
   const prInfo = useSessionLinkPrInfo(prLink);
   const reviewProvider = prLink ? reviewProviderFromUrl(prLink.url) : null;
   const [mergedAfterMerge, setMergedAfterMerge] = useState(false);
@@ -76,19 +75,6 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
       >
         {title}
       </Link>
-
-      {trackerLink ? (
-        <SessionLinkBadge className="hidden sm:inline-flex" link={trackerLink} variant="row" />
-      ) : null}
-
-      {prLink ? (
-        <SessionLinkBadge
-          className="hidden sm:inline-flex"
-          link={prLink}
-          prInfo={prInfo}
-          variant="row"
-        />
-      ) : null}
 
       <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
         {session.branch}
