@@ -88,7 +88,8 @@ describe("dedicated storage", () => {
         ? record.relativePath
         : null;
     expect(typeof relativePath).toBe("string");
-    expect(readFileSync(join(dedicatedStorageDir(DATA_DIR, "api-1"), String(relativePath)), "utf8"))
-      .toBe("png-bytes");
+    expect(
+      readFileSync(join(dedicatedStorageDir(DATA_DIR, "api-1"), String(relativePath)), "utf8"),
+    ).toBe("png-bytes");
   });
 });
