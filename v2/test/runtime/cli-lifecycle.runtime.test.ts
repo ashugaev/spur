@@ -537,6 +537,38 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     await expect(context.fetchJson("/info")).rejects.toThrow();
   });
 
+  it("keeps a protected prod-style daemon restart from forking a rogue listener", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-restart-guard-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-restart-guard.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli(["--config", configPath, "daemon", "restart", "--json"], {
+        env: { SPUR_DISABLE_AUTOSTART: "1" },
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("SPUR_DISABLE_AUTOSTART=1"),
+    });
+
+    delete currentActiveContext().daemonPid;
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+    await pollUntil(() => processExists(daemon.info.pid), {
+      timeoutMs: 15_000,
+      accept: (value) => value === false,
+    });
+
+    const restarted = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = restarted.info.pid;
+    expect(restarted.info.pid).not.toBe(daemon.info.pid);
+  });
+
   it("reloads all registered projects after a restart from a different config path", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
