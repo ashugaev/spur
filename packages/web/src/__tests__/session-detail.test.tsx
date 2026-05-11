@@ -846,10 +846,7 @@ describe("SessionDetail voice input", () => {
       }
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
-        return new Response(
-          JSON.stringify({ ...sessionFixture(), id: "api-b2" }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
@@ -887,10 +884,7 @@ describe("SessionDetail voice input", () => {
       }
       if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
         respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
-        return new Response(
-          JSON.stringify({ ...sessionFixture(), id: "api-b2" }),
-          { status: 200 },
-        );
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
       }
       throw new Error(`Unexpected fetch: ${url}`);
     });
