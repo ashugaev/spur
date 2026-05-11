@@ -6,8 +6,6 @@ Local daemon + CLI orchestrator.
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-No UI. No tracker flow. No plugin layer.
-
 ## Install
 
 Primary package-first path from this repo:
@@ -36,8 +34,7 @@ does not call `connect`, does not start the daemon, and does not create `~/.spur
 first normal Spur command still auto-initializes that global instance config, and `spur list` /
 `spur spawn` auto-connect the local project config through the existing registry path.
 
-If you are developing this repository itself, use `bash scripts/setup.sh` instead. That path is
-for contributors and dogfooding, not the main install flow.
+If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
 
 ## Local Project Config
 
