@@ -10,7 +10,7 @@ import {
 import { INPUT_CLASS } from "@/design/classes";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import type { InputHistoryEntry } from "@/hooks/useInputHistory";
-import type { ImageAttachment } from "@/lib/image-attachments";
+import { imageFilesFromDataTransfer, type ImageAttachment } from "@/lib/image-attachments";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -107,7 +107,7 @@ export function VoiceConfirmModal({
   onInsert: (text: string) => void;
   historyEntries?: InputHistoryEntry[];
   attachments?: ImageAttachment[];
-  onAddFiles?: (files: FileList | null) => void;
+  onAddFiles?: (files: FileList | File[] | null) => void;
   onRemoveAttachment?: (index: number) => void;
   onDismiss?: () => void;
 }) {
@@ -187,11 +187,11 @@ export function VoiceConfirmModal({
               onDrop={(event) => {
                 if (!onAddFiles) return;
                 event.preventDefault();
-                onAddFiles(event.dataTransfer.files);
+                onAddFiles(imageFilesFromDataTransfer(event.dataTransfer));
               }}
               onPaste={(event) => {
                 if (!onAddFiles) return;
-                const files = event.clipboardData.files;
+                const files = imageFilesFromDataTransfer(event.clipboardData);
                 if (files.length === 0) return;
                 event.preventDefault();
                 onAddFiles(files);

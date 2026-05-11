@@ -20,6 +20,7 @@ import { getAgentHotkeys } from "@/lib/agent-hotkeys";
 import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   encodeImageAttachments,
+  imageFilesFromDataTransfer,
   imageAttachmentsFromFiles,
   type ImageAttachment,
 } from "@/lib/image-attachments";
@@ -245,7 +246,7 @@ export function DirectTerminal({
   const voice = useVoiceInput();
   const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
 
-  const addVoiceImageFiles = useCallback((files: FileList | null) => {
+  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;
@@ -280,7 +281,7 @@ export function DirectTerminal({
   );
 
   const openAttachmentDraft = useCallback(
-    (files: FileList | null) => {
+    (files: File[]) => {
       if (!agentInputEnabled) return;
       void imageAttachmentsFromFiles(files)
         .then((attachments) => {
@@ -296,7 +297,7 @@ export function DirectTerminal({
   const handleTerminalPaste = useCallback(
     (event: ReactClipboardEvent<HTMLDivElement>) => {
       if (!agentInputEnabled) return;
-      const files = event.clipboardData.files;
+      const files = imageFilesFromDataTransfer(event.clipboardData);
       if (files.length === 0) return;
       event.preventDefault();
       openAttachmentDraft(files);
@@ -309,8 +310,9 @@ export function DirectTerminal({
     if (!target || !agentInputEnabled) return;
     const onPaste = (event: ClipboardEvent) => {
       if (!(event.target instanceof Node) || !target.contains(event.target)) return;
-      const files = event.clipboardData?.files;
-      if (!files || files.length === 0) return;
+      const dataTransfer = event.clipboardData;
+      const files = imageFilesFromDataTransfer(dataTransfer);
+      if (files.length === 0) return;
       event.preventDefault();
       event.stopPropagation();
       openAttachmentDraft(files);

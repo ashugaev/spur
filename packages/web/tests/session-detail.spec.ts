@@ -1518,6 +1518,59 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toBeVisible();
   });
 
+  test("pasted terminal image opens confirmation modal and sends an attachment", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-image-paste" });
+    let sendPayload: unknown = null;
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      sendPayload = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect
+      .poll(() => sendPayload)
+      .toMatchObject({
+        attachments: [{ name: "terminal-paste.png" }],
+        interrupt: true,
+        message: "",
+        queue: false,
+      });
+  });
+
   test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({
     page,
   }) => {

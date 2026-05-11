@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVoiceState = {
@@ -63,7 +63,7 @@ vi.mock("@/components/VoiceInput", () => ({
     voice,
   }: {
     attachments?: Array<{ file: File; preview: string }>;
-    onAddFiles?: (files: FileList | null) => void;
+    onAddFiles?: (files: FileList | File[] | null) => void;
     onInsert: (text: string) => void;
     voice: typeof mockVoiceState;
   }) =>
@@ -309,7 +309,14 @@ describe("DirectTerminal voice confirm", () => {
     const file = new File(["PNG"], "terminal.png", { type: "image/png" });
     fireEvent.paste(screen.getByTestId("direct-terminal-surface"), {
       clipboardData: {
-        files: [file] as unknown as FileList,
+        files: [] as unknown as FileList,
+        items: [
+          {
+            getAsFile: () => file,
+            kind: "file",
+            type: "image/png",
+          },
+        ],
       },
     });
 
@@ -330,6 +337,42 @@ describe("DirectTerminal voice confirm", () => {
       );
     });
     expect(sentInputPayloads()).toEqual([]);
+  });
+
+  it("leaves text-only terminal paste for xterm", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockVoiceState.voiceModalOpen = false;
+    mockVoiceState.voiceDraft = "";
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal apiSessionId="canonical-session" sessionId="tmux-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    const surface = screen.getByTestId("direct-terminal-surface");
+    const pasteEvent = createEvent.paste(surface, {
+      clipboardData: {
+        files: [] as unknown as FileList,
+        items: [{ getAsFile: () => null, kind: "string", type: "text/plain" }],
+      },
+    });
+    const preventDefault = vi.spyOn(pasteEvent, "preventDefault");
+
+    fireEvent(surface, pasteEvent);
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(mockVoiceState.openDraft).not.toHaveBeenCalled();
   });
 
   it("does not route sidecar terminal image paste to the session API", async () => {

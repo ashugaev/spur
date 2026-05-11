@@ -79,7 +79,7 @@ export function ImagePickerButton({
   onAddFiles,
 }: {
   className?: string;
-  onAddFiles: (files: FileList | null) => void;
+  onAddFiles: (files: FileList | File[] | null) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 

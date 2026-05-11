@@ -913,13 +913,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const addImageFiles = (files: FileList | null) => {
+  const addImageFiles = (files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
-  const addRespawnImageFiles = (files: FileList | null) => {
+  const addRespawnImageFiles = (files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});

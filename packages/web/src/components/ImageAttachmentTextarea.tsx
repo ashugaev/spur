@@ -1,7 +1,7 @@
 "use client";
 
 import { INPUT_CLASS } from "@/design/classes";
-import type { ImageAttachment } from "@/lib/image-attachments";
+import { imageFilesFromDataTransfer, type ImageAttachment } from "@/lib/image-attachments";
 import { VoiceButton } from "@/components/VoiceInput";
 import type { UseVoiceInput } from "@/hooks/useVoiceInput";
 import {
@@ -27,7 +27,7 @@ export function ImageAttachmentTextarea({
   onChange: (value: string) => void;
   placeholder: string;
   attachments: ImageAttachment[];
-  onAddFiles: (files: FileList | null) => void;
+  onAddFiles: (files: FileList | File[] | null) => void;
   onRemoveAttachment: (index: number) => void;
   onKeyDown?: React.KeyboardEventHandler<HTMLTextAreaElement>;
   voice?: UseVoiceInput;
@@ -45,7 +45,7 @@ export function ImageAttachmentTextarea({
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={onKeyDown}
         onPaste={(event) => {
-          const files = event.clipboardData.files;
+          const files = imageFilesFromDataTransfer(event.clipboardData);
           if (files.length > 0) {
             event.preventDefault();
             onAddFiles(files);
@@ -53,7 +53,7 @@ export function ImageAttachmentTextarea({
         }}
         onDrop={(event) => {
           event.preventDefault();
-          onAddFiles(event.dataTransfer.files);
+          onAddFiles(imageFilesFromDataTransfer(event.dataTransfer));
         }}
         onDragOver={(event) => event.preventDefault()}
         placeholder={placeholder}
