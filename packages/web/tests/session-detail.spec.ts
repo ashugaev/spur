@@ -1408,11 +1408,11 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
     const header = terminalDialog.locator(":scope > div > div").first();
+    const titleLine = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
     await expect(terminalDialog).toBeVisible();
     await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
-    await expect(header.locator(":scope > div:nth-child(2) > div:nth-child(2)")).toContainText(
-      "isolated-ui",
-    );
+    await expect(titleLine).toContainText("Header title from slot • isolated-ui");
+    await expect(titleLine).toContainText("isolated-ui");
   });
 
   test("terminal header wraps long sidecar titles without overlapping controls at desktop or 320px", async ({

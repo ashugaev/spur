@@ -28,6 +28,7 @@ let activeTmuxSocketName: string | null = null;
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
+const CODEX_READY_SETTLE_DELAY_MS = 500;
 
 export function setTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = socketName?.trim() || null;
@@ -285,13 +286,19 @@ export async function sendMessageToTmux(
   options?: { interrupt?: boolean; agent?: AgentName },
 ): Promise<void> {
   const target = exactPaneTarget(sessionName);
+  const useBracketedPaste =
+    options?.agent !== undefined &&
+    agentSendMode(options.agent) === "bracketed_paste" &&
+    !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
   if (options?.interrupt) {
     await tmux("send-keys", "-t", target, "C-c");
     await sleep(500);
   }
   await tmux("send-keys", "-t", target, "C-u");
-  if (options?.agent && agentSendMode(options.agent) === "bracketed_paste") {
+  if (useBracketedPaste) {
     // Codex TUI enables bracketed paste and handles it as a distinct paste event.
+    // The bash-based fake Codex runtime used in tests does not, so keep those
+    // runs on plain tmux input to avoid losing the first resumed prompt send.
     // Submit with a real Enter key so delivery does not depend on newline characters
     // inside the pasted payload or on Codex's paste-burst heuristics.
     await pasteLiteral(sessionName, message, true);
@@ -333,6 +340,10 @@ export async function waitForTmuxReady(
       return;
     }
     if (readyMarkers.every((marker) => capture.includes(marker))) {
+      if (options?.agent === "codex") {
+        // Codex can print its prompt before the next stdin read is ready.
+        await sleep(CODEX_READY_SETTLE_DELAY_MS);
+      }
       return;
     }
     if (

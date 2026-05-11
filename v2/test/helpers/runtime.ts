@@ -177,22 +177,21 @@ jsonl_append() {
   exit 0
 fi
 codex_base="\${CODEX_HOME:-$HOME/.codex}"
-session_rollout=""
+session_dir="$codex_base/sessions/2026/03/18"
+session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
 mode="launch"
 resume_id=""
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
-  # Discover the existing rollout file so resumed sessions can still write event_msg entries.
-  existing_rollout="$(find "$codex_base/sessions" -name "rollout-\${SPUR_SESSION:-no-session}.jsonl" 2>/dev/null | head -n 1)"
-  if [[ -n "$existing_rollout" ]]; then
-    session_rollout="$existing_rollout"
+  mkdir -p "$session_dir"
+  if [[ ! -f "$session_rollout" ]]; then
+    printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
+    printf '{"threadId":"%s"}\n' "\${resume_id:-thread-\${SPUR_SESSION:-no-session}}" >> "$session_rollout"
   fi
 else
-  session_dir="$codex_base/sessions/2026/03/18"
   thread_id="thread-\${SPUR_SESSION:-no-session}"
   mkdir -p "$session_dir"
-  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`
@@ -669,6 +668,7 @@ export async function createRuntimeTestContext(
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
+          SPUR_SKIP_CODEX_SUBMIT_ACK: "1",
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
           SPUR_FAKE_GH_STATE_FILE: ghStateFile,
         }
