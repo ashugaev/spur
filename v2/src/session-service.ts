@@ -3419,7 +3419,10 @@ export class SessionService {
     return this.enrich(record);
   }
 
-  private async ensureKillDirtyWorktreeAllowed(session: SessionRecord, force: boolean): Promise<void> {
+  private async ensureKillDirtyWorktreeAllowed(
+    session: SessionRecord,
+    force: boolean,
+  ): Promise<void> {
     if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
       return;
     }

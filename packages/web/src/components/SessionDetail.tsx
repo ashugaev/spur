@@ -885,7 +885,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       await submitRespawn(false);
     } catch (respawnFirstError) {
       const msg =
-        respawnFirstError instanceof Error ? respawnFirstError.message : "Failed to respawn session";
+        respawnFirstError instanceof Error
+          ? respawnFirstError.message
+          : "Failed to respawn session";
       const prefix = "Kill confirmation required";
       if (
         msg.startsWith(prefix) &&
