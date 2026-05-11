@@ -106,6 +106,19 @@ Notes:
 
 ## Systemd Services
 
+Provision daemon secrets out-of-band first. The unit reads them via
+`EnvironmentFile=/etc/spur/daemon.env`:
+
+```bash
+sudo install -d -m 0755 /etc/spur
+printf 'AZURE_OPENAI_API_KEY=<your-key>\n' | sudo tee /etc/spur/daemon.env >/dev/null
+sudo chown root:root /etc/spur/daemon.env
+sudo chmod 0600 /etc/spur/daemon.env
+```
+
+See `deploy/spur-daemon.env.example` for the file format. `pnpm main:deploy`
+aborts if this file is missing.
+
 Create a daemon unit:
 
 ```ini
