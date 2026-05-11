@@ -40,12 +40,14 @@ For an explicit production update on a host that runs `spur-daemon.service` and 
 pnpm main:deploy
 ```
 
+`pnpm main:deploy` syncs a dedicated release clone to the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA.
+
 ## Repo Layout
 
 - `v2/` — Spur daemon, CLI, automation runtime, tests, config example
 - `packages/web/` — Next.js UI over the Spur daemon API
 - `scripts/setup.sh` — bootstrap for local development and dogfooding
-- `scripts/main-deploy.sh` — explicit pull/build/restart flow for a `main`-based production host
+- `scripts/main-deploy.sh` — deploys the latest `origin/main` from a dedicated release clone on a production host
 - `tests/integration/` — onboarding smoke environment
 - `spur.yaml` — repo-local project config for this checkout
 

@@ -308,6 +308,19 @@ export function Dashboard() {
     [grouped],
   );
 
+  const visibleLevels = useMemo(
+    () =>
+      LANE_ORDER.filter(
+        (level) =>
+          grouped[level].length > 0 && (activeStatFilter === null || level === activeStatFilter),
+      ),
+    [activeStatFilter, grouped],
+  );
+
+  const hasActiveFilters =
+    projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
+  const hasVisibleSessions = visibleLevels.length > 0;
+
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
@@ -753,25 +766,36 @@ export function Dashboard() {
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
 
-        {!loading && sessions.length === 0 ? (
+        {!loading && !hasVisibleSessions ? (
           <section className="mt-5">
             <EmptyState
               message={
-                projectId
-                  ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
+                hasActiveFilters
+                  ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
                   : undefined
               }
             />
+            {hasActiveFilters ? (
+              <div className="mt-3 flex justify-center">
+                <button
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setActiveStatFilter(null);
+                    syncProjectFilter("");
+                  }}
+                  type="button"
+                >
+                  Reset Filters
+                </button>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
-        {!loading && sessions.length > 0 ? (
+        {!loading && hasVisibleSessions ? (
           <section className="mt-5 space-y-4">
-            {LANE_ORDER.filter(
-              (level) =>
-                grouped[level].length > 0 &&
-                (activeStatFilter === null || level === activeStatFilter),
-            ).map((level) => (
+            {visibleLevels.map((level) => (
               <AttentionZone
                 key={level}
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}

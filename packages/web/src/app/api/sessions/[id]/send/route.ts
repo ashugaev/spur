@@ -8,6 +8,8 @@ interface RouteContext {
 interface SendBody {
   message?: string;
   attachments?: Array<{ name: string; data: string }>;
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export async function POST(request: NextRequest, context: RouteContext) {
@@ -21,7 +23,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
     }
     const result = await spurRequestJson<{ ok: true }>(
       `/sessions/${encodeURIComponent(id)}/send`,
-      spurJsonInit("POST", { message, attachments: body.attachments }),
+      spurJsonInit("POST", {
+        message,
+        attachments: body.attachments,
+        ...(body.queue !== undefined ? { queue: body.queue } : {}),
+        ...(body.interrupt !== undefined ? { interrupt: body.interrupt } : {}),
+      }),
     );
     return NextResponse.json(result);
   } catch (error) {

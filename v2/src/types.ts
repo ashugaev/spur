@@ -210,6 +210,7 @@ export interface SessionRecord {
   updatedAt: string;
   retainInList?: boolean;
   slots?: SessionSlots;
+  sidecarNames?: string[];
   sidecarPorts?: Record<string, Record<string, number>>;
   pipeline?: SessionPipelineState;
   queuedMessages?: SessionQueuedMessagesState;
@@ -277,6 +278,8 @@ export interface SendMessageAttachment {
 export interface SendMessageRequest {
   message: string;
   attachments?: SendMessageAttachment[];
+  queue?: boolean;
+  interrupt?: boolean;
 }
 
 export interface RunServiceRequest {

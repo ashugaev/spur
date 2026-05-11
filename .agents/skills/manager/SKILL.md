@@ -40,6 +40,7 @@ Coordinate work through repo agents. Delegate code changes to `developer`.
 - Mark each checklist item `required` or `skipped` with reason.
 - Define expected evidence for each `required` item.
 - Execute the run against this checklist and update item status as steps complete.
+- For every code-change task, always include a `write/update tests` item as a required checklist step. Never mark implementation complete without it.
 
 4. Research
 - Run `researcher` and `critic` in parallel when score `>= 2`.

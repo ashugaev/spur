@@ -56,7 +56,10 @@ async function waitForState(
 describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
   afterEach(async () => {
     while (activeContexts.length > 0) {
-      const current = activeContexts.pop()!;
+      const current = activeContexts.pop();
+      if (!current) {
+        throw new Error("expected active runtime context during cleanup");
+      }
       if (current.daemonPid) {
         try {
           process.kill(current.daemonPid, "SIGTERM");
@@ -85,7 +88,11 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
       baseConfig(context, sessionPrefix),
     );
     const daemon = await context.startDaemon(configPath);
-    activeContexts[activeContexts.length - 1]!.daemonPid = daemon.info.pid;
+    const current = activeContexts[activeContexts.length - 1];
+    if (!current) {
+      throw new Error("expected active runtime context after setup");
+    }
+    current.daemonPid = daemon.info.pid;
     return { context, configPath, port };
   }
 
@@ -177,8 +184,12 @@ describe.skipIf(!tmuxOk)("Agent status detection (runtime)", () => {
     const view = await waitForState(port, session.id, "needs_input");
 
     expect(view.stateHistory).toBeDefined();
-    expect(view.stateHistory!.length).toBeGreaterThanOrEqual(2);
-    const states = view.stateHistory!.map((t) => t.state);
+    const stateHistory = view.stateHistory;
+    if (!stateHistory) {
+      throw new Error("expected state history to be present");
+    }
+    expect(stateHistory.length).toBeGreaterThanOrEqual(2);
+    const states = stateHistory.map((t) => t.state);
     expect(states).toContain("waiting");
     expect(states).toContain("needs_input");
   });

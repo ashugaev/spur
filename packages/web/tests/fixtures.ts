@@ -49,6 +49,10 @@ export interface SpurSessionView {
   workspaceExists: boolean;
   worktreePath: string;
   services: SpurServiceView[];
+  queuedMessages?: {
+    messages: string[];
+    awaitingPrompt: boolean;
+  };
   sidecars?: { name: string; alive: boolean }[];
   slots?: {
     title?: string;
@@ -82,6 +86,10 @@ function baseSession(id: string): SpurSessionView {
     workspaceExists: true,
     worktreePath: `/tmp/worktrees/${id}`,
     services: [],
+    queuedMessages: {
+      messages: [],
+      awaitingPrompt: false,
+    },
     sidecars: [],
     slots: { links: [] },
   };
@@ -216,7 +224,27 @@ export async function mockSessions(
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ available: false }),
+      body: JSON.stringify({ available: false, daemonAlive: true }),
     });
+  });
+}
+
+/**
+ * Navigate to the given path after setting up mocks and wait until the
+ * dashboard has rendered the mocked data. This prevents races where the
+ * first `getBy*` assertion fires before the component has re-rendered.
+ */
+export async function gotoMocked(
+  page: Page,
+  path: string,
+  sessions: SpurSessionView[],
+  projects?: ProjectInfo[],
+): Promise<void> {
+  await mockSessions(page, sessions, projects);
+  await page.goto(path);
+  // Wait for the loading state to clear — the dashboard replaces "Loading
+  // sessions..." with actual content once the first mocked fetch resolves.
+  await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+    timeout: 8000,
   });
 }
