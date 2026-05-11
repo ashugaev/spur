@@ -2825,13 +2825,10 @@ projects:
       ).stdout,
     ) as SessionView;
 
-    await pollUntil(
-      async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
-      {
-        timeoutMs: 15_000,
-        accept: (value) => value.state === "waiting",
-      },
-    );
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
 
     await execTmux(["copy-mode", "-t", spawned.tmuxSession]);
 
