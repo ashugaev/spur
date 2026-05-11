@@ -395,7 +395,6 @@ export function isIdleEnoughToReceive(
   if (!lastActivityAt) return true;
   const ts =
     typeof lastActivityAt === "string" ? Date.parse(lastActivityAt) : lastActivityAt.getTime();
-  if (!Number.isFinite(ts)) return true;
   return now - ts >= idleMs;
 }
 

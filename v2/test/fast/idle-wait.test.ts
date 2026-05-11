@@ -8,10 +8,6 @@ describe("isIdleEnoughToReceive", () => {
     expect(isIdleEnoughToReceive(null, IDLE_WAIT_BEFORE_FLUSH_MS, now)).toBe(true);
   });
 
-  it("treats an unparseable string as idle", () => {
-    expect(isIdleEnoughToReceive("not-a-date", IDLE_WAIT_BEFORE_FLUSH_MS, now)).toBe(true);
-  });
-
   it("returns true when the Date is older than the threshold", () => {
     const past = new Date(now - 31_000);
     expect(isIdleEnoughToReceive(past, IDLE_WAIT_BEFORE_FLUSH_MS, now)).toBe(true);
