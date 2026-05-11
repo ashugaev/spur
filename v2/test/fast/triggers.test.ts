@@ -1,27 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { EventBus } from "../../src/event-bus.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const DATA_DIR = `/tmp/spur-trigger-data-${process.pid}`;
 
-function parseJsonLine(line: string): unknown {
-  try {
-    return JSON.parse(line) as unknown;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSONL record: ${message}`, { cause: error });
-  }
-}
-
-function readDedicatedInputRecords(sessionId: string): unknown[] {
-  const file = join(DATA_DIR, "dedicated-storage", sessionId, "inputs.jsonl");
-  if (!existsSync(file)) {
-    return [];
-  }
-  return readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(parseJsonLine);
+function inputLogEntries(sessionId: string): unknown[] {
+  return logSpurEventMock.mock.calls
+    .map(([, entry]) => entry)
+    .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
 
 vi.mock("../../src/event-log.js", () => ({
@@ -244,13 +231,11 @@ async function loadTriggersModule() {
 describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    rmSync(join(DATA_DIR, "dedicated-storage"), { recursive: true, force: true });
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
     logSpurEventMock.mockReset();
   });
 
   afterEach(() => {
-    rmSync(join(DATA_DIR, "dedicated-storage"), { recursive: true, force: true });
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -299,7 +284,7 @@ describe("startConfiguredTriggers", () => {
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.delivered",
       );
-      expect(readDedicatedInputRecords("api-1")).toEqual([]);
+      expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }
@@ -343,17 +328,20 @@ describe("startConfiguredTriggers", () => {
       expect(delivered).not.toContain(
         "Review the latest GitHub updates on the active PR and act on them.",
       );
-      expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect(inputLogEntries("api-1")).toEqual([
         expect.objectContaining({
-          type: "text",
-          kind: "trigger_send_prompt",
-          text: "Run $manager and $github. Address the latest requested review changes on the active PR.",
-          metadata: {
-            projectId: "api",
-            sourceId: "pr-watch",
-            triggerId: "send",
+          event: "session.input.received",
+          message:
+            "Run $manager and $github. Address the latest requested review changes on the active PR.",
+          projectId: "api",
+          sourceId: "pr-watch",
+          triggerId: "send",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Run $manager and $github. Address the latest requested review changes on the active PR.",
             eventName: "github:comment",
-          },
+          }),
         }),
       ]);
     } finally {
@@ -389,7 +377,7 @@ describe("startConfiguredTriggers", () => {
         expect(getMock).toHaveBeenCalledTimes(1);
       });
       expect(deliverMock).not.toHaveBeenCalled();
-      expect(readDedicatedInputRecords("api-1")).toEqual([]);
+      expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }
@@ -434,7 +422,7 @@ describe("startConfiguredTriggers", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(deliverMock).not.toHaveBeenCalled();
-      expect(readDedicatedInputRecords("api-1")).toEqual([]);
+      expect(inputLogEntries("api-1")).toEqual([]);
     } finally {
       await controller.stop();
     }
@@ -498,11 +486,15 @@ describe("startConfiguredTriggers", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(deliverMock).toHaveBeenCalledTimes(1);
-      expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect(inputLogEntries("api-1")).toEqual([
         expect.objectContaining({
-          type: "text",
-          kind: "trigger_send_prompt",
-          text: "Read the active PR feedback and fix it.",
+          event: "session.input.received",
+          message: "Read the active PR feedback and fix it.",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Read the active PR feedback and fix it.",
+          }),
         }),
       ]);
     } finally {
@@ -547,11 +539,15 @@ describe("startConfiguredTriggers", () => {
       await vi.advanceTimersByTimeAsync(10 * 60_000);
 
       expect(deliverMock).toHaveBeenCalledTimes(3);
-      expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect(inputLogEntries("api-1")).toEqual([
         expect.objectContaining({
-          type: "text",
-          kind: "trigger_send_prompt",
-          text: "Read the failing CI report and fix it.",
+          event: "session.input.received",
+          message: "Read the failing CI report and fix it.",
+          details: expect.objectContaining({
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: "Read the failing CI report and fix it.",
+          }),
         }),
       ]);
     } finally {

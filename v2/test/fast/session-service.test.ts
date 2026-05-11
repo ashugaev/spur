@@ -96,24 +96,11 @@ const scanCodexRolloutForMessageMock = vi.fn();
 const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.pid}`);
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 let TEST_DATA_DIR = resolve(`/tmp/spur-session-service-test-${process.pid}`);
-const dedicatedStorageDirForSession = (sessionId: string) =>
-  join(TEST_DATA_DIR, "dedicated-storage", sessionId);
 
-function parseJsonLine(line: string): unknown {
-  try {
-    return JSON.parse(line) as unknown;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSONL record: ${message}`, { cause: error });
-  }
-}
-
-function readDedicatedInputRecords(sessionId: string): unknown[] {
-  const file = join(dedicatedStorageDirForSession(sessionId), "inputs.jsonl");
-  if (!existsSync(file)) {
-    return [];
-  }
-  return readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(parseJsonLine);
+function inputLogEntries(sessionId: string): unknown[] {
+  return logSpurEventMock.mock.calls
+    .map(([, entry]) => entry)
+    .filter((entry) => entry.event === "session.input.received" && entry.sessionId === sessionId);
 }
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
@@ -622,7 +609,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -646,12 +632,15 @@ describe("SessionService", () => {
     expect(result.worktree).toBe(true);
     expect(result.planMode).toBe(false);
     expect(result.branch).toBe("api-1");
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "text",
-        kind: "spawn_prompt",
-        text: "hello",
-        metadata: { source: "spawn" },
+        event: "session.input.received",
+        message: "hello",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "hello",
+        }),
       }),
     ]);
     expect(runSpawnPreflightMock).not.toHaveBeenCalled();
@@ -662,6 +651,7 @@ describe("SessionService", () => {
     ).toEqual([
       "session.spawn.started",
       "session.spawn.worktree_created",
+      "session.input.received",
       "session.spawn.tmux_created",
       "session.spawn.ready",
       "session.spawn.initial_prompt_sent",
@@ -755,12 +745,15 @@ describe("SessionService", () => {
         ([, session]) => session.id === "api-1" && session.status === "running",
       ),
     ).toBe(true);
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "text",
-        kind: "spawn_prompt",
-        text: "hello",
-        metadata: { source: "spawn_background" },
+        event: "session.input.received",
+        message: "hello",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn_background",
+          text: "hello",
+        }),
       }),
     ]);
   });
@@ -1197,19 +1190,16 @@ describe("SessionService", () => {
     expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-shot.png`, "utf8")).toBe(
       "png-bytes",
     );
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "attachment",
-        kind: "spawn_attachment",
-        name: "shot.png",
-        size: "png-bytes".length,
-        metadata: { source: "spawn" },
-      }),
-      expect.objectContaining({
-        type: "text",
-        kind: "spawn_prompt",
-        text: "describe this image",
-        metadata: { source: "spawn" },
+        event: "session.input.received",
+        message: "describe this image",
+        details: expect.objectContaining({
+          inputKind: "spawn_prompt",
+          source: "spawn",
+          text: "describe this image",
+          attachments: [{ id: "1773828300000-shot.png", name: "shot.png" }],
+        }),
       }),
     ]);
   });
@@ -1474,7 +1464,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -1530,12 +1519,15 @@ describe("SessionService", () => {
         sessionId: "api-1",
       }),
     );
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "text",
-        kind: "send_message",
-        text: "follow up",
-        metadata: { source: "send" },
+        event: "session.input.received",
+        message: "follow up",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send",
+          text: "follow up",
+        }),
       }),
     ]);
     expect(result.id).toBe("api-1");
@@ -1714,12 +1706,15 @@ describe("SessionService", () => {
       messages: ["follow up"],
       awaitingPrompt: false,
     });
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "text",
-        kind: "send_message",
-        text: "follow up",
-        metadata: { source: "send" },
+        event: "session.input.received",
+        message: "follow up",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send",
+          text: "follow up",
+        }),
       }),
     ]);
 
@@ -1870,12 +1865,15 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "text",
-        kind: "send_message",
-        text: "send immediately",
-        metadata: { source: "send_direct" },
+        event: "session.input.received",
+        message: "send immediately",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "send immediately",
+        }),
       }),
     ]);
   });
@@ -1932,19 +1930,16 @@ describe("SessionService", () => {
       "1773828300000-shot.png",
       true,
     );
-    expect(readDedicatedInputRecords("api-1")).toEqual([
+    expect(inputLogEntries("api-1")).toEqual([
       expect.objectContaining({
-        type: "attachment",
-        kind: "send_attachment",
-        name: "shot.png",
-        size: "png-bytes".length,
-        metadata: { source: "send" },
-      }),
-      expect.objectContaining({
-        type: "text",
-        kind: "send_message",
-        text: "inspect this",
-        metadata: { source: "send_direct" },
+        event: "session.input.received",
+        message: "inspect this",
+        details: expect.objectContaining({
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "inspect this",
+          attachments: [{ id: "1773828300000-shot.png", name: "shot.png" }],
+        }),
       }),
     ]);
   });
@@ -3487,7 +3482,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -4576,7 +4570,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -4599,7 +4592,7 @@ describe("SessionService", () => {
     expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
       "session.restore.completed",
     );
-    expect(readDedicatedInputRecords("api-1")).toEqual([]);
+    expect(inputLogEntries("api-1")).toEqual([]);
   });
 
   it("passes planMode through restore planning and native resume", async () => {
@@ -4797,7 +4790,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -5016,7 +5008,6 @@ describe("SessionService", () => {
         SPUR_SLOT_COMMAND: "/tmp/spur-tools/api-1/spur-slots",
         SPUR_AGENT_STATE_COMMAND: "/tmp/spur-tools/api-1/spur-agent-state",
         SPUR_AGENT_STATE_FILE: join(TEST_DATA_DIR, "session-agent-state", "api-1.json"),
-        SPUR_DEDICATED_STORAGE_DIR: dedicatedStorageDirForSession("api-1"),
         SPUR_REAL_HOME: expect.any(String),
         PATH: expect.stringContaining("/tmp/spur-tools/api-1:"),
       },
@@ -6491,26 +6482,19 @@ describe("SessionService", () => {
       expect(readFileSync(`${artifactDirForSession("api-1")}/1773828300000-new.png`, "utf8")).toBe(
         "new-bytes",
       );
-      expect(readDedicatedInputRecords("api-1")).toEqual([
+      expect(inputLogEntries("api-1")).toEqual([
         expect.objectContaining({
-          type: "attachment",
-          kind: "spawn_attachment",
-          name: "source.png",
-          size: "startup-bytes".length,
-          metadata: { source: "spawn" },
-        }),
-        expect.objectContaining({
-          type: "attachment",
-          kind: "spawn_attachment",
-          name: "new.png",
-          size: "new-bytes".length,
-          metadata: { source: "spawn" },
-        }),
-        expect.objectContaining({
-          type: "text",
-          kind: "respawn_override_prompt",
-          text: "edited prompt",
-          metadata: { source: "respawn" },
+          event: "session.input.received",
+          message: "edited prompt",
+          details: expect.objectContaining({
+            inputKind: "respawn_override_prompt",
+            source: "respawn",
+            text: "edited prompt",
+            attachments: [
+              { id: "1773828300000-source.png", name: "source.png" },
+              { id: "1773828300000-new.png", name: "new.png" },
+            ],
+          }),
         }),
       ]);
     });

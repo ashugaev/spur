@@ -421,6 +421,18 @@ test.describe("S2a: Logs modal", () => {
           historyArtifactId: "agent-history-2026-04-02T10-01-00-000Z-waiting-to-needs_input.jsonl",
         },
       },
+      {
+        timestamp: "2026-04-02T10:01:10.000Z",
+        event: "session.input.received",
+        level: "info",
+        message: "Fix the failing test",
+        details: {
+          inputKind: "send_message",
+          source: "send_direct",
+          text: "Fix the failing test",
+          attachments: [{ id: "upload.png", name: "upload.png" }],
+        },
+      },
     ]);
 
     await page.goto(`/sessions/${session.id}`);
@@ -431,6 +443,10 @@ test.describe("S2a: Logs modal", () => {
     await expect(page.getByText("waiting")).toBeVisible();
     await expect(page.getByText("needs input")).toBeVisible();
     await expect(page.getByText("source jsonl")).toBeVisible();
+    await expect(page.getByText("User input")).toBeVisible();
+    await expect(page.getByText("send message")).toBeVisible();
+    await expect(page.getByText("Fix the failing test")).toBeVisible();
+    await expect(page.getByText("Attachment upload.png")).toBeVisible();
     await expect(page.getByRole("link", { name: /history snapshot/i })).toHaveCount(0);
   });
 

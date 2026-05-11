@@ -1,5 +1,4 @@
 import { writeStderr } from "./io.js";
-import { appendDedicatedTextInput } from "./dedicated-storage.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import {
@@ -220,13 +219,17 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       if (batch.customPrompt !== undefined && !batch.customPromptRecorded) {
-        appendDedicatedTextInput(deps.config.dataDir, batch.batch.sessionId, {
-          kind: "trigger_send_prompt",
-          text: batch.customPrompt,
-          metadata: {
-            projectId: batch.projectId,
-            sourceId: batch.sourceId,
-            triggerId: batch.triggerId,
+        logTriggerEvent(deps.config.dataDir, "session.input.received", {
+          level: "info",
+          sessionId: batch.batch.sessionId,
+          projectId: batch.projectId,
+          sourceId: batch.sourceId,
+          triggerId: batch.triggerId,
+          message: batch.customPrompt,
+          details: {
+            inputKind: "trigger_send_prompt",
+            source: "trigger",
+            text: batch.customPrompt,
             eventName: batch.eventName,
           },
         });

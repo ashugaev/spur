@@ -517,8 +517,29 @@ function readLogDetail(details: Record<string, unknown> | undefined, key: string
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function readLogAttachments(details: Record<string, unknown> | undefined): Array<{
+  id: string;
+  name: string;
+}> {
+  const value = details?.["attachments"];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (
+      typeof item === "object" &&
+      item !== null &&
+      "id" in item &&
+      "name" in item &&
+      typeof item.id === "string" &&
+      typeof item.name === "string"
+    ) {
+      return [{ id: item.id, name: item.name }];
+    }
+    return [];
+  });
+}
+
 function formatLogEventLabel(event: string): string {
-  return event.replaceAll(".", " ");
+  return event.replaceAll(".", " ").replaceAll("_", " ");
 }
 
 function formatStateLabel(state: string): string {
@@ -556,8 +577,12 @@ function LogEntryRow({
   const historyArtifactId = readLogDetail(entry.details, "historyArtifactId");
   const serviceId = readLogDetail(entry.details, "serviceId");
   const sidecarName = readLogDetail(entry.details, "sidecarName");
+  const inputKind = readLogDetail(entry.details, "inputKind");
+  const inputText = readLogDetail(entry.details, "text") ?? entry.message ?? "";
+  const inputAttachments = readLogAttachments(entry.details);
   const isStateTransition =
     entry.event === "session.state.transition" && Boolean(fromState) && Boolean(toState);
+  const isUserInput = entry.event === "session.input.received";
   const runtimeLabel =
     entry.event === "service.output"
       ? serviceId
@@ -610,6 +635,36 @@ function LogEntryRow({
             >
               History snapshot
             </a>
+          ) : null}
+        </div>
+      ) : isUserInput ? (
+        <div className="px-3 py-3">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+            <span className="border border-[var(--color-status-working)] px-2 py-0.5 text-[var(--color-status-working)]">
+              User input
+            </span>
+            {inputKind ? (
+              <span className="border border-[var(--color-border-default)] px-2 py-0.5 text-[var(--color-text-secondary)]">
+                {formatLogEventLabel(inputKind)}
+              </span>
+            ) : null}
+          </div>
+          {inputText ? (
+            <pre className="whitespace-pre-wrap break-words border-l-2 border-[var(--color-status-working)] pl-3 font-mono text-[11px] leading-5 text-[var(--color-text-primary)]">
+              {inputText}
+            </pre>
+          ) : null}
+          {inputAttachments.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {inputAttachments.map((attachment) => (
+                <span
+                  className="border border-[var(--color-border-default)] px-2 py-1 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]"
+                  key={attachment.id}
+                >
+                  Attachment {attachment.name}
+                </span>
+              ))}
+            </div>
           ) : null}
         </div>
       ) : (

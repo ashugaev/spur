@@ -47,14 +47,6 @@ import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
 import { sendDesktopNotification } from "./desktop-notify.js";
 import {
-  appendDedicatedAttachmentInput,
-  appendDedicatedTextInput,
-  ensureDedicatedStorageDir,
-  type DedicatedAttachmentInputKind,
-  type DedicatedInputMetadata,
-  type DedicatedTextInputKind,
-} from "./dedicated-storage.js";
-import {
   requestGitHubMergeConflictRestoreReplay,
   deleteRuntimeLogCursorsForSession,
   deleteServiceInstance,
@@ -199,6 +191,18 @@ const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
 const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 const PR_CHECK_WAITING_LIMIT = 5;
+
+type UserInputKind =
+  | "spawn_prompt"
+  | "send_message"
+  | "trigger_send_prompt"
+  | "respawn_override_prompt";
+
+interface StoredImageAttachment {
+  id: string;
+  path: string;
+  name: string;
+}
 
 interface PrCheckTracker {
   waitingChecks: number;
@@ -548,7 +552,6 @@ function buildSessionEnv(args: {
     SPUR_SLOT_COMMAND: join(args.sessionToolDir, SLOT_TOOL_NAME),
     SPUR_AGENT_STATE_COMMAND: join(args.sessionToolDir, AGENT_STATE_TOOL_NAME),
     SPUR_AGENT_STATE_FILE: join(args.dataDir, "session-agent-state", `${args.sessionId}.json`),
-    SPUR_DEDICATED_STORAGE_DIR: ensureDedicatedStorageDir(args.dataDir, args.sessionId),
     // Real HOME from /etc/passwd, unaffected by sandboxes that remap $HOME to a scratch dir.
     // Sidecars that need `~/.nvm`, `~/.bashrc`, etc. should source "$SPUR_REAL_HOME/..." instead of "$HOME/...".
     SPUR_REAL_HOME: userInfo().homedir,
@@ -736,7 +739,7 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   placeholder: SessionRecord;
   sessionToolDir: string;
-  startupAttachments: Array<{ id: string; path: string }>;
+  startupAttachments: StoredImageAttachment[];
 }
 
 function resolveRespawnRequest(
@@ -924,6 +927,38 @@ export class SessionService {
     },
   ): void {
     logSpurEvent(this.config.dataDir, { event, ...entry });
+  }
+
+  private logUserInput(
+    sessionId: string,
+    projectId: string,
+    input: {
+      kind: UserInputKind;
+      source: string;
+      text: string;
+      attachments?: StoredImageAttachment[];
+    },
+  ): void {
+    const text = input.text.trim();
+    const attachments = (input.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      name: attachment.name,
+    }));
+    if (!text && attachments.length === 0) {
+      return;
+    }
+    this.logEvent("session.input.received", {
+      level: "info",
+      sessionId,
+      projectId,
+      message: text || `${attachments.length} attachment${attachments.length === 1 ? "" : "s"}`,
+      details: {
+        inputKind: input.kind,
+        source: input.source,
+        text,
+        ...(attachments.length > 0 ? { attachments } : {}),
+      },
+    });
   }
 
   private sessionAgentConfig(
@@ -1767,7 +1802,7 @@ export class SessionService {
 
   async spawn(
     request: SpawnSessionRequest,
-    options?: { promptKind?: DedicatedTextInputKind },
+    options?: { promptKind?: UserInputKind },
   ): Promise<SessionView> {
     let stage = "validating";
     let sessionId: string | undefined;
@@ -1956,16 +1991,14 @@ export class SessionService {
         steps && firstStage
           ? formatPipelineStepMessage(prompt, firstStage, 0, steps.length)
           : buildSessionPrompt(prompt, planMode);
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments, {
-        kind: "spawn_attachment",
-        metadata: { source: "spawn" },
-      });
-      appendDedicatedTextInput(this.config.dataDir, sessionId, {
-        kind: options?.promptKind ?? "spawn_prompt",
+      const inputKind = options?.promptKind ?? "spawn_prompt";
+      const inputSource = inputKind === "respawn_override_prompt" ? "respawn" : "spawn";
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
+        kind: inputKind,
         text: prompt,
-        metadata: {
-          source: options?.promptKind === "respawn_override_prompt" ? "respawn" : "spawn",
-        },
+        source: inputSource,
+        attachments: startupAttachments,
       });
       const startupAttachmentLines =
         agent === "codex"
@@ -2338,14 +2371,12 @@ export class SessionService {
         },
       });
 
-      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments, {
-        kind: "spawn_attachment",
-        metadata: { source: "spawn_background" },
-      });
-      appendDedicatedTextInput(this.config.dataDir, sessionId, {
+      const startupAttachments = this.storeImageAttachments(sessionId, request.attachments);
+      this.logUserInput(sessionId, request.project, {
         kind: "spawn_prompt",
         text: prompt,
-        metadata: { source: "spawn_background" },
+        source: "spawn_background",
+        attachments: startupAttachments,
       });
 
       return {
@@ -2808,11 +2839,6 @@ export class SessionService {
       throw new Error(`Session is not running: ${sessionId}`);
     }
     const finalMessage = this.prepareSendMessage(session, request);
-    appendDedicatedTextInput(this.config.dataDir, sessionId, {
-      kind: "send_message",
-      text: typeof request.message === "string" ? request.message : "",
-      metadata: { source: request.queue === false ? "send_direct" : "send" },
-    });
     if (request.queue === false) {
       return this.deliverPrepared(sessionId, finalMessage, {
         interrupt: request.interrupt === true,
@@ -2924,11 +2950,7 @@ export class SessionService {
   private storeImageAttachments(
     sessionId: string,
     attachments: SendMessageAttachment[] | undefined,
-    dedicatedInput: {
-      kind: DedicatedAttachmentInputKind;
-      metadata?: DedicatedInputMetadata;
-    },
-  ): Array<{ id: string; path: string }> {
+  ): StoredImageAttachment[] {
     if (!attachments || attachments.length === 0) {
       return [];
     }
@@ -2937,7 +2959,7 @@ export class SessionService {
     }
 
     const attachDir = ensureSessionArtifactsDir(this.config.dataDir, sessionId);
-    const stored: Array<{ id: string; path: string }> = [];
+    const stored: StoredImageAttachment[] = [];
     for (const [index, att] of attachments.entries()) {
       if (typeof att.name !== "string" || !NAME_RE.test(att.name)) {
         throw new Error(`Invalid attachment name: ${String(att.name)}`);
@@ -2962,13 +2984,7 @@ export class SessionService {
       writeFileSync(filePath, buf, { mode: 0o644 });
       setSessionArtifactOrigin(this.config.dataDir, sessionId, filename, "intentional");
       setSessionArtifactUserAdded(this.config.dataDir, sessionId, filename, true);
-      appendDedicatedAttachmentInput(this.config.dataDir, sessionId, {
-        kind: dedicatedInput.kind,
-        sourcePath: filePath,
-        name: att.name,
-        ...(dedicatedInput.metadata ? { metadata: dedicatedInput.metadata } : {}),
-      });
-      stored.push({ id: filename, path: filePath });
+      stored.push({ id: filename, path: filePath, name: att.name });
     }
     return stored;
   }
@@ -3060,18 +3076,26 @@ export class SessionService {
   }
 
   private prepareSendMessage(
-    session: Pick<SessionRecord, "id">,
+    session: Pick<SessionRecord, "id" | "project">,
     request: SendMessageRequest,
   ): string {
     const hasAttachments = Array.isArray(request.attachments) && request.attachments.length > 0;
     const message = typeof request.message === "string" ? request.message.trim() : "";
     if (!hasAttachments) {
+      this.logUserInput(session.id, session.project, {
+        kind: "send_message",
+        source: request.queue === false ? "send_direct" : "send",
+        text: message,
+      });
       return message;
     }
 
-    const stored = this.storeImageAttachments(session.id, request.attachments, {
-      kind: "send_attachment",
-      metadata: { source: "send" },
+    const stored = this.storeImageAttachments(session.id, request.attachments);
+    this.logUserInput(session.id, session.project, {
+      kind: "send_message",
+      source: request.queue === false ? "send_direct" : "send",
+      text: message,
+      attachments: stored,
     });
     const prefixLines = buildAttachmentReferenceLines(stored.map((attachment) => attachment.id));
     return prefixLines.join("\n") + (message ? `\n${message}` : "");
