@@ -11,6 +11,7 @@ interface RespawnBody {
   attachments?: Array<{ name: string; data: string }>;
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  forceKillSource?: boolean;
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -25,8 +26,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (Array.isArray(body.startupAttachmentIds)) {
       payload.startupAttachmentIds = body.startupAttachmentIds;
     }
-    if (typeof body.terminateSessionId === "string" && body.terminateSessionId.trim()) {
-      payload.terminateSessionId = body.terminateSessionId.trim();
+    if (typeof body.forceKillSource === "boolean" && body.forceKillSource) {
+      payload.forceKillSource = true;
     }
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,

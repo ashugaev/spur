@@ -851,14 +851,24 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
-    setBusyAction("respawn");
-    try {
+    const prLink = session?.links.find((link) => link.label === "pr");
+    if (
+      prLink &&
+      !window.confirm(
+        `This session has a linked pull request (${prLink.url}). Respawn removes the old session worktree after success. Continue?`,
+      )
+    ) {
+      return;
+    }
+
+    const submitRespawn = async (forceKillSource: boolean) => {
       const payload: Record<string, unknown> = {
         prompt: respawnPrompt.trim(),
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeImageAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (forceKillSource) payload.forceKillSource = true;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -868,8 +878,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const data = (await response.json()) as SpurSessionView;
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
-    } catch (respawnError) {
-      setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    };
+
+    setBusyAction("respawn");
+    try {
+      await submitRespawn(false);
+    } catch (respawnFirstError) {
+      const msg =
+        respawnFirstError instanceof Error ? respawnFirstError.message : "Failed to respawn session";
+      const prefix = "Kill confirmation required";
+      if (
+        msg.startsWith(prefix) &&
+        window.confirm(
+          `${msg}\n\nRespawn anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?`,
+        )
+      ) {
+        try {
+          await submitRespawn(true);
+        } catch (respawnForceError) {
+          setError(
+            respawnForceError instanceof Error
+              ? respawnForceError.message
+              : "Failed to respawn session",
+          );
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusyAction(null);
     }

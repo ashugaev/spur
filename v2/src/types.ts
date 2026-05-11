@@ -410,6 +410,7 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  forceKillSource?: boolean;
 }
 
 export interface UpdateSessionSlotsRequest {
