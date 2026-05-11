@@ -4008,9 +4008,7 @@ export class SessionService {
     if (classified.state !== "waiting") {
       return false;
     }
-    if (
-      !isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, IDLE_WAIT_BEFORE_FLUSH_MS)
-    ) {
+    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, IDLE_WAIT_BEFORE_FLUSH_MS)) {
       return false;
     }
 
