@@ -18,9 +18,13 @@ const WORKING_CURRENT_SESSION_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/working-spur-67c0-rollout-tail.jsonl",
 );
-const WORKING_BB_F95E_FIXTURE = join(
+const IDLE_BB_F95E_FIXTURE = join(
   __dirname,
-  "../fixtures/agent-history/codex/working-bb-f95e-active-tail.jsonl",
+  "../fixtures/agent-history/codex/idle-bb-f95e-trailing-tool-output-tail.jsonl",
+);
+const WORKING_UNMATCHED_TOOL_CALL_FIXTURE = join(
+  __dirname,
+  "../fixtures/agent-history/codex/working-unmatched-tool-call-tail.jsonl",
 );
 
 const tempDirs: string[] = [];
@@ -57,16 +61,63 @@ describe("readCodexRolloutState", () => {
     });
   });
 
-  it("reads working from a Codex active turn after an older task_complete marker", async () => {
-    const content = await readFile(WORKING_BB_F95E_FIXTURE, "utf8");
-    const sessionsDir = await makeSessionsDir(content, "rollout-working-bb-f95e.jsonl");
+  it("reads waiting from a Codex turn whose tail ends with matched function_call_output", async () => {
+    const content = await readFile(IDLE_BB_F95E_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-idle-bb-f95e.jsonl");
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toMatchObject({
+      state: "waiting",
+      reason: "task_complete",
+      turnId: "019e112e-6670-7620-9d09-061a78dc96cf",
+    });
+  });
+
+  it("reads working from an in-flight Codex turn with an unmatched function_call", async () => {
+    const content = await readFile(WORKING_UNMATCHED_TOOL_CALL_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-working-unmatched.jsonl");
 
     const result = await readCodexRolloutState(sessionsDir);
 
     expect(result).toMatchObject({
       state: "working",
-      reason: "function_call_output",
-      timestamp: "2026-05-10T09:26:55.521Z",
+      reason: "function_call",
+      timestamp: "2026-05-10T10:01:02.000Z",
+    });
+  });
+
+  it("treats function_call as state-neutral when its matching function_call_output exists later in the file", async () => {
+    const sessionsDir = await makeSessionsDir(
+      [
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:00.000Z",
+          type: "event_msg",
+          payload: {
+            type: "task_started",
+            turn_id: "019e1300-bbbb-7000-9000-000000000003",
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:01.000Z",
+          type: "response_item",
+          payload: { type: "function_call", name: "exec_command", call_id: "call_X" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-10T11:00:02.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", call_id: "call_X" },
+        }),
+      ].join("\n"),
+      "rollout-matched-pair.jsonl",
+    );
+
+    const result = await readCodexRolloutState(sessionsDir);
+
+    expect(result).toMatchObject({
+      state: "working",
+      reason: "task_started",
+      turnId: "019e1300-bbbb-7000-9000-000000000003",
     });
   });
 

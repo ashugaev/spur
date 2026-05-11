@@ -26,4 +26,5 @@ f8c9f60642ca1526338dc1687ca0ae840e3c6812ed933a5bb38873bc2b8929fb  codex/interrup
 88e6898bdbda6e0345ecd34efb5e4b12d3d84d6fd9faddbeee6bc9f536d89ba2  codex/spur-67c0-history-tail.jsonl
 b595d9a5fb7e035056ba04837c1f48807c875d11c0de33689640ddf543ddf4cb  codex/waiting-while-working-bb-f95e-tail.jsonl
 f7b50a3ce872e5df162500d2061614e47a0eb0c744c0b2004025427702e0c467  codex/working-spur-67c0-rollout-tail.jsonl
-46e5c21d9b89a337435b22002be7d941318423a2103577c75692df19fda20244  codex/working-bb-f95e-active-tail.jsonl
+ce974735054fd51e95308accd74c6dfeb3498e7ca9910e3833562f4eed487682  codex/idle-bb-f95e-trailing-tool-output-tail.jsonl
+ffc99ce7d6477f769503d44273ad0b70985f51e016086f7b9ce30bf0012e6989  codex/working-unmatched-tool-call-tail.jsonl
