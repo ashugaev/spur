@@ -1679,7 +1679,12 @@ export function createProgram(cliEntrypoint: string): Command {
     .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
-    .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
+    .option(
+      "--unlink <label>",
+      "Remove a named link. When `pr` exists as both a generic link and a native GitHub PR binding, the generic link is removed first.",
+      collectOptionValue,
+      [],
+    )
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;

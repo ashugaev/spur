@@ -9,7 +9,7 @@ export interface SessionLinkDisplay {
 }
 
 export function isGitHubPrLinkLabel(label: string): boolean {
-  return label === "github-pr" || label === "pr";
+  return label === "github-pr" || label === "github_pr" || label === "pr";
 }
 
 function readUrlPathSegments(url: URL): string[] {
@@ -67,16 +67,7 @@ export function formatSessionLinkDisplay(link: SessionLink): SessionLinkDisplay 
     };
   }
 
-  if (link.label === "github-pr") {
-    const id = displayPrId(url);
-    return {
-      label: link.label,
-      text: id ? `github pr ${shortText(id)}` : "github pr",
-      url: url.toString(),
-    };
-  }
-
-  if (link.label === "pr") {
+  if (isGitHubPrLinkLabel(link.label)) {
     const id = displayPrId(url);
     return {
       label: link.label,

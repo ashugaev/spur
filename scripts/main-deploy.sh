@@ -26,6 +26,30 @@ systemctl_cmd() {
   sudo systemctl "$@"
 }
 
+# Kill any process holding 127.0.0.1:4310 that is NOT under spur-daemon.service.
+# Such a process is an orphan from a prior run and would block systemd's restart
+# with EADDRINUSE, putting spur-daemon.service into a crash loop. Tmux sessions,
+# agents, and the isolated dev daemon never bind 4310, so they are unaffected.
+kill_rogue_daemon_on_port() {
+  local port=4310
+  local pid
+  pid=$(sudo ss -tlnpH "sport = :$port" 2>/dev/null \
+    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2)
+  [[ -z "$pid" ]] && return 0
+
+  local cg
+  cg=$(awk -F: '{print $3}' "/proc/$pid/cgroup" 2>/dev/null || true)
+  [[ "$cg" == */spur-daemon.service ]] && return 0
+
+  echo "main:deploy killing rogue daemon pid=$pid cgroup=${cg:-unknown} on :$port"
+  kill "$pid" 2>/dev/null || true
+  for _ in 1 2 3 4 5; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -9 "$pid" 2>/dev/null || true
+}
+
 services_are_active() {
   systemctl_cmd is-active --quiet spur-daemon.service
   systemctl_cmd is-active --quiet spur-web.service
@@ -99,6 +123,7 @@ if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
   install_service_files "$deploy_root"
   if [[ "$SERVICES_CHANGED" == true ]]; then
     echo "Service files updated — restarting"
+    kill_rogue_daemon_on_port
     systemctl_cmd restart spur-daemon.service spur-web.service
     services_are_active
   fi
@@ -110,11 +135,15 @@ git -C "$deploy_root" checkout -B main origin/main
 git -C "$deploy_root" reset --hard "$remote_head"
 git -C "$deploy_root" clean -fd
 pnpm -C "$deploy_root" install --frozen-lockfile
-pnpm -C "$deploy_root" build
+# Build with managed-prod autostart disabled so the build-triggered daemon
+# restart path cannot fork a rogue listener outside systemd during the
+# service restart window.
+SPUR_DISABLE_AUTOSTART=1 pnpm -C "$deploy_root" build
 install_service_files "$deploy_root"
 # Safe to restart: the systemd unit uses KillMode=process, so only the
 # daemon's node process is stopped. Tmux sessions and agents survive.
 # The daemon re-discovers living sessions on startup.
+kill_rogue_daemon_on_port
 systemctl_cmd restart spur-daemon.service spur-web.service
 services_are_active
 printf '%s\n' "$remote_head" >"$deployed_sha_file"

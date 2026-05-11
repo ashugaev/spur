@@ -614,16 +614,36 @@ export async function scanCodexRolloutForMessage(
 }
 
 export interface CodexRolloutStateRecord {
-  state: "waiting" | "needs_input";
+  state: "working" | "waiting" | "needs_input";
   timestamp: string;
   timestampMs: number;
   filePath: string;
-  reason: "task_complete" | "turn_aborted" | "input_required" | "request_user_input";
+  reason:
+    | "task_started"
+    | "function_call"
+    | "custom_tool_call"
+    | "function_call_output"
+    | "custom_tool_call_output"
+    | "task_complete"
+    | "turn_aborted"
+    | "input_required"
+    | "request_user_input";
   turnId?: string;
 }
 
 function readRolloutTurnId(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function codexRolloutStateRecord(
+  state: CodexRolloutStateRecord["state"],
+  timestamp: string,
+  timestampMs: number,
+  reason: CodexRolloutStateRecord["reason"],
+  turnId?: string,
+): Omit<CodexRolloutStateRecord, "filePath"> {
+  const record = { state, timestamp, timestampMs, reason };
+  return turnId ? { ...record, turnId } : record;
 }
 
 function extractCodexRolloutStateLine(
@@ -654,56 +674,27 @@ function extractCodexRolloutStateLine(
 
   if (type === "event_msg") {
     const payloadType = payload["type"];
+    if (payloadType === "task_started") {
+      const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
+      return codexRolloutStateRecord("working", timestamp, timestampMs, "task_started", turnId);
+    }
     if (payloadType === "task_complete") {
       const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "task_complete",
-            turnId,
-          }
-        : {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "task_complete",
-          };
+      return codexRolloutStateRecord("waiting", timestamp, timestampMs, "task_complete", turnId);
     }
     if (payloadType === "turn_aborted" && payload["reason"] === "interrupted") {
       const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "turn_aborted",
-            turnId,
-          }
-        : {
-            state: "waiting",
-            timestamp,
-            timestampMs,
-            reason: "turn_aborted",
-          };
+      return codexRolloutStateRecord("waiting", timestamp, timestampMs, "turn_aborted", turnId);
     }
     if (payloadType === "input_required") {
       const turnId = readRolloutTurnId(payload["turn_id"]) ?? readRolloutTurnId(payload["turnId"]);
-      return turnId
-        ? {
-            state: "needs_input",
-            timestamp,
-            timestampMs,
-            reason: "input_required",
-            turnId,
-          }
-        : {
-            state: "needs_input",
-            timestamp,
-            timestampMs,
-            reason: "input_required",
-          };
+      return codexRolloutStateRecord(
+        "needs_input",
+        timestamp,
+        timestampMs,
+        "input_required",
+        turnId,
+      );
     }
   }
 
@@ -715,20 +706,23 @@ function extractCodexRolloutStateLine(
     payloadName === "request_user_input"
   ) {
     const turnId = readRolloutTurnId(parsed["turn_id"]) ?? readRolloutTurnId(payload["turn_id"]);
-    return turnId
-      ? {
-          state: "needs_input",
-          timestamp,
-          timestampMs,
-          reason: "request_user_input",
-          turnId,
-        }
-      : {
-          state: "needs_input",
-          timestamp,
-          timestampMs,
-          reason: "request_user_input",
-        };
+    return codexRolloutStateRecord(
+      "needs_input",
+      timestamp,
+      timestampMs,
+      "request_user_input",
+      turnId,
+    );
+  }
+  if (
+    type === "response_item" &&
+    (payloadType === "function_call" ||
+      payloadType === "custom_tool_call" ||
+      payloadType === "function_call_output" ||
+      payloadType === "custom_tool_call_output")
+  ) {
+    const turnId = readRolloutTurnId(parsed["turn_id"]) ?? readRolloutTurnId(payload["turn_id"]);
+    return codexRolloutStateRecord("working", timestamp, timestampMs, payloadType, turnId);
   }
 
   return null;

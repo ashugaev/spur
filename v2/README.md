@@ -69,7 +69,7 @@ Use it inside the session to update the task title and any named links shown in 
 
 ```bash
 spur-slots --title "Fix flaky auth test"
-spur-slots --link tracker=https://tracker.example.com/TASK-123 --link github-pr=https://github.com/org/repo/pull/45
+spur-slots --link tracker=https://tracker.example.com/TASK-123 --link pr=https://github.com/org/repo/pull/45
 spur-slots --link design=https://figma.com/...
 ```
 
@@ -219,7 +219,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). The PR URL is seeded into `slots.links` (`label: "pr"`) on the spawned session.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`.
 
 `send.interrupt`:
 

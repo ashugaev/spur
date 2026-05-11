@@ -50,6 +50,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
+- Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
 
 ### D3: Session rows render with correct columns
 
@@ -106,6 +107,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
+- On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
 - Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 
@@ -301,9 +303,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Shows when session has links
 - PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
 - Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
+- Canonical tracker/PR links stay surfaced in the header badge strip
+- A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab
 
 ### S4b: Artifacts section

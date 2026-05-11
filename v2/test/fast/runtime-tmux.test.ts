@@ -69,7 +69,7 @@ describe("runtime-tmux", () => {
     const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
 
     await syncTmuxStatus("api-1", {
-      links: [{ label: "github-pr", url: "https://github.com/org/repo/pull/42" }],
+      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
     });
 
     const bindCall = execFileAsyncMock.mock.calls.find(
@@ -97,7 +97,7 @@ describe("runtime-tmux", () => {
 
     await syncTmuxStatus("api-1", {
       links: [
-        { label: "github-pr", url: "https://github.com/acme/api/pull/42" },
+        { label: "pr", url: "https://github.com/acme/api/pull/42" },
         { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
       ],
     });
@@ -110,7 +110,7 @@ describe("runtime-tmux", () => {
     }
     const [, args] = statusRightCall;
     const rendered = args.at(-1);
-    expect(rendered).toContain("]github pr ##42#[");
+    expect(rendered).toContain("]pr ##42#[");
     expect(rendered).toContain("tracker API-7");
   });
 

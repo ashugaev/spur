@@ -2429,3 +2429,80 @@ describe("SessionDetail display state", () => {
     await expectStateBadge("working");
   });
 });
+
+describe("SessionDetail links", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    pushMock.mockReset();
+    replaceMock.mockReset();
+    backMock.mockReset();
+    window.localStorage.clear();
+    window.history.replaceState(null, "", "/sessions/api-a1");
+  });
+
+  it("keeps surfaced review and tracker URLs out of the Links section", async () => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+    const gitlabUrl = "https://gitlab.com/test/repo/-/merge_requests/7";
+    const trackerUrl = "https://jira.example.com/browse/WEBDEV-4617";
+    const docsUrl = "https://example.com/docs";
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify(
+            sessionFixture({
+              slots: {
+                title: "Linked session",
+                links: [
+                  { label: "github-pr", url: githubUrl },
+                  { label: "docs", url: githubUrl },
+                  { label: "gitlab-pr", url: gitlabUrl },
+                  { label: "docs", url: gitlabUrl },
+                  { label: "tracker", url: trackerUrl },
+                  { label: "docs", url: trackerUrl },
+                  { label: "docs", url: docsUrl },
+                ],
+              },
+            }),
+          ),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-a1/conversation") {
+        return new Response(JSON.stringify(conversationFixture()), { status: 200 });
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url.startsWith("/api/pr-status?url=")) {
+        return new Response(
+          JSON.stringify({
+            state: "open",
+            reviewDecision: "approved",
+            ciStatus: "success",
+            totalThreads: 0,
+            unresolvedThreads: 0,
+            canMerge: false,
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "docs" })).toHaveAttribute("href", docsUrl);
+    });
+
+    const links = screen.getAllByRole("link");
+    expect(links.filter((link) => link.getAttribute("href") === githubUrl)).toHaveLength(1);
+    expect(links.filter((link) => link.getAttribute("href") === gitlabUrl)).toHaveLength(1);
+    expect(links.filter((link) => link.getAttribute("href") === trackerUrl)).toHaveLength(1);
+    expect(links.filter((link) => link.getAttribute("href") === docsUrl)).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: "github pr" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "gitlab mr" })).not.toBeInTheDocument();
+  });
+});

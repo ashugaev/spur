@@ -41,6 +41,7 @@ import {
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
@@ -68,7 +69,7 @@ function insertTextAtCursor(
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
-  if (!raw) return new Set();
+  if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -274,7 +275,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions", projectId] as const;
+  const sessionsQueryKey = ["sessions"] as const;
   const {
     data,
     isPending,
@@ -282,8 +283,7 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
@@ -320,10 +320,16 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
+  const projectSessions = useMemo(
+    () =>
+      projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions,
+    [allSessions, projectId],
+  );
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return allSessions;
-    return allSessions.filter(
+    if (!q) return projectSessions;
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -331,7 +337,7 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [allSessions, searchQuery]);
+  }, [projectSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -529,10 +535,7 @@ export function Dashboard() {
           (existingSession) => existingSession.id !== session.id,
         );
         return {
-          sessions:
-            projectId && session.project !== projectId
-              ? currentSessions
-              : [session, ...currentSessions],
+          sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
