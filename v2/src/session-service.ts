@@ -169,7 +169,10 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
-export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+export const IDLE_WAIT_BEFORE_FLUSH_MS = (() => {
+  const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
+})();
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
