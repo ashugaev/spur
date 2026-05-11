@@ -181,17 +181,14 @@ session_dir="$codex_base/sessions/2026/03/18"
 session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
 mode="launch"
 resume_id=""
+thread_id="thread-\${SPUR_SESSION:-no-session}"
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
-  mkdir -p "$session_dir"
-  if [[ ! -f "$session_rollout" ]]; then
-    printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
-    printf '{"threadId":"%s"}\n' "\${resume_id:-thread-\${SPUR_SESSION:-no-session}}" >> "$session_rollout"
-  fi
-else
-  thread_id="thread-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
+  thread_id="\${resume_id:-$thread_id}"
+fi
+mkdir -p "$session_dir"
+if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`
@@ -252,12 +249,6 @@ touch_chat_store "$chat_id"`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
-  // Claude signals working per-line; codex buffers pasted multi-line input and
-  // writes a single rollout event_msg with the full message (matching real codex).
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : "";
   // Codex uses a buffering read loop that drains pasted lines before emitting
   // one event_msg entry, so scanCodexRolloutForMessage sees the full message.
   const codexEmitBuffered = `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
@@ -268,7 +259,7 @@ touch_chat_store "$chat_id"`;
     agentName === "claude"
       ? `while IFS= read -r line; do
   printf '%s\\n' "$line" >> "$log_file"
-  ${signalWorking}
+  jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}

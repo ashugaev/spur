@@ -1407,12 +1407,9 @@ test.describe("S6: Terminal modal from detail page", () => {
     await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
 
     const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
-    const header = terminalDialog.locator(":scope > div > div").first();
-    const titleLine = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
     await expect(terminalDialog).toBeVisible();
     await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
-    await expect(titleLine).toContainText("Header title from slot • isolated-ui");
-    await expect(titleLine).toContainText("isolated-ui");
+    await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
   });
 
   test("terminal header wraps long sidecar titles without overlapping controls at desktop or 320px", async ({
@@ -1465,9 +1462,6 @@ test.describe("S6: Terminal modal from detail page", () => {
         closeButton.boundingBox(),
       ]);
 
-      expect(titleBox).not.toBeNull();
-      expect(statusBox).not.toBeNull();
-      expect(closeBox).not.toBeNull();
       if (!titleBox || !statusBox || !closeBox) {
         throw new Error("Expected terminal header title and controls to have bounding boxes");
       }
