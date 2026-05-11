@@ -209,15 +209,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
     options?: { attempt?: number; clearAfter?: boolean; keepRetryState?: boolean },
   ): Promise<void> => {
-    if (options?.clearAfter !== false) {
-      const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
-        keepInterrupted: interrupt,
-      };
-      if (options?.keepRetryState !== undefined) {
-        clearOptions.keepRetryState = options.keepRetryState;
-      }
-      clearBatch(queueKey, clearOptions);
-    }
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
@@ -232,6 +223,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           attempt: options?.attempt ?? null,
         },
       });
+      if (options?.clearAfter !== false) {
+        const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
+          keepInterrupted: interrupt,
+        };
+        if (options?.keepRetryState !== undefined) {
+          clearOptions.keepRetryState = options.keepRetryState;
+        }
+        clearBatch(queueKey, clearOptions);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
@@ -401,6 +401,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (isDeliverableState(session)) {
       interruptedKeys.delete(queueKey);
       await deliverBatch(queueKey, batch, false);
+      return;
+    }
+
+    // Pending interrupt batch whose previous delivery failed: retry while the
+    // session is still working. `clearBatch` only runs on success, so reaching
+    // here means the prior deliverBatch threw.
+    if (session.state === "working" && interruptedKeys.has(queueKey)) {
+      await deliverBatch(queueKey, batch, true);
     }
   };
 

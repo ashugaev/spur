@@ -807,6 +807,70 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("retries delivery via flush loop when deliver throws", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "working",
+      workspaceExists: true,
+    });
+    const deliverMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("agent busy"))
+      .mockResolvedValue(undefined);
+    readGitHubSourceSnapshotMock.mockReturnValue(
+      new Map([
+        [
+          "merge_conflict",
+          {
+            key: "merge_conflict",
+            kind: "merge_conflict",
+            text: "Merge conflicts are blocking this PR.",
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: config({ event: "github:merge_conflict", interrupt: true }) as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(mergeConflictEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(1);
+      });
+      expect(deliverMock).toHaveBeenNthCalledWith(
+        1,
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledTimes(2);
+      });
+      expect(deliverMock).toHaveBeenNthCalledWith(
+        2,
+        "api-1",
+        expect.stringContaining("Merge conflicts are blocking this PR."),
+        { interrupt: true },
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const { startConfiguredTriggers } = await loadTriggersModule();
