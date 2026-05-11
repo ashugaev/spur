@@ -917,13 +917,17 @@ test.describe("S3: Message section", () => {
     await expect(page.getByText(/Failed to transcribe audio after 3 attempts/i)).toBeVisible();
     await expect(page.getByRole("button", { name: /play failed voice recording/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /discard failed voice recording/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /discard failed voice recording/i }),
+    ).toBeVisible();
 
     await page.getByRole("button", { name: /retry failed voice recording/i }).click();
 
     await expect(page.getByRole("textbox")).toHaveValue("Recovered retained recording");
     await expect(page.getByRole("button", { name: /start voice recording/i })).toBeVisible();
-    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /retry failed voice recording/i })).toHaveCount(
+      0,
+    );
   });
 });
 
