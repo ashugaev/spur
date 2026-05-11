@@ -405,19 +405,14 @@ export function useVoiceInput(options: {
       setVoiceError(null);
       setVoiceBusy("transcribing");
       try {
-        let text = "";
-        try {
-          text = await transcribeRecording(audio);
-        } catch (error) {
-          await setRetainedTake({
-            blob: audio,
-            mode,
-          });
-          throw error;
-        }
-        await discardRetainedTake();
+        const text = await transcribeRecording(audio);
         await applyTranscription(text, mode, onSend);
+        await discardRetainedTake();
       } catch (error) {
+        await setRetainedTake({
+          blob: audio,
+          mode,
+        });
         setVoiceError(error instanceof Error ? error.message : TRANSCRIBE_ERROR);
       } finally {
         setVoiceBusy(null);

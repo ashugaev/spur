@@ -321,7 +321,28 @@ describe("useVoiceInput", () => {
     expect(secondRender.result.current.voiceError).toBe(null);
   });
 
-  it("successful retry clears the retained take before a later send failure", async () => {
+  it("retains a fresh recording when send fails after transcription", async () => {
+    buildFetch([{ text: "transcribed but unsent" }]);
+    const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:send-error" }));
+
+    await waitFor(() => expect(result.current.canUseVoice).toBe(true));
+
+    await act(async () => {
+      result.current.toggleRecording();
+    });
+    await waitFor(() => expect(result.current.recording).toBe(true));
+
+    await act(async () => {
+      result.current.stopAndSend(async () => {
+        throw new Error("terminal unavailable");
+      });
+    });
+
+    await waitFor(() => expect(result.current.voiceError).toBe("terminal unavailable"));
+    expect(result.current.hasRetainedTake).toBe(true);
+  });
+
+  it("keeps the retained take when send fails after successful transcription", async () => {
     buildFetch([{ text: "recovered take" }]);
     fakeIndexedDb.seed("terminal:send-failure", "send");
     const { result } = renderHook(() => useVoiceInput({ contextKey: "terminal:send-failure" }));
@@ -335,7 +356,7 @@ describe("useVoiceInput", () => {
     });
 
     await waitFor(() => expect(result.current.voiceError).toBe("send failed"));
-    expect(result.current.hasRetainedTake).toBe(false);
+    expect(result.current.hasRetainedTake).toBe(true);
   });
 
   it("retrying a retained modal take opens the confirm modal", async () => {
