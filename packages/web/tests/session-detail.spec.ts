@@ -1453,8 +1453,10 @@ test.describe("S6: Terminal modal from detail page", () => {
       const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
       const statusText = terminalDialog.getByText("Connected", { exact: true });
       const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
+      const controls = terminalDialog.locator(":scope > div > div").nth(2);
 
       await expect(titleText).toContainText("isolated-ui");
+      await expect(controls).toBeVisible();
 
       const [titleBox, statusBox, closeBox] = await Promise.all([
         titleText.boundingBox(),
@@ -1477,6 +1479,34 @@ test.describe("S6: Terminal modal from detail page", () => {
         };
       });
       expect(headerMetrics.scrollWidth).toBeLessThanOrEqual(headerMetrics.clientWidth + 1);
+
+      const overflowMetrics = await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"]');
+        const controlsElement = dialog?.querySelector(":scope > div > div:nth-child(3)");
+        if (!(dialog instanceof HTMLElement) || !(controlsElement instanceof HTMLElement)) {
+          throw new Error("Expected terminal dialog and controls");
+        }
+
+        return {
+          bodyScrollWidth: document.body.scrollWidth,
+          controlsClientWidth: controlsElement.clientWidth,
+          controlsScrollWidth: controlsElement.scrollWidth,
+          dialogClientWidth: dialog.clientWidth,
+          dialogScrollWidth: dialog.scrollWidth,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(overflowMetrics.documentScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.viewportWidth,
+      );
+      expect(overflowMetrics.bodyScrollWidth).toBeLessThanOrEqual(overflowMetrics.viewportWidth);
+      expect(overflowMetrics.dialogScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.dialogClientWidth,
+      );
+      expect(overflowMetrics.controlsScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.controlsClientWidth,
+      );
     }
   });
 

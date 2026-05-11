@@ -600,9 +600,9 @@ export function DirectTerminal({
           ? (error ?? "Error")
           : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
-    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)]";
+    "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
@@ -660,13 +660,13 @@ export function DirectTerminal({
       ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
