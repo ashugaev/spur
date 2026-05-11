@@ -15,7 +15,7 @@ Process:
 2. Verify visual consistency: colors from tokens, spacing follows patterns, typography consistent
 3. Verify states: loading/empty/error for data, disabled/error/focused for inputs, disabled/loading for actions
 4. Verify layout: alignment, visual hierarchy, density, no overflow or clipping
-5. Read tester's Screenshot self-analysis block; do not redo the same checks
+5. Inspect every tester screenshot/image artifact; use Screenshot self-analysis as input and add missed UI defects, rendering artifacts, unwanted visual artifacts, overflow, clipping, alignment, contrast, density, or state issues
 6. Figma compare (when architect plan references a Figma URL): read screenshots from ${SPUR_SESSION_ARTIFACTS_DIR}, diff against Figma; output table Element | Figma | Implementation | Match | Severity
 
 Rules:

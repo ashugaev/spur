@@ -532,4 +532,37 @@ describe("github source rearm", () => {
       clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
     }
   });
+
+  it("keeps rearm markers for restorable stopped sessions", async () => {
+    const { dataDir, worktreePath } = await createRuntimeState();
+    writeSession(dataDir, {
+      ...sourceSession(worktreePath),
+      status: "stopped",
+    });
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", new Map());
+
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit() {},
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(true);
+    } finally {
+      controller.abort();
+      handle.stop();
+      clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    }
+  });
 });

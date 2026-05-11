@@ -18,6 +18,7 @@ import {
   deleteReviewSourceSnapshot,
   hasGitHubMergeConflictRestoreReplay,
   listSessions,
+  readSession,
   readReviewSourceSnapshots,
   readWorkItemRegistry,
   recordWorkItem,
@@ -233,6 +234,16 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
 
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
+          const latestSession = readSession(deps.dataDir, sessionId);
+          if (
+            latestSession &&
+            latestSession.status !== "completed" &&
+            latestSession.status !== "killed" &&
+            Boolean(latestSession.worktreePath) &&
+            existsSync(latestSession.worktreePath)
+          ) {
+            continue;
+          }
           snapshots.delete(sessionId);
           deleteReviewSourceSnapshot(
             deps.dataDir,

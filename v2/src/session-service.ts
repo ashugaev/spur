@@ -4004,7 +4004,8 @@ export class SessionService {
       throw new Error(`Failed to restore ${sessionId}: ${message}`, { cause: error });
     }
 
-    const { error: _ignoredError, ...restoredBase } = current;
+    const latestStored = readSession(this.config.dataDir, sessionId) ?? current;
+    const { error: _ignoredError, ...restoredBase } = latestStored;
     const restored: SessionRecord = {
       ...restoredBase,
       planMode: resolvePlanMode(current),

@@ -25,7 +25,7 @@ For each todo, evaluate every property. Combine the gates whose property applies
 | Non-trivial design or planning needed | `architect` |
 | Any code change | `architect` plan includes unit/E2E test lists; `developer` writes them; `code-simplifier`; `reviewer`; `tester` validates; `github` close-out (mandatory PR) |
 | Touches Spur runtime (CLI, daemon, sessions) | `tester` loads `spur` skill |
-| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `designer` (Figma compare); `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes |
+| Visible change in `packages/web` | `architect` lists new/changed UI scenarios before steps and maps automated coverage; `tester` manually opens local site with browser tooling, no scripts, saves screenshots to artifacts, self-analyzes; `designer` inspects every captured image for UI defects and artifacts, plus Figma compare when referenced |
 | Touches `SKILL.md`, agent definitions, `AGENTS.md`/`CLAUDE.md`, or `.cursor/rules` | `skill-writer` (caveman pass) before `reviewer` |
 | Default close-out | `self-verify` |
 | Wording-only docs or analysis | close-out only |
@@ -34,7 +34,7 @@ Score `<= 1` skips research unless the codebase is unclear.
 
 ## Canonical gate order
 
-`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `designer` -> `tester` -> `github` (close-out) -> `self-verify`.
+`researcher` -> `critic` -> `architect` -> `developer` -> `skill-writer` (caveman) -> `code-simplifier` -> `reviewer` -> `tester` -> `designer` -> `github` (close-out) -> `self-verify`.
 
 ## Process
 
@@ -48,8 +48,8 @@ Score `<= 1` skips research unless the codebase is unclear.
    - Caveman: `skill-writer` when the diff touches prose surfaces.
    - Simplify: `code-simplifier`.
    - Review: `reviewer`.
-   - Design: `designer` for visible UI changes.
    - Validate: `tester`.
+   - Design: `designer` for visible UI changes after tester screenshots exist.
    - Close-out: `github` gate. Mandatory after any code change. Never close out a code change without an open PR.
    - Verify: `self-verify`.
 4. Single-cycle gates: each gate runs once. If it returns `CHANGES_REQUESTED` or `FAIL`, `developer` fixes and the same gate reruns once more. Downstream gates run only when their input changed. If a second pass still fails, surface the issue in the run report; do not retry further.

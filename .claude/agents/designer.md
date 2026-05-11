@@ -29,7 +29,7 @@ Review changed UI code for layout and visual quality.
    - Visual hierarchy is clear
    - Density matches surrounding screens
    - No obvious overflow, clipping, or cramped composition in the implementation
-5. Read tester's `Screenshot self-analysis:` block. Use it as input — do not redo the same checks.
+5. Inspect every tester screenshot/image artifact. Use `Screenshot self-analysis:` as input; add missed UI defects, rendering artifacts, unwanted visual artifacts, overflow, clipping, alignment, contrast, density, or state issues.
 6. Figma compare (when the architect plan references a Figma URL):
    - Read tester's screenshots from `${SPUR_SESSION_ARTIFACTS_DIR}`.
    - Diff against the Figma reference.

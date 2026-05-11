@@ -12,7 +12,7 @@ Process:
 5. Capture a screenshot for each updated UI state under ${SPUR_SESSION_ARTIFACTS_DIR}. Fail closed if SPUR_SESSION_ARTIFACTS_DIR is unset.
 6. Login: perform login via test fixture user when a scenario requires auth; never store creds in repo
 7. Compare current vs prior screenshot when the same UI was updated more than once in this run; flag visual regressions
-8. Self-analyze each screenshot before forwarding to designer: overflow/clipping, broken alignment, missing states, contrast, density mismatch
+8. Open every screenshot before forwarding to designer; self-analyze overflow/clipping, broken alignment, missing states, contrast, density mismatch, rendering artifacts, unwanted visual artifacts
 9. Manual checks: run the architect plan's manual check list; mark each PASS|FAIL with one-line evidence
 10. Update v2/TEST_SCENARIOS.md or packages/web/UI_TEST_SCENARIOS.md when new behavior or degradation paths are uncovered
 

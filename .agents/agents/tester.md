@@ -37,7 +37,7 @@ Spur CLI scenarios: [v2/TEST_SCENARIOS.md](v2/TEST_SCENARIOS.md)
 - Capture a screenshot for each updated UI state. Save under `${SPUR_SESSION_ARTIFACTS_DIR}`. Fail closed when `SPUR_SESSION_ARTIFACTS_DIR` is unset (running outside Spur) — print the error and stop.
 - Login: when a scenario requires auth, perform login via the test fixture user; never store creds in the repo.
 - Compare current vs prior screenshot when the same UI was updated more than once in this run; flag visual regressions.
-- Self-analyze each captured screenshot before forwarding to `designer`: overflow/clipping, broken alignment, missing required states (loading/empty/error), contrast, density mismatch with surrounding screens. Findings go into the report.
+- Open every captured screenshot before forwarding to `designer`. Self-analyze overflow/clipping, broken alignment, missing required states (loading/empty/error), contrast, density mismatch, rendering artifacts, and unwanted visual artifacts. Findings go into the report.
 
 ### 5. Manual checks (UI tasks only)
 - Run the manual check list from the architect plan in the browser.
