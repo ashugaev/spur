@@ -2,7 +2,7 @@
 
 Contributor bootstrap for this repo.
 
-For package install, first run, runtime behavior, and deployment, use [v2/README.md](v2/README.md).
+For package install, first run, and runtime behavior, use [v2/README.md](v2/README.md). For deploy and operator flow, use [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md).
 
 ## Prerequisites
 

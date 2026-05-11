@@ -20,6 +20,12 @@ The UI reads project labels from the daemon's `/projects` response. Verify that 
 spur list
 ```
 
+If you need to attach a specific local config file manually:
+
+```bash
+spur connect /path/to/spur.yaml
+```
+
 If you use multiple instance configs, point both CLI and web at the same global config:
 
 ```bash
