@@ -577,15 +577,23 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
+  const project = config.projects[projectId];
+  if (!project) return [];
+  const sourceIds: string[] = [];
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    sourceIds.push(sourceId);
+  }
+  return sourceIds;
+}
+
 function requestGitHubMergeConflictRestoreReplays(
   config: AppConfig,
   projectId: string,
   sessionId: string,
 ): void {
-  const project = config.projects[projectId];
-  if (!project) return;
-  for (const [sourceId, source] of Object.entries(project.sources)) {
-    if (source.type !== "github") continue;
+  for (const sourceId of githubReplaySourceIds(config, projectId)) {
     requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
   }
 }

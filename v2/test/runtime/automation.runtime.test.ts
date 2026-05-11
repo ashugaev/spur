@@ -1112,7 +1112,8 @@ describe.skipIf(!tmuxOk)("Spur automation (runtime)", () => {
             accept: (value) => value.state === "stopped",
           });
 
-          await service.restore(session.id);
+          const restored = await service.restore(session.id);
+          expect(restored.status).toBe("running");
 
           const restoredPane = await pollUntil(async () => captureTmuxPane(session.id), {
             timeoutMs: 20_000,

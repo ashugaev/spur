@@ -1,7 +1,13 @@
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
+import {
+  createProjectConfigScaffold,
+  loadConfig,
+  loadProjectConfig,
+  resolveConfigPath,
+  writeProjectConfigScaffold,
+} from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -1088,5 +1094,46 @@ projects:
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
+  });
+
+  it("renders a minimal project config scaffold for the current repo", async () => {
+    const dir = await createTempDir("spur-fast-doctor-");
+    tempDirs.push(dir);
+
+    const scaffold = createProjectConfigScaffold(join(dir, "My Repo"), "release");
+
+    expect(scaffold.configPath).toBe(join(dir, "My Repo", "spur.yaml"));
+    expect(scaffold.projectId).toBe("my-repo");
+    expect(scaffold.sessionPrefix).toBe("my-repo");
+    expect(scaffold.content).toBe(
+      [
+        "projects:",
+        "  my-repo:",
+        "    path: .",
+        "    defaultBranch: release",
+        "    sessionPrefix: my-repo",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("writes a project config scaffold that parses as a normal local config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-write-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const scaffold = createProjectConfigScaffold(repoDir, "main");
+
+    writeProjectConfigScaffold(scaffold);
+
+    process.chdir(repoDir);
+    const config = loadProjectConfig();
+
+    expect(config.configPath).toBe(join(repoDir, "spur.yaml"));
+    expect(config.projects["repo"]).toMatchObject({
+      defaultBranch: "main",
+      path: repoDir,
+      sessionPrefix: "repo",
+    });
   });
 });
