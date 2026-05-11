@@ -64,11 +64,11 @@ export function classifyClaudeJsonlState(
       return "working";
     }
 
-    if (record.type === "system" || record.type === "stop_hook_summary") {
-      return "waiting";
-    }
-
-    if (record.type === "file-history-snapshot") {
+    if (
+      record.type === "system" ||
+      record.type === "stop_hook_summary" ||
+      record.type === "file-history-snapshot"
+    ) {
       return "waiting";
     }
 
