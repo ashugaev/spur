@@ -32,20 +32,34 @@ services_are_active() {
 }
 
 # Install systemd service files from deploy/templates, filling {{SPUR_ROOT}}
-# with the deploy clone path.  Extracts existing secrets from installed units
-# so the templates never contain real credentials.
+# with the deploy clone path. Secrets are provisioned out-of-band in
+# /etc/spur/daemon.env (read via EnvironmentFile= in the unit); this
+# function requires that file to exist and refuses to install otherwise.
 # Sets SERVICES_CHANGED=true when any file was updated.
 SERVICES_CHANGED=false
+
+require_daemon_env_file() {
+  if [[ ! -f /etc/spur/daemon.env ]]; then
+    cat >&2 <<'EOF'
+main:deploy aborting: /etc/spur/daemon.env is missing.
+
+The spur-daemon unit reads its secrets via EnvironmentFile=/etc/spur/daemon.env.
+Create it before running this script:
+
+  sudo install -d -m 0755 /etc/spur
+  printf 'AZURE_OPENAI_API_KEY=<your-key>\n' | sudo tee /etc/spur/daemon.env >/dev/null
+  sudo chown root:root /etc/spur/daemon.env
+  sudo chmod 0600 /etc/spur/daemon.env
+EOF
+    exit 1
+  fi
+}
 
 install_service_files() {
   local root="$1"
   local template_dir="$root/deploy"
 
-  # Extract AZURE_OPENAI_API_KEY from the currently-installed daemon unit
-  local azure_key=""
-  if [[ -f /etc/systemd/system/spur-daemon.service ]]; then
-    azure_key=$(sed -n 's/^Environment=AZURE_OPENAI_API_KEY=//p' /etc/systemd/system/spur-daemon.service || true)
-  fi
+  require_daemon_env_file
 
   for template in "$template_dir"/*.service; do
     [[ -f "$template" ]] || continue
@@ -55,7 +69,6 @@ install_service_files() {
     local content
     content=$(<"$template")
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
-    content="${content//\{\{AZURE_OPENAI_API_KEY\}\}/$azure_key}"
 
     if [[ -f "$target" ]] && diff <(printf '%s\n' "$content") "$target" >/dev/null 2>&1; then
       continue

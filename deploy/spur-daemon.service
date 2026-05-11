@@ -1,7 +1,10 @@
 # Spur daemon — systemd unit template
 #
-# Copy to /etc/systemd/system/spur-daemon.service, replace {{…}} placeholders,
-# then run: systemctl daemon-reload && systemctl enable --now spur-daemon
+# The deploy script substitutes {{SPUR_ROOT}} and writes this file to
+# /etc/systemd/system/spur-daemon.service. Secrets are provisioned
+# out-of-band: create /etc/spur/daemon.env (mode 0600, owner root:root)
+# containing AZURE_OPENAI_API_KEY=<value>. The unit pulls it via
+# EnvironmentFile below.
 
 [Unit]
 Description=Spur daemon
@@ -12,8 +15,8 @@ Type=simple
 User=alek
 WorkingDirectory={{SPUR_ROOT}}
 Environment=HOME=/home/alek
-Environment=PATH=/home/alek/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-Environment=AZURE_OPENAI_API_KEY={{AZURE_OPENAI_API_KEY}}
+Environment=PATH=/home/alek/.local/bin:/home/alek/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/etc/spur/daemon.env
 ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
 RestartSec=3
