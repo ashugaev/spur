@@ -169,10 +169,12 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
-export const IDLE_WAIT_BEFORE_FLUSH_MS = (() => {
+export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+
+export function getIdleWaitBeforeFlushMs(): number {
   const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : 30_000;
-})();
+  return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
+}
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
@@ -4011,7 +4013,7 @@ export class SessionService {
     if (classified.state !== "waiting") {
       return false;
     }
-    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, IDLE_WAIT_BEFORE_FLUSH_MS)) {
+    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
       return false;
     }
 

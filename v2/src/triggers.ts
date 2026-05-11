@@ -12,7 +12,7 @@ import {
 } from "./types.js";
 import type { EventBus } from "./event-bus.js";
 import {
-  IDLE_WAIT_BEFORE_FLUSH_MS,
+  getIdleWaitBeforeFlushMs,
   isIdleEnoughToReceive,
   type SessionService,
 } from "./session-service.js";
@@ -133,7 +133,7 @@ function isSendTrigger(
 function isDeliverableState(session: SessionView): boolean {
   return (
     session.state === "waiting" &&
-    isIdleEnoughToReceive(session.lastActivityAt, IDLE_WAIT_BEFORE_FLUSH_MS)
+    isIdleEnoughToReceive(session.lastActivityAt, getIdleWaitBeforeFlushMs())
   );
 }
 
