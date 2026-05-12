@@ -16,11 +16,7 @@ import {
 } from "./shared.js";
 import type { ReviewProvider } from "./types.js";
 
-export {
-  hasMergeConflict,
-  normalizeReviewDecision,
-  shortText,
-} from "./shared.js";
+export { hasMergeConflict, normalizeReviewDecision, shortText } from "./shared.js";
 
 const FAILING_GITHUB_CI_STATES = new Set([
   "FAILURE",
@@ -328,9 +324,10 @@ async function collectSignals(
       : Promise.resolve([]),
   ]);
 
-  const ciText = normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
-    ? null
-    : summarizeFailingCi(checks);
+  const ciText =
+    normalizeReviewState(pr.statusCheckRollupState) === "SUCCESS"
+      ? null
+      : summarizeFailingCi(checks);
   const snapshot = new Map<string, ReviewSignal>();
   if (pr.reviewDecision === "changes_requested") {
     snapshot.set("changes_requested", {
