@@ -202,6 +202,7 @@ export interface ReviewRequestSummary {
 export interface ReviewCheck {
   name: string;
   state: string;
+  conclusion?: string | null;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
