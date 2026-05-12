@@ -102,6 +102,55 @@ describe("github source", () => {
     handle.stop();
   });
 
+  it("does not emit ci_failed when the GitHub rollup is successful with skipped rows", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          title: "Fix CI alert",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          statusCheckRollup: [
+            { name: "workflow", conclusion: "SUCCESS" },
+            { name: "skipped job", conclusion: "SKIPPED" },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { name: "old failed row", state: "FAILURE" },
+          { name: "skipped job", state: "SKIPPED" },
+          { name: "neutral job", state: "NEUTRAL" },
+        ]),
+      )
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).not.toHaveBeenCalledWith("github:ci_failed", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("ci_failed")).toBe(false);
+    }
+
+    handle.stop();
+  });
+
   it("emits github:work_item.new for unseen query results", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([]);
