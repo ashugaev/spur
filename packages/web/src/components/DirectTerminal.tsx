@@ -607,24 +607,25 @@ export function DirectTerminal({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
       <div
-        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto]"
+        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
         data-testid="direct-terminal-header"
       >
-        <div className={cn("row-span-2 mt-1 h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
-        <div className="min-w-0">
-          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)]">
+        <div className={cn("mt-1 h-2 w-2 shrink-0 rounded-full sm:mt-0", statusDotClass)} />
+        <div className="min-w-0 sm:flex sm:items-baseline sm:gap-2">
+          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)] sm:shrink-0 sm:break-normal">
             {label ?? sessionId}
           </div>
           {title ? (
             <div
-              className="break-words whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)]"
+              className="break-words whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] sm:min-w-0 sm:truncate"
               data-testid="direct-terminal-header-title"
+              title={title}
             >
               {title}
             </div>
           ) : null}
         </div>
-        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-span-2 sm:row-start-1 sm:pl-2">
+        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-start-1 sm:pl-2">
           <div className="text-right text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
             {statusText}
           </div>

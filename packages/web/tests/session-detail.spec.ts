@@ -1412,9 +1412,7 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
   });
 
-  test("terminal header wraps long sidecar titles without overlapping controls at desktop or 320px", async ({
-    page,
-  }) => {
+  test("terminal header keeps desktop text in one row and wraps on 320px", async ({ page }) => {
     const title = "Terminal header title uses available space and wraps without clipping";
     const session = makeWorkingSession({
       id: "detail-s6-wrap",
@@ -1450,6 +1448,7 @@ test.describe("S6: Terminal modal from detail page", () => {
       await expect(terminalDialog).toBeVisible();
 
       const header = terminalDialog.locator(":scope > div > div").first();
+      const labelText = header.locator(":scope > div:nth-child(2) > div:nth-child(1)");
       const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
       const statusText = terminalDialog.getByText("Connected", { exact: true });
       const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
@@ -1458,18 +1457,25 @@ test.describe("S6: Terminal modal from detail page", () => {
       await expect(titleText).toContainText("isolated-ui");
       await expect(controls).toBeVisible();
 
-      const [titleBox, statusBox, closeBox] = await Promise.all([
+      const [labelBox, titleBox, statusBox, closeBox] = await Promise.all([
+        labelText.boundingBox(),
         titleText.boundingBox(),
         statusText.boundingBox(),
         closeButton.boundingBox(),
       ]);
 
-      if (!titleBox || !statusBox || !closeBox) {
-        throw new Error("Expected terminal header title and controls to have bounding boxes");
+      if (!labelBox || !titleBox || !statusBox || !closeBox) {
+        throw new Error("Expected terminal header text and controls to have bounding boxes");
       }
 
       expect(overlaps(titleBox, statusBox)).toBe(false);
       expect(overlaps(titleBox, closeBox)).toBe(false);
+      if (viewport.width >= 640) {
+        expect(Math.abs(labelBox.y - titleBox.y)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleBox.y - statusBox.y)).toBeLessThanOrEqual(1);
+      } else {
+        expect(titleBox.y).toBeGreaterThan(labelBox.y);
+      }
 
       const headerMetrics = await header.evaluate((element) => {
         const headerElement = element as HTMLDivElement;
