@@ -130,8 +130,23 @@ function isDeliverableState(session: SessionView): boolean {
   return session.state === "waiting";
 }
 
-function isClosedState(session: SessionView): boolean {
-  return session.state === "stopped" || session.state === "error" || session.state === "killed";
+function isClosedState(state: SessionView["state"]): boolean {
+  return state === "stopped" || state === "error" || state === "killed";
+}
+
+// Detects a restart (e.g. `service.restore`) since the last interrupt delivery,
+// so the trigger runtime delivers again instead of dropping as a duplicate.
+function sessionRestartedSince(session: SessionView, sinceMs: number): boolean {
+  const history = session.stateHistory;
+  if (!history) return false;
+  for (const entry of history) {
+    if (!isClosedState(entry.state)) continue;
+    const transitionMs = Date.parse(entry.at);
+    if (Number.isFinite(transitionMs) && transitionMs >= sinceMs) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function createQueueKey(projectId: string, triggerId: string, sessionId: string): string {
@@ -165,7 +180,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const unsubscribers: Array<() => void> = [];
   const inFlight = new Set<Promise<void>>();
   const pendingBatches = new Map<string, PendingBatch>();
-  const interruptedKeys = new Set<string>();
+  const interruptedKeys = new Map<string, number>();
   const retryStates = new Map<string, RetryState>();
   const serialByKey = new Map<string, Promise<void>>();
   let flushTimer: NodeJS.Timeout | null = null;
@@ -194,15 +209,6 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     interrupt: boolean,
     options?: { attempt?: number; clearAfter?: boolean; keepRetryState?: boolean },
   ): Promise<void> => {
-    if (options?.clearAfter !== false) {
-      const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
-        keepInterrupted: interrupt,
-      };
-      if (options?.keepRetryState !== undefined) {
-        clearOptions.keepRetryState = options.keepRetryState;
-      }
-      clearBatch(queueKey, clearOptions);
-    }
     try {
       await deps.sessionService.deliver(batch.batch.sessionId, batch.batch.format(), { interrupt });
       logTriggerEvent(deps.config.dataDir, "trigger.send.delivered", {
@@ -217,6 +223,15 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           attempt: options?.attempt ?? null,
         },
       });
+      if (options?.clearAfter !== false) {
+        const clearOptions: { keepInterrupted?: boolean; keepRetryState?: boolean } = {
+          keepInterrupted: interrupt,
+        };
+        if (options?.keepRetryState !== undefined) {
+          clearOptions.keepRetryState = options.keepRetryState;
+        }
+        clearBatch(queueKey, clearOptions);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logTriggerEvent(deps.config.dataDir, "trigger.send.failed", {
@@ -307,7 +322,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session)) {
+    if (isClosedState(session.state)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -386,6 +401,14 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     if (isDeliverableState(session)) {
       interruptedKeys.delete(queueKey);
       await deliverBatch(queueKey, batch, false);
+      return;
+    }
+
+    // Pending interrupt batch whose previous delivery failed: retry while the
+    // session is still working. `clearBatch` only runs on success, so reaching
+    // here means the prior deliverBatch threw.
+    if (session.state === "working" && interruptedKeys.has(queueKey)) {
+      await deliverBatch(queueKey, batch, true);
     }
   };
 
@@ -427,7 +450,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
     const session = await loadSessionOrClear(queueKey, batch);
     if (!session) return;
 
-    if (isClosedState(session)) {
+    if (isClosedState(session.state)) {
       clearBatch(queueKey);
       logTriggerEvent(deps.config.dataDir, "trigger.send.dropped", {
         level: "warn",
@@ -457,17 +480,16 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       return;
     }
 
-    const isWorking = session.state === "working";
-    const needsInput = session.state === "needs_input";
-    if (!isWorking && !needsInput) return;
+    if (session.state !== "working" && session.state !== "needs_input") return;
+    if (session.state === "needs_input" || !trigger.send.interrupt) return;
 
-    if (needsInput || !trigger.send.interrupt) {
-      return;
+    const interruptedAt = interruptedKeys.get(queueKey);
+    if (interruptedAt !== undefined) {
+      if (!sessionRestartedSince(session, interruptedAt)) return;
+      interruptedKeys.delete(queueKey);
     }
 
-    if (interruptedKeys.has(queueKey)) return;
-
-    interruptedKeys.add(queueKey);
+    interruptedKeys.set(queueKey, Date.now());
     await deliverBatch(queueKey, batch, true);
   };
 
