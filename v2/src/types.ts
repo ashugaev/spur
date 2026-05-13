@@ -411,6 +411,7 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {

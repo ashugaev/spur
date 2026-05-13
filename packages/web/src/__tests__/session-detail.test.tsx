@@ -801,6 +801,137 @@ describe("SessionDetail voice input", () => {
     });
   });
 
+  it("defaults the respawn agent select to the session agent", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture({ agent: "codex" }),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    const select = screen.getByRole("combobox", { name: "Respawn agent" }) as HTMLSelectElement;
+    expect(select.value).toBe("codex");
+  });
+
+  it("includes the selected agent in the respawn payload when changed", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Respawn agent" }), {
+      target: { value: "cursor" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(respawnBody).not.toBeNull();
+    });
+    expect(respawnBody?.agent).toBe("cursor");
+  });
+
+  it("omits the agent from the respawn payload when unchanged", async () => {
+    let respawnBody: Record<string, unknown> | null = null;
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "" }), { status: 200 });
+      }
+      if (url === "/api/sessions/api-a1/respawn" && init?.method === "POST") {
+        respawnBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ ...sessionFixture(), id: "api-b2" }), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    fireEvent.click(screen.getByRole("button", { name: "Respawn" }));
+
+    await waitFor(() => {
+      expect(respawnBody).not.toBeNull();
+    });
+    expect(respawnBody && "agent" in respawnBody).toBe(false);
+  });
+
+  it("renders a mic button inside the respawn modal when voice is available", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/sessions/api-a1") {
+        return new Response(
+          JSON.stringify({
+            ...sessionFixture(),
+            status: "completed",
+            runtimeAlive: false,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(
+          JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<SessionDetail sessionId="api-a1" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Edit & Respawn" }));
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("button", { name: "Start voice recording" }).length,
+      ).toBeGreaterThan(0);
+    });
+  });
+
   it("shows an add-image picker inside the respawn editor and accepts files from it", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;

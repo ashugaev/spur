@@ -739,13 +739,13 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
-    agent: session.agent,
+    agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
@@ -3935,6 +3935,7 @@ export class SessionService {
       prompt?: string;
       attachments?: SendMessageAttachment[];
       startupAttachmentIds?: string[];
+      agent?: string;
     } = {},
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
@@ -3975,6 +3976,7 @@ export class SessionService {
       resolveRespawnRequest(session, {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),
     );
   }
