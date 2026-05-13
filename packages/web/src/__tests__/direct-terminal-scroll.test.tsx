@@ -512,7 +512,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
   });
 
-  it("uses wrapping classes for long header labels and titles", async () => {
+  it("keeps desktop header text inline while allowing mobile wrapping", async () => {
     const title = "Very long terminal header title for isolated sidecar sessions";
 
     await mountTerminal({
@@ -529,12 +529,13 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
       "break-all",
     );
-    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).not.toContain(
-      "truncate",
+    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
+      "sm:break-normal",
     );
     expect(screen.getByText(title).className).toContain("break-words");
     expect(screen.getByText(title).className).toContain("whitespace-normal");
-    expect(screen.getByText(title).className).not.toContain("truncate");
+    expect(screen.getByText(title).className).toContain("sm:truncate");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain("sm:items-center");
     expect(screen.getByTestId("direct-terminal-header").className).toContain(
       "sm:grid-cols-[auto_minmax(0,1fr)_auto]",
     );
