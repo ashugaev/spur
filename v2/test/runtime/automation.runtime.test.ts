@@ -73,6 +73,7 @@ function runtimeEnv(context: RuntimeTestContext) {
     SPUR_CODEX_BIN: context.env.SPUR_CODEX_BIN,
     SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
     SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
   };
 }
 
@@ -89,6 +90,7 @@ async function withRuntimeEnv<T>(context: RuntimeTestContext, run: () => Promise
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
     SPUR_FAKE_AGENT_LOG_DIR: process.env.SPUR_FAKE_AGENT_LOG_DIR,
     SPUR_FAKE_GH_STATE_FILE: process.env.SPUR_FAKE_GH_STATE_FILE,
+    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS,
   };
   Object.assign(process.env, runtimeEnv(context));
   try {

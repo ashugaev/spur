@@ -780,6 +780,7 @@ export async function createRuntimeTestContext(
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
     ...(useFakeTools
       ? {
           HOME: rootDir,
