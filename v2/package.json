@@ -1,6 +1,7 @@
 {
-  "name": "@composio/spur",
+  "name": "spur",
   "version": "0.1.0",
+  "private": true,
   "description": "Spur: lean v2 orchestrator with a local daemon, tmux sessions, and project workspaces",
   "license": "MIT",
   "type": "module",

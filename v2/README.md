@@ -6,19 +6,13 @@ Local daemon + CLI orchestrator.
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-## Install
-
-Primary package-first path from this repo:
+## Run From Source
 
 ```bash
-npm pack ./v2
-npm install -g ./composio-spur-<version>.tgz
-```
-
-Registry release install uses the same global package flow when published:
-
-```bash
-npm install -g @composio/spur
+pnpm --dir v2 build
+node v2/dist/cli.js doctor
+node v2/dist/cli.js list
+node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
 ```
 
 First run in a repo you want Spur to manage:
@@ -32,7 +26,7 @@ spur spawn <project> "Fix the flaky auth test"
 `spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
 does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
 first normal Spur command still auto-initializes that global instance config, and `spur list` /
-`spur spawn` auto-connect the local project config through the existing registry path.
+`spur spawn` auto-connect the local project config through the existing config path.
 
 If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
 
