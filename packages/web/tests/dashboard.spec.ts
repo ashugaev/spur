@@ -340,8 +340,8 @@ test.describe("D4: Terminal button state", () => {
     await expect(termBtn).not.toBeDisabled();
   });
 
-  test("disabled terminal button for stopped session", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-disabled-1" });
+  test("disabled terminal button for running session without tmuxSession", async ({ page }) => {
+    const session = makeWorkingSession({ id: "term-disabled-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -370,7 +370,7 @@ test.describe("D4: Terminal button state", () => {
   });
 
   test("clicking disabled terminal button does not add terminal query param", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-no-click-1" });
+    const session = makeWorkingSession({ id: "term-no-click-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -383,6 +383,79 @@ test.describe("D4: Terminal button state", () => {
     // URL should not contain terminal param
     const url = page.url();
     expect(url).not.toContain("terminal=");
+  });
+
+  test("stopped restorable session shows restore instead of disabled terminal", async ({ page }) => {
+    const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
+  test("clicking restore posts and refetches sessions", async ({ page }) => {
+    const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
+    const restored = makeWorkingSession({
+      ...stopped,
+      status: "running",
+      state: "working",
+      runtimeAlive: true,
+      tmuxSession: "spur-restore-click-1",
+    });
+    let restoredState = false;
+    let restoreCalls = 0;
+
+    await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      restoredState = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${stopped.id}`, "i") })
+      .click();
+
+    await expect
+      .poll(() => restoreCalls)
+      .toBe(1);
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Open web terminal for ${stopped.id}`, "i") }),
+    ).toBeVisible();
+  });
+
+  test("restore failure leaves row visible and shows error", async ({ page }) => {
+    const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore failed",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
+      .click();
+
+    await expect(page.getByText("Restore failed")).toBeVisible();
+    await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });
 
