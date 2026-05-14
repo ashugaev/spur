@@ -202,6 +202,7 @@ export interface ReviewRequestSummary {
 export interface ReviewCheck {
   name: string;
   state: string;
+  conclusion?: string | null;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
@@ -410,6 +411,7 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {

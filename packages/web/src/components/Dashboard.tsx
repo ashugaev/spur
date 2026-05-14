@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -20,7 +21,8 @@ import {
   type ImageAttachment,
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
-import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import type { AgentName } from "@/lib/agents";
+import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -45,26 +47,6 @@ const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
-
-function insertTextAtCursor(
-  element: HTMLTextAreaElement | null,
-  value: string,
-  setValue: (value: string) => void,
-) {
-  if (!element) {
-    setValue(value);
-    return;
-  }
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? element.value.length;
-  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
-  setValue(next);
-  queueMicrotask(() => {
-    element.focus();
-    const cursor = start + value.length;
-    element.setSelectionRange(cursor, cursor);
-  });
-}
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
@@ -759,18 +741,11 @@ export function Dashboard() {
                       </option>
                     ))}
                   </select>
-                  <select
-                    aria-label="Spawn agent"
-                    className={INPUT_CLASS}
-                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
+                  <AgentSelect
+                    ariaLabel="Spawn agent"
+                    onChange={setSpawnAgent}
                     value={spawnAgent}
-                  >
-                    {AGENT_OPTIONS.map((agent) => (
-                      <option key={agent} value={agent}>
-                        {getAgentDisplayName(agent)}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div className="flex gap-2">
                   <input

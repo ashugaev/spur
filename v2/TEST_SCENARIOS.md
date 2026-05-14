@@ -15,6 +15,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Fast
 
+- Root help also exposes `doctor`, and `doctor --help` explains the local scaffold plus the follow-up auto-connect flow through `list` or `spawn`.
 - Root help exposes `spawn`, `list`, `send`, `pause`, `complete`, and `kill`, keeps the branded help output, and hides the internal `daemon` and `slots` commands.
 - `list` subcommand help keeps the compact sections, inherited global options, and the TTY note for `p`, `c`, `r`, and `k`.
 - In-process server returns runtime info and stops cleanly.
@@ -22,6 +23,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `GET /sessions?view=dashboard` returns a lean dashboard payload that keeps attention-critical fields plus `hasServiceIssues`, skips artifact/service/sidecar/workspace/state-history expansion, and still leaves `GET /sessions/:id` on the full detail shape.
 - Client reuses a compatible daemon, auto-starts when unreachable, replaces an incompatible daemon, and surfaces JSON error payloads.
 - Instance bootstrap auto-creates `~/.spur/config.yaml` when missing, applies defaults for daemon host/port, tmux socket, and UI port, and keeps local project discovery separate.
+- `doctor` renders a minimal local `spur.yaml` at the git repo root, writes it without calling `connect`, does not create `~/.spur/config.yaml`, and refuses to overwrite an existing `spur.yaml` or `spur.yml`.
 - Registry merges compatible config files into one daemon project set, materializes each project's effective default agent once, and rejects duplicate project ids or `sessionPrefix` values across registered configs.
 - Config applies defaults once at the parse boundary for `server`, `defaultAgent`, project `worktree`, trigger spawn overrides, `runOnStart`, `intervalMs`, and `send.interrupt`.
 - Config parses optional project `codexArgs`, and Codex spawn, resume, restore, and spawn preflight append those args through the single Codex launch path.
@@ -125,6 +127,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 
 ## Runtime Integration
 
+- `doctor` writes a local config at the repo root in a fresh repo, even when launched from a nested directory, then the next `list --json` auto-connects that repo through the normal registry flow.
 - `list --json` auto-starts the daemon, auto-inits the global instance config when missing, auto-connects the nearest local project config when present, and returns `[]` on a fresh registry; `ls --json` does the same.
 - `spawn` auto-inits the global instance config when missing and auto-connects the nearest local project config before project validation.
 - `send`, `pause`, `complete`, `kill`, `service`, and hidden `daemon` commands use the global instance config but do not auto-connect a local project config.
@@ -151,7 +154,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `respawn --json` preserves shared-workspace mode for shared sessions, preserves explicit branch targets, and falls back to a fresh session id branch when respawn preflight defers or picks an occupied worktree branch.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message; automatic queue/pipeline delivery does not restart a persisted stopped session on its own.
-- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
+- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status-left to the live title without restarting the session, keeps status-right empty, and preserves stored link metadata.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
 - `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
@@ -206,7 +209,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Real `codex` startup image attachments use the native `--image` launch path, while real `claude` startup image attachments arrive through artifact-path references in the first prompt.
 - Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
 - Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
-- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
+- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
 - When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
 

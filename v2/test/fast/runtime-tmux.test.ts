@@ -63,55 +63,71 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
-  it("registers status-right link click handling when syncing tmux status", async () => {
+  it("hides the tmux status bar when no slot title exists", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
 
     const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
 
-    await syncTmuxStatus("api-1", {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    });
+    await syncTmuxStatus("api-1", undefined);
 
-    const bindCall = execFileAsyncMock.mock.calls.find(
-      (call) => call[1]?.[0] === "bind-key" && call[1]?.[2] === "MouseUp1StatusRight",
+    const statusLeftCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
     );
-    expect(bindCall?.[0]).toBe("tmux");
-    expect(bindCall?.[1]?.slice(0, 6)).toEqual([
-      "bind-key",
-      "-n",
-      "MouseUp1StatusRight",
-      "if-shell",
-      "-F",
-      "#{mouse_hyperlink}",
+    expect(statusLeftCall?.[1]?.at(-1)).toBe("");
+
+    const statusCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status"),
+    );
+    expect(statusCall?.[1]?.at(-1)).toBe("off");
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
     ]);
-    expect(bindCall?.[1]?.[6]).toContain("run-shell -b");
-    expect(bindCall?.[1]?.[6]).toContain(process.execPath);
-    expect(bindCall?.[1]?.[6]).toContain("open-link.js");
-    expect(bindCall?.[1]?.[6]).toContain("q:mouse_hyperlink");
   });
 
-  it("renders compact link ids in tmux status", async () => {
+  it("renders only the slot title in tmux status", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
 
     await syncTmuxStatus("api-1", {
+      title: "Investigate session display cleanup",
       links: [
         { label: "pr", url: "https://github.com/acme/api/pull/42" },
         { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
       ],
     });
 
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    const statusLeftCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
     );
-    if (!statusRightCall) {
-      throw new Error("Expected syncTmuxStatus to set status-right");
+    if (!statusLeftCall) {
+      throw new Error("Expected syncTmuxStatus to set status-left");
     }
-    const [, args] = statusRightCall;
-    const rendered = args.at(-1);
-    expect(rendered).toContain("]pr ##42#[");
-    expect(rendered).toContain("tracker API-7");
+    const [, leftArgs] = statusLeftCall;
+    expect(leftArgs.at(-1)).toContain("Investigate session display cleanup");
+    expect(leftArgs.at(-1)).not.toContain("api-1");
+
+    const statusCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status"),
+    );
+    if (!statusCall) {
+      throw new Error("Expected syncTmuxStatus to set status");
+    }
+    const [, args] = statusCall;
+    expect(args.at(-1)).toBe("on");
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, setArgs]) => setArgs[0] === "set-option" && setArgs.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
+    ]);
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {

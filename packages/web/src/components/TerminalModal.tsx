@@ -2,6 +2,7 @@
 
 import { useEffect } from "react";
 import { DirectTerminal } from "@/components/DirectTerminal";
+import { getSessionTitle } from "@/lib/format";
 import type { DashboardSession } from "@/lib/types";
 
 interface TerminalModalProps {
@@ -11,6 +12,22 @@ interface TerminalModalProps {
   tmuxSessionOverride?: string;
   /** Override the modal title suffix (e.g. sidecar name). */
   titleSuffix?: string;
+}
+
+function normalizeTitleSuffix(titleSuffix?: string): string | undefined {
+  const normalizedTitleSuffix = titleSuffix?.trim();
+  return normalizedTitleSuffix ? normalizedTitleSuffix : undefined;
+}
+
+function buildTerminalTitle(session: DashboardSession, titleSuffix?: string): string | undefined {
+  const normalizedTitleSuffix = normalizeTitleSuffix(titleSuffix);
+  const sessionTitle = getSessionTitle(session);
+
+  if (sessionTitle) {
+    return normalizedTitleSuffix ? `${sessionTitle} • ${normalizedTitleSuffix}` : sessionTitle;
+  }
+
+  return `${session.projectName} • ${normalizedTitleSuffix ?? session.agent}`;
 }
 
 export function TerminalModal({
@@ -41,7 +58,7 @@ export function TerminalModal({
         label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}
-        title={`${session.projectName} • ${titleSuffix ?? session.agent}`}
+        title={buildTerminalTitle(session, titleSuffix)}
       />
     </div>
   );
