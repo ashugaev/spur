@@ -6875,9 +6875,7 @@ describe("SessionService", () => {
       const afterFailure = await service.list({ view: "dashboard" });
       expect(afterFailure.map((view) => view.id)).toEqual(["api-1"]);
 
-      enrichSpy.mockImplementation((session: SessionRecord) =>
-        Promise.resolve({ id: session.id }),
-      );
+      enrichSpy.mockImplementation((session: SessionRecord) => Promise.resolve({ id: session.id }));
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(enrichSpy).toHaveBeenCalledTimes(2);

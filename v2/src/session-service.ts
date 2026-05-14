@@ -1062,9 +1062,7 @@ export class SessionService {
         return session.status !== "killed" || session.retainInList === true;
       });
       const liveIds = new Set(sessions.map((session) => session.id));
-      const enriched = await Promise.all(
-        sessions.map((session) => this.enrichDashboard(session)),
-      );
+      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
       for (const view of enriched) {
         this.dashboardCache.set(view.id, view);
       }
