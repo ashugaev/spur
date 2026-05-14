@@ -385,7 +385,9 @@ test.describe("D4: Terminal button state", () => {
     expect(url).not.toContain("terminal=");
   });
 
-  test("stopped restorable session shows restore instead of disabled terminal", async ({ page }) => {
+  test("stopped restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
     const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
     await mockSessions(page, [session]);
     await page.goto("/");
@@ -430,9 +432,7 @@ test.describe("D4: Terminal button state", () => {
       .getByRole("button", { name: new RegExp(`Restore session ${stopped.id}`, "i") })
       .click();
 
-    await expect
-      .poll(() => restoreCalls)
-      .toBe(1);
+    await expect.poll(() => restoreCalls).toBe(1);
     await expect(
       page.getByRole("button", { name: new RegExp(`Open web terminal for ${stopped.id}`, "i") }),
     ).toBeVisible();
