@@ -1506,14 +1506,11 @@ export class SessionService {
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views: SessionListView[] = [];
-    for (const session of sessions) {
-      views.push(
-        options?.view === "dashboard"
-          ? await this.enrichDashboard(session)
-          : await this.enrich(session),
-      );
-    }
+    const views = await Promise.all(
+      sessions.map((session) =>
+        options?.view === "dashboard" ? this.enrichDashboard(session) : this.enrich(session),
+      ),
+    );
     return views;
   }
 

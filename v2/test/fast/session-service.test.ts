@@ -370,6 +370,7 @@ type SessionServiceInternals = {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void>;
+  enrichDashboard(session: SessionRecord): Promise<{ id: string }>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -6739,6 +6740,90 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("waiting");
+    });
+  });
+
+  describe("list parallelization", () => {
+    function seedDashboardSessions(count: number): void {
+      const sessions = createSessionStore();
+      for (let index = 1; index <= count; index += 1) {
+        const id = `api-${index}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: `task ${index}`,
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+    }
+
+    it("returns sessions in original order under parallel enrichment", async () => {
+      seedDashboardSessions(5);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+      const expectedOrder = ["api-1", "api-2", "api-3", "api-4", "api-5"];
+
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        (session: SessionRecord) => {
+          const position = expectedOrder.indexOf(session.id);
+          const delay = (expectedOrder.length - position) * 10;
+          return new Promise((resolveDelay) => {
+            setTimeout(() => resolveDelay({ id: session.id }), delay);
+          });
+        },
+      );
+      vi.useRealTimers();
+
+      const listed = await service.list({ view: "dashboard" });
+
+      expect(listed.map((view) => view.id)).toEqual(expectedOrder);
+    });
+
+    it("enriches concurrently, not serially", async () => {
+      seedDashboardSessions(10);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        (session: SessionRecord) =>
+          new Promise((resolveDelay) => {
+            setTimeout(() => resolveDelay({ id: session.id }), 50);
+          }),
+      );
+      vi.useRealTimers();
+
+      const startedAt = Date.now();
+      const listed = await service.list({ view: "dashboard" });
+      const elapsed = Date.now() - startedAt;
+
+      expect(listed).toHaveLength(10);
+      expect(elapsed).toBeLessThan(200);
+    });
+
+    it("rejects when any enrichment throws", async () => {
+      seedDashboardSessions(3);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        (session: SessionRecord) => {
+          if (session.id === "api-2") {
+            return Promise.reject(new Error("boom"));
+          }
+          return Promise.resolve({ id: session.id });
+        },
+      );
+      vi.useRealTimers();
+
+      await expect(service.list({ view: "dashboard" })).rejects.toThrow("boom");
     });
   });
 });
