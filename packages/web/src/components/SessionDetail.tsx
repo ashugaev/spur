@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentSelect } from "@/components/AgentSelect";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
@@ -26,11 +27,13 @@ import {
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
+import { type AgentName } from "@/lib/agents";
 import {
   encodeImageAttachments,
   imageAttachmentsFromFiles,
   type ImageAttachment,
 } from "@/lib/image-attachments";
+import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -57,6 +60,23 @@ function displayLinkLabel(label: string, url: string): string {
     return reviewProviderFromUrl(url) === "gitlab" ? "gitlab mr" : "github pr";
   }
   return label;
+}
+
+function splitSessionLinks(
+  links: DashboardSession["links"],
+  sidecarLinkLabels: Set<string>,
+): {
+  surfacedLinks: DashboardSession["links"];
+  visibleLinks: DashboardSession["links"];
+} {
+  const surfacedLinks = links.filter(
+    (link) => link.label === "tracker" || isReviewLinkLabel(link.label),
+  );
+  const surfacedUrls = new Set(surfacedLinks.map((link) => link.url));
+  const visibleLinks = links.filter(
+    (link) => !sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url),
+  );
+  return { surfacedLinks, visibleLinks };
 }
 
 function PlayIcon() {
@@ -429,26 +449,6 @@ interface DialogMessage {
   pending?: boolean;
 }
 
-function insertTextAtCursor(
-  element: HTMLTextAreaElement | null,
-  value: string,
-  setValue: (value: string) => void,
-) {
-  if (!element) {
-    setValue(value);
-    return;
-  }
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? element.value.length;
-  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
-  setValue(next);
-  queueMicrotask(() => {
-    element.focus();
-    const cursor = start + value.length;
-    element.setSelectionRange(cursor, cursor);
-  });
-}
-
 interface ToastState {
   id: number;
   tone: "success" | "error";
@@ -696,8 +696,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [attachments, setAttachments] = useState<ImageAttachment[]>([]);
   const [respawnOpen, setRespawnOpen] = useState(false);
   const [respawnPrompt, setRespawnPrompt] = useState("");
+  const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const respawnVoice = useVoiceInput({
+    onTranscribed: (text) =>
+      setRespawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
+  });
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -861,6 +867,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const encodedAttachments = encodeImageAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (forceKillSource) payload.forceKillSource = true;
+      if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1048,22 +1055,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const surfacedLinks = useMemo(
-    () =>
-      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
-      [],
-    [session],
-  );
-  const surfacedLinkUrls = useMemo(
-    () => new Set(surfacedLinks.map((link) => link.url)),
-    [surfacedLinks],
-  );
-  const visibleLinks = useMemo(
-    () =>
-      session?.links.filter(
-        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
-      ) ?? [],
-    [session, sidecarLinkLabels, surfacedLinkUrls],
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(
+    session?.links ?? [],
+    sidecarLinkLabels,
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1101,8 +1095,15 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     setRespawnPrompt(session.prompt);
     setRespawnStartupAttachmentIds(session.startupAttachmentIds ?? []);
     setRespawnAttachments([]);
+    setRespawnAgent(session.agent);
     setRespawnOpen(true);
   }, [session]);
+
+  const respawnVoiceDismiss = respawnVoice.dismissModal;
+  useEffect(() => {
+    if (respawnOpen) return;
+    respawnVoiceDismiss();
+  }, [respawnOpen, respawnVoiceDismiss]);
 
   useEffect(() => {
     if (!requestedTerminalSessionId || !session || typeof window === "undefined") return;
@@ -1197,7 +1198,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} variant="detail" />
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
               ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">
@@ -1810,7 +1811,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               }
             />
           ) : null}
-          {respawnOpen && session ? (
+          {respawnOpen && session && respawnAgent ? (
             <div
               className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
               onClick={(event) => {
@@ -1853,6 +1854,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </div>
                 ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <AgentSelect
+                    ariaLabel="Respawn agent"
+                    onChange={setRespawnAgent}
+                    value={respawnAgent}
+                  />
                   <ImageAttachmentTextarea
                     attachments={respawnAttachments}
                     minHeightClass="min-h-[10rem]"
@@ -1863,9 +1869,16 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         current.filter((_, currentIndex) => currentIndex !== index),
                       )
                     }
-                    placeholder="Edit the initial message..."
+                    placeholder={voicePlaceholder("Edit the initial message...", respawnVoice)}
+                    textareaRef={respawnPromptRef}
                     value={respawnPrompt}
+                    voice={respawnVoice}
                   />
+                  {respawnVoice.voiceError ? (
+                    <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
+                      {respawnVoice.voiceError}
+                    </div>
+                  ) : null}
                   {startupArtifacts.length > 0 ? (
                     <div className="space-y-2">
                       <div className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
@@ -1898,28 +1911,33 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </div>
                     </div>
                   ) : null}
-                  <div className="flex items-center justify-end gap-2">
-                    <button
-                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
-                      disabled={busyAction === "respawn"}
-                      onClick={() => setRespawnOpen(false)}
-                      type="button"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
-                      disabled={
-                        busyAction === "respawn" ||
-                        (!respawnPrompt.trim() &&
-                          respawnStartupAttachmentIds.length === 0 &&
-                          respawnAttachments.length === 0)
-                      }
-                      onClick={() => void handleRespawn()}
-                      type="button"
-                    >
-                      {busyAction === "respawn" ? "Respawning..." : "Respawn"}
-                    </button>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      <VoiceStatusHint voice={respawnVoice} />
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                        disabled={busyAction === "respawn"}
+                        onClick={() => setRespawnOpen(false)}
+                        type="button"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                        disabled={
+                          busyAction === "respawn" ||
+                          (!respawnPrompt.trim() &&
+                            respawnStartupAttachmentIds.length === 0 &&
+                            respawnAttachments.length === 0)
+                        }
+                        onClick={() => void handleRespawn()}
+                        type="button"
+                      >
+                        {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

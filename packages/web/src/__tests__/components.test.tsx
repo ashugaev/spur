@@ -42,13 +42,16 @@ vi.mock("@/components/DirectTerminal", () => ({
     label,
     onClose,
     sessionId,
+    title,
   }: {
     label?: string;
     onClose?: () => void;
     sessionId: string;
+    title?: string;
   }) => (
     <div>
       <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
       </button>
@@ -222,6 +225,7 @@ describe("Dashboard", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
       expect(screen.getByText("Direct terminal api-a1")).toBeInTheDocument();
+      expect(screen.getByText("Direct terminal title Fix auth")).toBeInTheDocument();
     });
 
     expect(window.location.search).toContain("terminal=api-a1");
@@ -271,6 +275,47 @@ describe("Dashboard", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("dialog", { name: "Terminal api-a1" })).toBeInTheDocument();
+    });
+  });
+
+  it("uses session title in the terminal header when available", async () => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [
+              {
+                ...sessionsPayload().sessions[0],
+                slots: { title: "Fix auth header", links: [] },
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-a1" }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open web terminal for api-a1" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Direct terminal title Fix auth header")).toBeInTheDocument();
     });
   });
 
@@ -506,6 +551,121 @@ describe("Dashboard", () => {
       expect(within(header).getByRole("button", { name: /Stopped/i })).toHaveTextContent("1");
       expect(screen.getAllByText("Stopped")[0]).toBeInTheDocument();
       expect(screen.getByRole("link", { name: "Manual stop" })).toBeInTheDocument();
+    });
+  });
+
+  it("restores a stopped session from the dashboard row action", async () => {
+    const stoppedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-restore-1",
+      prompt: "Recover me",
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tmuxSession: null,
+    };
+    const restoredSession = {
+      ...stoppedSession,
+      status: "running",
+      state: "working",
+      runtimeAlive: true,
+      tmuxSession: "api-restore-1",
+    };
+    let restored = false;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [restored ? restoredSession : stoppedSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-restore-1/restore") {
+        expect(init?.method).toBe("POST");
+        restored = true;
+        return new Response("{}", { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const restoreButton = await screen.findByRole("button", {
+      name: "Restore session api-restore-1",
+    });
+    expect(restoreButton).not.toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Open web terminal for api-restore-1" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(restoreButton);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-restore-1/restore", {
+        method: "POST",
+      });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-restore-1" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("keeps a stopped session visible and surfaces restore failures", async () => {
+    const stoppedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-restore-fail-1",
+      prompt: "Still stopped",
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tmuxSession: null,
+    };
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [stoppedSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-restore-fail-1/restore") {
+        expect(init?.method).toBe("POST");
+        return new Response("Restore failed", { status: 502 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Restore session api-restore-fail-1" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Restore failed")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Still stopped" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Restore session api-restore-fail-1" }),
+      ).not.toBeDisabled();
     });
   });
 
@@ -835,7 +995,7 @@ describe("Dashboard", () => {
         return new Response(
           JSON.stringify({
             ...sessionsPayload(),
-            sessions: [{ ...sessionsPayload().sessions[0], runtimeAlive: false }],
+            sessions: [{ ...sessionsPayload().sessions[0], tmuxSession: null }],
           }),
           { status: 200 },
         );

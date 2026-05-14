@@ -62,12 +62,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D4: Dashboard row action button state
 
 - Sessions with `runtimeAlive=true` + `tmuxSession` + `status!=completed|killed`: button enabled (visible border, secondary text color)
-- Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
+- Sessions without `tmuxSession` and no restore action: button disabled (transparent border, 25% opacity, cursor-not-allowed)
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
+- Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -302,9 +304,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
-- PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
 - Canonical tracker/PR links stay surfaced in the header badge strip
+- PR header badges show compact provider/id, CI/review state, and review thread count
 - A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab
 
@@ -404,6 +405,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
+- Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 

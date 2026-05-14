@@ -75,6 +75,11 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
+export interface WorkItemLifecycleRecord extends GitHubWorkItemEventData {
+  sessionId: string;
+  createdAt: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -155,6 +160,7 @@ export interface TriggerSpawnConfig {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  autoComplete?: boolean;
 }
 
 export interface TriggerSendConfig {
@@ -202,6 +208,7 @@ export interface ReviewRequestSummary {
 export interface ReviewCheck {
   name: string;
   state: string;
+  conclusion?: string | null;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
@@ -411,6 +418,7 @@ export interface RespawnSessionRequest {
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
   forceKillSource?: boolean;
+  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {

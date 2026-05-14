@@ -6,7 +6,50 @@ Local daemon + CLI orchestrator.
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-No UI. No tracker flow. No plugin layer.
+## Install
+
+Primary package-first path from this repo:
+
+```bash
+npm pack ./v2
+npm install -g ./composio-spur-<version>.tgz
+```
+
+Registry release install uses the same global package flow when published:
+
+```bash
+npm install -g @composio/spur
+```
+
+First run in a repo you want Spur to manage:
+
+```bash
+spur doctor
+spur list
+spur spawn <project> "Fix the flaky auth test"
+```
+
+`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
+does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
+first normal Spur command still auto-initializes that global instance config, and `spur list` /
+`spur spawn` auto-connect the local project config through the existing registry path.
+
+If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
+
+## Local Project Config
+
+`spur doctor` writes the same minimal shape shown below:
+
+```yaml
+projects:
+  my-project:
+    path: .
+    defaultBranch: main
+    sessionPrefix: my-project
+```
+
+Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`,
+`triggers`, `sidecars`, or agent overrides only when the repo needs them.
 
 ## Commands
 
@@ -65,7 +108,7 @@ If that preflight-suggested branch is already checked out in another worktree, S
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
-Use it inside the session to update the task title and any named links shown in the tmux status line. In attached tmux sessions, clicking a status-right link label opens its URL:
+Use it inside the session to update the task title shown in the tmux status line and any named links stored with the session:
 
 ```bash
 spur-slots --title "Fix flaky auth test"
@@ -219,7 +262,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -337,7 +380,8 @@ projects:
         event: github:work_item.new
         spawn:
           agent: claude
-          prompt: "Run /code-review on this pull request and post findings."
+          prompt: "/code-review {{url}}"
+          autoComplete: true
       web-watch-crash:
         source: web-watch
         event: service:crash

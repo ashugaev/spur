@@ -172,6 +172,12 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+
+export function getIdleWaitBeforeFlushMs(): number {
+  const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
+}
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
@@ -389,6 +395,17 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
+export function isIdleEnoughToReceive(
+  lastActivityAt: string | Date | null,
+  idleMs: number,
+  now: number = Date.now(),
+): boolean {
+  if (!lastActivityAt) return true;
+  const ts =
+    typeof lastActivityAt === "string" ? Date.parse(lastActivityAt) : lastActivityAt.getTime();
+  return now - ts >= idleMs;
+}
+
 function shouldUseCodexRolloutState(
   hookState: { state: SessionState; updatedAt: string; turnId?: string } | null,
   rolloutState: CodexRolloutStateRecord,
@@ -578,15 +595,23 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
+  const project = config.projects[projectId];
+  if (!project) return [];
+  const sourceIds: string[] = [];
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    sourceIds.push(sourceId);
+  }
+  return sourceIds;
+}
+
 function requestGitHubMergeConflictRestoreReplays(
   config: AppConfig,
   projectId: string,
   sessionId: string,
 ): void {
-  const project = config.projects[projectId];
-  if (!project) return;
-  for (const [sourceId, source] of Object.entries(project.sources)) {
-    if (source.type !== "github") continue;
+  for (const sourceId of githubReplaySourceIds(config, projectId)) {
     requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
   }
 }
@@ -732,13 +757,13 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
-    agent: session.agent,
+    agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
@@ -3035,8 +3060,10 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    const shouldWaitForCodexAck =
+      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const codexSessionsDir = agentWaitsForSubmitAck(session.agent)
+    const codexSessionsDir = shouldWaitForCodexAck
       ? join(codexHookHomePath(sessionToolDir), "sessions")
       : null;
     const baseline: RolloutBaseline | null = codexSessionsDir
@@ -3047,7 +3074,7 @@ export class SessionService {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (!agentWaitsForSubmitAck(session.agent) || !codexSessionsDir || !baseline) {
+    if (!shouldWaitForCodexAck || !codexSessionsDir || !baseline) {
       return;
     }
     let lastResult: { found: boolean; lastScannedFile: string | null } = {
@@ -3974,6 +4001,7 @@ export class SessionService {
       resolveRespawnRequest(session, {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),
     );
     if (session.status !== "completed") {
@@ -4022,8 +4050,11 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const agentState = await this.classifySessionState(readySession);
-    if (agentState !== "waiting") {
+    const classified = await this.classifySessionRecord(readySession);
+    if (classified.state !== "waiting") {
+      return false;
+    }
+    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
       return false;
     }
 

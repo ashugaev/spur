@@ -199,14 +199,31 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-async function mountTerminal(
+async function mountTerminal({
   sessionId = "test-session",
-  agent: "claude" | "codex" | "cursor" = "claude",
-) {
+  agent = "claude",
+  label = "test",
+  title,
+  onClose,
+}: {
+  sessionId?: string;
+  agent?: "claude" | "codex" | "cursor";
+  label?: string;
+  title?: string;
+  onClose?: () => void;
+} = {}) {
   const { DirectTerminal } = await import("@/components/DirectTerminal");
   let result!: ReturnType<typeof render>;
   await act(async () => {
-    result = render(<DirectTerminal agent={agent} sessionId={sessionId} label="test" />);
+    result = render(
+      <DirectTerminal
+        agent={agent}
+        label={label}
+        onClose={onClose}
+        sessionId={sessionId}
+        title={title}
+      />,
+    );
   });
   await act(async () => {
     await new Promise((r) => setTimeout(r, 50));
@@ -216,7 +233,7 @@ async function mountTerminal(
 
 describe("DirectTerminal scroll integration", () => {
   it("uses the runtime terminal port when opening the websocket", async () => {
-    await mountTerminal("port-test");
+    await mountTerminal({ sessionId: "port-test" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -242,7 +259,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("forwards keyboard input via onData to WebSocket", async () => {
-    await mountTerminal("test-data");
+    await mountTerminal({ sessionId: "test-data" });
 
     await waitFor(() => {
       expect(onDataCallback).not.toBeNull();
@@ -253,7 +270,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("does not prevent wheel events (lets xterm.js handle them natively)", async () => {
-    const { container } = await mountTerminal("test-wheel");
+    const { container } = await mountTerminal({ sessionId: "test-wheel" });
 
     const terminalDiv = container.querySelector("div > div:nth-child(2) > div");
 
@@ -267,7 +284,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("maps touch swipe direction to native terminal scroll direction", async () => {
-    const { container } = await mountTerminal("test-touch");
+    const { container } = await mountTerminal({ sessionId: "test-touch" });
 
     const touchTarget = container.querySelector(".xterm-screen");
     expect(touchTarget).not.toBeNull();
@@ -290,7 +307,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("opens agent hotkeys menu and sends a selected shortcut", async () => {
-    await mountTerminal("test-hotkeys", "claude");
+    await mountTerminal({ sessionId: "test-hotkeys", agent: "claude" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open claude shortcuts" }));
     expect(screen.getByRole("menu", { name: "claude shortcuts" })).toBeInTheDocument();
@@ -303,7 +320,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("renders codex-specific hotkeys menu label", async () => {
-    await mountTerminal("test-codex-hotkeys", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkeys", agent: "codex" });
 
     fireEvent.click(screen.getByRole("button", { name: "Open codex shortcuts" }));
     expect(screen.getByRole("menu", { name: "codex shortcuts" })).toBeInTheDocument();
@@ -313,7 +330,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("submits codex slash suggestions as bracketed paste plus enter", async () => {
-    await mountTerminal("test-codex-hotkey-submit", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkey-submit", agent: "codex" });
 
     const slashButton = screen.getByRole("button", { name: "Slash" });
     expect(slashButton).toHaveTextContent("/");
@@ -330,7 +347,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("submits claude slash suggestions as bracketed paste plus enter", async () => {
-    await mountTerminal("test-claude-hotkey-submit", "claude");
+    await mountTerminal({ sessionId: "test-claude-hotkey-submit", agent: "claude" });
 
     fireEvent.click(screen.getByRole("button", { name: "Slash" }));
     await waitFor(() => {
@@ -345,7 +362,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("shows a visible error when codex slash suggestion submit fails", async () => {
-    await mountTerminal("test-codex-hotkey-submit-error", "codex");
+    await mountTerminal({ sessionId: "test-codex-hotkey-submit-error", agent: "codex" });
 
     wsInstances[0].readyState = 3;
     fireEvent.click(screen.getByRole("button", { name: "Slash" }));
@@ -360,13 +377,13 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("does not render a standalone esc button in the control bar", async () => {
-    await mountTerminal("test-no-esc", "claude");
+    await mountTerminal({ sessionId: "test-no-esc", agent: "claude" });
 
     expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
   it("reconnects after an unexpected websocket close", async () => {
-    await mountTerminal("test-reconnect");
+    await mountTerminal({ sessionId: "test-reconnect" });
 
     const firstSocket = wsInstances[0];
     act(() => {
@@ -390,7 +407,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("does not reconnect after returning from a hidden tab when the websocket is still open", async () => {
-    await mountTerminal("test-visibility");
+    await mountTerminal({ sessionId: "test-visibility" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -418,7 +435,7 @@ describe("DirectTerminal scroll integration", () => {
   });
 
   it("reconnects after returning from a hidden tab when the websocket is already closed", async () => {
-    await mountTerminal("test-visibility-closed");
+    await mountTerminal({ sessionId: "test-visibility-closed" });
 
     await waitFor(() => {
       expect(MockWebSocket).toHaveBeenCalledTimes(1);
@@ -461,7 +478,7 @@ describe("DirectTerminal scroll integration", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    await mountTerminal("test-voice-insert");
+    await mountTerminal({ sessionId: "test-voice-insert" });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
@@ -486,12 +503,44 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByRole("dialog", { name: "Confirm voice input" })).toBeInTheDocument();
   });
   it("does not show a primary voice hint in the terminal toolbar before the popup opens", async () => {
-    await mountTerminal("test-terminal-voice-hint");
+    await mountTerminal({ sessionId: "test-terminal-voice-hint" });
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Start voice recording" })).toBeInTheDocument();
     });
 
     expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
+  });
+
+  it("clamps terminal header title to two lines with CSS", async () => {
+    const title = "Very long terminal header title for isolated sidecar sessions";
+
+    await mountTerminal({
+      sessionId: "terminal-header-wrap",
+      label: "session-with-a-very-long-sidecar-name",
+      onClose: vi.fn(),
+      title,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Connected")).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
+      "break-all",
+    );
+    expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
+      "sm:break-normal",
+    );
+    expect(screen.getByText(title).className).toContain("whitespace-normal");
+    expect(screen.getByText(title).className).toContain("[display:-webkit-box]");
+    expect(screen.getByText(title).className).toContain("[-webkit-line-clamp:2]");
+    expect(screen.getByText(title).className).toContain("[overflow-wrap:anywhere]");
+    expect(screen.getByText(title).className).toContain("overflow-hidden");
+    expect(screen.getByText(title).parentElement?.className).toContain("sm:items-center");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain("sm:items-center");
+    expect(screen.getByTestId("direct-terminal-header").className).toContain(
+      "sm:grid-cols-[auto_minmax(0,1fr)_auto]",
+    );
   });
 });

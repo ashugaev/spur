@@ -682,6 +682,7 @@ describe("Spur web API routes", () => {
           prompt: "Retry with screenshot",
           startupAttachmentIds: ["1715000000000-source.png"],
           attachments: [{ name: "shot.png", data: "cG5n" }],
+          agent: "codex",
         }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
@@ -699,8 +700,30 @@ describe("Spur web API routes", () => {
         prompt: "Retry with screenshot",
         startupAttachmentIds: ["1715000000000-source.png"],
         attachments: [{ name: "shot.png", data: "cG5n" }],
+        agent: "codex",
       },
     );
+  });
+
+  it("POST /api/sessions/:id/respawn drops invalid agent values", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry",
+          agent: "not-an-agent",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect("agent" in body).toBe(false);
+    expect(body.prompt).toBe("Retry");
   });
 
   it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {
