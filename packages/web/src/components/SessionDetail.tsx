@@ -708,6 +708,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
+  const respawnWorkspaceRiskBanner = session?.status === "errored" || session?.status === "killed";
 
   const loadSession = useCallback(async () => {
     try {
@@ -851,16 +853,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
-    const prLink = session?.links.find((link) => link.label === "pr");
-    if (
-      prLink &&
-      !window.confirm(
-        `This session has a linked pull request (${prLink.url}). Respawn removes the old session worktree after success. Continue?`,
-      )
-    ) {
-      return;
-    }
-
     const submitRespawn = async (forceKillSource: boolean) => {
       const payload: Record<string, unknown> = {
         prompt: respawnPrompt.trim(),
@@ -1841,6 +1833,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ✕
                   </button>
                 </div>
+                {respawnModalPrLink || respawnWorkspaceRiskBanner ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    {respawnModalPrLink ? (
+                      <div>
+                        This session links a PR ({respawnModalPrLink.url}). Respawn drops the
+                        replaced worktree after success—confirm merges or updates first if needed.
+                      </div>
+                    ) : null}
+                    {respawnWorkspaceRiskBanner ? (
+                      <div className={respawnModalPrLink ? "mt-2" : ""}>
+                        Local uncommitted changes or unpushed commits make respawn ask for extra
+                        confirmation before discarding the old workspace.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                   <ImageAttachmentTextarea
                     attachments={respawnAttachments}

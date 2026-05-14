@@ -29,6 +29,9 @@ export async function POST(request: Request, context: RouteContext) {
     if (typeof body.forceKillSource === "boolean" && body.forceKillSource) {
       payload.forceKillSource = true;
     }
+    if (typeof body.terminateSessionId === "string" && body.terminateSessionId.trim().length > 0) {
+      payload.terminateSessionId = body.terminateSessionId.trim();
+    }
     const result = await spurRequestJson<SpurSessionView>(
       `/sessions/${encodeURIComponent(id)}/respawn`,
       spurJsonInit("POST", Object.keys(payload).length > 0 ? payload : undefined),
