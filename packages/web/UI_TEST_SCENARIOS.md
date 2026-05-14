@@ -396,7 +396,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
 - Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
-- Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS without overlapping controls or causing horizontal scroll.
+- Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 

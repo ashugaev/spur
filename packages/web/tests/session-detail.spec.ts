@@ -1486,8 +1486,13 @@ test.describe("S6: Terminal modal from detail page", () => {
       expect(overlaps(titleBox, statusBox)).toBe(false);
       expect(overlaps(titleBox, closeBox)).toBe(false);
       if (viewport.width >= 640) {
-        expect(Math.abs(labelBox.y - titleBox.y)).toBeLessThanOrEqual(1);
-        expect(Math.abs(titleBox.y - statusBox.y)).toBeLessThanOrEqual(1);
+        const labelCenterY = labelBox.y + labelBox.height / 2;
+        const titleCenterY = titleBox.y + titleBox.height / 2;
+        const statusCenterY = statusBox.y + statusBox.height / 2;
+        const closeCenterY = closeBox.y + closeBox.height / 2;
+        expect(Math.abs(labelCenterY - titleCenterY)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleCenterY - statusCenterY)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleCenterY - closeCenterY)).toBeLessThanOrEqual(1);
       } else {
         expect(titleBox.y).toBeGreaterThan(labelBox.y);
       }

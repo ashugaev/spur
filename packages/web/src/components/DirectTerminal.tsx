@@ -611,7 +611,7 @@ export function DirectTerminal({
         data-testid="direct-terminal-header"
       >
         <div className={cn("mt-1 h-2 w-2 shrink-0 rounded-full sm:mt-0", statusDotClass)} />
-        <div className="min-w-0 sm:flex sm:items-baseline sm:gap-2">
+        <div className="min-w-0 sm:flex sm:items-center sm:gap-2">
           <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)] sm:shrink-0 sm:break-normal">
             {label ?? sessionId}
           </div>
