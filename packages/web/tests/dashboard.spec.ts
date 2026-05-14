@@ -542,20 +542,20 @@ test.describe("D4b: Merged-PR done button", () => {
   });
 });
 
-// D5: Dashboard rows hide tracker and PR links
-test.describe("D5: Dashboard rows hide tracker and PR links", () => {
-  test("session with tracker link does not render a tracker badge in the row", async ({ page }) => {
+// D5: Tracker and PR links
+test.describe("D5: Tracker and PR links", () => {
+  test("session with tracker link shows tracker icon+id", async ({ page }) => {
     const session = makeSessionWithTracker({ id: "tracker-row-1" });
     await mockSessions(page, [session]);
     await page.goto("/");
 
+    // The tracker link contains WEBDEV-4617 as extracted ID
+    // It's in a sm:inline-flex so visible at desktop
     const trackerLink = page.locator("a[href*='jira.example.com']");
-    await expect(trackerLink).toHaveCount(0);
+    await expect(trackerLink).toBeVisible();
   });
 
-  test("session with PR link keeps row actions but does not render a PR badge", async ({
-    page,
-  }) => {
+  test("session with PR link shows github link", async ({ page }) => {
     const prUrl = "https://github.com/test/repo/pull/42001";
     const session = makeSessionWithPR({
       id: "pr-row-1",
@@ -581,20 +581,12 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     });
     await page.goto("/");
 
-    await expect(page.locator(`a[href='${prUrl}']`)).toHaveCount(0);
-    await expect(
-      page.getByRole("button", {
-        name: new RegExp(`Merge PR for ${session.id}`, "i"),
-      }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("button", {
-        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
-      }),
-    ).toHaveCount(0);
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
   });
 
-  test("session with GitLab MR link does not render a PR badge in the row", async ({ page }) => {
+  test("session with GitLab MR link shows compact merge request id", async ({ page }) => {
     const session = makeWorkingSession({
       id: "gitlab-pr-row-1",
       slots: {
@@ -617,7 +609,10 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     });
     await page.goto("/");
 
-    await expect(page.locator("a[href*='gitlab.com']")).toHaveCount(0);
+    const prLink = page.locator("a[href*='gitlab.com']").first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink).toContainText("!42");
+    await expect(prLink.locator("svg")).toHaveCount(1);
   });
 
   test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
@@ -643,6 +638,9 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     });
     await page.goto("/");
 
+    await expect(
+      page.locator("a[href='https://github.com/test/repo/pull/999']").first(),
+    ).toBeVisible();
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 
@@ -674,9 +672,8 @@ test.describe("D5: Dashboard rows hide tracker and PR links", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    await expect(page.locator("a[href*='jira']")).toHaveCount(0);
-    await expect(page.locator("a[href*='github.com']")).toHaveCount(0);
-    await expect(page.locator("a[href*='gitlab.com']")).toHaveCount(0);
+    const trackerLinks = page.locator("a[href*='jira']");
+    await expect(trackerLinks).toHaveCount(0);
   });
 });
 
