@@ -262,7 +262,7 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
 
-When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death; no cleanup. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`.
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -380,7 +380,8 @@ projects:
         event: github:work_item.new
         spawn:
           agent: claude
-          prompt: "Run /code-review on this pull request and post findings."
+          prompt: "/code-review {{url}}"
+          autoComplete: true
       web-watch-crash:
         source: web-watch
         event: service:crash

@@ -3,9 +3,12 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteWorkItemLifecycle,
+  readWorkItemLifecycles,
   readSession,
   readWorkItemRegistry,
   recordWorkItem,
+  recordWorkItemLifecycle,
   writeSession,
 } from "../../src/metadata.js";
 import type { SessionRecord } from "../../src/types.js";
@@ -55,6 +58,48 @@ describe("work-item registry", () => {
     recordWorkItem(dataDir, "api", "pr-watch", "acme/api#1");
     const ids = readWorkItemRegistry(dataDir, "api", "pr-watch");
     expect(ids.size).toBe(1);
+  });
+});
+
+describe("work-item lifecycle registry", () => {
+  it("round-trips lifecycle records", async () => {
+    const dataDir = await newDataDir();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      externalId: "acme/api#7",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+    });
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").get("acme/api#7")).toEqual({
+      externalId: "acme/api#7",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+    });
+  });
+
+  it("deletes lifecycle records", async () => {
+    const dataDir = await newDataDir();
+    recordWorkItemLifecycle(dataDir, "api", "pr-watch", {
+      externalId: "acme/api#7",
+      sessionId: "api-a1b2",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Review me",
+      repo: "acme/api",
+      createdAt: "2026-05-11T10:00:00.000Z",
+    });
+
+    deleteWorkItemLifecycle(dataDir, "api", "pr-watch", "acme/api#7");
+
+    expect(readWorkItemLifecycles(dataDir, "api", "pr-watch").size).toBe(0);
   });
 });
 

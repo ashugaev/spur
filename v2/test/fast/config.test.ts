@@ -486,6 +486,7 @@ projects:
         event: github:work_item.new
         spawn:
           prompt: "Take this work item."
+          autoComplete: true
 `);
 
     const config = loadConfig(configPath);
@@ -500,8 +501,76 @@ projects:
       event: "github:work_item.new",
       spawn: {
         prompt: "Take this work item.",
+        autoComplete: true,
       },
     });
+  });
+
+  it("rejects autoComplete on non-work-item spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+    );
+  });
+
+  it("rejects autoComplete on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      reply:
+        source: pr-watch
+        event: github:comment
+        send:
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+    );
+  });
+
+  it("rejects legacy autoClose on spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoClose: complete
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+    );
   });
 
   it("rejects github:work_item.new triggers when the source has no query", async () => {
