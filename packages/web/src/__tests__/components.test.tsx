@@ -2339,9 +2339,9 @@ describe("StatusBar", () => {
 
     rtlRender(<StatusBar />, { wrapper: Wrapper });
 
-    expect(
-      screen.getByRole("button", { name: "Show aggregated system status" }),
-    ).toHaveTextContent("Unavailable");
+    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
+      "Unavailable",
+    );
     expect(
       screen.getByRole("button", { name: "Show aggregated system status" }),
     ).not.toHaveTextContent("Critical");
