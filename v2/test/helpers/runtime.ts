@@ -341,9 +341,10 @@ touch_chat_store "$chat_id"`;
       ? `while IFS= read -r line; do
   full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
-  # Drain remaining lines from the same paste. Claude's non-bracketed paste
-  # arrives as one tmux paste-buffer write, so a short timeout suffices.
-  while IFS= read -r -t 0.1 extra; do
+  # Drain remaining lines from the same paste. Daemon sends paste then sleeps
+  # DEFAULT_SUBMIT_DELAY_MS (300ms) before the submit Enter; drain must exceed
+  # that so we capture the full message before emitting the JSONL ack record.
+  while IFS= read -r -t 0.5 extra; do
     full_msg="$full_msg
 $extra"
     printf '%s\\n' "$extra" >> "$log_file"
