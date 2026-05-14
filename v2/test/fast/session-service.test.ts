@@ -2750,12 +2750,19 @@ describe("SessionService", () => {
       }),
     );
     const jsonlReader = { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
-    readClaudeJsonlStateMock
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+    const startMs = new Date("2026-03-18T10:05:00.000Z").getTime();
+    readClaudeJsonlStateMock.mockImplementation(async () => {
+      const elapsedSec = Math.round((Date.now() - startMs) / 1000);
+      const stateForElapsed =
+        elapsedSec < 5
+          ? "waiting"
+          : elapsedSec < 15
+            ? "needs_input"
+            : elapsedSec < 30
+              ? "waiting"
+              : "needs_input";
+      return { state: stateForElapsed, reader: jsonlReader };
+    });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2772,10 +2779,10 @@ describe("SessionService", () => {
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    await advanceSeconds(5);
+    await advanceSeconds(19);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    await advanceSeconds(5);
+    await advanceSeconds(6);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
     service.dispose();
   });
@@ -3994,7 +4001,9 @@ describe("SessionService", () => {
         },
       },
     });
-    tmuxSessionExistsMock.mockRejectedValueOnce(new Error("enrich boom"));
+    tmuxSessionExistsMock
+      .mockRejectedValueOnce(new Error("enrich boom"))
+      .mockRejectedValueOnce(new Error("enrich boom"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -6743,8 +6752,8 @@ describe("SessionService", () => {
     });
   });
 
-  describe("list parallelization", () => {
-    function seedDashboardSessions(count: number): void {
+  describe("dashboard cache", () => {
+    function seedDashboardSessions(count: number): Map<string, SessionRecord> {
       const sessions = createSessionStore();
       for (let index = 1; index <= count; index += 1) {
         const id = `api-${index}`;
@@ -6763,67 +6772,119 @@ describe("SessionService", () => {
           updatedAt: "2026-03-18T10:01:00.000Z",
         });
       }
+      return sessions;
     }
 
-    it("returns sessions in original order under parallel enrichment", async () => {
-      seedDashboardSessions(5);
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-      const expectedOrder = ["api-1", "api-2", "api-3", "api-4", "api-5"];
-
-      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
-        (session: SessionRecord) => {
-          const position = expectedOrder.indexOf(session.id);
-          const delay = (expectedOrder.length - position) * 10;
-          return new Promise((resolveDelay) => {
-            setTimeout(() => resolveDelay({ id: session.id }), delay);
-          });
-        },
-      );
-      vi.useRealTimers();
-
-      const listed = await service.list({ view: "dashboard" });
-
-      expect(listed.map((view) => view.id)).toEqual(expectedOrder);
-    });
-
-    it("enriches concurrently, not serially", async () => {
-      seedDashboardSessions(10);
-      const { SessionService } = await loadSessionServiceModule();
-      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-
-      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
-        (session: SessionRecord) =>
-          new Promise((resolveDelay) => {
-            setTimeout(() => resolveDelay({ id: session.id }), 50);
-          }),
-      );
-      vi.useRealTimers();
-
-      const startedAt = Date.now();
-      const listed = await service.list({ view: "dashboard" });
-      const elapsed = Date.now() - startedAt;
-
-      expect(listed).toHaveLength(10);
-      expect(elapsed).toBeLessThan(200);
-    });
-
-    it("rejects when any enrichment throws", async () => {
+    it("loop populates cache and list returns from cache without re-running enrichDashboard", async () => {
       seedDashboardSessions(3);
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
-        (session: SessionRecord) => {
-          if (session.id === "api-2") {
-            return Promise.reject(new Error("boom"));
-          }
-          return Promise.resolve({ id: session.id });
-        },
-      );
-      vi.useRealTimers();
+      const enrichSpy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
 
-      await expect(service.list({ view: "dashboard" })).rejects.toThrow("boom");
+      const first = await service.list({ view: "dashboard" });
+      const callsAfterFirst = enrichSpy.mock.calls.length;
+      const second = await service.list({ view: "dashboard" });
+
+      expect(first).toHaveLength(3);
+      expect(second).toHaveLength(3);
+      expect(enrichSpy.mock.calls.length).toBe(callsAfterFirst);
+      service.dispose();
+    });
+
+    it("kill refreshes cache entry eagerly", async () => {
+      const sessions = seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard" });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      await service.kill("api-1", { force: true });
+
+      const listed = await service.list({ view: "dashboard", includeCompleted: true });
+      const killed = listed.find((view) => view.id === "api-1");
+      expect(killed).toBeUndefined();
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      service.dispose();
+    });
+
+    it("re-entrancy guard prevents overlapping ticks", async () => {
+      seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      let calls = 0;
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        (session: SessionRecord) =>
+          new Promise((resolveDelay) => {
+            calls += 1;
+            setTimeout(() => resolveDelay({ id: session.id }), 3_000);
+          }),
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(calls).toBe(1);
+      service.dispose();
+    });
+
+    it("cache evicts removed sessions", async () => {
+      const sessions = seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const before = await service.list({ view: "dashboard" });
+      expect(before.map((view) => view.id).sort()).toEqual(["api-1", "api-2"]);
+
+      sessions.delete("api-2");
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const after = await service.list({ view: "dashboard" });
+      expect(after.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
+    });
+
+    it("boot warm-up populates cache before first list call", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(listed).toHaveLength(2);
+      service.dispose();
+    });
+
+    it("survives a tick failure and keeps prior cache values", async () => {
+      seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const before = await service.list({ view: "dashboard" });
+      expect(before.map((view) => view.id)).toEqual(["api-1"]);
+
+      const enrichSpy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
+      enrichSpy.mockImplementationOnce(() => {
+        throw new Error("boom");
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(enrichSpy).toHaveBeenCalledTimes(1);
+
+      const afterFailure = await service.list({ view: "dashboard" });
+      expect(afterFailure.map((view) => view.id)).toEqual(["api-1"]);
+
+      enrichSpy.mockImplementation((session: SessionRecord) =>
+        Promise.resolve({ id: session.id }),
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(enrichSpy).toHaveBeenCalledTimes(2);
+
+      const afterRecovery = await service.list({ view: "dashboard" });
+      expect(afterRecovery.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
     });
   });
 });
