@@ -342,8 +342,8 @@ touch_chat_store "$chat_id"`;
   full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
   # Drain remaining lines from the same paste. Claude's non-bracketed paste
-  # arrives line-by-line through tmux with occasional gaps, so wait up to 1s.
-  while IFS= read -r -t 1 extra; do
+  # arrives as one tmux paste-buffer write, so a short timeout suffices.
+  while IFS= read -r -t 0.1 extra; do
     full_msg="$full_msg
 $extra"
     printf '%s\\n' "$extra" >> "$log_file"
