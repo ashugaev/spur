@@ -544,6 +544,22 @@ export function Dashboard() {
     setError(null);
   };
 
+  const handleRestoreSession = async (session: DashboardSession) => {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (restoreError) {
+      setError(
+        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
+      );
+      throw restoreError;
+    }
+  };
+
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
     setSpawnAttachments([]);
@@ -929,6 +945,7 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
+                onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
                 sessions={grouped[level]}

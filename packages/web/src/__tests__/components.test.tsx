@@ -554,6 +554,121 @@ describe("Dashboard", () => {
     });
   });
 
+  it("restores a stopped session from the dashboard row action", async () => {
+    const stoppedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-restore-1",
+      prompt: "Recover me",
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tmuxSession: null,
+    };
+    const restoredSession = {
+      ...stoppedSession,
+      status: "running",
+      state: "working",
+      runtimeAlive: true,
+      tmuxSession: "api-restore-1",
+    };
+    let restored = false;
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [restored ? restoredSession : stoppedSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-restore-1/restore") {
+        expect(init?.method).toBe("POST");
+        restored = true;
+        return new Response("{}", { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const restoreButton = await screen.findByRole("button", {
+      name: "Restore session api-restore-1",
+    });
+    expect(restoreButton).not.toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Open web terminal for api-restore-1" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(restoreButton);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/sessions/api-restore-1/restore", {
+        method: "POST",
+      });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Open web terminal for api-restore-1" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("keeps a stopped session visible and surfaces restore failures", async () => {
+    const stoppedSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-restore-fail-1",
+      prompt: "Still stopped",
+      status: "stopped",
+      state: "stopped",
+      runtimeAlive: false,
+      tmuxSession: null,
+    };
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [stoppedSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-restore-fail-1/restore") {
+        expect(init?.method).toBe("POST");
+        return new Response("Restore failed", { status: 502 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Restore session api-restore-fail-1" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Restore failed")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Still stopped" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Restore session api-restore-fail-1" }),
+      ).not.toBeDisabled();
+    });
+  });
+
   it("collapses the Stopped category by default on mobile until expanded", async () => {
     setMobileViewport(true);
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
@@ -880,7 +995,7 @@ describe("Dashboard", () => {
         return new Response(
           JSON.stringify({
             ...sessionsPayload(),
-            sessions: [{ ...sessionsPayload().sessions[0], runtimeAlive: false }],
+            sessions: [{ ...sessionsPayload().sessions[0], tmuxSession: null }],
           }),
           { status: 200 },
         );

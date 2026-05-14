@@ -6,7 +6,13 @@ import { useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
-import { canComplete, isTerminalSession, type DashboardSession } from "@/lib/types";
+import {
+  canComplete,
+  getAttentionLevel,
+  isRestorable,
+  isTerminalSession,
+  type DashboardSession,
+} from "@/lib/types";
 
 const BASE_BTN = "inline-flex h-6 w-6 shrink-0 items-center justify-center border transition";
 const DISABLED_BTN =
@@ -42,12 +48,19 @@ interface SessionRowProps {
   projectFilterId?: string;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
+  onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
-export function SessionRow({ projectFilterId, session, onOpenTerminal }: SessionRowProps) {
+export function SessionRow({
+  projectFilterId,
+  session,
+  onOpenTerminal,
+  onRestoreSession,
+}: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
+  const showRestore = getAttentionLevel(session) === "stopped" && isRestorable(session);
 
   const prLink = session.links.find((l) => isReviewLinkLabel(l.label));
   const prInfo = useSessionLinkPrInfo(prLink);
@@ -58,6 +71,7 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
     reviewProvider === "github" && Boolean(prLink) && prInfo.canMerge && !mergedAfterMerge;
   const [completing, setCompleting] = useState(false);
   const [merging, setMerging] = useState(false);
+  const [restoring, setRestoring] = useState(false);
 
   return (
     <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
@@ -158,6 +172,39 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
             <path d="M19.5 15.5A2.5 2.5 0 1 0 17 18a2.5 2.5 0 0 0 2.5-2.5Z" />
             <path d="M19.5 6A2.5 2.5 0 1 0 17 8.5 2.5 2.5 0 0 0 19.5 6Z" />
             <path d="M7 6h5a5 5 0 0 1 5 5v2.5" />
+          </svg>
+        </IconButton>
+      ) : showRestore ? (
+        <IconButton
+          label={`Restore session ${session.id}`}
+          disabled={restoring}
+          activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
+          onClick={async () => {
+            if (restoring) return;
+            setRestoring(true);
+            try {
+              await onRestoreSession(session);
+            } catch (err) {
+              console.error("restore failed", err);
+              setRestoring(false);
+            }
+          }}
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3.5 w-3.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            viewBox="0 0 24 24"
+          >
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <path d="M3 4v6h6" />
+            <path d="M10 12h4" />
+            <path d="m14 12-2-2" />
+            <path d="m14 12-2 2" />
           </svg>
         </IconButton>
       ) : (
