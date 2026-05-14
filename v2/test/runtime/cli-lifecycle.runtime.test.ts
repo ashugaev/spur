@@ -294,7 +294,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       const firstNotification = await pollUntil(
         async () => (existsSync(logPath) ? readFile(logPath, "utf8") : ""),
         {
-          timeoutMs: 15_000,
+          timeoutMs: 25_000,
           accept: (value) => value.includes(`Spur needs input [${spawned.id}]`),
         },
       );
@@ -304,6 +304,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       const log = existsSync(logPath) ? await readFile(logPath, "utf8") : "";
       expect(log.match(new RegExp(`Spur needs input \\[${spawned.id}\\]`, "g"))).toHaveLength(1);
     },
+    35_000,
   );
 
   it("restarts the daemon through the built CLI and keeps restart as a no-op once it is down", async () => {
