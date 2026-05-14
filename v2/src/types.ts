@@ -75,6 +75,11 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
+export interface WorkItemLifecycleRecord extends GitHubWorkItemEventData {
+  sessionId: string;
+  createdAt: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -155,6 +160,7 @@ export interface TriggerSpawnConfig {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  autoComplete?: boolean;
 }
 
 export interface TriggerSendConfig {

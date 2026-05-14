@@ -2,6 +2,11 @@ import { writeStderr } from "./io.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { createSendBatchParser, type SendBatch } from "./send-batches.js";
 import {
+  deleteWorkItemLifecycle,
+  readWorkItemLifecycles,
+  recordWorkItemLifecycle,
+} from "./metadata.js";
+import {
   GITHUB_WORK_ITEM_NEW_EVENT,
   type AgentName,
   type AppConfig,
@@ -51,6 +56,34 @@ const DEFAULT_TRIGGER_LOGGER: TriggerLogger = {
 };
 const CI_FAILED_RETRY_INTERVAL_MS = 10 * 60_000;
 const CI_FAILED_MAX_ATTEMPTS = 3;
+const WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS = 5 * 60_000;
+const WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS = 30_000;
+const PROMPT_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
+
+function isWorkItemEventData(data: unknown): data is GitHubWorkItemEventData {
+  if (!data || typeof data !== "object") return false;
+  const record = data as Partial<Record<keyof GitHubWorkItemEventData, unknown>>;
+  return (
+    typeof record.externalId === "string" &&
+    typeof record.url === "string" &&
+    typeof record.number === "number" &&
+    typeof record.title === "string" &&
+    typeof record.repo === "string"
+  );
+}
+
+function renderSpawnPrompt(template: string, data: unknown): string {
+  return template.replace(PROMPT_PLACEHOLDER_RE, (match, key: string) => {
+    if (!data || typeof data !== "object") {
+      throw new Error(`Cannot render prompt placeholder ${match}: event data is unavailable`);
+    }
+    const value = (data as Record<string, unknown>)[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      return String(value);
+    }
+    throw new Error(`Cannot render prompt placeholder ${match}: event data.${key} is unavailable`);
+  });
+}
 
 async function runSpawnTrigger(
   dataDir: string,
@@ -64,6 +97,7 @@ async function runSpawnTrigger(
   agent: AgentName | undefined,
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
+  autoComplete: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -86,17 +120,28 @@ async function runSpawnTrigger(
   );
 
   try {
+    const renderedPrompt = renderSpawnPrompt(prompt, eventData);
+    const workItemData =
+      eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
+    if (autoComplete && !workItemData) {
+      throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
+    }
     const session = await service.spawn({
       project: projectId,
-      prompt,
+      prompt: renderedPrompt,
       ...(steps !== undefined ? { steps } : {}),
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
-      ...(eventName === GITHUB_WORK_ITEM_NEW_EVENT
-        ? { slots: { links: [{ label: "pr", url: (eventData as GitHubWorkItemEventData).url }] } }
-        : {}),
+      ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
     });
+    if (autoComplete && workItemData) {
+      recordWorkItemLifecycle(dataDir, projectId, sourceId, {
+        ...workItemData,
+        sessionId: session.id,
+        createdAt: new Date().toISOString(),
+      });
+    }
     logTriggerEvent(dataDir, "trigger.spawn.completed", {
       level: "info",
       sessionId: session.id,
@@ -121,6 +166,123 @@ async function runSpawnTrigger(
       },
     });
     logger.warn(`[trigger:${projectId}/${triggerId}] failed to spawn: ${message}`);
+  }
+}
+
+async function runWorkItemAutoCompleteTrigger(
+  dataDir: string,
+  service: SessionService,
+  projectId: string,
+  triggerId: string,
+  sourceId: string,
+  logger: TriggerLogger,
+): Promise<void> {
+  const lifecycles = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  const now = Date.now();
+
+  for (const lifecycle of lifecycles.values()) {
+    const createdAt = Date.parse(lifecycle.createdAt);
+    if (!Number.isFinite(createdAt)) {
+      deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
+        level: "info",
+        sessionId: lifecycle.sessionId,
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Cleared work item ${lifecycle.externalId}: invalid lifecycle timestamp`,
+        details: {
+          externalId: lifecycle.externalId,
+        },
+      });
+      continue;
+    }
+
+    if (now - createdAt < WORK_ITEM_AUTO_COMPLETE_MIN_AGE_MS) {
+      continue;
+    }
+
+    try {
+      const session = await service.get(lifecycle.sessionId);
+      if (session.status === "completed" || session.status === "killed") {
+        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
+          level: "info",
+          sessionId: lifecycle.sessionId,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Cleared work item ${lifecycle.externalId}: session already ${session.status}`,
+          details: {
+            externalId: lifecycle.externalId,
+          },
+        });
+        continue;
+      }
+      if (session.status === "stopped" || session.status === "errored") {
+        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
+          level: "info",
+          sessionId: lifecycle.sessionId,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Cleared work item ${lifecycle.externalId}: session already ${session.status}`,
+          details: {
+            externalId: lifecycle.externalId,
+          },
+        });
+        continue;
+      }
+      if (session.status !== "running" || session.state !== "waiting") {
+        continue;
+      }
+
+      await service.complete(lifecycle.sessionId);
+      deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.completed", {
+        level: "info",
+        sessionId: lifecycle.sessionId,
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Auto-completed work item ${lifecycle.externalId}`,
+        details: {
+          externalId: lifecycle.externalId,
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("Session not found:")) {
+        deleteWorkItemLifecycle(dataDir, projectId, sourceId, lifecycle.externalId);
+        logTriggerEvent(dataDir, "trigger.work_item_auto_complete.noop", {
+          level: "info",
+          sessionId: lifecycle.sessionId,
+          projectId,
+          sourceId,
+          triggerId,
+          message: `Cleared work item ${lifecycle.externalId}: session not found`,
+          details: {
+            externalId: lifecycle.externalId,
+          },
+        });
+        continue;
+      }
+      logTriggerEvent(dataDir, "trigger.work_item_auto_complete.failed", {
+        level: "error",
+        sessionId: lifecycle.sessionId,
+        projectId,
+        sourceId,
+        triggerId,
+        message: `Failed to auto-complete work item ${lifecycle.externalId}: ${message}`,
+        details: {
+          externalId: lifecycle.externalId,
+        },
+      });
+      logger.warn(
+        `[trigger:${projectId}/${triggerId}] failed to auto-complete work item: ${message}`,
+      );
+    }
   }
 }
 
@@ -190,7 +352,9 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
   const interruptedKeys = new Map<string, number>();
   const retryStates = new Map<string, RetryState>();
   const serialByKey = new Map<string, Promise<void>>();
+  const autoCompleteChecks: Array<() => void> = [];
   let flushTimer: NodeJS.Timeout | null = null;
+  let autoCompleteTimer: NodeJS.Timeout | null = null;
   let stopped = false;
 
   const clearBatch = (
@@ -552,6 +716,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           trigger.spawn.agent,
           trigger.spawn.branch,
           trigger.spawn.overrides,
+          trigger.spawn.autoComplete,
           event.data,
           logger,
         );
@@ -562,7 +727,35 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       });
 
       unsubscribers.push(unsubscribe);
+
+      if (!isSendTrigger(trigger) && trigger.spawn.autoComplete === true) {
+        autoCompleteChecks.push(() => {
+          const queueKey = `${projectId}:${triggerId}:${trigger.source}:work-item-auto-complete`;
+          enqueue(queueKey, async () => {
+            await runWorkItemAutoCompleteTrigger(
+              deps.config.dataDir,
+              deps.sessionService,
+              projectId,
+              triggerId,
+              trigger.source,
+              logger,
+            );
+          });
+        });
+      }
     }
+  }
+
+  if (autoCompleteChecks.length > 0) {
+    for (const check of autoCompleteChecks) {
+      check();
+    }
+    autoCompleteTimer = setInterval(() => {
+      if (stopped) return;
+      for (const check of autoCompleteChecks) {
+        check();
+      }
+    }, WORK_ITEM_AUTO_COMPLETE_CHECK_INTERVAL_MS);
   }
 
   return {
@@ -571,6 +764,10 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
       if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;
+      }
+      if (autoCompleteTimer) {
+        clearInterval(autoCompleteTimer);
+        autoCompleteTimer = null;
       }
       for (let index = unsubscribers.length - 1; index >= 0; index -= 1) {
         try {

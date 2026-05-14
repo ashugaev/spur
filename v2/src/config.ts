@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  GITHUB_WORK_ITEM_NEW_EVENT,
   REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
@@ -458,6 +459,12 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  if (sendRaw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
+  }
+  if (sendRaw["autoComplete"] !== undefined) {
+    throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
+  }
   const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
@@ -703,6 +710,15 @@ function parseTrigger(
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
+  if (spawnRaw["autoClose"] !== undefined) {
+    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
+  }
+  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
+  if (autoComplete !== undefined && event !== GITHUB_WORK_ITEM_NEW_EVENT) {
+    throw new Error(
+      `${label}.spawn.autoComplete is only supported for ${GITHUB_WORK_ITEM_NEW_EVENT}`,
+    );
+  }
 
   return {
     source,
@@ -713,6 +729,7 @@ function parseTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
     },
   };
 }
@@ -763,7 +780,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
 
   const workItemSubs = new Map<string, number>();
   for (const trigger of Object.values(triggers)) {
-    if (trigger.event !== "github:work_item.new") continue;
+    if (trigger.event !== GITHUB_WORK_ITEM_NEW_EVENT) continue;
     workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
   }
   for (const [src, count] of workItemSubs) {

@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
+const readWorkItemLifecyclesMock = vi.fn();
+const recordWorkItemLifecycleMock = vi.fn();
+const deleteWorkItemLifecycleMock = vi.fn();
 const logSpurEventMock = vi.fn();
 
 vi.mock("../../src/event-log.js", () => ({
@@ -9,7 +12,10 @@ vi.mock("../../src/event-log.js", () => ({
 }));
 
 vi.mock("../../src/metadata.js", () => ({
+  deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
+  readWorkItemLifecycles: readWorkItemLifecyclesMock,
+  recordWorkItemLifecycle: recordWorkItemLifecycleMock,
 }));
 
 function config(options?: { event?: string; interrupt?: boolean; prompt?: string }) {
@@ -68,7 +74,7 @@ function spawnConfig() {
   };
 }
 
-function workItemSpawnConfig() {
+function workItemSpawnConfig(options?: { prompt?: string; autoComplete?: boolean }) {
   return {
     dataDir: "/tmp/spur-data",
     projects: {
@@ -84,7 +90,8 @@ function workItemSpawnConfig() {
             source: "pr-watch",
             event: "github:work_item.new",
             spawn: {
-              prompt: "Take this work item.",
+              prompt: options?.prompt ?? "Take {{url}} from {{repo}}.",
+              autoComplete: options?.autoComplete ?? true,
             },
           },
         },
@@ -224,6 +231,21 @@ function recentActivity(): string {
   return new Date(Date.now() - 10_000).toISOString();
 }
 
+function workItemEvent() {
+  return {
+    name: "github:work_item.new",
+    projectId: "api",
+    sourceId: "pr-watch",
+    data: {
+      externalId: "acme/api#42",
+      url: "https://github.com/acme/api/pull/42",
+      number: 42,
+      title: "Fix the bug",
+      repo: "acme/api",
+    },
+  };
+}
+
 async function loadTriggersModule() {
   vi.resetModules();
   return import("../../src/triggers.js");
@@ -233,6 +255,9 @@ describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
+    readWorkItemLifecyclesMock.mockReset().mockReturnValue(new Map());
+    recordWorkItemLifecycleMock.mockReset();
+    deleteWorkItemLifecycleMock.mockReset();
     logSpurEventMock.mockReset();
   });
 
@@ -899,26 +924,163 @@ describe("startConfiguredTriggers", () => {
     });
 
     try {
-      bus.emit({
-        name: "github:work_item.new",
-        projectId: "api",
-        sourceId: "pr-watch",
-        data: {
-          externalId: "acme/api#42",
-          url: "https://github.com/acme/api/pull/42",
-          number: 42,
-          title: "Fix the bug",
-          repo: "acme/api",
-        },
-      });
+      bus.emit(workItemEvent());
       await vi.waitFor(() => {
         expect(spawnMock).toHaveBeenCalledTimes(1);
       });
       expect(spawnMock).toHaveBeenCalledWith({
         project: "api",
-        prompt: "Take this work item.",
+        prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         slots: { links: [{ label: "pr", url: "https://github.com/acme/api/pull/42" }] },
       });
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        expect.objectContaining({
+          externalId: "acme/api#42",
+          sessionId: "api-9",
+          url: "https://github.com/acme/api/pull/42",
+          number: 42,
+          title: "Fix the bug",
+          repo: "acme/api",
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("auto-completes a waiting work-item session after the minimum age", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "waiting",
+      workspaceExists: true,
+    });
+    const completeMock = vi.fn().mockResolvedValue(undefined);
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#42",
+          {
+            externalId: "acme/api#42",
+            sessionId: "api-9",
+            url: "https://github.com/acme/api/pull/42",
+            number: 42,
+            title: "Fix the bug",
+            repo: "acme/api",
+            createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, complete: completeMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.waitFor(() => {
+        expect(completeMock).toHaveBeenCalledWith("api-9");
+      });
+      expect(deleteWorkItemLifecycleMock).toHaveBeenCalledWith(
+        "/tmp/spur-data",
+        "api",
+        "pr-watch",
+        "acme/api#42",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("blocks auto-complete before the minimum age or while needs_input", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "needs_input",
+      workspaceExists: true,
+    });
+    const completeMock = vi.fn().mockResolvedValue(undefined);
+    readWorkItemLifecyclesMock.mockReturnValue(
+      new Map([
+        [
+          "acme/api#42",
+          {
+            externalId: "acme/api#42",
+            sessionId: "api-9",
+            url: "https://github.com/acme/api/pull/42",
+            number: 42,
+            title: "Fix the bug",
+            repo: "acme/api",
+            createdAt: new Date(Date.now() - 10_000).toISOString(),
+          },
+        ],
+      ]),
+    );
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, complete: completeMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(completeMock).not.toHaveBeenCalled();
+
+      readWorkItemLifecyclesMock.mockReturnValue(
+        new Map([
+          [
+            "acme/api#42",
+            {
+              externalId: "acme/api#42",
+              sessionId: "api-9",
+              url: "https://github.com/acme/api/pull/42",
+              number: 42,
+              title: "Fix the bug",
+              repo: "acme/api",
+              createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+            },
+          ],
+        ]),
+      );
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalled();
+      });
+      expect(completeMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("fails a spawn trigger when prompt placeholders are missing", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig({ prompt: "Take {{missing}}." }) as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+          "trigger.spawn.failed",
+        );
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
     } finally {
       await controller.stop();
     }

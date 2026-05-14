@@ -38,6 +38,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   prsByNumber?: Record<
@@ -50,6 +54,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
