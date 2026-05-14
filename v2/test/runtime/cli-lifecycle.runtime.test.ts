@@ -18,6 +18,7 @@ import {
   createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
+  execTmux,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
