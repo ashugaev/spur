@@ -118,6 +118,7 @@ import {
   type AppConfig,
   type BranchSource,
   type ConversationResponse,
+  type DashboardSessionView,
   type KillSessionRequest,
   type ProjectListEntry,
   type PreflightRequest,
@@ -135,6 +136,7 @@ import {
   type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
+  type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
   type SpawnOverrides,
@@ -169,6 +171,12 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+
+export function getIdleWaitBeforeFlushMs(): number {
+  const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
+}
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
@@ -386,6 +394,17 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
+export function isIdleEnoughToReceive(
+  lastActivityAt: string | Date | null,
+  idleMs: number,
+  now: number = Date.now(),
+): boolean {
+  if (!lastActivityAt) return true;
+  const ts =
+    typeof lastActivityAt === "string" ? Date.parse(lastActivityAt) : lastActivityAt.getTime();
+  return now - ts >= idleMs;
+}
+
 function shouldUseCodexRolloutState(
   hookState: { state: SessionState; updatedAt: string; turnId?: string } | null,
   rolloutState: CodexRolloutStateRecord,
@@ -396,7 +415,7 @@ function shouldUseCodexRolloutState(
     hookState.turnId === rolloutState.turnId;
   const hookUpdatedAtMs = hookState ? new Date(hookState.updatedAt).getTime() : 0;
   const rolloutNewerThanHook = !hookState || rolloutState.timestampMs >= hookUpdatedAtMs;
-  if (rolloutState.state === "needs_input") {
+  if (rolloutState.state === "working" || rolloutState.state === "needs_input") {
     return sameTurn || rolloutNewerThanHook;
   }
   return !hookState || sameTurn || hookState.state === "needs_input";
@@ -575,15 +594,23 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
+  const project = config.projects[projectId];
+  if (!project) return [];
+  const sourceIds: string[] = [];
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    sourceIds.push(sourceId);
+  }
+  return sourceIds;
+}
+
 function requestGitHubMergeConflictRestoreReplays(
   config: AppConfig,
   projectId: string,
   sessionId: string,
 ): void {
-  const project = config.projects[projectId];
-  if (!project) return;
-  for (const [sourceId, source] of Object.entries(project.sources)) {
-    if (source.type !== "github") continue;
+  for (const sourceId of githubReplaySourceIds(config, projectId)) {
     requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
   }
 }
@@ -654,6 +681,14 @@ function buildWorkspaceAccess(
   return items.length > 0 ? { items } : undefined;
 }
 
+function buildLastActivityAt(
+  session: Pick<SessionRecord, "updatedAt">,
+  runtime: Pick<SessionRuntimeSnapshot, "tmuxActivityAt">,
+): string {
+  const updatedAt = new Date(session.updatedAt);
+  return (latestActivityAt(updatedAt, runtime.tmuxActivityAt) ?? updatedAt).toISOString();
+}
+
 function copySessionWithoutSidecarPorts(session: SessionRecord): SessionRecord {
   const updated: SessionRecord = { ...session };
   delete updated.sidecarPorts;
@@ -721,13 +756,13 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
-    agent: session.agent,
+    agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
@@ -1461,16 +1496,23 @@ export class SessionService {
     };
   }
 
-  async list(options?: { includeCompleted?: boolean }): Promise<SessionView[]> {
+  async list(options?: {
+    includeCompleted?: boolean;
+    view?: "full" | "dashboard";
+  }): Promise<SessionListView[]> {
     const sessions = listSessions(this.config.dataDir).filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views: SessionView[] = [];
+    const views: SessionListView[] = [];
     for (const session of sessions) {
-      views.push(await this.enrich(session));
+      views.push(
+        options?.view === "dashboard"
+          ? await this.enrichDashboard(session)
+          : await this.enrich(session),
+      );
     }
     return views;
   }
@@ -3017,8 +3059,10 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    const shouldWaitForSubmitAck =
+      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const binding: SubmitAckBinding | null = agentWaitsForSubmitAck(session.agent)
+    const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
       ? await createAgentSubmitAckBinding(session.agent, {
           worktreePath: session.worktreePath,
           codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
@@ -3088,6 +3132,8 @@ export class SessionService {
     }
     const session = currentSession;
     const normalized = normalizeSlotsUpdate(request);
+    const hasGenericPrSlot = session.slots?.links.some((link) => link.label === "pr") ?? false;
+    const unlinksPr = normalized.unlinkLabels.includes("pr");
     const prLink = normalized.links.filter((link) => link.label === "pr").at(-1);
     const nativePr = prLink ? parseSessionPrBinding(prLink.url) : null;
     const genericLinks = normalized.links.filter(
@@ -3112,7 +3158,7 @@ export class SessionService {
       ...(slots ? { slots } : {}),
       ...(nativePr
         ? { pr: nativePr }
-        : normalized.unlinkLabels.includes("pr")
+        : unlinksPr && !hasGenericPrSlot
           ? {}
           : session.pr
             ? { pr: session.pr }
@@ -3121,7 +3167,7 @@ export class SessionService {
     if (!slots) {
       delete updated.slots;
     }
-    if (prLink === undefined && normalized.unlinkLabels.includes("pr")) {
+    if (prLink === undefined && unlinksPr && !hasGenericPrSlot) {
       delete updated.pr;
     }
     writeSession(this.config.dataDir, updated);
@@ -3902,6 +3948,7 @@ export class SessionService {
       prompt?: string;
       attachments?: SendMessageAttachment[];
       startupAttachmentIds?: string[];
+      agent?: string;
     } = {},
   ): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
@@ -3942,6 +3989,7 @@ export class SessionService {
       resolveRespawnRequest(session, {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),
     );
   }
@@ -3986,8 +4034,11 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const agentState = await this.classifySessionState(readySession);
-    if (agentState !== "waiting") {
+    const classified = await this.classifySessionRecord(readySession);
+    if (classified.state !== "waiting") {
+      return false;
+    }
+    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
       return false;
     }
 
@@ -4460,6 +4511,76 @@ export class SessionService {
     };
   }
 
+  private stabilizeState(sessionId: string, nextState: SessionState): SessionState {
+    const cached = this.stateCache.get(sessionId);
+    const now = Date.now();
+    if (cached && nextState !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
+      if (
+        nextState !== "needs_input" &&
+        nextState !== "stopped" &&
+        nextState !== "killed" &&
+        nextState !== "error"
+      ) {
+        return cached.state;
+      }
+    }
+    this.stateCache.set(sessionId, { state: nextState, classifiedAt: now });
+    return nextState;
+  }
+
+  private async updateStateHistory(
+    session: SessionRecord,
+    state: SessionState,
+    stateSource: StateSource,
+    historySourcePath: string | null,
+  ): Promise<SessionStateTransition[]> {
+    const history = this.stateHistory.get(session.id) ?? [];
+    const lastEntry = history[history.length - 1];
+    if (history.length === 0 || lastEntry?.state !== state) {
+      const transitionAt = new Date().toISOString();
+      history.push({ state, at: transitionAt, source: stateSource });
+      if (history.length > STATE_HISTORY_LIMIT) {
+        history.splice(0, history.length - STATE_HISTORY_LIMIT);
+      }
+      this.stateHistory.set(session.id, history);
+      if (lastEntry) {
+        await this.logStateTransition(
+          session,
+          {
+            at: transitionAt,
+            fromState: lastEntry.state,
+            toState: state,
+            source: stateSource,
+          },
+          historySourcePath,
+        );
+      }
+    }
+    return history;
+  }
+
+  private async hasServiceIssues(session: Pick<SessionRecord, "id" | "project">): Promise<boolean> {
+    for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {
+      if (service.status !== "running") {
+        return true;
+      }
+      if (!(await tmuxSessionExists(service.tmuxSession))) {
+        return true;
+      }
+      if (
+        listActiveServiceProblems(
+          this.config.dataDir,
+          session.project,
+          session.id,
+          service.serviceId,
+        ).length > 0
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private async reconcileUnexpectedStop(
     session: SessionRecord,
     runtime: SessionRuntimeSnapshot,
@@ -4520,7 +4641,13 @@ export class SessionService {
   }
 
   private async classifySessionRecord(session: SessionRecord): Promise<SessionStateResult> {
-    let runtime = await this.readRuntimeSnapshot(session);
+    let runtime: SessionRuntimeSnapshot = isTerminalSessionStatus(session.status)
+      ? {
+          runtimeAlive: false,
+          processAlive: false,
+          tmuxActivityAt: null,
+        }
+      : await this.readRuntimeSnapshot(session);
     let effectiveSession = session;
     let state: SessionState;
     let stateSource: StateSource = "status";
@@ -4630,57 +4757,51 @@ export class SessionService {
     };
   }
 
+  private async enrichDashboard(session: SessionRecord): Promise<DashboardSessionView> {
+    const classified = await this.classifySessionRecord(session);
+    session = classified.session;
+    const {
+      queuedMessages: _queuedMessages,
+      pipeline: _pipeline,
+      sidecarNames: _sidecarNames,
+      sidecarPorts: _sidecarPorts,
+      ...dashboardSession
+    } = session;
+    const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
+    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const state = this.stabilizeState(session.id, classified.state);
+    await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+    );
+    const displaySlots = deriveSessionSlots(session);
+
+    return {
+      ...dashboardSession,
+      planMode: resolvePlanMode(dashboardSession),
+      ...(displaySlots ? { slots: displaySlots } : {}),
+      runtimeAlive: classified.runtime.runtimeAlive,
+      workspaceExists: workspacePresent,
+      state,
+      lastActivityAt,
+      ...((await this.hasServiceIssues(session)) ? { hasServiceIssues: true } : {}),
+    };
+  }
+
   private async enrich(session: SessionRecord): Promise<SessionView> {
     const classified = await this.classifySessionRecord(session);
     session = classified.session;
     const workspacePresent = session.worktreePath ? workspaceExists(session.worktreePath) : false;
-    const updatedAt = new Date(session.updatedAt);
-    const tmuxActivityAt = classified.runtime.tmuxActivityAt;
-    const lastActivityAt = (latestActivityAt(updatedAt, tmuxActivityAt) ?? updatedAt).toISOString();
-    let state = classified.state;
-    const stateSource = classified.source;
-    const historySourcePath = classified.historySourcePath ?? null;
-
-    // State debounce: suppress single-poll flicker for running sessions.
-    const cached = this.stateCache.get(session.id);
-    const now = Date.now();
-    let classifiedAt = now;
-    if (cached && state !== cached.state && now - cached.classifiedAt < STATE_HOLD_MS) {
-      if (
-        state !== "needs_input" &&
-        state !== "stopped" &&
-        state !== "killed" &&
-        state !== "error"
-      ) {
-        state = cached.state;
-        classifiedAt = cached.classifiedAt;
-      }
-    }
-    this.stateCache.set(session.id, { state, classifiedAt });
-
-    // State history: ring buffer of transitions.
-    const history = this.stateHistory.get(session.id) ?? [];
-    const lastEntry = history[history.length - 1];
-    if (history.length === 0 || lastEntry?.state !== state) {
-      const transitionAt = new Date(now).toISOString();
-      history.push({ state, at: transitionAt, source: stateSource });
-      if (history.length > STATE_HISTORY_LIMIT) {
-        history.splice(0, history.length - STATE_HISTORY_LIMIT);
-      }
-      this.stateHistory.set(session.id, history);
-      if (lastEntry) {
-        await this.logStateTransition(
-          session,
-          {
-            at: transitionAt,
-            fromState: lastEntry.state,
-            toState: state,
-            source: stateSource,
-          },
-          historySourcePath,
-        );
-      }
-    }
+    const lastActivityAt = buildLastActivityAt(session, classified.runtime);
+    const state = this.stabilizeState(session.id, classified.state);
+    const history = await this.updateStateHistory(
+      session,
+      state,
+      classified.source,
+      classified.historySourcePath ?? null,
+    );
 
     const services: ServiceInstanceView[] = [];
     for (const service of listServiceInstancesForSession(this.config.dataDir, session.id)) {

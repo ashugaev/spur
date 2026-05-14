@@ -1,11 +1,16 @@
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { chmod, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { TOOL_USE_STALE_MS } from "../../src/claude-jsonl-state.js";
 import { readEventLog, type SpurLogEntry } from "../../src/event-log.js";
-import type { RuntimeInfo, ServiceInstanceView, SessionView } from "../../src/types.js";
+import { readSession, writeSession } from "../../src/metadata.js";
+import type {
+  RuntimeInfo,
+  ServiceInstanceView,
+  SessionRecord,
+  SessionView,
+} from "../../src/types.js";
 import { execFileAsync, findFreePort, pollUntil, sleep } from "../helpers/common.js";
 import {
   CLI_PATH,
@@ -13,7 +18,6 @@ import {
   createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
-  execTmux,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
@@ -25,6 +29,13 @@ import {
 } from "../helpers/runtime.js";
 
 const tmuxOk = await isTmuxAvailable();
+
+interface DoctorResult {
+  configPath: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
+}
 
 const activeContexts: Array<{
   context: RuntimeTestContext;
@@ -47,6 +58,14 @@ function popActiveContext(): (typeof activeContexts)[number] {
     throw new Error("Expected an active runtime context to clean up");
   }
   return current;
+}
+
+function requireSessionRecord(dataDir: string, sessionId: string): SessionRecord {
+  const session = readSession(dataDir, sessionId);
+  if (!session) {
+    throw new Error(`Expected persisted session record for ${sessionId}`);
+  }
+  return session;
 }
 
 function baseConfig(
@@ -395,6 +414,121 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
     },
   );
 
+  it("doctor writes a local config and list --json auto-connects it", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const instanceConfigPath = await context.writeConfig(
+      "doctor-instance.yaml",
+      [
+        "server:",
+        "  host: 127.0.0.1",
+        `  port: ${port}`,
+        `dataDir: ${context.dataDir}`,
+        `worktreeDir: ${context.worktreeDir}`,
+        "defaultAgent: claude",
+        "",
+      ].join("\n"),
+    );
+    const doctorEnv = {
+      ...context.env,
+      SPUR_CONFIG: instanceConfigPath,
+    };
+
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+      timeout: 60_000,
+    });
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
+    expect(doctor.defaultBranch).toBe("main");
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toContain(
+      `  ${doctor.projectId}:`,
+    );
+
+    const listRun = await execFileAsync(process.execPath, [CLI_PATH, "list", "--json"], {
+      cwd: context.repoDir,
+      env: doctorEnv,
+      timeout: 60_000,
+    });
+    let sessions: SessionView[];
+    try {
+      sessions = JSON.parse(listRun.stdout) as SessionView[];
+    } catch (error) {
+      throw new Error(`Expected list JSON output, received: ${listRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    const info = await context.fetchJson<RuntimeInfo>("/info");
+    currentActiveContext().daemonPid = info.pid;
+    const projects = await context.fetchJson<Array<{ id: string }>>("/projects");
+
+    expect(sessions).toEqual([]);
+    expect(projects.map((project) => project.id)).toContain(doctor.projectId);
+  });
+
+  it("doctor scaffolds at the git repo root from nested directories without creating global config", async () => {
+    const context = await createRuntimeTestContext(await findFreePort());
+    const sessionPrefix = `rt-doctor-nested-${context.port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const nestedDir = join(context.repoDir, "packages", "service");
+    const globalConfigPath = join(context.env.HOME ?? context.rootDir, ".spur", "config.yaml");
+    await mkdir(nestedDir, { recursive: true });
+
+    const doctorRun = await execFileAsync(process.execPath, [CLI_PATH, "doctor", "--json"], {
+      cwd: nestedDir,
+      env: context.env,
+      timeout: 60_000,
+    });
+    let doctor: DoctorResult;
+    try {
+      doctor = JSON.parse(doctorRun.stdout) as DoctorResult;
+    } catch (error) {
+      throw new Error(`Expected doctor JSON output, received: ${doctorRun.stdout}`, {
+        cause: error,
+      });
+    }
+
+    expect(doctor.configPath).toBe(join(context.repoDir, "spur.yaml"));
+    expect(doctor.projectId).toMatch(/^spur-runtime-repo-/);
+    expect(existsSync(join(nestedDir, "spur.yaml"))).toBe(false);
+    expect(existsSync(globalConfigPath)).toBe(false);
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toContain(
+      `  ${doctor.projectId}:`,
+    );
+  });
+
+  it("doctor refuses to overwrite an existing local config", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-doctor-existing-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const existingConfig = ["projects:", "  existing:", "    path: .", ""].join("\n");
+    await writeFile(join(context.repoDir, "spur.yaml"), existingConfig, "utf8");
+
+    await expect(
+      execFileAsync(process.execPath, [CLI_PATH, "doctor"], {
+        cwd: context.repoDir,
+        env: context.env,
+        timeout: 60_000,
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("Local project config already exists"),
+    });
+    expect(await readFile(join(context.repoDir, "spur.yaml"), "utf8")).toBe(existingConfig);
+  });
+
   it("stops the daemon through the built CLI and keeps stop as a no-op once it is down", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
@@ -458,7 +592,7 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       const firstNotification = await pollUntil(
         async () => (existsSync(logPath) ? readFile(logPath, "utf8") : ""),
         {
-          timeoutMs: TOOL_USE_STALE_MS + 10_000,
+          timeoutMs: 15_000,
           accept: (value) => value.includes(`Spur needs input [${spawned.id}]`),
         },
       );
@@ -521,6 +655,38 @@ describe.skipIf(!tmuxOk)("Spur CLI lifecycle (runtime)", () => {
       restarted: false,
     });
     await expect(context.fetchJson("/info")).rejects.toThrow();
+  });
+
+  it("keeps a protected prod-style daemon restart from forking a rogue listener", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-daemon-restart-guard-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    const configPath = await context.writeConfig(
+      "daemon-restart-guard.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    await expect(
+      context.execCli(["--config", configPath, "daemon", "restart", "--json"], {
+        env: { SPUR_DISABLE_AUTOSTART: "1" },
+      }),
+    ).rejects.toMatchObject({
+      stderr: expect.stringContaining("SPUR_DISABLE_AUTOSTART=1"),
+    });
+
+    delete currentActiveContext().daemonPid;
+    await expect(context.fetchJson("/info")).rejects.toThrow();
+    await pollUntil(() => processExists(daemon.info.pid), {
+      timeoutMs: 15_000,
+      accept: (value) => value === false,
+    });
+
+    const restarted = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = restarted.info.pid;
+    expect(restarted.info.pid).not.toBe(daemon.info.pid);
   });
 
   it("reloads all registered projects after a restart from a different config path", async () => {
@@ -1737,7 +1903,7 @@ projects:
     expect(listed).toEqual([]);
   });
 
-  it("updates live session slots through the helper command and refreshes tmux status", async () => {
+  it("updates live session slots through the helper command and only shows tmux status for titled sessions", async () => {
     const port = await findFreePort();
     const context = await createRuntimeTestContext(port);
     const sessionPrefix = `rt-slots-${port}`;
@@ -1766,6 +1932,8 @@ projects:
 
     const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
     expect(existsSync(helperPath)).toBe(true);
+    const initialStatus = await readTmuxOption(spawned.id, "status");
+    expect(initialStatus).toBe("status off");
 
     await execFileAsync(helperPath, [
       "--title",
@@ -1790,36 +1958,120 @@ projects:
     );
 
     const statusLeft = await readTmuxOption(spawned.id, "status-left");
-    const statusRight = await readTmuxOption(spawned.id, "status-right");
-    const { stdout: mouseBinding } = await execTmux([
-      "list-keys",
-      "-T",
-      "root",
-      "MouseUp1StatusRight",
-    ]);
+    const status = await readTmuxOption(spawned.id, "status");
 
     expect(listed[0]?.slots).toEqual({
       title: "Investigate status bar links",
       links: [
         { label: "tracker", url: "https://tracker.example.com/TASK-9" },
-        { label: "github-pr", url: "https://github.com/org/repo/pull/9" },
+        { label: "pr", url: "https://github.com/org/repo/pull/9" },
       ],
     });
+    expect(status).toBe("status on");
     expect(statusLeft).toContain("Investigate status bar links");
-    expect(statusRight).toContain("tracker TASK-9");
-    expect(statusRight).toContain("github pr ##9");
-    expect(statusRight).toContain(
-      "#[hyperlink=https://tracker.example.com/TASK-9]tracker TASK-9#[hyperlink=]",
-    );
-    expect(statusRight).toContain(
-      "#[hyperlink=https://github.com/org/repo/pull/9]github pr ##9#[hyperlink=]",
-    );
-    expect(mouseBinding).toContain("MouseUp1StatusRight");
-    expect(mouseBinding).toContain("open-link.js");
-    expect(mouseBinding).toContain("q:mouse_hyperlink");
+    expect(statusLeft).not.toContain(spawned.id);
     expect(readEventLog(context.dataDir).map((entry) => entry.event)).toContain(
       "session.slots.updated",
     );
+  });
+
+  it("unlinks a generic pr slot before clearing the native GitHub PR binding in runtime flows", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-pr-unlink-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "pr-unlink.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "mixed pr unlink runtime prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    const helperPath = join(context.dataDir, "session-tools", spawned.id, "spur-slots");
+    expect(existsSync(helperPath)).toBe(true);
+
+    const githubPrUrl = "https://github.com/org/repo/pull/9";
+    const gitlabPrUrl = "https://gitlab.com/org/repo/-/merge_requests/7";
+    writeSession(context.dataDir, {
+      ...requireSessionRecord(context.dataDir, spawned.id),
+      pr: {
+        number: 9,
+        repo: "org/repo",
+        url: githubPrUrl,
+      },
+      slots: {
+        title: "Investigate mixed pr bindings",
+        links: [
+          { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+          { label: "pr", url: gitlabPrUrl },
+        ],
+      },
+    });
+
+    const mixedResult = JSON.parse(
+      (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
+    ) as SessionView;
+    const afterFirstUnlink = requireSessionRecord(context.dataDir, spawned.id);
+    const statusAfterFirstUnlink = await readTmuxOption(spawned.id, "status");
+
+    expect(mixedResult.pr).toEqual({
+      number: 9,
+      repo: "org/repo",
+      url: githubPrUrl,
+    });
+    expect(mixedResult.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [
+        { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+        { label: "pr", url: githubPrUrl },
+      ],
+    });
+    expect(afterFirstUnlink.pr).toEqual({
+      number: 9,
+      repo: "org/repo",
+      url: githubPrUrl,
+    });
+    expect(afterFirstUnlink.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(statusAfterFirstUnlink).toBe("status on");
+
+    const nativeOnlyResult = JSON.parse(
+      (await execFileAsync(helperPath, ["--json", "--unlink", "pr"])).stdout,
+    ) as SessionView;
+    const afterSecondUnlink = requireSessionRecord(context.dataDir, spawned.id);
+    const statusAfterSecondUnlink = await readTmuxOption(spawned.id, "status");
+
+    expect(nativeOnlyResult.pr).toBeUndefined();
+    expect(nativeOnlyResult.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(afterSecondUnlink.pr).toBeUndefined();
+    expect(afterSecondUnlink.slots).toEqual({
+      title: "Investigate mixed pr bindings",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+    expect(statusAfterSecondUnlink).toBe("status on");
   });
 
   it("surfaces session artifacts from daemon-owned storage and removes them on complete", async () => {

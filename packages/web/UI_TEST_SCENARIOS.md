@@ -50,10 +50,11 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - When the active filters produce zero visible sessions, show the empty placeholder instead of a blank area
 - When only completed sessions exist, the default empty placeholder stays neutral and does not show a guide hint about toggling `Completed`
 - Filtered empty placeholder shows a `Reset Filters` button that clears search, project, and stat filters
+- Switching the dashboard project filter updates the visible rows and `?project=` URL without triggering a new `/api/sessions` fetch
 
 ### D3: Session rows render with correct columns
 
-- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, tracker/PR links (hidden <sm), branch (hidden <lg), time, trailing action button
+- Each row: activity dot, project (hidden <sm), agent (hidden <md), title link, branch (hidden <lg), time, trailing action button
 - Project filter dropdown shows a small left-side chevron indicator so it reads as a select, not a plain input
 - All rows aligned — terminal button column is uniform width
 - Session title link carries `?project=<id>` only when the dashboard itself currently has an explicit project filter; from `All projects` it opens session detail without a project query
@@ -61,12 +62,14 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### D4: Dashboard row action button state
 
 - Sessions with `runtimeAlive=true` + `tmuxSession` + `status!=completed|killed`: button enabled (visible border, secondary text color)
-- Sessions with `runtimeAlive=false` OR no `tmuxSession`: button disabled (transparent border, 25% opacity, cursor-not-allowed)
+- Sessions without `tmuxSession` and no restore action: button disabled (transparent border, 25% opacity, cursor-not-allowed)
 - Disabled button does NOT open terminal modal on click
 - Enabled button opens terminal modal on click
 - Opening terminal appends `terminal=<session-id>` query param
 - Closing terminal removes `terminal` query param
 - Reload with `terminal=<session-id>` restores modal only when that session is attachable
+- Restorable Stopped sessions show a restore icon in the row action slot instead of a disabled terminal icon
+- Clicking restore posts to `/api/sessions/<id>/restore`; success refetches sessions and failure leaves the row visible with a dashboard error
 - Sessions with an open PR that GitHub reports as mergeable: merge icon button replaces terminal button in the dashboard list only
 - Clicking the merge icon calls the web merge API and, on success, the row flips into the merged-PR done-button state without waiting for a full reload
 
@@ -79,33 +82,26 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - On error: button re-enables
 - On success: button stays disabled until dashboard poll refreshes session to done zone
 
-### D5: Tracker and PR links
+### D5: Dashboard rows hide tracker and PR links
 
-- Sessions with tracker link: Jira icon + ticket ID (e.g., WEBDEV-4617)
-- Sessions with PR link: provider icon + compact review id (GitHub `#3439`, GitLab `!3439`), including the canonical `github-pr` slot label
-- PR badges stay compact: review id first, then CI/review mark, then review thread count
-- PR badges show a CI-first compact mark: one green check for CI success, then an overlapping second check for review state
-- When approval is received, the second overlapping check is green
-- When approval is still required, the second overlapping check is yellow
-- When no approval is required, the second overlapping check is gray
-- When changes are requested, the second review mark stays red/error
-- Resolved threads alone do not turn the review mark green
-- Stale/missing PR status payloads keep the PR link visible and do not change the footer GitHub connection indicator
-- Soft PR status errors stay local to the PR UI and do not replace the footer GitHub connection indicator
-- Both open in new tab on click
+- Sessions with tracker and/or PR links do not render tracker/PR badges in the dashboard row
+- Row layout stays aligned when link metadata exists: no green strip, no empty spacer
 - Sessions without links: no icons shown, no empty space
+- Stale/missing PR status payloads do not change the footer GitHub connection indicator
+- Soft PR status errors stay local to row action state and do not replace the footer GitHub connection indicator
 
 ### D5b: PR status survives reload and GitHub errors
 
-- After PR badges (state color, CI dot, review thread count) populate, a full page reload renders the same badges immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response — no flash of empty badges
-- When GitHub responds with an error after a previous successful fetch, the badge keeps the last known state and the footer `Git Error` badge appears alongside it; badges do not reset to empty
-- A first-ever load with GitHub down shows empty badges plus the `Git Error` footer; subsequent successful fetches replace empty badges with real values
+- After PR status populates, a full page reload renders the same row merge/done action immediately from `localStorage` (`spur:pr-status-cache:v1`) before any network response
+- When GitHub responds with an error after a previous successful fetch, the row action keeps the last known state and the footer `Git Error` badge appears alongside it
+- A first-ever load with GitHub down keeps the default row action plus the `Git Error` footer; subsequent successful fetches can still upgrade the row action
 
 ### D6: Attention zone sections
 
 - Default dashboard view shows active sections only: NEEDS INPUT, WAITING, WORKING, STOPPED
 - `Completed` toggle reveals the COMPLETED section and hides current-session sections
 - Each has colored dot + uppercase label + divider line + count
+- On mobile first render, `Stopped` starts collapsed by default when no saved `spur:mobile-collapsed-categories` override exists; the header and count stay visible and tapping the section expands/collapses rows normally
 - Empty sections are hidden instead of rendering placeholder rows
 - Sessions sorted into correct sections by attention level
 
@@ -300,10 +296,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S4: Links section
 
 - Shows when session has links
-- PR badges use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
-- Header badges for tracker/PR links use the same compact renderer as dashboard rows, including the overlapping CI/review double-check mark
-- Canonical `github-pr` links render as `github pr` in the raw link list
+- Canonical tracker/PR links stay surfaced in the header badge strip
+- PR header badges show compact provider/id, CI/review state, and review thread count
+- A tracker or PR URL appears in exactly one place on session detail: header badge strip or Links section, never both
 - Each link clickable, opens in new tab
 
 ### S4b: Artifacts section
@@ -402,6 +397,8 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Any sidecar whose name matches a session slot link label renders an `Open` link when alive
 - When a sidecar row has multiple actions, the play/stop icon stays as the rightmost action
 - Clicking terminal button opens terminal modal for sidecar tmux session
+- Terminal header shows `session.title` from slots title when available, with sidecar suffix appended on sidecar terminals
+- Terminal header text shows session id, then title, then status/close controls. Long titles clamp to two lines via CSS, with desktop header items vertically centered and no overlap or horizontal scroll.
 - Clicking play/stop updates the sidecar row state without leaving the page
 - No sidecars section shown when sidecars array is empty
 

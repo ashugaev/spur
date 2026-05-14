@@ -155,7 +155,7 @@ export async function mockSessions(
   sessions: SpurSessionView[] | (() => SpurSessionView[]),
   projects?: ProjectInfo[] | (() => ProjectInfo[]),
 ): Promise<void> {
-  // Match /api/sessions and /api/sessions?project=... but NOT /api/sessions/<id>
+  // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
     void route.fulfill({
       status: 200,

@@ -18,6 +18,17 @@ const DAEMON_START_ATTEMPTS = 160;
 const DAEMON_START_RETRY_DELAY_MS = 250;
 const EXTERNAL_DAEMON_RESTART_ATTEMPTS = 20;
 
+function parseJsonText(text: string): unknown {
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("Failed to parse daemon JSON response");
+  }
+}
+
 export function createBaseUrl(configPath?: string): { baseUrl: string; configPath: string } {
   const config = loadConfig(configPath);
   return {
@@ -33,7 +44,7 @@ async function fetchJson(
 ): Promise<{ response: Response; payload: unknown }> {
   const response = await fetch(`${baseUrl}${path}`, init);
   const text = await response.text();
-  const payload = text ? (JSON.parse(text) as unknown) : {};
+  const payload = parseJsonText(text);
   return { response, payload };
 }
 
@@ -94,12 +105,10 @@ export async function probeDaemon(baseUrl: string): Promise<DaemonProbe> {
     const response = await fetch(`${baseUrl}/info`);
     const text = await response.text();
     let payload: unknown = {};
-    if (text) {
-      try {
-        payload = JSON.parse(text) as unknown;
-      } catch {
-        payload = {};
-      }
+    try {
+      payload = parseJsonText(text);
+    } catch {
+      payload = {};
     }
     if (response.status === 503) {
       return { state: "starting" };
@@ -191,6 +200,16 @@ async function stopIncompatibleDaemon(baseUrl: string, pid?: number): Promise<vo
 }
 
 function spawnDaemon(cliEntrypoint: string, configPath: string): void {
+  // SPUR_DISABLE_AUTOSTART blocks CLI auto-spawn so the daemon is only ever
+  // started by an external manager (e.g. systemd on the prod VM). Without
+  // this guard, a CLI invocation during a restart window can fork a daemon
+  // outside the service cgroup, win the :4310 bind race, and put
+  // spur-daemon.service into an EADDRINUSE crash loop.
+  if (process.env.SPUR_DISABLE_AUTOSTART === "1") {
+    throw new Error(
+      "Spur daemon is unreachable and SPUR_DISABLE_AUTOSTART=1; this managed instance must come back through the repo deploy or service restart flow.",
+    );
+  }
   const child = spawn(
     process.execPath,
     [cliEntrypoint, "--config", configPath, "daemon", "start"],
@@ -257,9 +276,7 @@ export async function restartDaemonIfRunning(
 
   // Give an external service manager (e.g. systemd) a short chance to restart the daemon,
   // then fall back to spawning the daemon directly so CLI calls do not sit idle for 40s.
-  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS).catch(
-    () => null,
-  );
+  let runtime = await waitForReadyDaemon(baseUrl, EXTERNAL_DAEMON_RESTART_ATTEMPTS);
   if (!runtime) {
     spawnDaemon(cliEntrypoint, resolvedConfigPath);
     runtime = await waitForReadyDaemon(baseUrl);

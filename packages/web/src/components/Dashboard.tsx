@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
@@ -20,7 +21,8 @@ import {
   type ImageAttachment,
 } from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
-import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import type { AgentName } from "@/lib/agents";
+import { insertTextAtCursor } from "@/lib/textarea";
 import {
   isPrimarySubmitHotkey,
   isVoiceToggleHotkey,
@@ -41,34 +43,15 @@ import {
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
 const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
 const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 
-function insertTextAtCursor(
-  element: HTMLTextAreaElement | null,
-  value: string,
-  setValue: (value: string) => void,
-) {
-  if (!element) {
-    setValue(value);
-    return;
-  }
-  const start = element.selectionStart ?? element.value.length;
-  const end = element.selectionEnd ?? element.value.length;
-  const next = `${element.value.slice(0, start)}${value}${element.value.slice(end)}`;
-  setValue(next);
-  queueMicrotask(() => {
-    element.focus();
-    const cursor = start + value.length;
-    element.setSelectionRange(cursor, cursor);
-  });
-}
-
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
-  if (!raw) return new Set();
+  if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -274,7 +257,7 @@ export function Dashboard() {
   }, [requestedProject]);
 
   const queryClient = useQueryClient();
-  const sessionsQueryKey = ["sessions", projectId] as const;
+  const sessionsQueryKey = ["sessions"] as const;
   const {
     data,
     isPending,
@@ -282,8 +265,7 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const query = projectId ? `?project=${encodeURIComponent(projectId)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store", signal });
+      const response = await fetch("/api/sessions", { cache: "no-store", signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
@@ -320,10 +302,16 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
+  const projectSessions = useMemo(
+    () =>
+      projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions,
+    [allSessions, projectId],
+  );
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return allSessions;
-    return allSessions.filter(
+    if (!q) return projectSessions;
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -331,7 +319,7 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [allSessions, searchQuery]);
+  }, [projectSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
@@ -529,10 +517,7 @@ export function Dashboard() {
           (existingSession) => existingSession.id !== session.id,
         );
         return {
-          sessions:
-            projectId && session.project !== projectId
-              ? currentSessions
-              : [session, ...currentSessions],
+          sessions: [session, ...currentSessions],
           projects: current?.projects ?? [],
         };
       });
@@ -557,6 +542,22 @@ export function Dashboard() {
   const openTerminal = (session: DashboardSession) => {
     syncTerminalFilter(session.id);
     setError(null);
+  };
+
+  const handleRestoreSession = async (session: DashboardSession) => {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (restoreError) {
+      setError(
+        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
+      );
+      throw restoreError;
+    }
   };
 
   const openSpawnModal = () => {
@@ -756,18 +757,11 @@ export function Dashboard() {
                       </option>
                     ))}
                   </select>
-                  <select
-                    aria-label="Spawn agent"
-                    className={INPUT_CLASS}
-                    onChange={(event) => setSpawnAgent(event.target.value as AgentName)}
+                  <AgentSelect
+                    ariaLabel="Spawn agent"
+                    onChange={setSpawnAgent}
                     value={spawnAgent}
-                  >
-                    {AGENT_OPTIONS.map((agent) => (
-                      <option key={agent} value={agent}>
-                        {getAgentDisplayName(agent)}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div className="flex gap-2">
                   <input
@@ -951,6 +945,7 @@ export function Dashboard() {
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
+                onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
                 sessions={grouped[level]}

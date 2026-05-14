@@ -75,6 +75,11 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
+export interface WorkItemLifecycleRecord extends GitHubWorkItemEventData {
+  sessionId: string;
+  createdAt: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -155,6 +160,7 @@ export interface TriggerSpawnConfig {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  autoComplete?: boolean;
 }
 
 export interface TriggerSendConfig {
@@ -202,6 +208,7 @@ export interface ReviewRequestSummary {
 export interface ReviewCheck {
   name: string;
   state: string;
+  conclusion?: string | null;
 }
 
 export type GitHubReviewDecision = ReviewDecision;
@@ -326,6 +333,17 @@ export interface SessionView extends SessionRecord {
   workspaceAccess?: SessionWorkspaceAccess;
 }
 
+export interface DashboardSessionView extends SessionRecord {
+  runtimeAlive: boolean;
+  workspaceExists: boolean;
+  state: SessionState;
+  lastActivityAt: string;
+  slots?: SessionSlots;
+  hasServiceIssues?: boolean;
+}
+
+export type SessionListView = SessionView | DashboardSessionView;
+
 export interface SessionWorkspaceAccessItem {
   label: string;
   kind: WorkspaceAccessItemKind;
@@ -399,11 +417,13 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
+  setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
 }

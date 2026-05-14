@@ -21,6 +21,7 @@ const SPUR_WRAPPER_NAME = "spur";
 interface NormalizedSlotsUpdate {
   title?: string;
   clearTitle: boolean;
+  setTitleIfAbsent?: boolean;
   links: SessionLink[];
   unlinkLabels: string[];
 }
@@ -34,8 +35,8 @@ function normalizeSlotLabel(label: string): string {
   if (!SLOT_LABEL_RE.test(normalized)) {
     throw new Error("slot link labels must match ^[a-z0-9][a-z0-9_-]{0,15}$");
   }
-  if (normalized === "pr" || normalized === "github_pr") {
-    return "github-pr";
+  if (normalized === "github-pr" || normalized === "github_pr") {
+    return "pr";
   }
   return normalized;
 }
@@ -67,8 +68,14 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   if (request.clearTitle !== undefined && typeof request.clearTitle !== "boolean") {
     throw new Error("clearTitle must be a boolean");
   }
+  if (request.setTitleIfAbsent !== undefined && typeof request.setTitleIfAbsent !== "boolean") {
+    throw new Error("setTitleIfAbsent must be a boolean");
+  }
   if (request.title !== undefined && request.clearTitle) {
     throw new Error("title and clearTitle cannot be used together");
+  }
+  if (request.setTitleIfAbsent === true && request.title === undefined) {
+    throw new Error("setTitleIfAbsent requires a title");
   }
 
   const linksRaw: unknown = request.links ?? [];
@@ -115,6 +122,7 @@ export function normalizeSlotsUpdate(request: UpdateSessionSlotsRequest): Normal
   return {
     ...(request.title !== undefined ? { title: normalizeTitle(request.title) } : {}),
     clearTitle: request.clearTitle === true,
+    ...(request.setTitleIfAbsent === true ? { setTitleIfAbsent: true } : {}),
     links,
     unlinkLabels,
   };
@@ -138,7 +146,10 @@ export function applySlotsUpdate(
     title = undefined;
   }
   if (update.title !== undefined) {
-    title = update.title;
+    const hasExistingTitle = (current?.title?.trim().length ?? 0) > 0;
+    if (!update.setTitleIfAbsent || !hasExistingTitle) {
+      title = update.title;
+    }
   }
 
   const nextLinks = [...links.values()];
@@ -159,10 +170,9 @@ export function withSessionSlotInstructions(prompt: string): string {
   return `${prompt}
 
 Session metadata:
-- Update the session title and related links as soon as you know them.
-- Once you know the task title and any related URLs, prefer one combined call such as \`"$SPUR_SLOT_COMMAND" --title "..." --link tracker=https://... --link github-pr=https://...\`. \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
-- If you learn links later, use \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link github-pr=https://...\` to add them without changing the title.
-- Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- Set the session title once at task start using \`"$SPUR_SLOT_COMMAND" --title-if-absent "..." --link tracker=https://... --link pr=https://...\`. The title must describe the whole task end-to-end, not the current step. After it is set, the title is locked — further \`--title-if-absent\` calls are silently ignored.
+- Update links any time with \`"$SPUR_SLOT_COMMAND" --link tracker=https://... --link pr=https://...\`. Use \`"$SPUR_SLOT_COMMAND" --link label=https://...\` for any other useful links.
+- \`$SPUR_SLOT_COMMAND\` points to this session's \`${SLOT_TOOL_NAME}\` helper.
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 

@@ -168,35 +168,11 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
-    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
-  });
-
-  it("GET /api/sessions filters by project", async () => {
-    mockedSpurRequestJson
-      .mockResolvedValueOnce([
-        sessionFixture(),
-        sessionFixture({
-          id: "web-b2",
-          project: "web",
-          tmuxSession: "web-b2",
-          worktreePath: "/tmp/web-b2",
-        }),
-      ])
-      .mockResolvedValueOnce([
-        { id: "api", name: "API" },
-        { id: "web", name: "Web" },
-      ]);
-
-    const response = await listSessions(
-      new NextRequest("http://localhost:3000/api/sessions?project=api"),
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+      1,
+      "/sessions?includeCompleted=1&view=dashboard",
     );
-    const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
-
-    expect(response.status).toBe(200);
-    expect(payload.sessions).toHaveLength(1);
-    expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
+    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
@@ -689,6 +665,7 @@ describe("Spur web API routes", () => {
           prompt: "Retry with screenshot",
           startupAttachmentIds: ["1715000000000-source.png"],
           attachments: [{ name: "shot.png", data: "cG5n" }],
+          agent: "codex",
         }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
@@ -706,8 +683,30 @@ describe("Spur web API routes", () => {
         prompt: "Retry with screenshot",
         startupAttachmentIds: ["1715000000000-source.png"],
         attachments: [{ name: "shot.png", data: "cG5n" }],
+        agent: "codex",
       },
     );
+  });
+
+  it("POST /api/sessions/:id/respawn drops invalid agent values", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry",
+          agent: "not-an-agent",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect("agent" in body).toBe(false);
+    expect(body.prompt).toBe("Retry");
   });
 
   it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {

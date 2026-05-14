@@ -998,7 +998,7 @@ test.describe("S4: Links section", () => {
     await expect(link).toBeVisible();
   });
 
-  test("canonical github-pr links render as github pr", async ({ page }) => {
+  test("canonical github-pr links stay surfaced as header badges", async ({ page }) => {
     const session = makeWorkingSession({
       id: "detail-s4-pr",
       slots: {
@@ -1009,7 +1009,55 @@ test.describe("S4: Links section", () => {
     await mockSessionDetail(page, session);
     await page.goto(`/sessions/${session.id}`);
 
-    await expect(page.getByRole("link", { name: "github pr" })).toBeVisible();
+    await expect(page.locator('a[href="https://github.com/test/repo/pull/42"]')).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "#42" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+  });
+
+  test("surfaced badge URLs are not repeated in the Links section", async ({ page }) => {
+    const githubUrl = "https://github.com/test/repo/pull/42";
+    const gitlabUrl = "https://gitlab.com/test/repo/-/merge_requests/7";
+    const trackerUrl = "https://jira.example.com/browse/WEBDEV-4617";
+    const docsUrl = "https://example.com/docs";
+    const session = makeWorkingSession({
+      id: "detail-s4-dedupe",
+      slots: {
+        title: "Session with surfaced links",
+        links: [
+          { label: "github-pr", url: githubUrl },
+          { label: "docs", url: githubUrl },
+          { label: "gitlab-pr", url: gitlabUrl },
+          { label: "docs", url: gitlabUrl },
+          { label: "tracker", url: trackerUrl },
+          { label: "docs", url: trackerUrl },
+          { label: "docs", url: docsUrl },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          canMerge: false,
+        }),
+      });
+    });
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.locator(`a[href="${docsUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${githubUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${gitlabUrl}"]`)).toHaveCount(1);
+    await expect(page.locator(`a[href="${trackerUrl}"]`)).toHaveCount(1);
+    await expect(page.getByRole("link", { name: "docs" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "github pr" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "gitlab mr" })).toHaveCount(0);
   });
 
   test("links open in new tab", async ({ page }) => {
@@ -1338,6 +1386,154 @@ test.describe("S6: Terminal modal from detail page", () => {
 
     // URL should have terminal query param
     await expect(page).toHaveURL(new RegExp(`terminal=${session.id}`));
+  });
+
+  test("terminal header keeps the sidecar suffix in its title line", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "detail-s6-title",
+      slots: { title: "Header title from slot", links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+    const terminalDialog = page.getByRole("dialog", { name: new RegExp(`Terminal ${session.id}`) });
+    await expect(terminalDialog).toBeVisible();
+    await expect(terminalDialog.getByText(`${session.id}--isolated-ui`)).toBeVisible();
+    await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
+  });
+
+  test("terminal header clamps long title to two CSS lines", async ({ page }) => {
+    const title =
+      "Terminal header title uses available space and clamps to two lines without clipping controls when the session title is very long";
+    const session = makeWorkingSession({
+      id: "detail-s6-wrap",
+      project: "Terminal header project name uses available space and wraps without clipping",
+      slots: { title, links: [] },
+      sidecars: [{ name: "isolated-ui", alive: true }],
+    });
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+
+    const overlaps = (
+      a: { x: number; y: number; width: number; height: number },
+      b: { x: number; y: number; width: number; height: number },
+    ) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+    for (const viewport of [
+      { width: 1280, height: 900 },
+      { width: 320, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/sessions/${session.id}?terminal=${session.id}--isolated-ui`);
+
+      const terminalDialog = page.getByRole("dialog", {
+        name: new RegExp(`Terminal ${session.id}`),
+      });
+      await expect(terminalDialog).toBeVisible();
+
+      const header = terminalDialog.locator(":scope > div > div").first();
+      const labelText = header.locator(":scope > div:nth-child(2) > div:nth-child(1)");
+      const titleText = header.locator(":scope > div:nth-child(2) > div:nth-child(2)");
+      const statusText = terminalDialog.getByText("Connected", { exact: true });
+      const closeButton = terminalDialog.getByRole("button", { name: /close terminal/i });
+      const controls = terminalDialog.locator(":scope > div > div").nth(2);
+
+      await expect(titleText).toContainText("isolated-ui");
+      await expect(controls).toBeVisible();
+
+      const titleClamp = await titleText.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          height: rect.height,
+          lineClamp: styles.getPropertyValue("-webkit-line-clamp"),
+          lineHeight: Number.parseFloat(styles.lineHeight),
+          overflow: styles.overflow,
+        };
+      });
+      expect(titleClamp.lineClamp).toBe("2");
+      expect(titleClamp.overflow).toBe("hidden");
+      expect(titleClamp.height).toBeLessThanOrEqual(titleClamp.lineHeight * 2 + 1);
+
+      const [labelBox, titleBox, statusBox, closeBox] = await Promise.all([
+        labelText.boundingBox(),
+        titleText.boundingBox(),
+        statusText.boundingBox(),
+        closeButton.boundingBox(),
+      ]);
+
+      if (!labelBox || !titleBox || !statusBox || !closeBox) {
+        throw new Error("Expected terminal header text and controls to have bounding boxes");
+      }
+
+      expect(overlaps(titleBox, statusBox)).toBe(false);
+      expect(overlaps(titleBox, closeBox)).toBe(false);
+      if (viewport.width >= 640) {
+        const labelCenterY = labelBox.y + labelBox.height / 2;
+        const titleCenterY = titleBox.y + titleBox.height / 2;
+        const statusCenterY = statusBox.y + statusBox.height / 2;
+        const closeCenterY = closeBox.y + closeBox.height / 2;
+        expect(Math.abs(labelCenterY - titleCenterY)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleCenterY - statusCenterY)).toBeLessThanOrEqual(1);
+        expect(Math.abs(titleCenterY - closeCenterY)).toBeLessThanOrEqual(1);
+      } else {
+        expect(titleBox.y).toBeGreaterThan(labelBox.y);
+      }
+
+      const headerMetrics = await header.evaluate((element) => {
+        const headerElement = element as HTMLDivElement;
+        return {
+          clientWidth: headerElement.clientWidth,
+          scrollWidth: headerElement.scrollWidth,
+        };
+      });
+      expect(headerMetrics.scrollWidth).toBeLessThanOrEqual(headerMetrics.clientWidth + 1);
+
+      const overflowMetrics = await page.evaluate(() => {
+        const dialog = document.querySelector('[role="dialog"]');
+        const controlsElement = dialog?.querySelector(":scope > div > div:nth-child(3)");
+        if (!(dialog instanceof HTMLElement) || !(controlsElement instanceof HTMLElement)) {
+          throw new Error("Expected terminal dialog and controls");
+        }
+
+        return {
+          bodyScrollWidth: document.body.scrollWidth,
+          controlsClientWidth: controlsElement.clientWidth,
+          controlsScrollWidth: controlsElement.scrollWidth,
+          dialogClientWidth: dialog.clientWidth,
+          dialogScrollWidth: dialog.scrollWidth,
+          documentScrollWidth: document.documentElement.scrollWidth,
+          viewportWidth: window.innerWidth,
+        };
+      });
+      expect(overflowMetrics.documentScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.viewportWidth,
+      );
+      expect(overflowMetrics.bodyScrollWidth).toBeLessThanOrEqual(overflowMetrics.viewportWidth);
+      expect(overflowMetrics.dialogScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.dialogClientWidth,
+      );
+      expect(overflowMetrics.controlsScrollWidth).toBeLessThanOrEqual(
+        overflowMetrics.controlsClientWidth,
+      );
+    }
   });
 
   test("URL gets terminal=<id> when terminal opened, removed when closed", async ({ page }) => {

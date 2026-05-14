@@ -340,8 +340,8 @@ test.describe("D4: Terminal button state", () => {
     await expect(termBtn).not.toBeDisabled();
   });
 
-  test("disabled terminal button for stopped session", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-disabled-1" });
+  test("disabled terminal button for running session without tmuxSession", async ({ page }) => {
+    const session = makeWorkingSession({ id: "term-disabled-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -370,7 +370,7 @@ test.describe("D4: Terminal button state", () => {
   });
 
   test("clicking disabled terminal button does not add terminal query param", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-no-click-1" });
+    const session = makeWorkingSession({ id: "term-no-click-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -383,6 +383,79 @@ test.describe("D4: Terminal button state", () => {
     // URL should not contain terminal param
     const url = page.url();
     expect(url).not.toContain("terminal=");
+  });
+
+  test("stopped restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
+    const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
+  test("clicking restore posts and refetches sessions", async ({ page }) => {
+    const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
+    const restored = makeWorkingSession({
+      ...stopped,
+      status: "running",
+      state: "working",
+      runtimeAlive: true,
+      tmuxSession: "spur-restore-click-1",
+    });
+    let restoredState = false;
+    let restoreCalls = 0;
+
+    await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      restoredState = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${stopped.id}`, "i") })
+      .click();
+
+    await expect.poll(() => restoreCalls).toBe(1);
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Open web terminal for ${stopped.id}`, "i") }),
+    ).toBeVisible();
+  });
+
+  test("restore failure leaves row visible and shows error", async ({ page }) => {
+    const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore failed",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
+      .click();
+
+    await expect(page.getByText("Restore failed")).toBeVisible();
+    await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });
 
@@ -469,20 +542,20 @@ test.describe("D4b: Merged-PR done button", () => {
   });
 });
 
-// D5: Tracker and PR links
-test.describe("D5: Tracker and PR links", () => {
-  test("session with tracker link shows tracker icon+id", async ({ page }) => {
+// D5: Dashboard rows hide tracker and PR links
+test.describe("D5: Dashboard rows hide tracker and PR links", () => {
+  test("session with tracker link does not render a tracker badge in the row", async ({ page }) => {
     const session = makeSessionWithTracker({ id: "tracker-row-1" });
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    // The tracker link contains WEBDEV-4617 as extracted ID
-    // It's in a sm:inline-flex so visible at desktop
     const trackerLink = page.locator("a[href*='jira.example.com']");
-    await expect(trackerLink).toBeVisible();
+    await expect(trackerLink).toHaveCount(0);
   });
 
-  test("session with PR link shows github link", async ({ page }) => {
+  test("session with PR link keeps row actions but does not render a PR badge", async ({
+    page,
+  }) => {
     const prUrl = "https://github.com/test/repo/pull/42001";
     const session = makeSessionWithPR({
       id: "pr-row-1",
@@ -500,6 +573,7 @@ test.describe("D5: Tracker and PR links", () => {
           state: "open",
           reviewDecision: "approved",
           ciStatus: "success",
+          canMerge: true,
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
@@ -507,12 +581,20 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    const prLink = page.locator(`a[href='${prUrl}']`).first();
-    await expect(prLink).toBeVisible();
-    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
+    await expect(page.locator(`a[href='${prUrl}']`)).toHaveCount(0);
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Merge PR for ${session.id}`, "i"),
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
   });
 
-  test("session with GitLab MR link shows compact merge request id", async ({ page }) => {
+  test("session with GitLab MR link does not render a PR badge in the row", async ({ page }) => {
     const session = makeWorkingSession({
       id: "gitlab-pr-row-1",
       slots: {
@@ -535,10 +617,7 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    const prLink = page.locator("a[href*='gitlab.com']").first();
-    await expect(prLink).toBeVisible();
-    await expect(prLink).toContainText("!42");
-    await expect(prLink.locator("svg")).toHaveCount(1);
+    await expect(page.locator("a[href*='gitlab.com']")).toHaveCount(0);
   });
 
   test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
@@ -564,9 +643,6 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    await expect(
-      page.locator("a[href='https://github.com/test/repo/pull/999']").first(),
-    ).toBeVisible();
     await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 
@@ -598,8 +674,9 @@ test.describe("D5: Tracker and PR links", () => {
     await mockSessions(page, [session]);
     await page.goto("/");
 
-    const trackerLinks = page.locator("a[href*='jira']");
-    await expect(trackerLinks).toHaveCount(0);
+    await expect(page.locator("a[href*='jira']")).toHaveCount(0);
+    await expect(page.locator("a[href*='github.com']")).toHaveCount(0);
+    await expect(page.locator("a[href*='gitlab.com']")).toHaveCount(0);
   });
 });
 
