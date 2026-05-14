@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type {
+  AgentName,
   ServiceInstanceRecord,
   SessionRecord,
   SessionStateTransition,
@@ -6736,7 +6737,7 @@ describe("SessionService", () => {
       const { SessionService } = await loadSessionServiceModule();
       const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
 
-      await expect(service.respawn("api-1", { agent: "wat" })).rejects.toThrow(
+      await expect(service.respawn("api-1", { agent: "wat" as AgentName })).rejects.toThrow(
         "Unsupported agent: wat",
       );
     });
