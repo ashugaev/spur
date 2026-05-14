@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { SessionRow } from "@/components/SessionRow.js";
-import type { DashboardSession } from "@/lib/types.js";
+import type { DashboardSession, SpurSessionLink } from "@/lib/types.js";
 
 const useSessionLinkPrInfoMock = vi.fn();
 
@@ -17,6 +17,22 @@ vi.mock("next/link", () => ({
 vi.mock("@/components/SessionLinkBadge.js", () => ({
   useSessionLinkPrInfo: (...args: Parameters<typeof useSessionLinkPrInfoMock>) =>
     useSessionLinkPrInfoMock(...args),
+  SessionLinkBadge: ({ link }: { link: SpurSessionLink }) => {
+    const labelText = (() => {
+      const githubMatch = link.url.match(/\/pull\/(\d+)/);
+      if (githubMatch) return `#${githubMatch[1]}`;
+      const gitlabMatch = link.url.match(/\/merge_requests\/(\d+)/);
+      if (gitlabMatch) return `!${gitlabMatch[1]}`;
+      const tracker = link.url.match(/\/browse\/([A-Z]+-\d+)/);
+      if (tracker) return tracker[1];
+      return link.label;
+    })();
+    return (
+      <a href={link.url} rel="noreferrer" target="_blank">
+        {labelText}
+      </a>
+    );
+  },
 }));
 
 function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
@@ -55,8 +71,10 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
   };
 }
 
+const onRestoreSession = vi.fn().mockResolvedValue(undefined);
+
 describe("SessionRow", () => {
-  it("hides tracker and PR badges while keeping the merge action", () => {
+  it("renders tracker and PR badges alongside the merge action", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
       reviewDecision: "approved",
@@ -68,22 +86,28 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    render(<SessionRow session={makeSession()} />);
+    render(<SessionRow session={makeSession()} onRestoreSession={onRestoreSession} />);
 
-    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.getByRole("link", { name: "Remove row link strip" })).toHaveAttribute(
       "href",
       "/sessions/api-a1",
     );
-    expect(screen.queryByRole("link", { name: /WEBDEV-4617/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "#42" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /WEBDEV-4617/i })).toHaveAttribute(
+      "href",
+      "https://jira.example.com/browse/WEBDEV-4617",
+    );
+    expect(screen.getByRole("link", { name: /#42/ })).toHaveAttribute(
+      "href",
+      "https://github.com/test/repo/pull/42",
+    );
     expect(screen.getByRole("button", { name: "Merge PR for api-a1" })).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Open web terminal for api-a1" }),
     ).not.toBeInTheDocument();
   });
 
-  it("keeps the done action when PR state is merged", () => {
+  it("renders badges and the done action when PR state is merged", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "merged",
       reviewDecision: null,
@@ -95,11 +119,17 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    render(<SessionRow session={makeSession()} />);
+    render(<SessionRow session={makeSession()} onRestoreSession={onRestoreSession} />);
 
-    expect(screen.getAllByRole("link")).toHaveLength(1);
+    expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: /WEBDEV-4617/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "#42" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /WEBDEV-4617/i })).toHaveAttribute(
+      "href",
+      "https://jira.example.com/browse/WEBDEV-4617",
+    );
+    expect(screen.getByRole("link", { name: /#42/ })).toHaveAttribute(
+      "href",
+      "https://github.com/test/repo/pull/42",
+    );
   });
 });
