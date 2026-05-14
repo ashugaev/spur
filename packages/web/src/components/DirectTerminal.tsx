@@ -617,7 +617,7 @@ export function DirectTerminal({
           </div>
           {title ? (
             <div
-              className="break-words whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] sm:min-w-0 sm:truncate"
+              className="min-w-0 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
               data-testid="direct-terminal-header-title"
               title={title}
             >

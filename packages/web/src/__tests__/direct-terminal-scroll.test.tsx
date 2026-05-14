@@ -512,7 +512,7 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByText("Voice ⌘ + .")).not.toBeInTheDocument();
   });
 
-  it("keeps desktop header text inline while allowing mobile wrapping", async () => {
+  it("clamps terminal header title to two lines with CSS", async () => {
     const title = "Very long terminal header title for isolated sidecar sessions";
 
     await mountTerminal({
@@ -532,9 +532,11 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.getByText("session-with-a-very-long-sidecar-name").className).toContain(
       "sm:break-normal",
     );
-    expect(screen.getByText(title).className).toContain("break-words");
     expect(screen.getByText(title).className).toContain("whitespace-normal");
-    expect(screen.getByText(title).className).toContain("sm:truncate");
+    expect(screen.getByText(title).className).toContain("[display:-webkit-box]");
+    expect(screen.getByText(title).className).toContain("[-webkit-line-clamp:2]");
+    expect(screen.getByText(title).className).toContain("[overflow-wrap:anywhere]");
+    expect(screen.getByText(title).className).toContain("overflow-hidden");
     expect(screen.getByTestId("direct-terminal-header").className).toContain("sm:items-center");
     expect(screen.getByTestId("direct-terminal-header").className).toContain(
       "sm:grid-cols-[auto_minmax(0,1fr)_auto]",

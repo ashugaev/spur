@@ -1412,8 +1412,9 @@ test.describe("S6: Terminal modal from detail page", () => {
     await expect(terminalDialog.getByText("Header title from slot • isolated-ui")).toBeVisible();
   });
 
-  test("terminal header keeps desktop text in one row and wraps on 320px", async ({ page }) => {
-    const title = "Terminal header title uses available space and wraps without clipping";
+  test("terminal header clamps long title to two CSS lines", async ({ page }) => {
+    const title =
+      "Terminal header title uses available space and clamps to two lines without clipping controls when the session title is very long";
     const session = makeWorkingSession({
       id: "detail-s6-wrap",
       project: "Terminal header project name uses available space and wraps without clipping",
@@ -1456,6 +1457,20 @@ test.describe("S6: Terminal modal from detail page", () => {
 
       await expect(titleText).toContainText("isolated-ui");
       await expect(controls).toBeVisible();
+
+      const titleClamp = await titleText.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return {
+          height: rect.height,
+          lineClamp: styles.getPropertyValue("-webkit-line-clamp"),
+          lineHeight: Number.parseFloat(styles.lineHeight),
+          overflow: styles.overflow,
+        };
+      });
+      expect(titleClamp.lineClamp).toBe("2");
+      expect(titleClamp.overflow).toBe("hidden");
+      expect(titleClamp.height).toBeLessThanOrEqual(titleClamp.lineHeight * 2 + 1);
 
       const [labelBox, titleBox, statusBox, closeBox] = await Promise.all([
         labelText.boundingBox(),
