@@ -62,6 +62,23 @@ function displayLinkLabel(label: string, url: string): string {
   return label;
 }
 
+function splitSessionLinks(
+  links: DashboardSession["links"],
+  sidecarLinkLabels: Set<string>,
+): {
+  surfacedLinks: DashboardSession["links"];
+  visibleLinks: DashboardSession["links"];
+} {
+  const surfacedLinks = links.filter(
+    (link) => link.label === "tracker" || isReviewLinkLabel(link.label),
+  );
+  const surfacedUrls = new Set(surfacedLinks.map((link) => link.url));
+  const visibleLinks = links.filter(
+    (link) => !sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url),
+  );
+  return { surfacedLinks, visibleLinks };
+}
+
 function PlayIcon() {
   return (
     <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
@@ -1009,22 +1026,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       session?.artifacts.filter((artifact) => startupAttachmentIds.includes(artifact.id)) ?? []
     );
   }, [session]);
-  const surfacedLinks = useMemo(
-    () =>
-      session?.links.filter((link) => link.label === "tracker" || isReviewLinkLabel(link.label)) ??
-      [],
-    [session],
-  );
-  const surfacedLinkUrls = useMemo(
-    () => new Set(surfacedLinks.map((link) => link.url)),
-    [surfacedLinks],
-  );
-  const visibleLinks = useMemo(
-    () =>
-      session?.links.filter(
-        (link) => !sidecarLinkLabels.has(link.label) && !surfacedLinkUrls.has(link.url),
-      ) ?? [],
-    [session, sidecarLinkLabels, surfacedLinkUrls],
+  const { surfacedLinks, visibleLinks } = splitSessionLinks(
+    session?.links ?? [],
+    sidecarLinkLabels,
   );
   const workspaceAccessItems = session?.workspaceAccess?.items ?? [];
 
@@ -1165,7 +1169,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {surfacedLinks.map((link) => (
-                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} variant="detail" />
+                <SessionLinkBadge key={`${link.label}-${link.url}`} link={link} />
               ))}
               {!session.runtimeAlive && !isTerminalSession(session) ? (
                 <span className="border border-[var(--color-chip-error-border)] px-2 py-0.5 text-[var(--color-chip-error-text)]">

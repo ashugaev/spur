@@ -177,7 +177,8 @@ jsonl_append() {
   exit 0
 fi
 codex_base="\${CODEX_HOME:-$HOME/.codex}"
-session_rollout=""
+session_dir="$codex_base/sessions/2026/03/18"
+session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
 find_rollout_by_thread_id() {
   local sessions_root="$1"
   local wanted_thread_id="$2"
@@ -235,18 +236,18 @@ PY
 }
 mode="launch"
 resume_id=""
+thread_id="thread-\${SPUR_SESSION:-no-session}"
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
-  existing_rollout="$(find_rollout_by_thread_id "$codex_base/sessions" "$resume_id")"
+  thread_id="\${resume_id:-$thread_id}"
+  existing_rollout="$(find_rollout_by_thread_id "$codex_base/sessions" "$thread_id")"
   if [[ -n "$existing_rollout" ]]; then
     session_rollout="$existing_rollout"
   fi
-else
-  session_dir="$codex_base/sessions/2026/03/18"
-  thread_id="thread-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
-  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+fi
+mkdir -p "$session_dir"
+if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
 fi`
@@ -307,12 +308,6 @@ touch_chat_store "$chat_id"`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
-  // Claude signals working per-line; codex buffers pasted multi-line input and
-  // writes a single rollout event_msg with the full message (matching real codex).
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : "";
   // Codex uses a buffering read loop that drains pasted lines before emitting
   // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
   // the exact full restore/replay message even across interrupt-driven sends.
@@ -324,7 +319,7 @@ touch_chat_store "$chat_id"`;
     agentName === "claude"
       ? `while IFS= read -r line; do
   printf '%s\\n' "$line" >> "$log_file"
-  ${signalWorking}
+  jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}
@@ -789,6 +784,7 @@ export async function createRuntimeTestContext(
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
           SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
+          SPUR_SKIP_CODEX_SUBMIT_ACK: "1",
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
           SPUR_FAKE_GH_STATE_FILE: ghStateFile,
         }

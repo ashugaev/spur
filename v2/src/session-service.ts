@@ -3059,8 +3059,10 @@ export class SessionService {
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    const shouldWaitForCodexAck =
+      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const codexSessionsDir = agentWaitsForSubmitAck(session.agent)
+    const codexSessionsDir = shouldWaitForCodexAck
       ? join(codexHookHomePath(sessionToolDir), "sessions")
       : null;
     const baseline: RolloutBaseline | null = codexSessionsDir
@@ -3071,7 +3073,7 @@ export class SessionService {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (!agentWaitsForSubmitAck(session.agent) || !codexSessionsDir || !baseline) {
+    if (!shouldWaitForCodexAck || !codexSessionsDir || !baseline) {
       return;
     }
     let lastResult: { found: boolean; lastScannedFile: string | null } = {

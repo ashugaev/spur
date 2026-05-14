@@ -154,7 +154,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - `respawn --json` preserves shared-workspace mode for shared sessions, preserves explicit branch targets, and falls back to a fresh session id branch when respawn preflight defers or picks an occupied worktree branch.
 - `complete --json` and `kill --json` still work for sessions spawned under an old project id after the config renames that project to the same repo path, including sidecar cleanup on `complete --json`.
 - `send --json` to a stopped or paused worktree-backed session resumes the same native Claude/Codex conversation when native state exists, otherwise relaunches in the same worktree and still delivers the message; automatic queue/pipeline delivery does not restart a persisted stopped session on its own.
-- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status hyperlinks without restarting the session, and keeps the status-right click binding pointed at the live URL opener.
+- The per-session `spur-slots` helper updates a live session title and named links through the hidden CLI/API path, refreshes `tmux` status-left to the live title without restarting the session, keeps status-right empty, and preserves stored link metadata.
 - `service run` started from a session workspace creates a sidecar `tmux` session, `service status` inspects that live sidecar through the built CLI, and TTY `list` `l` opens a session log view with structured events while agent/runtime log output stays empty until a non-`tmux` log source exists.
 - `service logs` currently returns structured runtime log entries only from the session event log, so service and sidecar output stay empty until a non-`tmux` log source exists; it still works inside a session workspace via the injected `spur` wrapper and rejects missing session context outside a Spur session.
 - The hidden `sidecar start` CLI command starts a configured sidecar from the main session shell, allows one manual nested start from a first-level sidecar, and rejects callers already inside a nested sidecar.
@@ -209,7 +209,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - Real `codex` startup image attachments use the native `--image` launch path, while real `claude` startup image attachments arrive through artifact-path references in the first prompt.
 - Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.
 - Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.
-- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions, and those slots survive `restore` in session metadata and tmux status.
+- Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.
 - A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.
 - When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.
 
