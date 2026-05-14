@@ -18,20 +18,10 @@ vi.mock("@/components/SessionLinkBadge.js", () => ({
   useSessionLinkPrInfo: (...args: Parameters<typeof useSessionLinkPrInfoMock>) =>
     useSessionLinkPrInfoMock(...args),
   SessionLinkBadge: ({ link }: { link: SpurSessionLink }) => {
-    const labelText = (() => {
-      const githubMatch = link.url.match(/\/pull\/(\d+)/);
-      if (githubMatch) return `#${githubMatch[1]}`;
-      const gitlabMatch = link.url.match(/\/merge_requests\/(\d+)/);
-      if (gitlabMatch) return `!${gitlabMatch[1]}`;
-      const tracker = link.url.match(/\/browse\/([A-Z]+-\d+)/);
-      if (tracker) return tracker[1];
-      return link.label;
-    })();
-    return (
-      <a href={link.url} rel="noreferrer" target="_blank">
-        {labelText}
-      </a>
-    );
+    const pr = link.url.match(/\/pull\/(\d+)/);
+    const tracker = link.url.match(/\/browse\/([A-Z]+-\d+)/);
+    const text = pr ? `#${pr[1]}` : (tracker?.[1] ?? link.label);
+    return <a href={link.url}>{text}</a>;
   },
 }));
 
