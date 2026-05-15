@@ -18,9 +18,9 @@ const WORKING_CURRENT_SESSION_FIXTURE = join(
   __dirname,
   "../fixtures/agent-history/codex/working-spur-67c0-rollout-tail.jsonl",
 );
-const IDLE_BB_F95E_FIXTURE = join(
+const IDLE_FIXTURE_SESSION_FIXTURE = join(
   __dirname,
-  "../fixtures/agent-history/codex/idle-bb-f95e-trailing-tool-output-tail.jsonl",
+  "../fixtures/agent-history/codex/idle-fixture-session-trailing-tool-output-tail.jsonl",
 );
 const WORKING_UNMATCHED_TOOL_CALL_FIXTURE = join(
   __dirname,
@@ -62,8 +62,8 @@ describe("readCodexRolloutState", () => {
   });
 
   it("reads waiting from a Codex turn whose tail ends with matched function_call_output", async () => {
-    const content = await readFile(IDLE_BB_F95E_FIXTURE, "utf8");
-    const sessionsDir = await makeSessionsDir(content, "rollout-idle-bb-f95e.jsonl");
+    const content = await readFile(IDLE_FIXTURE_SESSION_FIXTURE, "utf8");
+    const sessionsDir = await makeSessionsDir(content, "rollout-idle-fixture-session.jsonl");
 
     const result = await readCodexRolloutState(sessionsDir);
 
