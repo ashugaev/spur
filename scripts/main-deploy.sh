@@ -57,12 +57,8 @@ services_are_active() {
   systemctl_cmd is-active --quiet spur-web.service
 }
 
-# Install systemd service files from deploy/templates, filling {{SPUR_ROOT}}
-# with the deploy clone path and service account placeholders from
-# MAIN_DEPLOY_SERVICE_USER/MAIN_DEPLOY_SERVICE_HOME, defaulting to the account
-# running this script. Secrets are provisioned out-of-band in /etc/spur/daemon.env
-# (read via EnvironmentFile= in the unit); this function requires that file to
-# exist and refuses to install otherwise.
+# Install deploy/*.service with deploy root and service account placeholders.
+# Secrets stay in /etc/spur/daemon.env via EnvironmentFile=. Refuse install if missing.
 # Sets SERVICES_CHANGED=true when any file was updated.
 SERVICES_CHANGED=false
 

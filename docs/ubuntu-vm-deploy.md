@@ -36,7 +36,7 @@ sudo apt-get update
 sudo apt-get install -y git tmux nginx gh
 ```
 
-Install Node.js 20+ or newer, then install `pnpm` and optional agent CLIs:
+Install Node.js 20+, then install `pnpm` and optional agent CLIs:
 
 ```bash
 sudo corepack enable
@@ -44,13 +44,13 @@ sudo corepack prepare pnpm@9.15.4 --activate
 sudo npm install -g @openai/codex
 ```
 
-If you plan to run Claude sessions too:
+For Claude sessions:
 
 ```bash
 sudo npm install -g @anthropic-ai/claude-code
 ```
 
-Agent CLIs must also be authenticated on the VM. Without that, the daemon and UI can run, but real `spawn` calls will fail.
+Agent CLIs must be authenticated on the VM. Without that, the daemon and UI can run, but real `spawn` calls fail.
 
 ## Clone And Build
 
@@ -84,7 +84,7 @@ ui:
   port: 5555
 ```
 
-Then keep the repo-local project config in the checkout, for example `~/projects/spur/spur.yaml`:
+Keep the repo-local project config in the checkout, for example `~/projects/spur/spur.yaml`:
 
 ```yaml
 projects:
@@ -255,7 +255,7 @@ curl http://127.0.0.1:4310/sessions
 curl http://127.0.0.1:5555/api/runtime/terminal
 ```
 
-`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set and otherwise keeps its managed release clone under `~/.spur/main-deploy/repo`. It installs the systemd units for the account running the script, or `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME` when those are set. It fetches the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
+`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set. Otherwise it keeps its managed release clone under `~/.spur/main-deploy/repo`. It installs systemd units for the script account, or `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME` when set. It fetches latest `origin/main`, builds there, restarts services only after a successful build, and records the last deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
 
 ## Automated Main Releases
 
@@ -268,11 +268,11 @@ crontab /tmp/spur.cron
 rm /tmp/spur.cron
 ```
 
-Keep the hourly cron pointed at a normal repo checkout only as the command entrypoint. The actual deploy work happens inside `MAIN_DEPLOY_ROOT`, which should stay reserved for automation and not for day-to-day editing.
+Keep hourly cron pointed at a normal repo checkout only as command entrypoint. Deploy work happens inside `MAIN_DEPLOY_ROOT`, which stays reserved for automation, not day-to-day editing.
 
 ## Operational Notes
 
-- `spur-daemon.service` and `spur-web.service` should be `enabled`, not just started
+- `spur-daemon.service` and `spur-web.service` must be enabled, not only started
 - keep the daemon and Next.js app on loopback even when the UI is proxied
 - do not point the browser directly at the terminal bind port
 - set `DIRECT_TERMINAL_PUBLIC_PORT` to the reverse proxy port the browser will actually use
