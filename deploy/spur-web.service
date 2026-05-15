@@ -10,9 +10,9 @@ Requires=spur-daemon.service
 
 [Service]
 Type=simple
-User=alek
+User=spur
 WorkingDirectory={{SPUR_ROOT}}
-Environment=HOME=/home/alek
+Environment=HOME=/home/spur
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=WEB_HOST=127.0.0.1
 Environment=DIRECT_TERMINAL_BIND_HOST=127.0.0.1

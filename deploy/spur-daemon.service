@@ -12,10 +12,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=alek
+User=spur
 WorkingDirectory={{SPUR_ROOT}}
-Environment=HOME=/home/alek
-Environment=PATH=/home/alek/.local/bin:/home/alek/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=/home/spur
+Environment=PATH=/home/spur/.local/bin:/home/spur/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/etc/spur/daemon.env
 ExecStart=/usr/bin/node {{SPUR_ROOT}}/v2/dist/cli.js daemon start
 Restart=always
