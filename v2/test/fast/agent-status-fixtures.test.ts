@@ -183,10 +183,10 @@ describe("Claude JSONL fixture classification", () => {
       Date.parse("2026-04-19T09:45:10.348Z"),
       "working",
     ],
-    // bg-bash intelas-web: last tool_use at 2026-04-13T11:19:48.036Z. With stale
+    // bg-bash web fixture: last tool_use at 2026-04-13T11:19:48.036Z. With stale
     // mtime past the 60s window and no AskUserQuestion, it must classify as waiting.
     [
-      "working-bg-bash-intelas-web-tail.jsonl",
+      "working-bg-bash-web-tail.jsonl",
       "past the 60s window with stale mtime → waiting",
       Date.parse("2026-04-13T11:21:00.000Z"),
       Date.parse("2026-04-13T11:19:48.036Z"),

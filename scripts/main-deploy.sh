@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 deploy_root="${MAIN_DEPLOY_ROOT:-$HOME/.spur/main-deploy/repo}"
 deployed_sha_file="${MAIN_DEPLOY_STAMP_FILE:-$deploy_root/.git/main-deploy-last-successful}"
+service_user="${MAIN_DEPLOY_SERVICE_USER:-$(id -un)}"
+service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
 origin_url="$(git -C "$repo_root" remote get-url origin)"
 
 ensure_deploy_clone() {
@@ -56,9 +58,11 @@ services_are_active() {
 }
 
 # Install systemd service files from deploy/templates, filling {{SPUR_ROOT}}
-# with the deploy clone path. Secrets are provisioned out-of-band in
-# /etc/spur/daemon.env (read via EnvironmentFile= in the unit); this
-# function requires that file to exist and refuses to install otherwise.
+# with the deploy clone path and service account placeholders from
+# MAIN_DEPLOY_SERVICE_USER/MAIN_DEPLOY_SERVICE_HOME, defaulting to the account
+# running this script. Secrets are provisioned out-of-band in /etc/spur/daemon.env
+# (read via EnvironmentFile= in the unit); this function requires that file to
+# exist and refuses to install otherwise.
 # Sets SERVICES_CHANGED=true when any file was updated.
 SERVICES_CHANGED=false
 
@@ -93,6 +97,8 @@ install_service_files() {
     local content
     content=$(<"$template")
     content="${content//\{\{SPUR_ROOT\}\}/$root}"
+    content="${content//\{\{SPUR_SERVICE_USER\}\}/$service_user}"
+    content="${content//\{\{SPUR_SERVICE_HOME\}\}/$service_home}"
 
     if [[ -f "$target" ]] && diff <(printf '%s\n' "$content") "$target" >/dev/null 2>&1; then
       continue

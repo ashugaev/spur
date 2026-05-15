@@ -255,7 +255,7 @@ curl http://127.0.0.1:4310/sessions
 curl http://127.0.0.1:5555/api/runtime/terminal
 ```
 
-`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set and otherwise keeps its managed release clone under `~/.spur/main-deploy/repo`. It fetches the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
+`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set and otherwise keeps its managed release clone under `~/.spur/main-deploy/repo`. It installs the systemd units for the account running the script, or `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME` when those are set. It fetches the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
 
 ## Automated Main Releases
 

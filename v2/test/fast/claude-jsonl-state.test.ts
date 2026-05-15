@@ -294,14 +294,14 @@ describe("parseConversationLines", () => {
     }
   });
 
-  it("classifies the intelas-0763 tail as waiting once the activity window elapses without an identified question", async () => {
+  it("classifies the stale activity tail as waiting once the activity window elapses without an identified question", async () => {
     const fixturePath = join(
       __dirname,
-      "../fixtures/agent-history/claude/waiting-intelas-0763-tail.jsonl",
+      "../fixtures/agent-history/claude/waiting-stale-activity-tail.jsonl",
     );
     const fixture = await readFile(fixturePath, "utf8");
-    const tempDir = await mkdtemp(join(tmpdir(), "intelas-0763-tail-"));
-    const tempFile = join(tempDir, "intelas-0763-tail.jsonl");
+    const tempDir = await mkdtemp(join(tmpdir(), "stale-activity-tail-"));
+    const tempFile = join(tempDir, "stale-activity-tail.jsonl");
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
 
