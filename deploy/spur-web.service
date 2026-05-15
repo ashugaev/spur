@@ -1,8 +1,7 @@
-# Spur web UI — systemd unit template
+# Spur web UI systemd unit template
 #
-# The deploy script substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
-# {{SPUR_SERVICE_HOME}}, then writes this file to
-# /etc/systemd/system/spur-web.service.
+# main:deploy substitutes {{SPUR_ROOT}}, {{SPUR_SERVICE_USER}}, and
+# {{SPUR_SERVICE_HOME}}, then writes /etc/systemd/system/spur-web.service.
 
 [Unit]
 Description=Spur web UI
