@@ -2,24 +2,19 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
 deploy_root="${MAIN_DEPLOY_ROOT:-$HOME/.spur/main-deploy/repo}"
 deployed_sha_file="${MAIN_DEPLOY_STAMP_FILE:-$deploy_root/.git/main-deploy-last-successful}"
 service_user="${MAIN_DEPLOY_SERVICE_USER:-$(id -un)}"
 service_home="${MAIN_DEPLOY_SERVICE_HOME:-$HOME}"
-origin_url="$(git -C "$repo_root" remote get-url origin)"
 
 ensure_deploy_clone() {
   if git -C "$deploy_root" rev-parse --git-dir >/dev/null 2>&1; then
-    local current_origin
-    current_origin="$(git -C "$deploy_root" remote get-url origin)"
-    if [[ "$current_origin" != "$origin_url" ]]; then
-      echo "main:deploy origin mismatch: expected $origin_url, got $current_origin" >&2
-      exit 1
-    fi
     return
   fi
 
+  local source_repo origin_url
+  source_repo="$(cd "$script_dir/.." && pwd)"
+  origin_url="$(git -C "$source_repo" remote get-url origin)"
   mkdir -p "$(dirname "$deploy_root")"
   git clone --branch main --single-branch "$origin_url" "$deploy_root"
 }
@@ -96,6 +91,14 @@ install_service_files() {
     content="${content//\{\{SPUR_SERVICE_USER\}\}/$service_user}"
     content="${content//\{\{SPUR_SERVICE_HOME\}\}/$service_home}"
 
+    # Fail fast on unsubstituted placeholders. Writing a unit with literal
+    # `{{...}}` would put systemd into a status=217/USER restart loop.
+    if printf '%s' "$content" | grep -qF '{{'; then
+      echo "main:deploy refusing to install $name: unsubstituted placeholders" >&2
+      printf '%s\n' "$content" | grep -nF '{{' >&2
+      exit 1
+    fi
+
     if [[ -f "$target" ]] && diff <(printf '%s\n' "$content") "$target" >/dev/null 2>&1; then
       continue
     fi
@@ -112,10 +115,29 @@ install_service_files() {
 ensure_deploy_clone
 
 git -C "$deploy_root" fetch origin main
-
 remote_head="$(git -C "$deploy_root" rev-parse origin/main)"
-deployed_head=""
+# Reset deploy_root to origin/main before anything else, including the re-exec
+# below. Guarantees the script we run from there matches origin/main.
+git -C "$deploy_root" checkout -B main origin/main
+git -C "$deploy_root" reset --hard "$remote_head"
+git -C "$deploy_root" clean -fd
 
+# Re-exec from deploy_root so substitution logic and template format stay
+# locked together. Without this, an old caller script can write half-substituted
+# unit files and put systemd into a status=217/USER restart loop.
+deploy_script="$deploy_root/scripts/main-deploy.sh"
+if [[ "${MAIN_DEPLOY_REEXECED:-0}" != "1" && "$(realpath "${BASH_SOURCE[0]}")" != "$(realpath "$deploy_script")" ]]; then
+  echo "main:deploy re-executing from $deploy_script"
+  exec env \
+    MAIN_DEPLOY_ROOT="$deploy_root" \
+    MAIN_DEPLOY_STAMP_FILE="$deployed_sha_file" \
+    MAIN_DEPLOY_SERVICE_USER="$service_user" \
+    MAIN_DEPLOY_SERVICE_HOME="$service_home" \
+    MAIN_DEPLOY_REEXECED=1 \
+    bash "$deploy_script" "$@"
+fi
+
+deployed_head=""
 if [[ -f "$deployed_sha_file" ]]; then
   deployed_head="$(<"$deployed_sha_file")"
 fi
@@ -133,9 +155,6 @@ if [[ "$deployed_head" == "$remote_head" ]] && services_are_active; then
   exit 0
 fi
 
-git -C "$deploy_root" checkout -B main origin/main
-git -C "$deploy_root" reset --hard "$remote_head"
-git -C "$deploy_root" clean -fd
 pnpm -C "$deploy_root" install --frozen-lockfile
 # Build with managed-prod autostart disabled so the build-triggered daemon
 # restart path cannot fork a rogue listener outside systemd during the
