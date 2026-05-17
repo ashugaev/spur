@@ -52,7 +52,9 @@ export function TerminalModal({
       role="dialog"
     >
       <DirectTerminal
+        agentInputEnabled={!tmuxSessionOverride}
         agent={session.agent}
+        apiSessionId={session.id}
         label={tmuxSessionOverride ?? session.id}
         onClose={onClose}
         sessionId={tmuxSessionOverride ?? session.tmuxSession ?? session.id}

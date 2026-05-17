@@ -316,6 +316,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Agent`, `Attached`, and `System` views never mix cards across categories
 - Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
 - Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- User-added image artifacts in `Attached` render as larger polished image cards with visible `Attached Image`, extension, size, and timestamp badges
 - Clicking preview opens a full-screen artifact lightbox with close and download actions
 - Non-media artifacts render as file tiles with extension badge and download action only
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`
@@ -346,6 +347,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Idle state outside recording shows the single mic button only (no pencil, no stop)
 - Confirming terminal voice input submits immediately without an extra manual keypress: for both `claude` and `codex` the reviewed text is sent as a bracketed paste (`ESC[200~`…`ESC[201~`) followed by a separate `Enter`, so the agent never receives an embedded `\r` that would be treated as a newline inside the input
 - Confirmation popup has a microphone button inside the textarea (bottom-right corner); clicking it starts a new recording that appends transcribed text to the existing draft
+- Confirmation popup has an inline image-picker button matching spawn input; picking, pasting, or dropping images adds compact previews with remove buttons
+- Cmd+V image paste inside the main agent terminal opens the confirmation popup with the pasted image preview instead of sending raw clipboard bytes into xterm
+- Confirmation popup can insert image-only drafts, and image attachments are sent through the session message API
 - Confirmation popup textarea placeholder includes `Voice ⌘ + .` when idle
 - Confirmation popup actions include a history icon button before `Cancel`/`Insert`; it shows the last five inserted terminal drafts with timestamps and restores the selected draft into the popup textarea
 - `Insert` shows inline muted hotkey hint "⌘ + ⏎" and Cmd+Enter confirms the popup

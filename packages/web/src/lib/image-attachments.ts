@@ -6,6 +6,11 @@ export interface ImageAttachment {
   preview: string;
 }
 
+type ImageDataTransfer = DataTransfer & {
+  files?: FileList | File[];
+  items?: DataTransferItemList | DataTransferItem[];
+};
+
 export function sanitizeAttachmentFilename(name: string): string {
   return name.replace(/[^\w.-]/g, "_");
 }
@@ -20,7 +25,7 @@ export async function fileToDataUrl(file: File): Promise<string> {
 }
 
 export async function imageAttachmentsFromFiles(
-  files: FileList | null,
+  files: FileList | File[] | null,
 ): Promise<ImageAttachment[]> {
   if (!files) {
     return [];
@@ -32,6 +37,43 @@ export async function imageAttachmentsFromFiles(
       preview: await fileToDataUrl(file),
     })),
   );
+}
+
+function ensureImageFilename(file: File, index: number): File {
+  if (file.name.trim()) return file;
+  const extension = file.type.split("/")[1] ?? "png";
+  return new File([file], `clipboard-image-${index + 1}.${extension}`, {
+    lastModified: file.lastModified,
+    type: file.type,
+  });
+}
+
+export function imageFilesFromDataTransfer(dataTransfer: DataTransfer | null): File[] {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const { files, items } = dataTransfer as ImageDataTransfer;
+  const allFiles = files ? Array.from(files) : [];
+  const itemFiles = items
+    ? Array.from(items)
+        .filter((item) => item.kind === "file" && IMAGE_TYPES.has(item.type))
+        .map((item) => item.getAsFile())
+        .filter((file): file is File => file !== null)
+    : [];
+  return [...allFiles, ...itemFiles]
+    .filter((file, index, imageFiles) => {
+      if (!IMAGE_TYPES.has(file.type)) return false;
+      return (
+        imageFiles.findIndex(
+          (candidate) =>
+            candidate.name === file.name &&
+            candidate.type === file.type &&
+            candidate.size === file.size,
+        ) === index
+      );
+    })
+    .map(ensureImageFilename);
 }
 
 export function encodeImageAttachments(
