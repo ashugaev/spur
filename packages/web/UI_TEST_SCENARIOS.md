@@ -306,6 +306,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - `Agent`, `Attached`, and `System` views never mix cards across categories
 - Artifacts render as compact cards in a responsive grid, not as stacked full-width rows
 - Image and video cards show media thumbnails plus hover/focus overlay actions for preview and download
+- User-added image artifacts in `Attached` render as larger polished image cards with visible `Attached Image`, extension, size, and timestamp badges
 - Clicking preview opens a full-screen artifact lightbox with close and download actions
 - Non-media artifacts render as file tiles with extension badge and download action only
 - Download links proxy through `/api/sessions/:id/artifacts/:artifactId`

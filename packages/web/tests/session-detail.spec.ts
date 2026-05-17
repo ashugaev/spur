@@ -337,11 +337,7 @@ test.describe("S2: Actions bar", () => {
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
-    await page.evaluate(() => {
-      const textarea = document.querySelector(
-        'textarea[placeholder="Edit the initial message..."]',
-      );
-      if (!textarea) return;
+    await textarea.evaluate((textarea) => {
       const dt = new DataTransfer();
       dt.items.add(new File(["PNG"], "respawn.png", { type: "image/png" }));
       textarea.dispatchEvent(
@@ -1241,6 +1237,12 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Attached (1)" }).click();
 
     await expect(page.getByText("later-upload.png")).toBeVisible();
+    const attachedCard = page.getByRole("article", {
+      name: "Attached Image artifact later-upload.png",
+    });
+    await expect(attachedCard).toBeVisible();
+    await expect(attachedCard.getByText("Attached Image")).toBeVisible();
+    await expect(attachedCard.getByText("PNG", { exact: true })).toBeVisible();
     await expect(page.getByText("agent-output.txt")).toHaveCount(0);
   });
 

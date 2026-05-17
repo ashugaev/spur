@@ -2374,6 +2374,10 @@ describe("SessionDetail artifacts", () => {
       expect(screen.getByText("later-upload.png")).toBeInTheDocument();
     });
 
+    const attachedCard = screen.getByLabelText("Attached Image artifact later-upload.png");
+    expect(attachedCard).toBeInTheDocument();
+    expect(within(attachedCard).getByText("Attached Image")).toBeInTheDocument();
+    expect(within(attachedCard).getByText("PNG", { exact: true })).toBeInTheDocument();
     expect(screen.queryByText("agent-output.txt")).not.toBeInTheDocument();
   });
 

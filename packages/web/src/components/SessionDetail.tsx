@@ -239,6 +239,13 @@ function artifactExtension(name: string): string {
   return ext ? ext.toUpperCase() : "FILE";
 }
 
+function artifactKindLabel(artifact: SessionArtifact): string {
+  if (artifact.addedByUser && artifact.kind === "image") return "Attached Image";
+  if (artifact.addedByUser) return "Attached";
+  if (artifact.origin === "automatic") return "System";
+  return artifact.kind;
+}
+
 function overlayButtonClass(primary = false): string {
   return [
     "inline-flex h-8 w-8 items-center justify-center border transition",
@@ -252,6 +259,7 @@ function ArtifactCard({
   artifact,
   artifactHref,
   previewState,
+  variant = "compact",
   onPreview,
   onPreviewError,
   onPreviewReady,
@@ -259,17 +267,28 @@ function ArtifactCard({
   artifact: SessionArtifact;
   artifactHref: string;
   previewState: ArtifactPreviewState;
+  variant?: "compact" | "attachedImage";
   onPreview: (artifact: SessionArtifact) => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
   const previewable = artifact.kind === "image" || artifact.kind === "video";
   const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
+  const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
+  const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
 
   return (
-    <article className="group border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+    <article
+      aria-label={`${artifactKindLabel(artifact)} artifact ${artifact.name}`}
+      className={`group border bg-[var(--color-bg-surface)] ${
+        polishedAttachedImage
+          ? "border-[var(--color-border-strong)]"
+          : "border-[var(--color-border-default)]"
+      }`}
+    >
       <div
-        className={`relative isolate h-32 overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
+        className={`relative isolate ${frameClass} overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
           previewable ? "cursor-zoom-in" : ""
         }`}
         onClick={() => {
@@ -280,7 +299,7 @@ function ArtifactCard({
           <>
             <img
               alt={artifact.name}
-              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              className={`pointer-events-none h-full w-full ${mediaFitClass} transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
               onError={() => onPreviewError(artifact.id)}
               onLoad={() => onPreviewReady(artifact.id)}
               src={artifactHref}
@@ -319,6 +338,17 @@ function ArtifactCard({
           </div>
         ) : null}
 
+        {polishedAttachedImage ? (
+          <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+              Attached Image
+            </span>
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {artifactExtension(artifact.name)}
+            </span>
+          </div>
+        ) : null}
+
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
           {previewable ? (
             <button
@@ -352,9 +382,21 @@ function ArtifactCard({
         >
           {artifact.name}
         </div>
-        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
-          {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
-        </div>
+        {polishedAttachedImage ? (
+          <div className="flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {formatBytes(artifact.size)}
+            </span>
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {formatRelativeTime(artifact.updatedAt)}
+            </span>
+          </div>
+        ) : (
+          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+            {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+            {formatRelativeTime(artifact.updatedAt)}
+          </div>
+        )}
       </div>
     </article>
   );
@@ -1531,6 +1573,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }))
                             }
                             previewState={previewState}
+                            variant={
+                              artifactCategory === "attached" && artifact.kind === "image"
+                                ? "attachedImage"
+                                : "compact"
+                            }
                           />
                         );
                       })}
