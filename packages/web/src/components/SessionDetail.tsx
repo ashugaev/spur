@@ -224,12 +224,7 @@ function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
     return (
       <span aria-hidden="true" className={className}>
         <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
-          <path
-            d="m3.5 8.5 3 3 6-7"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth="2"
-          />
+          <path d="m3.5 8.5 3 3 6-7" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
         </svg>
       </span>
     );
@@ -247,11 +242,7 @@ function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
     return (
       <span aria-hidden="true" className={className}>
         <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
-          <path
-            d="m5 5 6 6M11 5l-6 6"
-            strokeLinecap="round"
-            strokeWidth="2"
-          />
+          <path d="m5 5 6 6M11 5l-6 6" strokeLinecap="round" strokeWidth="2" />
         </svg>
       </span>
     );
@@ -1503,10 +1494,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 <RefreshIcon />
               </ActionIconButton>
             ) : null}
-            <ActionIconButton
-              label="Logs"
-              onClick={() => void openLogs()}
-            >
+            <ActionIconButton label="Logs" onClick={() => void openLogs()}>
               <LogsIcon />
             </ActionIconButton>
           </div>
@@ -1616,7 +1604,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       ))}
                     </div>
                     {session.todo.items.length > 0 ? (
-                      <ol aria-label="Todo list" className="divide-y divide-[var(--color-border-subtle)]">
+                      <ol
+                        aria-label="Todo list"
+                        className="divide-y divide-[var(--color-border-subtle)]"
+                      >
                         {session.todo.items.map((item) => (
                           <li
                             key={`${session.id}:todo:${item.id}`}
