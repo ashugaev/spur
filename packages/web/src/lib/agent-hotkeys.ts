@@ -39,7 +39,13 @@ const COMMON_HOTKEYS: AgentHotkey[] = [
 ];
 
 const CLAUDE_HOTKEYS: AgentHotkey[] = [
-  shortcut("interrupt", "Interrupt / Exit", "Ctrl+C", ctrl("C"), "Stop the current run or clear the input"),
+  shortcut(
+    "interrupt",
+    "Interrupt / Exit",
+    "Ctrl+C",
+    ctrl("C"),
+    "Stop the current run or clear the input",
+  ),
   shortcut("history", "History search", "Ctrl+R", ctrl("R"), "Search previous prompts"),
   command("compact", "/compact", "Summarize chat and free context"),
   command("clear", "/clear", "Start a fresh Claude chat"),
