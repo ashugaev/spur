@@ -192,6 +192,7 @@ const SPAWN_RETRY_ATTEMPTS = 3;
 const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
 const CODEX_SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -816,6 +817,10 @@ export class SessionService {
   private readonly attentionStates = new Map<string, AttentionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
+  private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  private dashboardCacheTimer: NodeJS.Timeout | null = null;
+  private dashboardLoopRunning: boolean = false;
+  private dashboardCacheReady: Promise<void> | null = null;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -848,6 +853,8 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
+    this.dashboardCacheReady = this.runDashboardCacheTick();
+    this.startDashboardCacheLoop();
   }
 
   dispose(): void {
@@ -855,6 +862,7 @@ export class SessionService {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
     }
+    this.stopDashboardCacheLoop();
   }
 
   previewConfigConnect(configPath: string): {
@@ -1021,6 +1029,77 @@ export class SessionService {
       }
     } finally {
       this.attentionMonitorRunning = false;
+    }
+  }
+
+  private startDashboardCacheLoop(): void {
+    if (this.dashboardCacheTimer) {
+      return;
+    }
+    this.dashboardCacheTimer = setInterval(() => {
+      void this.runDashboardCacheTick();
+    }, DASHBOARD_CACHE_INTERVAL_MS);
+    this.dashboardCacheTimer.unref();
+  }
+
+  private stopDashboardCacheLoop(): void {
+    if (this.dashboardCacheTimer) {
+      clearInterval(this.dashboardCacheTimer);
+      this.dashboardCacheTimer = null;
+    }
+  }
+
+  private async runDashboardCacheTick(): Promise<void> {
+    if (this.dashboardLoopRunning) {
+      return;
+    }
+    this.dashboardLoopRunning = true;
+    try {
+      const sessions = listSessions(this.config.dataDir).filter((session) => {
+        if (session.status === "completed") {
+          return true;
+        }
+        return session.status !== "killed" || session.retainInList === true;
+      });
+      const liveIds = new Set(sessions.map((session) => session.id));
+      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
+      for (const view of enriched) {
+        this.dashboardCache.set(view.id, view);
+      }
+      for (const id of this.dashboardCache.keys()) {
+        if (!liveIds.has(id)) {
+          this.dashboardCache.delete(id);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.dashboard_cache.failed", {
+        level: "warn",
+        message: `Dashboard cache tick failed: ${message}`,
+      });
+    } finally {
+      this.dashboardLoopRunning = false;
+    }
+  }
+
+  private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {
+    try {
+      const included =
+        record.status === "completed"
+          ? true
+          : record.status !== "killed" || record.retainInList === true;
+      if (!included) {
+        this.dashboardCache.delete(record.id);
+        return;
+      }
+      this.dashboardCache.set(record.id, await this.enrichDashboard(record));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.dashboard_cache.refresh_failed", {
+        level: "warn",
+        sessionId: record.id,
+        message: `Dashboard cache refresh failed for ${record.id}: ${message}`,
+      });
     }
   }
 
@@ -1500,20 +1579,24 @@ export class SessionService {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
   }): Promise<SessionListView[]> {
+    if (options?.view === "dashboard") {
+      if (this.dashboardCacheReady) {
+        await this.dashboardCacheReady;
+      }
+      return Array.from(this.dashboardCache.values()).filter((view) => {
+        if (view.status === "completed") {
+          return options.includeCompleted === true || view.retainInList === true;
+        }
+        return view.status !== "killed" || view.retainInList === true;
+      });
+    }
     const sessions = listSessions(this.config.dataDir).filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views: SessionListView[] = [];
-    for (const session of sessions) {
-      views.push(
-        options?.view === "dashboard"
-          ? await this.enrichDashboard(session)
-          : await this.enrich(session),
-      );
-    }
+    const views = await Promise.all(sessions.map((session) => this.enrich(session)));
     return views;
   }
 
@@ -2139,6 +2222,7 @@ export class SessionService {
       }
 
       writeSession(this.config.dataDir, updatedRecord);
+      await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -2703,6 +2787,7 @@ export class SessionService {
       }
 
       writeSession(this.config.dataDir, persistedRecord);
+      await this.refreshDashboardCacheEntry(persistedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -3386,6 +3471,7 @@ export class SessionService {
       }
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
@@ -3433,6 +3519,7 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
       sessionId,
@@ -3507,6 +3594,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
       sessionId,
@@ -3737,6 +3825,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, recovered);
+    await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
       level: "info",
       sessionId: session.id,
@@ -3926,6 +4015,7 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
+    await this.refreshDashboardCacheEntry(persistedRestored);
     requestGitHubMergeConflictRestoreReplays(
       this.config,
       persistedRestored.project,

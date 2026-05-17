@@ -265,11 +265,12 @@ export function Dashboard() {
   } = useQuery<SpurSessionsResponse>({
     queryKey: sessionsQueryKey,
     queryFn: async ({ signal }) => {
-      const response = await fetch("/api/sessions", { cache: "no-store", signal });
+      const response = await fetch("/api/sessions", { signal });
       if (!response.ok) throw new Error(`sessions ${response.status}`);
       return (await response.json()) as SpurSessionsResponse;
     },
     refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
     placeholderData: (prev) => prev,
   });
   const rawSessions = data?.sessions ?? [];

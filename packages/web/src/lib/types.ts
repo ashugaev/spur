@@ -115,6 +115,7 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  daemonAlive?: boolean;
 }
 
 export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";

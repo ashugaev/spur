@@ -341,10 +341,7 @@ describe("Dashboard", () => {
     });
 
     expect(screen.getByTestId("project-filter-chevron")).toBeInTheDocument();
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/sessions",
-      expect.objectContaining({ cache: "no-store" }),
-    );
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions", expect.any(Object));
   });
 
   it("preserves the explicit project filter in session links", async () => {
@@ -1938,6 +1935,50 @@ describe("Dashboard", () => {
 
     expect(metadata.title).toBe("feature/test-123");
   });
+
+  it("re-mount within staleTime serves cached sessions without a second fetch", async () => {
+    let sessionFetches = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, language: "" }));
+      }
+      if (url === "/api/sessions") {
+        sessionFetches += 1;
+        return new Response(JSON.stringify(sessionsPayload()), { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, refetchOnWindowFocus: false, staleTime: 5_000 },
+      },
+    });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    const first = rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+    expect(sessionFetches).toBe(1);
+
+    first.unmount();
+
+    rtlRender(<Dashboard />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Fix auth" })).toBeInTheDocument();
+    });
+
+    expect(sessionFetches).toBe(1);
+  });
 });
 
 describe("StatusBar", () => {
@@ -1973,8 +2014,22 @@ describe("StatusBar", () => {
     });
   }
 
+  function renderStatusBar() {
+    const client = createTestQueryClient();
+    client.setQueryData(["sessions"], { sessions: [], projects: [], daemonAlive: true });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    return rtlRender(<StatusBar />, { wrapper: Wrapper });
+  }
+
   it("renders build version without hydration mismatch", () => {
-    const html = renderToString(<StatusBar />);
+    const client = createTestQueryClient();
+    const html = renderToString(
+      <QueryClientProvider client={client}>
+        <StatusBar />
+      </QueryClientProvider>,
+    );
     expect(html).toContain("dev");
   });
 
@@ -1982,14 +2037,13 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
-        daemonAlive: true,
         cpuPercent: 12,
         memoryPercent: 34,
         diskPercent: 56,
       },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     await waitFor(() => {
       expect(
@@ -2008,10 +2062,10 @@ describe("StatusBar", () => {
 
   it("hides resource metrics when runtime resources are unavailable", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     await waitFor(() => {
       expect(screen.queryByText(/CPU \d+%/)).not.toBeInTheDocument();
@@ -2031,14 +2085,13 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
-        daemonAlive: true,
         cpuPercent: 88,
         memoryPercent: 86,
         diskPercent: 91,
       },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     await waitFor(() => {
       expect(
@@ -2058,14 +2111,13 @@ describe("StatusBar", () => {
     mockStatusBarFetch({
       resources: {
         available: true,
-        daemonAlive: true,
         cpuPercent: 86,
         memoryPercent: 48,
         diskPercent: 41,
       },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     await waitFor(() => {
       expect(
@@ -2086,11 +2138,11 @@ describe("StatusBar", () => {
 
   it("shows a healthy GitHub footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
       github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.mouseEnter(githubStatus);
@@ -2102,11 +2154,11 @@ describe("StatusBar", () => {
 
   it("shows a healthy GitLab footer tooltip with the last request timestamp", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
       gitlab: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
     fireEvent.mouseEnter(gitlabStatus);
@@ -2117,11 +2169,11 @@ describe("StatusBar", () => {
 
   it("keeps the healthy GitHub tooltip open when the icon is clicked and closes it on the next click", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
       github: { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     fireEvent.click(githubStatus);
@@ -2137,10 +2189,10 @@ describe("StatusBar", () => {
 
   it("keeps provider statuses icon-only on the footer bar", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = await screen.findByLabelText("GitHub connection healthy");
     const gitlabStatus = await screen.findByLabelText("GitLab connection healthy");
@@ -2152,7 +2204,7 @@ describe("StatusBar", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+        return new Response(JSON.stringify({ available: false }));
       }
       if (url === "/api/github-status") {
         return new Promise<Response>(() => {});
@@ -2163,7 +2215,7 @@ describe("StatusBar", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = screen.getByLabelText("GitHub connection checking");
     fireEvent.mouseEnter(githubStatus);
@@ -2172,11 +2224,11 @@ describe("StatusBar", () => {
 
   it("shows the GitHub error text in the tooltip when the health check fails", async () => {
     mockStatusBarFetch({
-      resources: { available: false, daemonAlive: true },
+      resources: { available: false },
       github: { ok: false, error: "GitHub API 503", requestedAt: "2026-04-28T10:00:00.000Z" },
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = await screen.findByLabelText("GitHub connection error");
     fireEvent.click(githubStatus);
@@ -2187,7 +2239,7 @@ describe("StatusBar", () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
       if (url === "/api/runtime/resources") {
-        return new Response(JSON.stringify({ available: false, daemonAlive: true }));
+        return new Response(JSON.stringify({ available: false }));
       }
       if (url === "/api/github-status") {
         return new Response(JSON.stringify({ error: "upstream unavailable" }), { status: 503 });
@@ -2198,10 +2250,100 @@ describe("StatusBar", () => {
       throw new Error(`Unexpected fetch: ${url}`);
     });
 
-    render(<StatusBar />);
+    renderStatusBar();
 
     const githubStatus = await screen.findByLabelText("GitHub connection error");
     fireEvent.click(githubStatus);
     expect(screen.getByText("GitHub status unavailable (503)")).toBeInTheDocument();
+  });
+
+  it("dedupes resource fetches across instances mounted under a shared QueryClient", async () => {
+    let resourceFetches = 0;
+    vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources") {
+        resourceFetches += 1;
+        return new Response(JSON.stringify({ available: false }));
+      }
+      if (url === "/api/github-status") {
+        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+      }
+      if (url === "/api/gitlab-status") {
+        return new Response(JSON.stringify({ ok: true, requestedAt: "2026-04-28T10:00:00.000Z" }));
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, refetchOnWindowFocus: false, staleTime: 15_000 },
+      },
+    });
+    client.setQueryData(["sessions"], { sessions: [], projects: [], daemonAlive: true });
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    rtlRender(
+      <>
+        <StatusBar />
+        <StatusBar />
+      </>,
+      { wrapper: Wrapper },
+    );
+
+    await waitFor(() => {
+      expect(resourceFetches).toBeGreaterThan(0);
+    });
+    expect(resourceFetches).toBe(1);
+  });
+
+  it("shows daemon offline when the sessions query errors", async () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+    });
+
+    const client = createTestQueryClient();
+    await client
+      .fetchQuery({
+        queryKey: ["sessions"],
+        queryFn: () => Promise.reject(new Error("daemon down")),
+        retry: false,
+      })
+      .catch(() => {});
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    rtlRender(<StatusBar />, { wrapper: Wrapper });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Show aggregated system status" }),
+      ).toHaveTextContent("Critical");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Show aggregated system status" }));
+    expect(screen.getByLabelText("Daemon offline critical")).toBeInTheDocument();
+  });
+
+  it("does not flash daemon offline before the first sessions response", () => {
+    mockStatusBarFetch({
+      resources: { available: false },
+    });
+
+    const client = createTestQueryClient();
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    rtlRender(<StatusBar />, { wrapper: Wrapper });
+
+    expect(screen.getByRole("button", { name: "Show aggregated system status" })).toHaveTextContent(
+      "Unavailable",
+    );
+    expect(
+      screen.getByRole("button", { name: "Show aggregated system status" }),
+    ).not.toHaveTextContent("Critical");
   });
 });
