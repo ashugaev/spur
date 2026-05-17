@@ -135,7 +135,7 @@ describe("SessionRow", () => {
       fetchedAt: 0,
     });
 
-    render(
+    const { rerender } = render(
       <SessionRow
         session={makeSession({
           links: [],
@@ -152,6 +152,29 @@ describe("SessionRow", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Todo progress 2 of 3")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo progress 2 of 3")).toHaveClass(
+      "text-[var(--color-status-attention)]",
+    );
+
+    rerender(
+      <SessionRow
+        session={makeSession({
+          links: [],
+          todo: {
+            status: "completed",
+            total: 3,
+            done: 3,
+            skipped: 0,
+            failed: 0,
+            items: [],
+          },
+        })}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByLabelText("Todo progress 3 of 3")).toHaveClass(
+      "text-[var(--color-status-ready)]",
+    );
   });
 });

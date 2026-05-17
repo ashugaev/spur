@@ -274,6 +274,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 
 - Visible when the session payload includes `todo`
 - Header shows compact todo progress as an icon-only circle
+- Completed todo progress uses ready green; partial progress uses attention yellow
 - Section header is `TODO`
 - Compact summary row shows the same progress circle plus `<resolved>/<total>`
 - Each todo item renders as a flat checklist row with a single-color status checkbox, `#ID`, and task text

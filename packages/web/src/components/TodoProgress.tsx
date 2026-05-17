@@ -13,12 +13,19 @@ export function todoProgressLabel(todo: SpurTodoState): string {
 export function TodoProgress({ todo }: { todo: SpurTodoState }) {
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
-  const progress = todo.total > 0 ? Math.min(getTodoResolvedCount(todo) / todo.total, 1) : 0;
+  const resolved = getTodoResolvedCount(todo);
+  const progress = todo.total > 0 ? Math.min(resolved / todo.total, 1) : 0;
+  const colorClass =
+    todo.status === "completed"
+      ? "text-[var(--color-status-ready)]"
+      : progress > 0
+        ? "text-[var(--color-status-attention)]"
+        : "text-[var(--color-text-secondary)]";
 
   return (
     <span
       aria-label={todoProgressLabel(todo)}
-      className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-[var(--color-text-secondary)]"
+      className={`inline-flex h-4 w-4 shrink-0 items-center justify-center ${colorClass}`}
       role="img"
       title={todoProgressLabel(todo)}
     >
