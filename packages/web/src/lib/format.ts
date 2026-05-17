@@ -56,12 +56,3 @@ export function truncateMiddle(value: string, maxLength = 64): string {
   const keep = Math.max(8, Math.floor((maxLength - 1) / 2));
   return `${value.slice(0, keep)}…${value.slice(-keep)}`;
 }
-
-export function deskAccentCss(deskKey: string): string {
-  let hash = 0;
-  for (let i = 0; i < deskKey.length; i++) {
-    hash = Math.imul(31, hash) + deskKey.charCodeAt(i);
-  }
-  const hue = Math.abs(hash) % 360;
-  return `hsl(${hue} 52% 46%)`;
-}

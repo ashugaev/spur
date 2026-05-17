@@ -136,6 +136,7 @@ import {
   type SessionQueuedMessagesState,
   type SessionState,
   type SessionView,
+  type SessionDeskMember,
   type SessionListView,
   type SessionStateTransition,
   type SessionWorkspaceAccess,
@@ -2305,6 +2306,14 @@ export class SessionService {
         ...(parent.branchSource ? { branchSource: parent.branchSource } : {}),
       },
     };
+  }
+
+  private buildDeskGroupMembers(session: SessionRecord): SessionDeskMember[] {
+    const anchor = session.deskId ?? session.id;
+    return listSessions(this.config.dataDir)
+      .filter((s) => s.project === session.project && (s.deskId ?? s.id) === anchor)
+      .map((s) => ({ id: s.id, agent: s.agent }))
+      .sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
@@ -4900,6 +4909,7 @@ export class SessionService {
     const queuedMessagesView = displayQueuedMessages(session);
     const workspaceAccess = buildWorkspaceAccess(session, project, workspacePresent);
     const displaySlots = deriveSessionSlots(session);
+    const deskGroupMembers = this.buildDeskGroupMembers(session);
 
     return {
       ...session,
@@ -4915,6 +4925,7 @@ export class SessionService {
       sidecars,
       ...(workspaceAccess ? { workspaceAccess } : {}),
       ...(queuedMessagesView ? { queuedMessages: queuedMessagesView } : {}),
+      ...(deskGroupMembers.length > 1 ? { deskGroupMembers } : {}),
     };
   }
 

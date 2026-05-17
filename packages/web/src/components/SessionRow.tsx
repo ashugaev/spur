@@ -40,12 +40,12 @@ function IconButton({
 
 interface SessionRowProps {
   projectFilterId?: string;
-  deskAccent?: string;
+  deskPeerTotal?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
 }
 
-export function SessionRow({ projectFilterId, deskAccent, session, onOpenTerminal }: SessionRowProps) {
+export function SessionRow({ projectFilterId, deskPeerTotal, session, onOpenTerminal }: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -62,12 +62,7 @@ export function SessionRow({ projectFilterId, deskAccent, session, onOpenTermina
   const [merging, setMerging] = useState(false);
 
   return (
-    <div
-      className={`data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5 ${
-        deskAccent ? "border-l-[3px]" : ""
-      }`}
-      style={deskAccent ? { borderLeftColor: deskAccent } : undefined}
-    >
+    <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
       <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
         {session.projectName}
       </span>
@@ -82,6 +77,15 @@ export function SessionRow({ projectFilterId, deskAccent, session, onOpenTermina
       >
         {title}
       </Link>
+
+      {deskPeerTotal !== undefined && deskPeerTotal > 1 ? (
+        <span
+          className="hidden shrink-0 font-mono text-[10px] leading-none text-[var(--color-text-tertiary)] sm:inline"
+          title="Sessions sharing this checkout"
+        >
+          ×{deskPeerTotal}
+        </span>
+      ) : null}
 
       {trackerLink ? (
         <SessionLinkBadge className="hidden sm:inline-flex" link={trackerLink} variant="row" />

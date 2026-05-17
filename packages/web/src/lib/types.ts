@@ -56,6 +56,11 @@ export interface SpurSessionWorkspaceAccess {
   }>;
 }
 
+export interface SessionDeskMember {
+  id: string;
+  agent: AgentName;
+}
+
 export interface SpurSessionView {
   id: string;
   project: string;
@@ -87,6 +92,7 @@ export interface SpurSessionView {
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
+  deskGroupMembers?: SessionDeskMember[];
   error?: string;
 }
 
@@ -151,6 +157,7 @@ export interface DashboardSession {
   workspaceAccess?: SpurSessionWorkspaceAccess;
   deskId?: string;
   deskKey: string;
+  deskGroupMembers?: SessionDeskMember[];
   error?: string;
 }
 
@@ -193,6 +200,7 @@ export function toDashboardSession(
     workspaceAccess: session.workspaceAccess,
     deskKey: session.deskId?.trim() || session.id,
     deskId: session.deskId,
+    deskGroupMembers: session.deskGroupMembers,
     error: session.error,
   };
 }

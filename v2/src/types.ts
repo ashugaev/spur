@@ -315,6 +315,11 @@ export interface ServiceInstanceRecord {
   error?: string;
 }
 
+export interface SessionDeskMember {
+  id: string;
+  agent: AgentName;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -325,6 +330,7 @@ export interface SessionView extends SessionRecord {
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
   workspaceAccess?: SessionWorkspaceAccess;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export interface DashboardSessionView extends SessionRecord {

@@ -1207,6 +1207,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
+            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+              <nav
+                aria-label="Checkout group"
+                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+              >
+                {session.deskGroupMembers.map((m) => {
+                  const selected = m.id === session.id;
+                  return (
+                    <Link
+                      key={m.id}
+                      aria-current={selected ? "page" : undefined}
+                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                        selected
+                          ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
+                          : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                      }`}
+                      href={buildSessionPath(m.id, projectId)}
+                    >
+                      {m.agent} · {truncateMiddle(m.id, 18)}
+                    </Link>
+                  );
+                })}
+              </nav>
+            ) : null}
+
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {displayState ? <ActivityDot activity={displayState} /> : null}
               {session.branch ? (
