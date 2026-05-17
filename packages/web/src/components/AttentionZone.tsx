@@ -1,12 +1,14 @@
 "use client";
 
 import { SessionRow } from "@/components/SessionRow";
+import { deskAccentCss } from "@/lib/format";
 import type { AttentionLevel, DashboardSession } from "@/lib/types";
 
 interface AttentionZoneProps {
   level: AttentionLevel;
   projectFilterId?: string;
   sessions: DashboardSession[];
+  deskPeerCount?: ReadonlyMap<string, number>;
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
@@ -29,6 +31,7 @@ export function AttentionZone({
   level,
   projectFilterId,
   sessions,
+  deskPeerCount,
   collapsed,
   onToggle,
   onOpenTerminal,
@@ -56,6 +59,11 @@ export function AttentionZone({
   const rows = sessions.map((session) => (
     <SessionRow
       key={session.id}
+      deskAccent={
+        deskPeerCount && (deskPeerCount.get(session.deskKey) ?? 1) > 1
+          ? deskAccentCss(session.deskKey)
+          : undefined
+      }
       projectFilterId={projectFilterId}
       session={session}
       onOpenTerminal={onOpenTerminal}

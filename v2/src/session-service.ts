@@ -727,6 +727,7 @@ interface PreparedSpawn {
   resolvedBranch?: ResolvedSpawnBranch;
   placeholder: SessionRecord;
   sessionToolDir: string;
+  reuseSharedCheckout?: boolean;
 }
 
 function resolveRespawnRequest(
@@ -1770,6 +1771,7 @@ export class SessionService {
     let planMode: boolean;
     let preflightOutcome: "branch" | "defer" | undefined;
     let preflightBranch: string | undefined;
+    let allocatedNewWorktree = false;
     try {
       project = this.getProject(request.project);
       ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
@@ -1782,12 +1784,19 @@ export class SessionService {
 
       const overrides = parseSpawnOverrides(request.overrides, "overrides");
       worktree = resolveSpawnWorktree(project, overrides);
+      const reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
-      if (!effectiveBranch && worktree && project.preflight && prompt) {
+      if (
+        !reuseCtx &&
+        !effectiveBranch &&
+        worktree &&
+        project.preflight &&
+        prompt
+      ) {
         stage = "preflight";
         const preflight = await runSpawnPreflight({
           agent,
@@ -1811,7 +1820,7 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
-      if (preflightOutcome) {
+      if (!reuseCtx && preflightOutcome) {
         this.logEvent("session.preflight.completed", {
           level: "info",
           sessionId,
@@ -1827,38 +1836,42 @@ export class SessionService {
           },
         });
       }
-      resolvedBranch = await resolveSpawnBranch({
-        repoPath: project.path,
-        requestBranch: effectiveBranch,
-        ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
-        worktree,
-        fallbackBranch: sessionId,
-      });
-      if (worktree && resolvedBranch.branch !== sessionId) {
-        const branchConflictPath = await findWorktreePathForBranch(
-          project.path,
-          resolvedBranch.branch,
-        );
-        if (branchConflictPath) {
-          if (resolvedBranch.branchSource === "explicit") {
-            throw new Error(
-              `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
-            );
+      if (!reuseCtx) {
+        resolvedBranch = await resolveSpawnBranch({
+          repoPath: project.path,
+          requestBranch: effectiveBranch,
+          ...(effectiveBranchSource ? { requestBranchSource: effectiveBranchSource } : {}),
+          worktree,
+          fallbackBranch: sessionId,
+        });
+        if (worktree && resolvedBranch.branch !== sessionId) {
+          const branchConflictPath = await findWorktreePathForBranch(
+            project.path,
+            resolvedBranch.branch,
+          );
+          if (branchConflictPath) {
+            if (resolvedBranch.branchSource === "explicit") {
+              throw new Error(
+                `branch "${resolvedBranch.branch}" is already checked out in worktree ${branchConflictPath}`,
+              );
+            }
+            this.logEvent("session.spawn.branch_conflict", {
+              level: "warn",
+              sessionId,
+              projectId: request.project,
+              message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
+              details: {
+                occupiedBranch: resolvedBranch.branch,
+                conflictingWorktreePath: branchConflictPath,
+                fallbackBranch: sessionId,
+                branchSource: resolvedBranch.branchSource ?? null,
+              },
+            });
+            resolvedBranch = { branch: sessionId };
           }
-          this.logEvent("session.spawn.branch_conflict", {
-            level: "warn",
-            sessionId,
-            projectId: request.project,
-            message: `Branch ${resolvedBranch.branch} is already checked out; falling back to ${sessionId}`,
-            details: {
-              occupiedBranch: resolvedBranch.branch,
-              conflictingWorktreePath: branchConflictPath,
-              fallbackBranch: sessionId,
-              branchSource: resolvedBranch.branchSource ?? null,
-            },
-          });
-          resolvedBranch = { branch: sessionId };
         }
+      } else {
+        resolvedBranch = reuseCtx.resolvedBranch;
       }
       const tmuxSession = sessionId;
       createdAt = nowIso();
@@ -1874,6 +1887,7 @@ export class SessionService {
           worktree,
           defaultBranch,
           branchSource: resolvedBranch.branchSource ?? null,
+          ...(reuseCtx ? { reuseWorkspaceSessionId: request.reuseWorkspaceSessionId ?? null } : {}),
         },
       });
 
@@ -1886,12 +1900,13 @@ export class SessionService {
         branch: resolvedBranch.branch,
         ...(resolvedBranch.branchSource ? { branchSource: resolvedBranch.branchSource } : {}),
         worktree,
-        worktreePath: worktree ? "" : project.path,
+        worktreePath: reuseCtx ? reuseCtx.workspacePath : worktree ? "" : project.path,
         tmuxSession,
         launchCommand: "",
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
@@ -1906,25 +1921,40 @@ export class SessionService {
 
       if (worktree) {
         stage = "worktree.create";
-        workspacePath = await createWorktree({
-          repoPath: project.path,
-          worktreeBaseDir: this.config.worktreeDir,
-          projectId: request.project,
-          sessionId,
-          defaultBranch,
-          branch: resolvedBranch.branch,
-          symlinks: project.symlinks,
-        });
-        this.logEvent("session.spawn.worktree_created", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Created worktree for ${sessionId}`,
-          details: {
-            worktreePath: workspacePath,
-            symlinkCount: project.symlinks.length,
-          },
-        });
+        if (reuseCtx) {
+          workspacePath = reuseCtx.workspacePath;
+          this.logEvent("session.spawn.workspace_reused", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Reused workspace path for ${sessionId}`,
+            details: {
+              worktreePath: workspacePath,
+              sourceSessionId: request.reuseWorkspaceSessionId ?? null,
+            },
+          });
+        } else {
+          workspacePath = await createWorktree({
+            repoPath: project.path,
+            worktreeBaseDir: this.config.worktreeDir,
+            projectId: request.project,
+            sessionId,
+            defaultBranch,
+            branch: resolvedBranch.branch,
+            symlinks: project.symlinks,
+          });
+          allocatedNewWorktree = true;
+          this.logEvent("session.spawn.worktree_created", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Created worktree for ${sessionId}`,
+            details: {
+              worktreePath: workspacePath,
+              symlinkCount: project.symlinks.length,
+            },
+          });
+        }
       } else {
         this.logEvent("session.spawn.shared_workspace", {
           level: "info",
@@ -2138,7 +2168,7 @@ export class SessionService {
           await killSidecarTmux(sessionId, scName).catch(() => {});
         }
         this.removeSessionArtifacts(sessionId, { preserveStartup: true });
-        if (worktree && workspacePath) {
+        if (allocatedNewWorktree && workspacePath) {
           await removeWorktree(project.path, workspacePath);
         }
 
@@ -2223,9 +2253,58 @@ export class SessionService {
     } else {
       this.resetSpawnAttemptArtifacts(prepared.sessionId);
     }
-    if (prepared.worktree && workspacePath) {
+    if (prepared.worktree && workspacePath && !prepared.reuseSharedCheckout) {
       await removeWorktree(prepared.project.path, workspacePath);
     }
+  }
+
+  private resolveWorkspaceReuseContext(
+    request: SpawnSessionRequest,
+    project: ProjectConfig,
+    worktree: boolean,
+  ): {
+    deskId: string;
+    workspacePath: string;
+    worktree: boolean;
+    resolvedBranch: ResolvedSpawnBranch;
+  } | null {
+    const raw = request.reuseWorkspaceSessionId?.trim();
+    if (!raw) return null;
+
+    const parent = readSession(this.config.dataDir, raw);
+    if (!parent) {
+      throw new Error(`reuseWorkspaceSessionId: unknown session ${raw}`);
+    }
+    if (parent.project !== request.project) {
+      throw new Error("reuseWorkspaceSessionId: project mismatch");
+    }
+
+    if (worktree !== parent.worktree) {
+      throw new Error("reuseWorkspaceSessionId: overrides.worktree conflicts with source session");
+    }
+
+    const path = parent.worktreePath.trim();
+    if (!path) {
+      throw new Error("reuseWorkspaceSessionId: empty worktreePath on source");
+    }
+    if (!workspaceExists(path)) {
+      throw new Error(`reuseWorkspaceSessionId: workspace path not present (${path})`);
+    }
+
+    const reqBranch = request.branch?.trim();
+    if (reqBranch && reqBranch !== parent.branch) {
+      throw new Error("reuseWorkspaceSessionId: branch conflicts with shared checkout");
+    }
+
+    return {
+      deskId: parent.deskId ?? parent.id,
+      workspacePath: tryRealpath(path),
+      worktree: parent.worktree,
+      resolvedBranch: {
+        branch: parent.branch,
+        ...(parent.branchSource ? { branchSource: parent.branchSource } : {}),
+      },
+    };
   }
 
   private async prepareBackgroundSpawn(request: SpawnSessionRequest): Promise<PreparedSpawn> {
@@ -2241,6 +2320,12 @@ export class SessionService {
     let planMode: boolean;
     let resolvedBranch: ResolvedSpawnBranch | undefined;
     let explicitBranch: string | undefined;
+    let reuseCtx: {
+      deskId: string;
+      workspacePath: string;
+      worktree: boolean;
+      resolvedBranch: ResolvedSpawnBranch;
+    } | null = null;
     try {
       project = this.getProject(request.project);
       ({ prompt, steps, planMode } = normalizeSpawnRequest(request, project.spawn?.steps));
@@ -2254,6 +2339,7 @@ export class SessionService {
 
       const overrides = parseSpawnOverrides(request.overrides, "overrides");
       worktree = resolveSpawnWorktree(project, overrides);
+      reuseCtx = this.resolveWorkspaceReuseContext(request, project, worktree);
       const defaultBranch = resolveSpawnDefaultBranch({ project, worktree, overrides });
       agent = parseAgentName(request.agent ?? project.defaultAgent ?? this.config.defaultAgent);
       sessionId = await reserveNextSessionId(
@@ -2261,7 +2347,9 @@ export class SessionService {
         request.project,
         project.sessionPrefix,
       );
-      if (!worktree) {
+      if (reuseCtx) {
+        resolvedBranch = reuseCtx.resolvedBranch;
+      } else if (!worktree) {
         stage = "branch.resolve";
         resolvedBranch = await resolveSpawnBranch({
           repoPath: project.path,
@@ -2275,9 +2363,11 @@ export class SessionService {
       const placeholderBranch = resolvedBranch?.branch ?? explicitBranch ?? sessionId;
       const placeholderBranchSource =
         resolvedBranch?.branchSource ?? (worktree && explicitBranch ? "explicit" : undefined);
-      const placeholderWorktreePath = worktree
-        ? join(this.config.worktreeDir, request.project, sessionId)
-        : project.path;
+      const placeholderWorktreePath = reuseCtx
+        ? reuseCtx.workspacePath
+        : worktree
+          ? join(this.config.worktreeDir, request.project, sessionId)
+          : project.path;
       const placeholder: SessionRecord = {
         id: sessionId,
         project: request.project,
@@ -2293,6 +2383,7 @@ export class SessionService {
         status: "spawning",
         createdAt,
         updatedAt: createdAt,
+        ...(reuseCtx ? { deskId: reuseCtx.deskId } : {}),
         ...(Object.keys(project.sidecars).length > 0
           ? { sidecarNames: Object.keys(project.sidecars) }
           : {}),
@@ -2312,6 +2403,7 @@ export class SessionService {
           defaultBranch,
           branchSource: placeholderBranchSource ?? null,
           mode: "background",
+          ...(reuseCtx ? { reuseWorkspaceSessionId: request.reuseWorkspaceSessionId ?? null } : {}),
         },
       });
 
@@ -2328,6 +2420,7 @@ export class SessionService {
         ...(resolvedBranch ? { resolvedBranch } : {}),
         placeholder,
         sessionToolDir: this.prepareSessionTools(sessionId, agent),
+        ...(reuseCtx ? { reuseSharedCheckout: true as const } : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2345,9 +2438,11 @@ export class SessionService {
           branch: resolvedBranch?.branch ?? explicitBranch ?? sessionId,
           ...(erroredBranchSource ? { branchSource: erroredBranchSource } : {}),
           worktree,
-          worktreePath: worktree
-            ? join(this.config.worktreeDir, request.project, sessionId)
-            : project.path,
+          worktreePath: reuseCtx
+            ? reuseCtx.workspacePath
+            : worktree
+              ? join(this.config.worktreeDir, request.project, sessionId)
+              : project.path,
           tmuxSession: sessionId,
           launchCommand: "",
           status: "errored",
@@ -2471,26 +2566,41 @@ export class SessionService {
 
       stage = attempt > 1 ? `retry.${attempt}.worktree.create` : "worktree.create";
       if (prepared.worktree) {
-        workspacePath = await createWorktree({
-          repoPath: project.path,
-          worktreeBaseDir: this.config.worktreeDir,
-          projectId: request.project,
-          sessionId,
-          defaultBranch: prepared.defaultBranch,
-          branch: resolvedBranch.branch,
-          symlinks: project.symlinks,
-        });
-        this.logEvent("session.spawn.worktree_created", {
-          level: "info",
-          sessionId,
-          projectId: request.project,
-          message: `Created worktree for ${sessionId}`,
-          details: {
-            worktreePath: workspacePath,
-            symlinkCount: project.symlinks.length,
-            attempt,
-          },
-        });
+        if (prepared.reuseSharedCheckout) {
+          workspacePath = prepared.placeholder.worktreePath;
+          this.logEvent("session.spawn.workspace_reused", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Reused workspace path for ${sessionId}`,
+            details: {
+              worktreePath: workspacePath,
+              sourceSessionId: request.reuseWorkspaceSessionId ?? null,
+              attempt,
+            },
+          });
+        } else {
+          workspacePath = await createWorktree({
+            repoPath: project.path,
+            worktreeBaseDir: this.config.worktreeDir,
+            projectId: request.project,
+            sessionId,
+            defaultBranch: prepared.defaultBranch,
+            branch: resolvedBranch.branch,
+            symlinks: project.symlinks,
+          });
+          this.logEvent("session.spawn.worktree_created", {
+            level: "info",
+            sessionId,
+            projectId: request.project,
+            message: `Created worktree for ${sessionId}`,
+            details: {
+              worktreePath: workspacePath,
+              symlinkCount: project.symlinks.length,
+              attempt,
+            },
+          });
+        }
       } else {
         this.logEvent("session.spawn.shared_workspace", {
           level: "info",

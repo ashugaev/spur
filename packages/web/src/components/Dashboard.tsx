@@ -339,6 +339,14 @@ export function Dashboard() {
     );
   }, [projectSessions, searchQuery]);
 
+  const deskPeerCount = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of sessions) {
+      counts.set(s.deskKey, (counts.get(s.deskKey) ?? 0) + 1);
+    }
+    return counts;
+  }, [sessions]);
+
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
@@ -350,6 +358,14 @@ export function Dashboard() {
 
     for (const session of sessions) {
       lanes[getAttentionLevel(session)].push(session);
+    }
+
+    for (const level of LANE_ORDER) {
+      lanes[level].sort((a, b) => {
+        const byDesk = a.deskKey.localeCompare(b.deskKey, undefined, { sensitivity: "base" });
+        if (byDesk !== 0) return byDesk;
+        return a.id.localeCompare(b.id);
+      });
     }
 
     return lanes;
@@ -952,6 +968,7 @@ export function Dashboard() {
               <AttentionZone
                 key={level}
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
+                deskPeerCount={deskPeerCount}
                 level={level}
                 onOpenTerminal={openTerminal}
                 projectFilterId={projectId || undefined}

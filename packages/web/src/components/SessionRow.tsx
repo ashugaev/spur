@@ -40,11 +40,12 @@ function IconButton({
 
 interface SessionRowProps {
   projectFilterId?: string;
+  deskAccent?: string;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
 }
 
-export function SessionRow({ projectFilterId, session, onOpenTerminal }: SessionRowProps) {
+export function SessionRow({ projectFilterId, deskAccent, session, onOpenTerminal }: SessionRowProps) {
   const title = getSessionTitle(session);
   const canAttach =
     session.runtimeAlive && !isTerminalSession(session) && Boolean(session.tmuxSession);
@@ -61,7 +62,12 @@ export function SessionRow({ projectFilterId, session, onOpenTerminal }: Session
   const [merging, setMerging] = useState(false);
 
   return (
-    <div className="data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5">
+    <div
+      className={`data-row group flex items-center gap-2 border-b border-[var(--color-border-subtle)] px-2 py-2 transition-colors sm:gap-3 sm:px-2.5 ${
+        deskAccent ? "border-l-[3px]" : ""
+      }`}
+      style={deskAccent ? { borderLeftColor: deskAccent } : undefined}
+    >
       <span className="hidden w-[7rem] shrink-0 truncate font-semibold uppercase text-[var(--color-text-primary)] sm:inline">
         {session.projectName}
       </span>

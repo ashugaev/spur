@@ -275,6 +275,7 @@ export interface SessionQueuedMessagesState {
 export interface SessionRecord {
   id: string;
   project: string;
+  deskId?: string;
   agent: AgentName;
   planMode?: boolean;
   agentSessionId?: string;
@@ -374,6 +375,7 @@ export interface SpawnSessionRequest {
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
+  reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
 }

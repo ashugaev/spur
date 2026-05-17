@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
 import { SessionLinkBadge } from "@/components/SessionLinkBadge";
@@ -698,6 +699,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnPrompt, setRespawnPrompt] = useState("");
   const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
+  const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
+  const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawning, setDeskSpawning] = useState(false);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [artifactPreviewStates, setArtifactPreviewStates] = useState<
     Record<string, ArtifactPreviewState>
@@ -872,6 +877,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const openDeskSpawn = () => {
+    if (!session) return;
+    setDeskSpawnAgent(session.agent);
+    setDeskSpawnPrompt("");
+    setDeskSpawnOpen(true);
+  };
+
+  const handleDeskSpawn = async () => {
+    if (!session || deskSpawning) return;
+    const nextPrompt = deskSpawnPrompt.trim();
+    if (!nextPrompt) return;
+    setDeskSpawning(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: session.projectId,
+          prompt: nextPrompt,
+          agent: deskSpawnAgent,
+          reuseWorkspaceSessionId: session.id,
+          overrides: { worktree: session.worktree },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to spawn desk agent"));
+      }
+      const created = (await response.json()) as SpurSessionView;
+      setDeskSpawnOpen(false);
+      router.push(buildSessionPath(created.id, projectId));
+    } catch (deskError) {
+      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+    } finally {
+      setDeskSpawning(false);
     }
   };
 
@@ -1067,6 +1110,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
+  const canDeskSpawn = Boolean(
+    session && session.workspaceExists && !isTerminalSession(session),
+  );
+
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
@@ -1192,6 +1239,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onClick={() => syncTerminalFilter(session.id)}
               >
                 Terminal
+              </button>
+            ) : null}
+            {canDeskSpawn ? (
+              <button
+                type="button"
+                disabled={busyAction !== null || deskSpawning}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openDeskSpawn}
+                title="Opens a second agent in this checkout directory with the same branch"
+              >
+                Desk agent
               </button>
             ) : null}
             {canPause(session) ? (
@@ -1871,6 +1929,75 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       type="button"
                     >
                       {busyAction === "respawn" ? "Respawning..." : "Respawn"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {deskSpawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Desk agent
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={deskSpawning}
+                    onClick={() => setDeskSpawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <label className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Agent
+                    <select
+                      aria-label="Desk spawn agent"
+                      className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)]"
+                      disabled={deskSpawning}
+                      onChange={(event) => setDeskSpawnAgent(event.target.value as AgentName)}
+                      value={deskSpawnAgent}
+                    >
+                      {AGENT_OPTIONS.map((agent) => (
+                        <option key={agent} value={agent}>
+                          {getAgentDisplayName(agent)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <textarea
+                    aria-label="Desk agent prompt"
+                    className="min-h-[10rem] w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-mono text-sm text-[var(--color-text-primary)]"
+                    disabled={deskSpawning}
+                    onChange={(event) => setDeskSpawnPrompt(event.target.value)}
+                    placeholder="First message"
+                    rows={10}
+                    value={deskSpawnPrompt}
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      disabled={deskSpawning}
+                      onClick={() => setDeskSpawnOpen(false)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={deskSpawning || !deskSpawnPrompt.trim()}
+                      onClick={() => void handleDeskSpawn()}
+                      type="button"
+                    >
+                      {deskSpawning ? "Spawning..." : "Spawn"}
                     </button>
                   </div>
                 </div>

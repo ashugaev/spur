@@ -425,6 +425,38 @@ describe("Spur web API routes", () => {
     );
   });
 
+  it("POST /api/spawn forwards reuseWorkspaceSessionId with overrides", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture());
+
+    const response = await spawnSession(
+      new NextRequest("http://localhost:3000/api/spawn", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: "api",
+          prompt: "Pair task",
+          agent: "claude",
+          reuseWorkspaceSessionId: " sess-a ",
+          overrides: { worktree: true },
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(mockedSpurRequestJson).toHaveBeenCalledTimes(1);
+    expect(mockedSpurRequestJson.mock.calls[0][0]).toBe("/sessions/background");
+    const [, init] = mockedSpurRequestJson.mock.calls[0] as unknown as [
+      string,
+      { body?: string },
+    ];
+    expect(JSON.parse(init.body ?? "{}")).toEqual({
+      project: "api",
+      prompt: "Pair task",
+      agent: "claude",
+      overrides: { worktree: true },
+      reuseWorkspaceSessionId: "sess-a",
+    });
+  });
+
   it("POST /api/spawn forwards attachments", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture());
 

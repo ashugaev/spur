@@ -86,6 +86,7 @@ export interface SpurSessionView {
   };
   hasServiceIssues?: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  deskId?: string;
   error?: string;
 }
 
@@ -148,6 +149,8 @@ export interface DashboardSession {
   links: SpurSessionLink[];
   hasServiceIssues: boolean;
   workspaceAccess?: SpurSessionWorkspaceAccess;
+  deskId?: string;
+  deskKey: string;
   error?: string;
 }
 
@@ -188,6 +191,8 @@ export function toDashboardSession(
     links,
     hasServiceIssues: session.hasServiceIssues === true,
     workspaceAccess: session.workspaceAccess,
+    deskKey: session.deskId?.trim() || session.id,
+    deskId: session.deskId,
     error: session.error,
   };
 }
