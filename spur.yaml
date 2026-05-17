@@ -1,9 +1,20 @@
 projects:
   sp:
-    path: /home/alek/projects/ao
+    path: ~/projects/spur
     defaultBranch: main
     sessionPrefix: spur
-    symlinks: [.env]
+    symlinks:
+      - .env
+      - node_modules
+      - v2/node_modules
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: "cursor --remote ssh-remote+${SPUR_SIDECAR_PUBLIC_HOST} ${worktreePathShell}"
+        - label: Web IDE
+          kind: link
+          value: "${SPUR_VSCODE_WEB_URL}/?folder=${worktreePathUrl}"
     codexArgs:
       - -c
       - 'model_reasoning_effort="high"'
@@ -29,19 +40,25 @@ projects:
             env: SPUR_RESERVED_PORT_UI
             start: 5600
             end: 5699
+            url: SPUR_SIDECAR_PUBLIC_URL
           terminal:
             env: SPUR_RESERVED_PORT_TERMINAL
             start: 15600
             end: 15699
         env:
-          SPUR_SIDECAR_PUBLIC_HOST: openclaw-dev.tail90e846.ts.net
-          SPUR_SIDECAR_PUBLIC_SCHEME: http
+          SPUR_SIDECAR_PUBLIC_HOST: SPUR_SIDECAR_PUBLIC_HOST
+          SPUR_SIDECAR_PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
     spawn:
       steps:
         - "run $manager"
     sources:
       gh:
         type: github
+      gh-pr-review:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        query: "is:pr is:open repo:example-org/example-repo"
     triggers:
       gh-changes-requested:
         source: gh
@@ -57,9 +74,16 @@ projects:
         source: gh
         event: github:comment
         send:
-          prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+          prompt: "/pr-comments-fix"
       gh-merge-conflict:
         source: gh
         event: github:merge_conflict
         send:
           prompt: "поправь конфликты и подпуш свежую ветку к себе и подпуш все."
+      gh-pr-review-spawn:
+        source: gh-pr-review
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "/code-review {{url}}"
+          autoComplete: true

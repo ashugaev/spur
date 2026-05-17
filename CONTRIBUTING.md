@@ -6,15 +6,15 @@ This repo accepts changes in three places only:
 - `packages/web/` for the optional UI over Spur's API
 - root docs/scripts/workflows that support those two surfaces
 
-Do not reintroduce AO/v1 backends, plugin trees, example config sets, mobile clients, or parallel documentation.
-
 ## Setup
 
 ```bash
 bash scripts/setup.sh
 ```
 
-## Required Checks
+Bootstrap details live in [SETUP.md](SETUP.md).
+
+## PR Checks
 
 Before opening or updating a PR:
 

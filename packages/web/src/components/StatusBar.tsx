@@ -1,144 +1,82 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  CiStatusDot,
-  fetchPrInfo,
-  GithubIcon,
-  prStateColor,
-  useGitError,
-  type CiStatus,
-  type PrInfo,
-} from "@/lib/link-icons";
-import type { SpurSessionView } from "@/lib/types";
+import { type FocusEvent, useEffect, useRef, useState } from "react";
+import { skipToken, useQuery } from "@tanstack/react-query";
+import { GithubIcon, GitlabIcon } from "@/lib/link-icons";
+import { formatAbsoluteTime } from "@/lib/format";
+import type { GitHubStatusResponse } from "@/lib/github-status";
+import type { GitLabStatusResponse } from "@/lib/gitlab-status";
+import type { PlatformStatusResponse } from "@/lib/platform-status";
+import type { ResourceSnapshot } from "@/lib/resource-monitoring";
+import type { SpurSessionsResponse } from "@/lib/types";
 
-const AGGREGATE_POLL_MS = 120_000;
 const RESOURCE_POLL_MS = 15_000;
 const CPU_RAM_ATTENTION_THRESHOLD = 85;
 const DISK_ERROR_THRESHOLD = 85;
+const PLATFORM_STATUS_POLL_MS = 120_000;
 
 type HealthLevel = "ready" | "attention" | "error" | "unknown";
+type PlatformKind = "github" | "gitlab";
 
-type ResourceMetrics =
-  | {
-      available: false;
-      daemonAlive: boolean;
-    }
-  | {
-      available: true;
-      daemonAlive: boolean;
-      cpuPercent: number;
-      memoryPercent: number;
-      diskPercent: number;
-    };
-
-interface PrEntry {
-  url: string;
-  label: string;
-  info: PrInfo;
-}
-
-function parsePrLabel(url: string): string | null {
-  const m = url.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  return m ? `${m[1]}/${m[2]}#${m[3]}` : null;
-}
-
-function worstStatus(entries: PrEntry[]): CiStatus {
-  let worst: CiStatus = null;
-  for (const e of entries) {
-    if (e.info.ciStatus === "failure") return "failure";
-    if (e.info.ciStatus === "pending") worst = "pending";
-    if (e.info.ciStatus === "success" && worst === null) worst = "success";
-  }
-  return worst;
-}
-
-function useAggregatePr(sessions: SpurSessionView[]) {
-  const prUrls = useMemo(() => {
-    const urls = new Set<string>();
-    for (const s of sessions) {
-      for (const link of s.slots?.links ?? []) {
-        if (link.label === "pr") urls.add(link.url);
+function usePlatformStatus<TStatus extends PlatformStatusResponse>(
+  path: string,
+  unavailableMessage: string,
+) {
+  const { data } = useQuery<TStatus>({
+    queryKey: ["platform-status", path],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(path, { signal });
+      if (!response.ok) {
+        return {
+          ok: false,
+          error: `${unavailableMessage} (${response.status})`,
+          requestedAt: null,
+        } as TStatus;
       }
-    }
-    return [...urls];
-  }, [sessions]);
+      return (await response.json()) as TStatus;
+    },
+    refetchInterval: PLATFORM_STATUS_POLL_MS,
+    refetchIntervalInBackground: false,
+    staleTime: PLATFORM_STATUS_POLL_MS,
+  });
 
-  const [entries, setEntries] = useState<PrEntry[]>([]);
-
-  useEffect(() => {
-    if (prUrls.length === 0) {
-      setEntries([]);
-      return;
-    }
-
-    let cancelled = false;
-
-    const run = async () => {
-      const results: PrEntry[] = [];
-      for (const url of prUrls) {
-        const label = parsePrLabel(url);
-        if (!label) continue;
-        const info = await fetchPrInfo(url);
-        results.push({ url, label, info });
-      }
-      if (!cancelled) setEntries(results);
-    };
-
-    void run();
-    const timer = setInterval(() => void run(), AGGREGATE_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [prUrls]);
-
-  return entries;
+  return data ?? null;
 }
 
-function useResourceMetrics() {
-  const [metrics, setMetrics] = useState<ResourceMetrics>({ available: false, daemonAlive: false });
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async () => {
-      try {
-        const response = await fetch("/api/runtime/resources", { cache: "no-store" });
-        if (!response.ok) {
-          if (!cancelled) setMetrics({ available: false, daemonAlive: false });
-          return;
-        }
-        const payload = (await response.json()) as ResourceMetrics;
-        if (!cancelled) {
-          setMetrics(
-            payload.available &&
-              typeof payload.daemonAlive === "boolean" &&
-              Number.isFinite(payload.cpuPercent) &&
-              Number.isFinite(payload.memoryPercent) &&
-              Number.isFinite(payload.diskPercent)
-              ? payload
-              : {
-                  available: false,
-                  daemonAlive:
-                    typeof payload.daemonAlive === "boolean" ? payload.daemonAlive : false,
-                },
-          );
-        }
-      } catch {
-        if (!cancelled) setMetrics({ available: false, daemonAlive: false });
+function useResourceMetrics(): ResourceSnapshot {
+  const { data } = useQuery<ResourceSnapshot>({
+    queryKey: ["runtime", "resources"],
+    queryFn: async ({ signal }) => {
+      const response = await fetch("/api/runtime/resources", { signal });
+      if (!response.ok) return { available: false };
+      const payload = (await response.json()) as ResourceSnapshot;
+      if (
+        payload.available &&
+        Number.isFinite(payload.cpuPercent) &&
+        Number.isFinite(payload.memoryPercent) &&
+        Number.isFinite(payload.diskPercent)
+      ) {
+        return payload;
       }
-    };
+      return { available: false };
+    },
+    refetchInterval: RESOURCE_POLL_MS,
+    refetchIntervalInBackground: true,
+    staleTime: RESOURCE_POLL_MS,
+  });
 
-    void run();
-    const timer = setInterval(() => void run(), RESOURCE_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
+  return data ?? { available: false };
+}
 
-  return metrics;
+function useDaemonAlive(): boolean | undefined {
+  const { data, status, isError } = useQuery<SpurSessionsResponse>({
+    queryKey: ["sessions"],
+    queryFn: skipToken,
+  });
+  if (isError) return false;
+  if (status === "pending" && data === undefined) return undefined;
+  if (data === undefined) return undefined;
+  return data.daemonAlive !== false;
 }
 
 function healthColor(level: HealthLevel): string {
@@ -155,8 +93,12 @@ function resourceLevel(kind: "cpu" | "memory" | "disk", value: number): HealthLe
   return value >= CPU_RAM_ATTENTION_THRESHOLD ? "attention" : "ready";
 }
 
-function aggregateOnlineLevel(metrics: ResourceMetrics): HealthLevel {
-  if (!metrics.daemonAlive) return "error";
+function aggregateOnlineLevel(
+  metrics: ResourceSnapshot,
+  daemonAlive: boolean | undefined,
+): HealthLevel {
+  if (daemonAlive === false) return "error";
+  if (daemonAlive === undefined) return "unknown";
   if (!metrics.available) return "ready";
 
   const cpu = resourceLevel("cpu", metrics.cpuPercent);
@@ -176,6 +118,62 @@ function StatusDot({ level }: { level: HealthLevel }) {
       style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }}
     />
   );
+}
+
+function useFooterPopover() {
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const open = !dismissed && (hovered || pinned);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+    if (!touchDevice || !open) return;
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (containerRef.current?.contains(target)) return;
+      setDismissed(true);
+      setPinned(false);
+      setHovered(false);
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [open]);
+
+  return {
+    containerRef,
+    open,
+    onBlur(event: FocusEvent<HTMLDivElement>) {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        setPinned(false);
+        setDismissed(false);
+      }
+    },
+    onMouseEnter() {
+      setDismissed(false);
+      setHovered(true);
+    },
+    onMouseLeave() {
+      setDismissed(false);
+      setHovered(false);
+    },
+    toggle() {
+      setDismissed(false);
+      setPinned((current) => !current);
+    },
+    dismiss() {
+      setDismissed(true);
+      setPinned(false);
+    },
+  };
 }
 
 function statusText(level: HealthLevel): string {
@@ -211,26 +209,90 @@ function ResourceStatusRow({
   );
 }
 
-function PrStateLabel({ state }: { state: PrInfo["state"] }) {
-  if (!state) return null;
+function platformStatusLevel(status: PlatformStatusResponse | null): HealthLevel {
+  if (status === null) return "unknown";
+  return status.ok ? "ready" : "error";
+}
+
+function platformStatusText(status: PlatformStatusResponse | null): string {
+  if (status === null) return "Checking";
+  return status.ok ? "Healthy" : "Error";
+}
+
+function PlatformStatusButton({
+  platform,
+  status,
+}: {
+  platform: PlatformKind;
+  status: PlatformStatusResponse | null;
+}) {
+  const popover = useFooterPopover();
+  const label = platform === "github" ? "GitHub" : "GitLab";
+  const Icon = platform === "github" ? GithubIcon : GitlabIcon;
+  const level = platformStatusLevel(status);
+  const statusLabel = platformStatusText(status).toLowerCase();
+
   return (
-    <span className="uppercase" style={{ color: prStateColor(state) }}>
-      {state}
-    </span>
+    <div
+      ref={popover.containerRef}
+      className="relative"
+      onBlur={popover.onBlur}
+      onMouseEnter={popover.onMouseEnter}
+      onMouseLeave={popover.onMouseLeave}
+    >
+      <button
+        aria-expanded={popover.open}
+        aria-label={`${label} connection ${statusLabel}`}
+        className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
+        type="button"
+        onClick={popover.toggle}
+      >
+        <Icon />
+        <StatusDot level={level} />
+      </button>
+      {popover.open ? (
+        <div className="absolute bottom-full left-0 z-50 mb-1.5 min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]">
+          <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
+            <span className="text-[var(--color-text-secondary)]">{label}</span>
+            <span className="font-bold" style={{ color: healthColor(level) }}>
+              {platformStatusText(status)}
+            </span>
+          </div>
+          <div
+            className="normal-case tracking-normal text-[var(--color-text-secondary)]"
+            onClick={popover.dismiss}
+          >
+            {status === null ? (
+              "Checking authentication and API availability."
+            ) : status.ok ? (
+              <>Last request: {formatAbsoluteTime(status.requestedAt)}</>
+            ) : (
+              status.error
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
-  const gitError = useGitError();
-  const prEntries = useAggregatePr(sessions);
-  const aggregate = worstStatus(prEntries);
+export function StatusBar() {
+  const githubStatus = usePlatformStatus<GitHubStatusResponse>(
+    "/api/github-status",
+    "GitHub status unavailable",
+  );
+  const gitlabStatus = usePlatformStatus<GitLabStatusResponse>(
+    "/api/gitlab-status",
+    "GitLab status unavailable",
+  );
   const resourceMetrics = useResourceMetrics();
-  const [onlineHovered, setOnlineHovered] = useState(false);
-  const [onlinePinned, setOnlinePinned] = useState(false);
-  const [onlineDismissed, setOnlineDismissed] = useState(false);
-  const onlineContainerRef = useRef<HTMLDivElement | null>(null);
-  const onlineLevel = aggregateOnlineLevel(resourceMetrics);
-  const daemonLevel = resourceMetrics.daemonAlive ? "ready" : "error";
+  const daemonAlive = useDaemonAlive();
+  const onlinePopover = useFooterPopover();
+  const onlineLevel = aggregateOnlineLevel(resourceMetrics, daemonAlive);
+  const daemonLevel: HealthLevel =
+    daemonAlive === undefined ? "unknown" : daemonAlive ? "ready" : "error";
+  const daemonValue =
+    daemonAlive === undefined ? "unavailable" : daemonAlive ? "online" : "offline";
   const onlineLabel =
     onlineLevel === "error"
       ? "Critical"
@@ -239,71 +301,32 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
         : onlineLevel === "ready"
           ? "Healthy"
           : "Unavailable";
-  const onlineOpen = !onlineDismissed && (onlineHovered || onlinePinned);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const touchDevice = window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-    if (!touchDevice || !onlineOpen) return;
-
-    const onPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (onlineContainerRef.current?.contains(target)) return;
-      setOnlineDismissed(true);
-      setOnlinePinned(false);
-      setOnlineHovered(false);
-    };
-
-    document.addEventListener("pointerdown", onPointerDown);
-    return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
-    };
-  }, [onlineOpen]);
 
   return (
     <footer className="fixed bottom-0 left-0 right-0 z-40 flex min-h-6 flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1 text-[10px] uppercase tracking-[0.08em] sm:px-4">
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 sm:gap-x-6">
         <div
-          ref={onlineContainerRef}
+          ref={onlinePopover.containerRef}
           className="group/status relative"
-          onBlur={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setOnlinePinned(false);
-              setOnlineDismissed(false);
-            }
-          }}
-          onMouseEnter={() => {
-            setOnlineDismissed(false);
-            setOnlineHovered(true);
-          }}
-          onMouseLeave={() => {
-            setOnlineDismissed(false);
-            setOnlineHovered(false);
-          }}
+          onBlur={onlinePopover.onBlur}
+          onMouseEnter={onlinePopover.onMouseEnter}
+          onMouseLeave={onlinePopover.onMouseLeave}
         >
           <button
-            aria-expanded={onlineOpen}
+            aria-expanded={onlinePopover.open}
             aria-label="Show aggregated system status"
             className="-m-1.5 flex items-center gap-1.5 p-1.5 text-[var(--color-text-secondary)] outline-none transition-colors hover:text-[var(--color-text-primary)] focus-visible:text-[var(--color-text-primary)]"
             type="button"
-            onClick={() => {
-              setOnlineDismissed(false);
-              setOnlinePinned((current) => !current);
-            }}
+            onClick={onlinePopover.toggle}
           >
             <StatusDot level={onlineLevel} />
             <span>{onlineLabel}</span>
           </button>
 
-          {onlineOpen ? (
+          {onlinePopover.open ? (
             <div
-              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)]"
-              onClick={() => {
-                setOnlineDismissed(true);
-                setOnlinePinned(false);
-              }}
+              className="absolute bottom-full left-0 z-50 mb-1.5 w-[min(16rem,calc(100vw-1rem))] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_var(--color-shadow-modal-sm)]"
+              onClick={onlinePopover.dismiss}
             >
               <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--color-border-subtle)] pb-2">
                 <span className="text-[var(--color-text-secondary)]">System</span>
@@ -312,11 +335,7 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
                 </span>
               </div>
               <div className="flex flex-col gap-2">
-                <ResourceStatusRow
-                  label="Daemon"
-                  level={daemonLevel}
-                  value={resourceMetrics.daemonAlive ? "online" : "offline"}
-                />
+                <ResourceStatusRow label="Daemon" level={daemonLevel} value={daemonValue} />
                 <ResourceStatusRow
                   label="CPU"
                   level={
@@ -354,35 +373,8 @@ export function StatusBar({ sessions }: { sessions: SpurSessionView[] }) {
             </div>
           ) : null}
         </div>
-
-        {gitError ? (
-          <span className="font-bold text-[var(--color-status-error)]" title={gitError}>
-            Git Error
-          </span>
-        ) : null}
-
-        {prEntries.length > 0 && !gitError ? (
-          <div className="group/ci relative flex items-center gap-1.5" tabIndex={0}>
-            <GithubIcon />
-            <CiStatusDot status={aggregate} />
-
-            {/* Tooltip */}
-            <div className="absolute bottom-full left-0 z-50 mb-1.5 hidden max-w-[90vw] min-w-[180px] border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] p-2 shadow-[0_4px_12px_rgba(0,0,0,0.5)] group-focus-within/ci:block group-hover/ci:block">
-              {prEntries.slice(0, 8).map((entry) => (
-                <div key={entry.url} className="flex items-center gap-2 py-0.5">
-                  <span className="truncate text-[var(--color-text-secondary)]">{entry.label}</span>
-                  <CiStatusDot status={entry.info.ciStatus} />
-                  <PrStateLabel state={entry.info.state} />
-                </div>
-              ))}
-              {prEntries.length > 8 ? (
-                <div className="pt-0.5 text-[var(--color-text-tertiary)]">
-                  +{prEntries.length - 8} more
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
+        <PlatformStatusButton platform="github" status={githubStatus} />
+        <PlatformStatusButton platform="gitlab" status={gitlabStatus} />
       </div>
 
       <div className="ml-auto shrink-0 text-[var(--color-text-tertiary)]">

@@ -1,11 +1,11 @@
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 developer_instructions = """
 Review the diff. Run build checks. Verify no regressions, no security holes, requirements covered.
 
 Process:
-1. Get diff: git diff origin/dev...HEAD
+1. Get diff: git diff origin/HEAD...HEAD
 2. Run checks: pnpm typecheck && pnpm lint && pnpm test
 3. Analyze each changed file against priorities
 4. Verify call-sites for changed functions: rg "functionName" packages/ --type ts -l

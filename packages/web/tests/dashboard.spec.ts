@@ -8,6 +8,8 @@ import {
   makeWaitingSession,
   makeSessionWithPR,
   makeSessionWithTracker,
+  mockGitHubStatus,
+  mockGitLabStatus,
   mockSessions,
   type ProjectInfo,
   type SpurSessionView,
@@ -103,6 +105,12 @@ test.describe("D1: Header renders correctly", () => {
     await expect(page.getByRole("button", { name: /spawn session/i })).toBeVisible();
   });
 
+  test("tab title is Spur", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+    await expect(page).toHaveTitle("Spur");
+  });
+
   test("project title select has All projects option", async ({ page }) => {
     await mockSessions(page, []);
     await page.goto("/");
@@ -148,11 +156,51 @@ test.describe("D2: Header stats show correct counts", () => {
     await expect(header.getByText("1")).toBeVisible();
   });
 
+  test("Stopped shows 1 with one stopped session", async ({ page }) => {
+    const session = makeStoppedSession({ prompt: "Stopped session" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+    await expect(page.locator("header").getByRole("button", { name: /Stopped/i })).toContainText(
+      "1",
+    );
+  });
+
   test("Completed shows 1 with one completed session", async ({ page }) => {
     const session = makeCompletedSession({ prompt: "Completed session" });
     await mockSessions(page, [session]);
     await page.goto("/");
     await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+  });
+
+  test("Completed count updates after polling when a session finishes", async ({ page }) => {
+    const working = makeWorkingSession({
+      id: "wk-complete-1",
+      prompt: "Completes after poll",
+    });
+    let sessions = [working];
+    await mockSessions(page, () => sessions);
+    await page.goto("/");
+
+    await expect(page.getByText("Completes after poll")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("0");
+
+    sessions = [
+      {
+        ...working,
+        status: "completed",
+        state: "stopped",
+        runtimeAlive: false,
+        tmuxSession: null,
+      },
+    ];
+
+    await page.waitForTimeout(5500);
+
+    await expect(page.getByRole("button", { name: /Completed/i })).toContainText("1");
+    await expect(page.getByText("Completes after poll")).not.toBeVisible();
+
+    await page.getByRole("button", { name: /Completed/i }).click();
+    await expect(page.getByText("Completes after poll")).toBeVisible();
   });
 
   test("clicking Needs Input stat filters to only that session", async ({ page }) => {
@@ -167,7 +215,7 @@ test.describe("D2: Header stats show correct counts", () => {
     // Click the Needs Input stat button — it has value 1 in the header stat area
     // The stat buttons are in the header, find the one near "Needs Input"
     const statButtons = page.locator("header button");
-    // There are 3 stat buttons (respond, working, pending) + spawn button
+    // There are 4 stat buttons (respond, working, pending, stopped) + completed + spawn button
     // The respond stat is first
     await statButtons.first().click();
 
@@ -292,8 +340,8 @@ test.describe("D4: Terminal button state", () => {
     await expect(termBtn).not.toBeDisabled();
   });
 
-  test("disabled terminal button for stopped session", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-disabled-1" });
+  test("disabled terminal button for running session without tmuxSession", async ({ page }) => {
+    const session = makeWorkingSession({ id: "term-disabled-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -322,7 +370,7 @@ test.describe("D4: Terminal button state", () => {
   });
 
   test("clicking disabled terminal button does not add terminal query param", async ({ page }) => {
-    const session = makeStoppedSession({ id: "term-no-click-1" });
+    const session = makeWorkingSession({ id: "term-no-click-1", tmuxSession: null });
     await mockSessions(page, [session]);
     await page.goto("/");
 
@@ -335,6 +383,79 @@ test.describe("D4: Terminal button state", () => {
     // URL should not contain terminal param
     const url = page.url();
     expect(url).not.toContain("terminal=");
+  });
+
+  test("stopped restorable session shows restore instead of disabled terminal", async ({
+    page,
+  }) => {
+    const session = makeStoppedSession({ id: "restore-visible-1", prompt: "Restore visible" });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    const restoreBtn = page.getByRole("button", {
+      name: new RegExp(`Restore session ${session.id}`, "i"),
+    });
+    await expect(restoreBtn).toBeVisible();
+    await expect(restoreBtn).not.toBeDisabled();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+  });
+
+  test("clicking restore posts and refetches sessions", async ({ page }) => {
+    const stopped = makeStoppedSession({ id: "restore-click-1", prompt: "Restore click" });
+    const restored = makeWorkingSession({
+      ...stopped,
+      status: "running",
+      state: "working",
+      runtimeAlive: true,
+      tmuxSession: "spur-restore-click-1",
+    });
+    let restoredState = false;
+    let restoreCalls = 0;
+
+    await mockSessions(page, () => (restoredState ? [restored] : [stopped]));
+    await page.route(`**/api/sessions/${stopped.id}/restore`, async (route) => {
+      restoreCalls += 1;
+      restoredState = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: "{}",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${stopped.id}`, "i") })
+      .click();
+
+    await expect.poll(() => restoreCalls).toBe(1);
+    await expect(
+      page.getByRole("button", { name: new RegExp(`Open web terminal for ${stopped.id}`, "i") }),
+    ).toBeVisible();
+  });
+
+  test("restore failure leaves row visible and shows error", async ({ page }) => {
+    const session = makeStoppedSession({ id: "restore-fail-1", prompt: "Restore fails" });
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}/restore`, async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "text/plain",
+        body: "Restore failed",
+      });
+    });
+    await page.goto("/");
+
+    await page
+      .getByRole("button", { name: new RegExp(`Restore session ${session.id}`, "i") })
+      .click();
+
+    await expect(page.getByText("Restore failed")).toBeVisible();
+    await expect(page.getByText("Restore fails")).toBeVisible();
   });
 });
 
@@ -355,6 +476,7 @@ test.describe("D4b: Merged-PR done button", () => {
         body: JSON.stringify({
           state: "merged",
           ciStatus: null,
+          canMerge: false,
           totalThreads: 0,
           unresolvedThreads: 0,
         }),
@@ -368,6 +490,55 @@ test.describe("D4b: Merged-PR done button", () => {
       name: new RegExp(`Mark ${session.id} as done`, "i"),
     });
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
+  });
+
+  test("merge button replaces terminal button when PR can merge", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "merge-btn-1",
+      status: "running",
+      state: "needs_input",
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status\?/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: true,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.route("/api/pr-status/merge", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, merged: true, sha: "abc123" }),
+      });
+    });
+
+    await page.goto("/");
+
+    const mergeBtn = page.getByRole("button", {
+      name: new RegExp(`Merge PR for ${session.id}`, "i"),
+    });
+    await expect(mergeBtn).toBeVisible({ timeout: 8000 });
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Open web terminal for ${session.id}`, "i"),
+      }),
+    ).toHaveCount(0);
+
+    await mergeBtn.click();
+    await expect(
+      page.getByRole("button", {
+        name: new RegExp(`Mark ${session.id} as done`, "i"),
+      }),
+    ).toBeVisible();
   });
 });
 
@@ -385,7 +556,44 @@ test.describe("D5: Tracker and PR links", () => {
   });
 
   test("session with PR link shows github link", async ({ page }) => {
-    const session = makeSessionWithPR({ id: "pr-row-1" });
+    const prUrl = "https://github.com/test/repo/pull/42001";
+    const session = makeSessionWithPR({
+      id: "pr-row-1",
+      slots: {
+        title: "Session with PR",
+        links: [{ label: "pr", url: prUrl }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          canMerge: true,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    const prLink = page.locator(`a[href='${prUrl}']`).first();
+    await expect(prLink).toBeVisible();
+    await expect(prLink.locator("[data-pr-review-decision='approved']")).toBeVisible();
+  });
+
+  test("session with GitLab MR link shows compact merge request id", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "gitlab-pr-row-1",
+      slots: {
+        title: "Session with GitLab MR",
+        links: [{ label: "pr", url: "https://gitlab.com/test/repo/-/merge_requests/42" }],
+      },
+    });
     await mockSessions(page, [session]);
     await page.route(/\/api\/pr-status/, (route) => {
       void route.fulfill({
@@ -401,8 +609,62 @@ test.describe("D5: Tracker and PR links", () => {
     });
     await page.goto("/");
 
-    const prLink = page.locator("a[href*='github.com']").first();
+    const prLink = page.locator("a[href*='gitlab.com']").first();
     await expect(prLink).toBeVisible();
+    await expect(prLink).toContainText("!42");
+    await expect(prLink.locator("svg")).toHaveCount(1);
+  });
+
+  test("stale PR payload does not affect the footer GitHub health indicator", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "pr-row-missing-1",
+      slots: {
+        title: "Missing PR",
+        links: [{ label: "pr", url: "https://github.com/test/repo/pull/999" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(
+      page.locator("a[href='https://github.com/test/repo/pull/999']").first(),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
+  });
+
+  test("soft PR status errors do not replace the footer GitHub connection status", async ({
+    page,
+  }) => {
+    const session = makeSessionWithPR({ id: "pr-row-soft-error-1" });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: null,
+          ciStatus: null,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+          error: "GitHub API 503",
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toBeVisible();
   });
 
   test("session without links has no tracker or PR icons", async ({ page }) => {
@@ -426,7 +688,7 @@ test.describe("D6: Attention zone sections", () => {
     await mockSessions(page, sessions);
     await page.goto("/");
 
-    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Completed"
+    // AttentionZone labels: "Needs Input", "Working", "Waiting", "Stopped", "Completed"
     await expect(page.getByText("Needs Input").first()).toBeVisible();
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Waiting").first()).toBeVisible();
@@ -454,6 +716,18 @@ test.describe("D6: Attention zone sections", () => {
 
     await expect(page.getByText("Working").first()).toBeVisible();
     await expect(page.getByText("Working zone session")).toBeVisible();
+  });
+
+  test("stopped session appears in Stopped zone", async ({ page }) => {
+    const session = makeStoppedSession({
+      id: "zone-stopped-1",
+      prompt: "Stopped zone session",
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByText("Stopped").first()).toBeVisible();
+    await expect(page.getByText("Stopped zone session")).toBeVisible();
   });
 
   test("completed session not visible by default", async ({ page }) => {
@@ -502,6 +776,105 @@ test.describe("D6b: Footer clock hydrates cleanly", () => {
     await expect(page.locator("footer")).toBeVisible();
     // The footer contains "dev" or a build version string (YYYYMMDD or v20YY.MM.DD format)
     await expect(page.locator("footer")).toContainText(/dev|[0-9]{8}|v20[0-9]+/);
+  });
+
+  test("footer shows healthy GitHub status with the last request timestamp in a tooltip", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
+    await expect(githubStatus).toBeVisible();
+    await githubStatus.hover();
+
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+  });
+
+  test("footer shows healthy GitLab status with the last request timestamp in a tooltip", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const gitlabStatus = page.getByRole("button", { name: "GitLab connection healthy" });
+    await expect(gitlabStatus).toBeVisible();
+    await gitlabStatus.hover();
+
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+  });
+
+  test("footer keeps the GitHub tooltip pinned after clicking the healthy icon", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.goto("/");
+
+    const githubStatus = page.getByRole("button", { name: "GitHub connection healthy" });
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await githubStatus.click();
+    await page.mouse.move(1200, 40);
+    await expect(page.getByText(/Last request:/)).not.toBeVisible();
+  });
+
+  test("footer keeps GitHub and GitLab status buttons icon-only", async ({ page }) => {
+    await mockSessions(page, []);
+    await page.goto("/");
+
+    await expect(page.getByRole("button", { name: "GitHub connection healthy" })).toHaveText("");
+    await expect(page.getByRole("button", { name: "GitLab connection healthy" })).toHaveText("");
+  });
+
+  test("footer shows the GitHub error text in a tooltip when the health check fails", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub API 503",
+      requestedAt: "2026-04-28T10:00:00.000Z",
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
+    await expect(page.getByText("GitHub API 503")).toBeVisible();
+  });
+
+  test("footer shows auth and unavailable GitHub errors in a tooltip from mocked responses", async ({
+    page,
+  }) => {
+    await mockSessions(page, []);
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, {
+      ok: false,
+      error: "GitHub auth unavailable",
+      requestedAt: null,
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
+    await expect(page.getByText("GitHub auth unavailable")).toBeVisible();
+
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { error: "ignored" }, { status: 503 });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitHub connection error" }).click();
+    await expect(page.getByText("GitHub status unavailable (503)")).toBeVisible();
   });
 
   test("footer shows aggregated healthy tooltip with daemon and resource details", async ({
@@ -643,6 +1016,36 @@ test.describe("D6c: Footer touch tooltip dismissal", () => {
     await page.getByPlaceholder("Filter sessions...").tap();
     await expect(page.getByText("System")).not.toBeVisible();
   });
+
+  test("touch tap on the GitHub icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/github-status");
+    await mockGitHubStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitHub connection healthy" }).tap();
+    await expect(page.getByText("GitHub")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitHub")).not.toBeVisible();
+  });
+
+  test("touch tap on the GitLab icon opens the tooltip and tapping outside closes it", async ({
+    page,
+  }) => {
+    await page.unroute("/api/gitlab-status");
+    await mockGitLabStatus(page, { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" });
+    await page.reload();
+
+    await page.getByRole("button", { name: "GitLab connection healthy" }).tap();
+    await expect(page.getByText("GitLab")).toBeVisible();
+    await expect(page.getByText(/Last request:/)).toBeVisible();
+
+    await page.getByPlaceholder("Filter sessions...").tap();
+    await expect(page.getByText("GitLab")).not.toBeVisible();
+  });
 });
 
 // D7: Spawn modal
@@ -672,11 +1075,22 @@ test.describe("D7: Spawn modal", () => {
     // Project select (contains "Select project" option)
     await expect(page.getByRole("option", { name: /select project/i })).toBeAttached();
     // Agent select
+    await expect(page.getByRole("combobox", { name: "Spawn agent" })).toBeVisible();
     await expect(page.getByRole("option", { name: "claude" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "codex" })).toBeAttached();
+    await expect(page.getByRole("option", { name: "cursor" })).toBeAttached();
     // Branch input
     await expect(page.getByLabel("branch name")).toBeVisible();
     // Plan checkbox - it's a checkbox input inside a label with "Plan" text
     await expect(page.getByRole("checkbox")).toBeVisible();
+  });
+
+  test("plan toggle stays hint-free for codex", async ({ page }) => {
+    await openSpawnModal(page);
+
+    await expect(page.getByText(/codex does not enter a native plan mode/i)).toHaveCount(0);
+    await page.getByRole("combobox", { name: "Spawn agent" }).selectOption("codex");
+    await expect(page.getByText(/codex does not enter a native plan mode/i)).toHaveCount(0);
   });
 
   test("modal has Spawn button", async ({ page }) => {
@@ -719,6 +1133,44 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue(
       "Re-run the flaky deploy",
     );
+  });
+
+  test("slash button inserts a suggested command into the spawn prompt", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-slash-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              insertText: "/compact",
+              detail: "Compact the chat",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await expect(page.getByRole("button", { name: "Slash", exact: true })).toHaveText("/");
+    await page.getByRole("button", { name: "Slash", exact: true }).click();
+    await page.getByRole("menuitem", { name: /\/compact/i }).click();
+
+    await expect(page.getByPlaceholder("Prompt for the new session...")).toHaveValue("/compact");
   });
 
   test("Spawn button disabled when project field is empty", async ({ page }) => {
@@ -785,7 +1237,7 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
   });
 
-  test("Ctrl+Enter in textarea submits spawn request", async ({ page }) => {
+  test("Cmd+Enter in textarea submits spawn request", async ({ page }) => {
     await mockSessions(
       page,
       [makeWorkingSession({ id: "spawn-ctrlenter-1", project: "my-project" })],
@@ -828,13 +1280,34 @@ test.describe("D7: Spawn modal", () => {
     await projectSelect.selectOption("my-project");
 
     const textarea = page.locator("textarea").last();
-    await textarea.fill("Test prompt for ctrl enter");
-    await textarea.press("Control+Enter");
+    await textarea.fill("Test prompt for cmd enter");
+    await textarea.press("Meta+Enter");
 
     // Modal should close after spawn
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
       timeout: 5000,
     });
+  });
+
+  test("spawn modal shows the voice shortcut hint when voice is available", async ({ page }) => {
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-voice-hint-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+    await page.route("**/api/runtime/voice", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ available: true, modelPath: "/models/ggml-base.en.bin" }),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+
+    await expect(page.getByPlaceholder("Prompt for the new session... Voice ⌘ + .")).toBeVisible();
   });
 
   test("spawn ack failure keeps modal open and preserves prompt", async ({ page }) => {
@@ -863,6 +1336,57 @@ test.describe("D7: Spawn modal", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
     await expect(textarea).toHaveValue("Keep me");
     await expect(page.getByText(/Daemon down/i)).toBeVisible();
+  });
+
+  test("spawn prompt accepts image attachments and forwards them in the request body", async ({
+    page,
+  }) => {
+    let requestBody: Record<string, unknown> | null = null;
+    await mockSessions(
+      page,
+      [makeWorkingSession({ id: "spawn-image-1", project: "my-project" })],
+      [{ id: "my-project", name: "my-project" }],
+    );
+
+    await page.route("**/api/spawn", async (route) => {
+      requestBody = (route.request().postDataJSON() as Record<string, unknown>) ?? null;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(
+          makeSpawningSession({
+            id: "spawn-image-ack-1",
+            project: "my-project",
+            prompt: "Prompt with image",
+          }),
+        ),
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("button", { name: "Add image" })).toBeVisible();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    const textarea = page.getByPlaceholder("Prompt for the new session...");
+    await textarea.fill("Prompt with image");
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(new File(["PNG"], "spawn.png", { type: "image/png" }));
+      return dt;
+    });
+    await textarea.dispatchEvent("drop", { dataTransfer });
+
+    await expect(page.locator('img[alt="spawn.png"]')).toBeVisible({ timeout: 5000 });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible({
+      timeout: 5000,
+    });
+    expect(requestBody).toMatchObject({
+      projectId: "my-project",
+      prompt: "Prompt with image",
+      attachments: [{ name: "spawn.png", data: expect.any(String) }],
+    });
   });
 });
 
@@ -905,18 +1429,22 @@ test.describe("D7b: Silent branch preflight", () => {
 });
 
 test.describe("D7c: Background spawn lifecycle", () => {
-  test("successful spawn ack closes the modal and shows the placeholder session immediately", async ({
+  test("all-projects view keeps filter and URL unchanged while showing the placeholder immediately", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-ack-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Background placeholder session",
       branch: "feature/background-placeholder",
       tmuxSession: "spawn-bg-ack-1",
       worktreePath: "/tmp/worktrees/spawn-bg-ack-1",
     });
     const sessions: SpurSessionView[] = [];
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
 
     await page.route("**/api/spawn", async (route) => {
       sessions.splice(0, sessions.length, placeholder);
@@ -927,12 +1455,14 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
-    await fillSpawnForm(page, { prompt: placeholder.prompt });
+    await openSpawnModal(page, () => sessions, projects);
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
     await page.getByRole("button", { name: /^spawn$/i }).click();
 
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("");
+    await expect(page).toHaveURL(/\/$/);
     await expect(
       page.getByRole("button", {
         name: new RegExp(`Open web terminal for ${placeholder.id}`, "i"),
@@ -940,17 +1470,109 @@ test.describe("D7c: Background spawn lifecycle", () => {
     ).toBeDisabled();
   });
 
-  test("successful spawn sends the full form payload and resets non-project fields on reopen", async ({
+  test("matching project filter keeps the URL and still shows the placeholder", async ({
+    page,
+  }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-match-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-match-ack-1",
+      project: "my-project",
+      prompt: "Matching project placeholder",
+      branch: "feature/matching-filter",
+      tmuxSession: "spawn-filter-match-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-match-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      sessions.splice(0, sessions.length, placeholder, currentSession);
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "my-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("mismatched project filter keeps the current list and hides the spawned placeholder", async ({
+    page,
+  }) => {
+    const currentSession = makeWorkingSession({
+      id: "spawn-filter-mismatch-1",
+      project: "my-project",
+      prompt: "Current filtered session",
+    });
+    const placeholder = makeSpawningSession({
+      id: "spawn-filter-mismatch-ack-1",
+      project: "other-project",
+      prompt: "Hidden by current filter",
+      branch: "feature/mismatched-filter",
+      tmuxSession: "spawn-filter-mismatch-ack-1",
+      worktreePath: "/tmp/worktrees/spawn-filter-mismatch-ack-1",
+    });
+    const sessions: SpurSessionView[] = [currentSession];
+
+    await page.route("**/api/spawn", async (route) => {
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(placeholder),
+      });
+    });
+
+    await mockSessions(page, () => sessions, [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ]);
+    await page.goto("/?project=my-project");
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await expect(page.getByRole("heading", { name: /spawn session/i })).toBeVisible();
+
+    await fillSpawnForm(page, { project: "other-project", prompt: placeholder.prompt });
+    await page.getByRole("button", { name: /^spawn$/i }).click();
+
+    await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
+    await expect(page.getByText(currentSession.prompt)).toBeVisible();
+    await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Project filter" })).toHaveValue("my-project");
+    await expect(page).toHaveURL(/\/\?project=my-project$/);
+  });
+
+  test("successful spawn sends the full form payload, resets non-project fields, and remembers the last selected project", async ({
     page,
   }) => {
     const placeholder = makeSpawningSession({
       id: "spawn-bg-payload-1",
-      project: "my-project",
+      project: "other-project",
       prompt: "Carry the selected options into the background shell",
       branch: "feature/spawn-payload",
       tmuxSession: "spawn-bg-payload-1",
       worktreePath: "/tmp/worktrees/spawn-bg-payload-1",
     });
+    const projects = [
+      { id: "my-project", name: "my-project" },
+      { id: "other-project", name: "other-project" },
+    ];
     const requests: unknown[] = [];
     const sessions: SpurSessionView[] = [];
 
@@ -964,8 +1586,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
       });
     });
 
-    await openSpawnModal(page, () => sessions);
+    await openSpawnModal(page, () => sessions, projects);
     await fillSpawnForm(page, {
+      project: "other-project",
       prompt: placeholder.prompt,
       branch: "feature/spawn-payload",
       workspaceMode: "worktree",
@@ -978,7 +1601,7 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     expect(requests).toEqual([
       {
-        projectId: "my-project",
+        projectId: "other-project",
         prompt: placeholder.prompt,
         agent: "claude",
         branch: "feature/spawn-payload",
@@ -997,7 +1620,9 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("combobox", { name: "workspace mode" })).toHaveValue("default");
     await expect(page.getByRole("checkbox")).not.toBeChecked();
     await expect(page.getByLabel(/step 1/i)).toHaveCount(0);
-    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue("my-project");
+    await expect(page.getByRole("combobox", { name: "Spawn project" })).toHaveValue(
+      "other-project",
+    );
   });
 
   test("double-clicking Spawn while the request is in flight still sends only one spawn request", async ({
@@ -1314,5 +1939,43 @@ test.describe("D7c: Background spawn lifecycle", () => {
     await expect(page.getByRole("heading", { name: /spawn session/i })).not.toBeVisible();
     await expect(page.getByRole("link", { name: placeholder.prompt })).toHaveCount(1);
     expect(spawnCalls).toBe(2);
+  });
+});
+
+// D7d: Sessions list cache on revisit
+test.describe("D7d: Sessions list cache on revisit", () => {
+  test("Dashboard sessions cache survives navigation", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "cache-survive-1",
+      prompt: "Cached session row",
+    });
+    await mockSessions(page, [session]);
+    await page.route(`**/api/sessions/${session.id}`, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(session),
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.getByText("Loading sessions...")).not.toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
+
+    // Delay any subsequent /api/sessions call so that, if the dashboard were to
+    // refetch on revisit, the loader would be visible long enough for the
+    // synchronous assertion below to catch it.
+    await page.route("**/api/sessions*", async (route) => {
+      await new Promise((r) => setTimeout(r, 800));
+      await route.fallback();
+    });
+
+    await page.getByRole("link", { name: session.prompt }).first().click();
+    await expect(page.getByRole("link", { name: /back/i })).toBeVisible();
+
+    await page.getByRole("link", { name: /back/i }).click();
+
+    await expect(page.getByText("Loading sessions...")).toHaveCount(0);
+    await expect(page.getByRole("link", { name: session.prompt })).toBeVisible();
   });
 });

@@ -1,5 +1,5 @@
 import { test, expect } from "playwright/test";
-import { makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
+import { makeStoppedSession, makeWorkingSession, mockSessions, gotoMocked } from "./fixtures.js";
 
 // R1: Mobile (<640px)
 test.describe("R1: Mobile viewport", () => {
@@ -57,6 +57,85 @@ test.describe("R1: Mobile viewport", () => {
 
     await zoneToggle.click();
     await expect(page.getByText("Accordion session")).toBeVisible();
+  });
+
+  test("Stopped can start collapsed on mobile and expands on tap", async ({ page }) => {
+    await gotoMocked(page, "/", [
+      makeStoppedSession({
+        id: "mob-stop-1",
+        prompt: "Stopped mobile session",
+      }),
+    ]);
+    await page.evaluate(() => {
+      window.localStorage.setItem("spur:mobile-collapsed-categories", JSON.stringify(["stopped"]));
+    });
+    await page.reload();
+    await page.waitForFunction(() => !document.body.innerText.includes("Loading sessions"), {
+      timeout: 8000,
+    });
+
+    const zoneToggle = page
+      .locator("section button")
+      .filter({ hasText: /stopped/i })
+      .first();
+    await expect(zoneToggle).toBeVisible({ timeout: 5000 });
+    await expect(zoneToggle).toContainText("Stopped");
+    await expect(zoneToggle).toContainText("1");
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).toBeVisible();
+
+    await zoneToggle.click();
+    await expect(page.getByText("Stopped mobile session")).not.toBeVisible();
+  });
+
+  test("spawn slash suggestions stay within the viewport on mobile", async ({ page }) => {
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.route("**/api/projects/my-project/slash-commands?agent=claude", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          agent: "claude",
+          commands: [
+            {
+              id: "compact",
+              label: "/compact",
+              insertText: "/compact",
+              detail: "Compact the chat",
+              source: "built-in",
+              kind: "command",
+            },
+            {
+              id: "agents",
+              label: "/agents",
+              insertText: "/agents",
+              detail: "Manage agents",
+              source: "built-in",
+              kind: "command",
+            },
+          ],
+          skills: [],
+          agents: [],
+        }),
+      });
+    });
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+    await page.getByRole("button", { name: "Slash", exact: true }).click();
+
+    const menu = page.getByRole("menu", { name: "Slash suggestions" });
+    await expect(menu).toBeVisible();
+    const bounds = await menu.boundingBox();
+    expect(bounds).not.toBeNull();
+    if (!bounds) {
+      throw new Error("Expected mobile slash suggestions menu bounds");
+    }
+
+    expect(bounds.x).toBeGreaterThanOrEqual(0);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   });
 });
 
@@ -133,6 +212,7 @@ test.describe("R2: Tablet viewport (768px)", () => {
       page.getByRole("button", { name: /Needs Input/i }),
       page.getByRole("button", { name: /Working/i }),
       page.getByRole("button", { name: /Waiting/i }),
+      page.getByRole("button", { name: /Stopped/i }),
       page.getByRole("button", { name: /Completed/i }),
     ];
 

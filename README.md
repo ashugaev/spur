@@ -1,78 +1,53 @@
 # Spur
 
-This repository has two supported product surfaces:
+Local daemon + CLI orchestrator. `v2/` ships the runtime. `packages/web/` is an optional UI over Spur's HTTP API.
 
-- `v2/` is the Spur daemon and CLI.
-- `packages/web/` is an optional web UI that proxies to Spur's HTTP API.
+## Run From Source
 
-The old AO/v1 backend, mobile app, plugin tree, example configs, and parallel docs have been removed from the repo. Runtime behavior lives in `v2/`. The web package stays a thin view layer over that daemon.
+```bash
+pnpm --dir v2 build
+node v2/dist/cli.js doctor
+node v2/dist/cli.js list
+node v2/dist/cli.js spawn <project> "your task"
+```
 
-## Quick Start
+Repo bootstrap for active development:
 
 ```bash
 bash scripts/setup.sh
-spur list
 pnpm dev
 ```
 
-The first Spur command auto-initializes the global instance config at `~/.spur/config.yaml`.
-Use repo-local `spur.yaml` only for project definitions; `spur list` / `spur spawn` auto-connect it when present.
-The web UI defaults to the instance `ui.port` from that same global config; the default is `5555`.
+`spur doctor` writes a local `spur.yaml` in the current repo. The first normal Spur command still auto-initializes `~/.spur/config.yaml`, and `spur list` / `spur spawn` auto-connect the local project config when present.
 
-For a production-like UI server:
+Full runtime reference lives in [v2/README.md](v2/README.md).
 
-```bash
-pnpm ui:build
-WEB_HOST=127.0.0.1 \
-DIRECT_TERMINAL_BIND_HOST=127.0.0.1 \
-DIRECT_TERMINAL_BIND_PORT=14801 \
-DIRECT_TERMINAL_PUBLIC_PORT=3011 \
-PORT=3011 \
-pnpm ui:start
-```
-
-For reverse-proxy deployments, keep the Next.js app and direct terminal server bound to loopback and set
-`DIRECT_TERMINAL_PUBLIC_PORT` to the externally reachable proxy port.
-
-For an explicit production update on a host that runs `spur-daemon.service` and `spur-web.service`:
+## Develop Spur
 
 ```bash
-pnpm main:deploy
+bash scripts/setup.sh
+pnpm dev
+spur doctor
 ```
 
-`pnpm main:deploy` syncs a dedicated release clone to the latest `origin/main`, builds there, restarts the services only after a successful build, and records the last successfully deployed SHA.
+Use [SETUP.md](SETUP.md) for repo bootstrap, local config, and web UI development. Use [CONTRIBUTING.md](CONTRIBUTING.md) for PR checks.
 
-## Repo Layout
+## Repo Surfaces
 
 - `v2/` — Spur daemon, CLI, automation runtime, tests, config example
 - `packages/web/` — Next.js UI over the Spur daemon API
-- `scripts/setup.sh` — bootstrap for local development and dogfooding
-- `scripts/main-deploy.sh` — deploys the latest `origin/main` from a dedicated release clone on a production host
+- `scripts/setup.sh` — contributor bootstrap for local development and dogfooding
 - `tests/integration/` — onboarding smoke environment
+- `docs/ubuntu-vm-deploy.md` — deployment guide
 - `spur.yaml` — repo-local project config for this checkout
-
-## Validation
-
-```bash
-pnpm build
-pnpm test
-pnpm test:integration
-```
-
-When agent launch or prompt delivery changes, also run:
-
-```bash
-pnpm --dir v2 test:smoke
-```
 
 ## Docs
 
 - [v2/README.md](v2/README.md) — Spur commands, config, automation, validation
-- [SETUP.md](SETUP.md) — local repo setup and web UI development
+- [SETUP.md](SETUP.md) — contributor bootstrap and local web UI development
+- [CONTRIBUTING.md](CONTRIBUTING.md) — PR scope and required checks
 - [docs/ubuntu-vm-deploy.md](docs/ubuntu-vm-deploy.md) — generic Ubuntu VM deploy and release guide
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — current failure modes and fixes
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution scope and required checks
-- [docs/architecture-v2.md](docs/architecture-v2.md) — high-level architecture intent
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — short fixes for common local failures
 - [AGENTS.md](AGENTS.md) — repo-specific implementation rules
 
 ## License
