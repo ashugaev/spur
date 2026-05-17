@@ -714,6 +714,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const lastDialogTailRef = useRef<string | null>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const respawnModalPrLink = session?.links.find((link) => link.label === "pr");
+  const respawnWorkspaceRiskBanner = session?.status === "errored" || session?.status === "killed";
 
   const loadSession = useCallback(async () => {
     try {
@@ -857,14 +859,14 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   };
 
   const handleRespawn = async () => {
-    setBusyAction("respawn");
-    try {
+    const submitRespawn = async (forceKillSource: boolean) => {
       const payload: Record<string, unknown> = {
         prompt: respawnPrompt.trim(),
         startupAttachmentIds: respawnStartupAttachmentIds,
       };
       const encodedAttachments = encodeImageAttachments(respawnAttachments);
       if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
+      if (forceKillSource) payload.forceKillSource = true;
       if (session && respawnAgent && respawnAgent !== session.agent) payload.agent = respawnAgent;
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/respawn`, {
         method: "POST",
@@ -875,8 +877,35 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
       const data = (await response.json()) as SpurSessionView;
       setRespawnOpen(false);
       router.push(buildSessionPath(data.id, projectId));
-    } catch (respawnError) {
-      setError(respawnError instanceof Error ? respawnError.message : "Failed to respawn session");
+    };
+
+    setBusyAction("respawn");
+    try {
+      await submitRespawn(false);
+    } catch (respawnFirstError) {
+      const msg =
+        respawnFirstError instanceof Error
+          ? respawnFirstError.message
+          : "Failed to respawn session";
+      const prefix = "Kill confirmation required";
+      if (
+        msg.startsWith(prefix) &&
+        window.confirm(
+          `${msg}\n\nRespawn anyway and discard the old session worktree (including uncommitted changes or unpushed commits)?`,
+        )
+      ) {
+        try {
+          await submitRespawn(true);
+        } catch (respawnForceError) {
+          setError(
+            respawnForceError instanceof Error
+              ? respawnForceError.message
+              : "Failed to respawn session",
+          );
+        }
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusyAction(null);
     }
@@ -1805,6 +1834,25 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     ✕
                   </button>
                 </div>
+                {respawnModalPrLink || respawnWorkspaceRiskBanner ? (
+                  <div
+                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--color-text-secondary)]"
+                    role="note"
+                  >
+                    {respawnModalPrLink ? (
+                      <div>
+                        This session links a PR ({respawnModalPrLink.url}). Respawn drops the
+                        replaced worktree after success—confirm merges or updates first if needed.
+                      </div>
+                    ) : null}
+                    {respawnWorkspaceRiskBanner ? (
+                      <div className={respawnModalPrLink ? "mt-2" : ""}>
+                        Local uncommitted changes or unpushed commits make respawn ask for extra
+                        confirmation before discarding the old workspace.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                   <AgentSelect
                     ariaLabel="Respawn agent"

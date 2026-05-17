@@ -656,6 +656,23 @@ describe("Spur web API routes", () => {
 
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
+  it("POST /api/sessions/:id/respawn forwards terminateSessionId to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    const response = await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-source/respawn", {
+        method: "POST",
+        body: JSON.stringify({ terminateSessionId: " api-caller " }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      { terminateSessionId: "api-caller" },
+    );
+  });
+
   it("POST /api/sessions/:id/respawn proxies to daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
 

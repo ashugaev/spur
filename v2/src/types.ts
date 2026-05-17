@@ -417,6 +417,7 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  forceKillSource?: boolean;
   agent?: AgentName;
 }
 

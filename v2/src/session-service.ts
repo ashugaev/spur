@@ -124,6 +124,7 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type ProjectConfig,
+  type RespawnSessionRequest,
   type RunServiceRequest,
   type RuntimeInfo,
   type ServiceInstanceRecord,
@@ -3532,6 +3533,26 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private async ensureKillDirtyWorktreeAllowed(
+    session: SessionRecord,
+    force: boolean,
+  ): Promise<void> {
+    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+      return;
+    }
+    const cleanup = await this.resolveCleanupContext(session);
+    const reasons: string[] = [];
+    if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
+      reasons.push("uncommitted changes in its worktree");
+    }
+    if (await hasUnpushedCommits(session.worktreePath)) {
+      reasons.push("unpushed commits");
+    }
+    if (reasons.length > 0 && !force) {
+      throw new Error(buildKillConfirmationRequiredMessage(session.id, reasons));
+    }
+  }
+
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -3541,19 +3562,7 @@ export class SessionService {
       throw new Error(`Session ${sessionId} is already completed`);
     }
 
-    if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-      const cleanup = await this.resolveCleanupContext(session);
-      const reasons: string[] = [];
-      if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
-        reasons.push("uncommitted changes in its worktree");
-      }
-      if (await hasUnpushedCommits(session.worktreePath)) {
-        reasons.push("unpushed commits");
-      }
-      if (reasons.length > 0 && request.force !== true) {
-        throw new Error(buildKillConfirmationRequiredMessage(sessionId, reasons));
-      }
-    }
+    await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
       await killTmuxSession(session.tmuxSession);
@@ -4038,15 +4047,7 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
-  async respawn(
-    sessionId: string,
-    request: {
-      prompt?: string;
-      attachments?: SendMessageAttachment[];
-      startupAttachmentIds?: string[];
-      agent?: string;
-    } = {},
-  ): Promise<SessionView> {
+  async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -4059,6 +4060,11 @@ export class SessionService {
       throw new Error(
         `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
       );
+    }
+
+    const forceKillSource = request.forceKillSource === true;
+    if (session.status !== "completed") {
+      await this.ensureKillDirtyWorktreeAllowed(session, forceKillSource);
     }
 
     this.logEvent("session.respawn.started", {
@@ -4081,13 +4087,17 @@ export class SessionService {
       requestedStartupAttachmentIds,
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
-    return this.spawn(
+    const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
         ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),
     );
+    if (session.status !== "completed") {
+      await this.kill(session.id, { force: forceKillSource });
+    }
+    return spawned;
   }
 
   private resumeSessionDelivery(): void {
