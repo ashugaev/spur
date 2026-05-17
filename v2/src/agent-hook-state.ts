@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface AgentHookStateRecord {
-  state: "working" | "waiting";
+  state: "working" | "waiting" | "needs_input";
   updatedAt: string;
   hookEvent?: string;
   turnId?: string;
@@ -25,7 +25,9 @@ export function readAgentHookState(
     const fileMtimeMs = statSync(path).mtimeMs;
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<AgentHookStateRecord>;
     if (
-      (parsed.state === "working" || parsed.state === "waiting") &&
+      (parsed.state === "working" ||
+        parsed.state === "waiting" ||
+        parsed.state === "needs_input") &&
       typeof parsed.updatedAt === "string"
     ) {
       return {

@@ -19,6 +19,7 @@ const SMOKE_BASE_REF = await git(SMOKE_REPO_DIR, "rev-parse", "HEAD");
 const tmuxOk = await isTmuxAvailable();
 const CLAUDE_BIN = await binaryPath("claude");
 const CODEX_BIN = await binaryPath("codex");
+const CURSOR_BIN = await binaryPath("agent");
 
 interface AuthStatus {
   available: boolean;
@@ -122,8 +123,55 @@ async function codexStatus(): Promise<AuthStatus> {
   }
 }
 
+async function cursorStatus(): Promise<AuthStatus> {
+  if (!tmuxOk) {
+    return { available: false, skipReason: "tmux unavailable" };
+  }
+  if (!CURSOR_BIN) {
+    return { available: false, skipReason: "cursor agent unavailable" };
+  }
+  if (process.env.CURSOR_API_KEY?.trim() || process.env.CURSOR_AUTH_TOKEN?.trim()) {
+    return { available: true };
+  }
+
+  try {
+    const { stdout, stderr } = await execFileAsync(CURSOR_BIN, ["status"], {
+      timeout: 10_000,
+    });
+    const text = `${stdout}\n${stderr}`.trim();
+    const normalized = text.toLowerCase();
+    if (
+      normalized.includes("authenticated") ||
+      normalized.includes("logged in") ||
+      normalized.includes("api key")
+    ) {
+      return { available: true };
+    }
+    if (
+      normalized.includes("not authenticated") ||
+      normalized.includes("not logged in") ||
+      normalized.includes("agent login")
+    ) {
+      return { available: false, skipReason: "cursor not authenticated" };
+    }
+    return { available: false, error: `Unexpected cursor status output: ${text}` };
+  } catch (error) {
+    const text = errorText(error);
+    const normalized = text.toLowerCase();
+    if (
+      normalized.includes("not authenticated") ||
+      normalized.includes("not logged in") ||
+      normalized.includes("agent login")
+    ) {
+      return { available: false, skipReason: "cursor not authenticated" };
+    }
+    return { available: false, error: `Failed to read cursor auth status: ${text}` };
+  }
+}
+
 const claudeAuth = await claudeStatus();
 const codexAuth = await codexStatus();
+const cursorAuth = await cursorStatus();
 
 const cleanupItems: CleanupItem[] = [];
 
@@ -164,12 +212,16 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
   const saved = {
     SPUR_CLAUDE_BIN: process.env.SPUR_CLAUDE_BIN,
     SPUR_CODEX_BIN: process.env.SPUR_CODEX_BIN,
+    SPUR_CURSOR_BIN: process.env.SPUR_CURSOR_BIN,
   };
   if (CLAUDE_BIN) {
     process.env.SPUR_CLAUDE_BIN = CLAUDE_BIN;
   }
   if (CODEX_BIN) {
     process.env.SPUR_CODEX_BIN = CODEX_BIN;
+  }
+  if (CURSOR_BIN) {
+    process.env.SPUR_CURSOR_BIN = CURSOR_BIN;
   }
 
   try {
@@ -184,6 +236,11 @@ async function withPinnedAgentBinaries<T>(fn: () => Promise<T>): Promise<T> {
       delete process.env.SPUR_CODEX_BIN;
     } else {
       process.env.SPUR_CODEX_BIN = saved.SPUR_CODEX_BIN;
+    }
+    if (saved.SPUR_CURSOR_BIN === undefined) {
+      delete process.env.SPUR_CURSOR_BIN;
+    } else {
+      process.env.SPUR_CURSOR_BIN = saved.SPUR_CURSOR_BIN;
     }
   }
 }
@@ -256,16 +313,13 @@ async function runSmoke(
 
   await withPinnedAgentBinaries(async () => {
     const service = await startServer(configPath, {});
-    const initialSmokeTimeoutMs = agent === "codex" ? 240_000 : 180_000;
+    const initialSmokeTimeoutMs = agent === "claude" ? 180_000 : 240_000;
     const expectedTitle = `${agent} smoke slots`;
     const expectedLinks = [
       { label: "tracker", url: `https://tracker.example.com/${agent}-smoke` },
       { label: "pr", url: `https://example.com/${agent}/pull/1` },
     ] as const;
     const expectedLinkPairs = expectedLinks.map((link) => `${link.label}=${link.url}`).sort();
-    const expectedStatusLinks = expectedLinks.map(
-      (link) => `#[hyperlink=${link.url}]${link.label}#[hyperlink=]`,
-    );
     try {
       const session = await service.spawn({
         project: "api",
@@ -293,11 +347,10 @@ After the file and the session metadata are set, wait for more instructions.`,
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
         const statusLeft = await readTmuxOption(session.id, "status-left");
-        const statusRight = await readTmuxOption(session.id, "status-right");
+        const status = await readTmuxOption(session.id, "status");
+        expect(status).toBe("status on");
         expect(statusLeft).toContain(expectedTitle);
-        for (const value of expectedStatusLinks) {
-          expect(statusRight).toContain(value);
-        }
+        expect(statusLeft).not.toContain(session.id);
         const links = liveState.slots.links.map((link) => `${link.label}=${link.url}`).sort();
         expect(links).toEqual(expectedLinkPairs);
       }
@@ -370,6 +423,24 @@ if (codexAuth.error) {
 
     it("uses codex spawn preflight before the normal session launch", async () => {
       await runSmoke("codex", { expectedPreflightBranch: "smoke-codex-preflight" });
+    });
+  });
+}
+
+if (cursorAuth.error) {
+  describe("Spur real-agent smoke (cursor)", () => {
+    it("passes the auth preflight", () => {
+      throw new Error(cursorAuth.error);
+    });
+  });
+} else {
+  describe.skipIf(!cursorAuth.available)("Spur real-agent smoke (cursor)", () => {
+    it("launches cursor, restores it, and accepts a follow-up send", async () => {
+      await runSmoke("cursor");
+    });
+
+    it("uses cursor spawn preflight before the normal session launch", async () => {
+      await runSmoke("cursor", { expectedPreflightBranch: "smoke-cursor-preflight" });
     });
   });
 }

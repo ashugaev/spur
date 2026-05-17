@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { ImageResponse } from "next/og";
+import { BG_BASE_HEX } from "@/design/colors";
 
 export function GET() {
   return new ImageResponse(
@@ -9,7 +10,7 @@ export function GET() {
         style: {
           width: "512px",
           height: "512px",
-          background: "#0D0D0E",
+          background: BG_BASE_HEX,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",

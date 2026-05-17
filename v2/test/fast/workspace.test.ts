@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import {
   createWorktree,
   findWorktreePathForBranch,
+  readDoctorBranchHint,
+  resolveDoctorRepoRoot,
   resolveRepoPathFromWorktree,
 } from "../../src/workspace.js";
 
@@ -83,6 +85,59 @@ describe("createWorktree", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+  });
+
+  it("uses origin/defaultBranch as base when checked-out default branch is dirty and behind", async () => {
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("remote not behind local");
+    mockGitSuccess("main");
+    mockGitSuccess(" M DIRTY.txt");
+    mockGitFailure("missing local branch");
+    mockGitFailure("missing remote branch");
+    mockGitSuccess();
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      "git",
+      ["merge", "--ff-only", "origin/main"],
+      { cwd: "/repo/api" },
+    );
+  });
+
+  it("fast-forwards a clean checked-out default branch before creating the worktree", async () => {
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("remote not behind local");
+    mockGitSuccess("main");
+    mockGitSuccess();
+    mockGitSuccess();
+    mockGitFailure("missing local branch");
+    mockGitFailure("missing remote branch");
+    mockGitSuccess();
+
+    await createWorktree(baseInput);
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["merge", "--ff-only", "origin/main"], {
+      cwd: "/repo/api",
+    });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
       { cwd: "/repo/api" },
     );
   });
@@ -221,5 +276,58 @@ branch refs/heads/main
 `);
 
     await expect(findWorktreePathForBranch("/repo/api", "feature/missing")).resolves.toBeNull();
+  });
+});
+
+describe("readDoctorBranchHint", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the checked-out branch when HEAD is attached", async () => {
+    mockGitSuccess("feature/onboarding");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("feature/onboarding");
+  });
+
+  it("falls back to the remote default branch when HEAD is detached", async () => {
+    mockGitFailure("detached");
+    mockGitSuccess("");
+    mockGitSuccess("origin/main");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("main");
+  });
+
+  it("falls back to main when the repo does not expose a branch hint", async () => {
+    mockGitFailure("missing");
+    mockGitSuccess("");
+    mockGitFailure("missing");
+    mockGitFailure("missing");
+
+    await expect(readDoctorBranchHint("/repo/api")).resolves.toBe("main");
+  });
+});
+
+describe("resolveDoctorRepoRoot", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns the git toplevel when doctor runs from a nested repo directory", async () => {
+    mockGitSuccess("/repo/api");
+
+    await expect(resolveDoctorRepoRoot("/repo/api/packages/service")).resolves.toBe("/repo/api");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+      { cwd: "/repo/api/packages/service" },
+    );
+  });
+
+  it("falls back to the current directory when git toplevel resolution fails", async () => {
+    mockGitFailure("not a git repo");
+
+    await expect(resolveDoctorRepoRoot("/tmp/scratch")).resolves.toBe("/tmp/scratch");
   });
 });

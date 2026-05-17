@@ -25,6 +25,7 @@ function session(overrides: Partial<SessionView>): SessionView {
     workspaceExists: true,
     state: "waiting",
     lastActivityAt: "2026-03-18T10:00:00.000Z",
+    artifacts: [],
     services: [],
     sidecars: [],
     ...overrides,
@@ -95,7 +96,10 @@ describe("cli-view.describeSession", () => {
 describe("session-link-display", () => {
   it("formats pr and tracker links as compact ids", () => {
     expect(
-      formatSessionLinkDisplay({ label: "pr", url: "https://github.com/acme/api/pull/42" }).text,
+      formatSessionLinkDisplay({
+        label: "pr",
+        url: "https://github.com/acme/api/pull/42",
+      }).text,
     ).toBe("pr #42");
     expect(
       formatSessionLinkDisplay({

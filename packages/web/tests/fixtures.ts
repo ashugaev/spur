@@ -1,68 +1,9 @@
 import type { Page } from "@playwright/test";
-
-export interface SpurSessionLink {
-  label: string;
-  url: string;
-}
-
-export interface SpurServiceView {
-  serviceId: string;
-  status: "running" | "stopped" | "errored";
-  state: "running" | "problem" | "stopped" | "error";
-  command: string;
-  cwd: string;
-  lastActivityAt: string;
-  runtimeAlive: boolean;
-  port?: number;
-}
-
-export type SpurSessionStatus =
-  | "spawning"
-  | "running"
-  | "paused"
-  | "errored"
-  | "completed"
-  | "killed";
-
-export type SpurSessionState =
-  | "working"
-  | "waiting"
-  | "needs_input"
-  | "stopped"
-  | "error"
-  | "killed";
-
-export interface SpurSessionView {
-  id: string;
-  project: string;
-  agent: "claude" | "codex";
-  prompt: string;
-  branch: string;
-  worktree: boolean;
-  tmuxSession: string | null;
-  status: SpurSessionStatus;
-  state: SpurSessionState;
-  createdAt: string;
-  updatedAt: string;
-  lastActivityAt: string;
-  runtimeAlive: boolean;
-  workspaceExists: boolean;
-  worktreePath: string;
-  services: SpurServiceView[];
-  sidecars?: { name: string; alive: boolean }[];
-  slots?: {
-    title?: string;
-    links: SpurSessionLink[];
-  };
-  error?: string;
-}
-
-export interface ProjectInfo {
-  id: string;
-  name: string;
-}
+import type { ProjectInfo, SpurSessionView } from "../src/lib/types";
 
 const NOW = new Date().toISOString();
+const DEFAULT_GITHUB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
+const DEFAULT_GITLAB_STATUS = { ok: true, requestedAt: "2026-04-28T10:00:00.000Z" };
 
 function baseSession(id: string): SpurSessionView {
   return {
@@ -82,6 +23,11 @@ function baseSession(id: string): SpurSessionView {
     workspaceExists: true,
     worktreePath: `/tmp/worktrees/${id}`,
     services: [],
+    artifacts: [],
+    queuedMessages: {
+      messages: [],
+      awaitingPrompt: false,
+    },
     sidecars: [],
     slots: { links: [] },
   };
@@ -98,12 +44,23 @@ export function makeWorkingSession(overrides?: Partial<SpurSessionView>): SpurSe
   };
 }
 
+export function makeSpawningSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
+  return {
+    ...baseSession("session-spawning-1"),
+    runtimeAlive: false,
+    status: "spawning",
+    state: "working",
+    workspaceExists: false,
+    ...overrides,
+  };
+}
+
 export function makeStoppedSession(overrides?: Partial<SpurSessionView>): SpurSessionView {
   return {
     ...baseSession("session-stopped-1"),
     runtimeAlive: false,
     tmuxSession: null,
-    status: "paused",
+    status: "stopped",
     state: "stopped",
     ...overrides,
   };
@@ -151,7 +108,7 @@ export function makeSessionWithPR(overrides?: Partial<SpurSessionView>): SpurSes
     state: "working",
     slots: {
       title: "Session with PR",
-      links: [{ label: "pr", url: "https://github.com/test/repo/pull/42" }],
+      links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
     },
     ...overrides,
   };
@@ -195,20 +152,18 @@ export function makeSessionWithSidecar(
 
 export async function mockSessions(
   page: Page,
-  sessions: SpurSessionView[],
-  projects?: ProjectInfo[],
+  sessions: SpurSessionView[] | (() => SpurSessionView[]),
+  projects?: ProjectInfo[] | (() => ProjectInfo[]),
 ): Promise<void> {
-  const body = JSON.stringify({
-    sessions,
-    projects: projects ?? [],
-  });
-
-  // Match /api/sessions and /api/sessions?project=... but NOT /api/sessions/<id>
+  // Match /api/sessions but not /api/sessions/<id>
   await page.route(/\/api\/sessions(\?.*)?$/, (route) => {
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body,
+      body: JSON.stringify({
+        sessions: typeof sessions === "function" ? sessions() : sessions,
+        projects: typeof projects === "function" ? projects() : (projects ?? []),
+      }),
     });
   });
 
@@ -216,7 +171,38 @@ export async function mockSessions(
     void route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ available: false }),
+      body: JSON.stringify({ available: false, daemonAlive: true }),
+    });
+  });
+
+  await mockGitHubStatus(page, DEFAULT_GITHUB_STATUS);
+  await mockGitLabStatus(page, DEFAULT_GITLAB_STATUS);
+}
+
+export async function mockGitHubStatus(
+  page: Page,
+  body: Record<string, unknown>,
+  options?: { status?: number },
+): Promise<void> {
+  await page.route("/api/github-status", (route) => {
+    void route.fulfill({
+      status: options?.status ?? 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
+    });
+  });
+}
+
+export async function mockGitLabStatus(
+  page: Page,
+  body: Record<string, unknown>,
+  options?: { status?: number },
+): Promise<void> {
+  await page.route("/api/gitlab-status", (route) => {
+    void route.fulfill({
+      status: options?.status ?? 200,
+      contentType: "application/json",
+      body: JSON.stringify(body),
     });
   });
 }

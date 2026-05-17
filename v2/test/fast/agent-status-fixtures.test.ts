@@ -3,7 +3,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { classifyClaudeJsonlState, type ParsedRecord } from "../../src/claude-jsonl-state.js";
+import {
+  classifyClaudeJsonlState,
+  parseJsonlRecord,
+  type ParsedRecord,
+} from "../../src/claude-jsonl-state.js";
 import { readAgentHookState } from "../../src/agent-hook-state.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,74 +18,14 @@ const MANIFEST_PATH = join(FIXTURES_DIR, "MANIFEST.sha256");
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/** Parse a JSONL fixture into ParsedRecord[] with controlled timestamps. */
-function parseFixtureJsonl(content: string, timestampMs: number): ParsedRecord[] {
+/** Parse a JSONL fixture via the production parser, ignoring non-record lines. */
+function parseFixtureJsonl(content: string, fallbackTimestampMs: number): ParsedRecord[] {
   const records: ParsedRecord[] = [];
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
-    const type = typeof parsed["type"] === "string" ? parsed["type"] : "";
-    if (type === "progress") {
-      records.push({ type: "progress", timestampMs });
-      continue;
-    }
-    if (type === "system" || type === "stop_hook_summary" || type === "file-history-snapshot") {
-      records.push({ type, timestampMs });
-      continue;
-    }
-    const message =
-      typeof parsed["message"] === "object" && parsed["message"] !== null
-        ? (parsed["message"] as Record<string, unknown>)
-        : parsed;
-    const role =
-      typeof message["role"] === "string"
-        ? message["role"]
-        : typeof parsed["role"] === "string"
-          ? parsed["role"]
-          : "";
-    if (role === "assistant") {
-      const stopReason =
-        typeof message["stop_reason"] === "string" ? message["stop_reason"] : undefined;
-      const content = Array.isArray(message["content"]) ? message["content"] : [];
-      const hasToolUse = content.some(
-        (block: unknown) =>
-          typeof block === "object" &&
-          block !== null &&
-          (block as Record<string, unknown>)["type"] === "tool_use",
-      );
-      records.push({
-        type: "assistant",
-        role: "assistant",
-        ...(stopReason ? { stopReason } : {}),
-        hasToolUse,
-        timestampMs,
-      });
-      continue;
-    }
-    if (role === "user") {
-      const content = Array.isArray(message["content"]) ? message["content"] : [];
-      const hasToolResult = content.some(
-        (block: unknown) =>
-          typeof block === "object" &&
-          block !== null &&
-          (block as Record<string, unknown>)["type"] === "tool_result",
-      );
-      records.push({
-        type: "user",
-        role: hasToolResult ? "tool_result" : "user",
-        timestampMs,
-      });
-      continue;
-    }
-    if (type) {
-      records.push({ type, timestampMs });
-    }
+    const record = parseJsonlRecord(trimmed, fallbackTimestampMs);
+    if (record) records.push(record);
   }
   return records;
 }
@@ -96,8 +40,8 @@ async function parseManifest(): Promise<Map<string, string>> {
   const entries = new Map<string, string>();
   for (const line of content.trim().split("\n")) {
     const match = line.match(/^([a-f0-9]{64})\s+(.+)$/);
-    if (match) {
-      entries.set(match[2]!, match[1]!);
+    if (match?.[1] && match[2]) {
+      entries.set(match[2], match[1]);
     }
   }
   return entries;
@@ -120,7 +64,6 @@ describe("Fixture integrity", () => {
 
 describe("Claude JSONL fixture classification", () => {
   const NOW = 1_700_000_000_000;
-  const STALE = NOW - 10_000; // 10s ago — past the 3s tool_use stale window
 
   // ── waiting states ──────────────────────────────────────────────────
 
@@ -151,22 +94,109 @@ describe("Claude JSONL fixture classification", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe(expectedState);
   });
 
-  // ── tool_use: fresh = working, stale = needs_input ──────────────────
+  // ── generic tool_use: fresh = working, stale = needs_input ──────────
 
-  it("classifies tool_use within stale window as working", async () => {
+  it("classifies tool_use within activity window as working", async () => {
     const content = await readFile(join(CLAUDE_DIR, "working-tool-use-fresh.jsonl"), "utf8");
     const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    // Records timestamped at NOW, checked at NOW → within 3s window → working
-    expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
+    // Last record embeds ts 2026-04-07T22:45:14.391Z. +1s into the 60s window → working.
+    expect(classifyClaudeJsonlState(records, Date.parse("2026-04-07T22:45:15.391Z"))).toBe(
+      "working",
+    );
   });
 
-  it("classifies tool_use past stale window as needs_input", async () => {
+  it("classifies AskUserQuestion tool_use as needs_input regardless of age", async () => {
     const content = await readFile(join(CLAUDE_DIR, "needs-input-tool-use-stale.jsonl"), "utf8");
-    // Records timestamped 10s ago, checked at NOW → past 3s window → needs_input
-    const records = parseFixtureJsonl(content, STALE);
+    const records = parseFixtureJsonl(content, NOW);
     expect(records.length).toBeGreaterThan(0);
-    expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
+    expect(
+      classifyClaudeJsonlState(
+        records,
+        Date.parse("2026-04-11T15:03:36.000Z"),
+        Date.parse("2026-04-11T15:02:06.116Z"),
+      ),
+    ).toBe("needs_input");
+  });
+
+  // ── Real-session tails ──────────────────────────────────────────────
+
+  /**
+   * Real-session tails exercising the activity-window classifier:
+   *   - tool_use inside 60s window (record ts or mtime) → working
+   *   - tool_use past 60s window with no AskUserQuestion → waiting
+   *   - AskUserQuestion tool_use → needs_input regardless of timing
+   *   - fileMtimeMs anchors "last activity" when newer than record ts
+   */
+  it.each<[string, string, number, number, string]>([
+    // spur-052a: last tool_use at 2026-04-15T12:47:58.984Z.
+    [
+      "working-spur-052a-tail.jsonl",
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-15T13:04:00.000Z"),
+      Date.parse("2026-04-15T12:48:00.000Z"),
+      "waiting",
+    ],
+    [
+      "working-spur-052a-tail.jsonl",
+      "fresh mtime keeps the session inside the activity window → working",
+      Date.parse("2026-04-15T13:04:00.000Z"),
+      Date.parse("2026-04-15T13:03:59.000Z"),
+      "working",
+    ],
+    // spur-0190: last tool_use at 2026-04-11T16:44:36.778Z.
+    [
+      "needs-input-spur-0190-tail.jsonl",
+      "inside the 60s window → working",
+      Date.parse("2026-04-11T16:44:46.500Z"),
+      0,
+      "working",
+    ],
+    [
+      "needs-input-spur-0190-tail.jsonl",
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-11T16:45:45.000Z"),
+      Date.parse("2026-04-11T16:44:37.000Z"),
+      "waiting",
+    ],
+    // AskUserQuestion fixtures: content beats timing.
+    [
+      "needs-input-ask-user-spur-6e9a-tail.jsonl",
+      "AskUserQuestion metadata makes it needs_input immediately",
+      Date.parse("2026-04-11T15:02:08.000Z"),
+      0,
+      "needs_input",
+    ],
+    [
+      "needs-input-ask-user-spur-6e9a-tail.jsonl",
+      "AskUserQuestion stays needs_input regardless of age",
+      Date.parse("2026-04-11T15:30:00.000Z"),
+      Date.parse("2026-04-11T15:02:06.116Z"),
+      "needs_input",
+    ],
+    // spur-36e9: ToolSearch result references AskUserQuestion schema but the
+    // session itself never invokes AskUserQuestion → not a real question.
+    [
+      "working-tool-search-ask-user-ref-spur-36e9-tail.jsonl",
+      "ToolSearch reference to AskUserQuestion schema is not a real question → working",
+      Date.parse("2026-04-19T09:45:10.500Z"),
+      Date.parse("2026-04-19T09:45:10.348Z"),
+      "working",
+    ],
+    // bg-bash web fixture: last tool_use at 2026-04-13T11:19:48.036Z. With stale
+    // mtime past the 60s window and no AskUserQuestion, it must classify as waiting.
+    [
+      "working-bg-bash-web-tail.jsonl",
+      "past the 60s window with stale mtime → waiting",
+      Date.parse("2026-04-13T11:21:00.000Z"),
+      Date.parse("2026-04-13T11:19:48.036Z"),
+      "waiting",
+    ],
+  ])("%s: %s", async (fixture, _description, nowMs, fileMtimeMs, expected) => {
+    const content = await readFile(join(CLAUDE_DIR, fixture), "utf8");
+    const records = parseFixtureJsonl(content, nowMs);
+    expect(records.length).toBeGreaterThan(0);
+    expect(classifyClaudeJsonlState(records, nowMs, fileMtimeMs)).toBe(expected);
   });
 });
 
@@ -186,6 +216,7 @@ describe("Codex hook state fixture classification", () => {
     ["working-pre-tool-use.json", "working"],
     ["working-post-tool-use.json", "working"],
     ["working-spur-436f.json", "working"],
+    ["stale-working-spur-1c0e.json", "working"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CODEX_DIR, fixture), "utf8");
     const parsed = JSON.parse(content) as { state: string };
@@ -205,10 +236,40 @@ describe("Codex hook state fixture classification", () => {
     expect(hookState.state).toBe("working");
     expect(hookState.turnId).toBeTruthy();
     expect(lines).toHaveLength(20);
-    expect(lines.some((line) => line.includes(hookState.turnId!))).toBe(true);
+    const turnId = hookState.turnId;
+    if (!turnId) {
+      throw new Error("expected spur-436f fixture to include turnId");
+    }
+    expect(lines.some((line) => line.includes(turnId))).toBe(true);
     expect(lines.some((line) => line.includes("Process running with session ID"))).toBe(true);
   });
 
+  it("captures the spur-1c0e tail where the rollout completed after a stale working hook snapshot", async () => {
+    const hookContent = await readFile(join(CODEX_DIR, "stale-working-spur-1c0e.json"), "utf8");
+    const hookState = JSON.parse(hookContent) as {
+      state: string;
+      hookEvent?: string;
+      turnId?: string;
+    };
+    const jsonlContent = await readFile(
+      join(CODEX_DIR, "stale-working-spur-1c0e-tail.jsonl"),
+      "utf8",
+    );
+    const lines = jsonlContent.trim().split("\n").filter(Boolean);
+
+    expect(hookState.state).toBe("working");
+    expect(hookState.hookEvent).toBe("PreToolUse");
+    expect(hookState.turnId).toBeTruthy();
+    expect(lines).toHaveLength(40);
+    const turnId = hookState.turnId;
+    if (!turnId) {
+      throw new Error("expected spur-1c0e fixture to include turnId");
+    }
+    expect(lines.some((line) => line.includes(turnId))).toBe(true);
+    expect(
+      lines.some((line) => line.includes('"type":"task_complete"') && line.includes(turnId)),
+    ).toBe(true);
+  });
   it("absent hook file → readAgentHookState returns null → classified as waiting (SPUR1614 regression)", async () => {
     // SPUR1614: Codex session with tmux+process alive but no hook state file.
     // All 20 events in fixtures/agent-history/codex/no-hook-spur1614.jsonl showed
@@ -258,9 +319,12 @@ describe("Codex hook state fixture classification", () => {
         expect(state, `readAgentHookState for ${fixture}`).not.toBeNull();
 
         const parsed = JSON.parse(content) as { state: string; hookEvent?: string };
-        expect(state!.state).toBe(parsed.state);
+        if (!state) {
+          throw new Error(`expected readAgentHookState to return data for ${fixture}`);
+        }
+        expect(state.state).toBe(parsed.state);
         if (parsed.hookEvent) {
-          expect(state!.hookEvent).toBe(parsed.hookEvent);
+          expect(state.hookEvent).toBe(parsed.hookEvent);
         }
       }
     } finally {

@@ -12,12 +12,24 @@ interface VoiceStatus {
 const EMPTY_AUDIO_ERROR =
   "Voice recording captured no audio. Check your microphone input and try again.";
 const TRANSCRIBE_ERROR = "Failed to transcribe audio";
+const TRANSCRIBE_TIMEOUT_ERROR = "Voice transcription timed out. Try again.";
 const INSERT_ERROR = "Failed to insert transcription";
 const MICROPHONE_HTTPS_ERROR =
   "Microphone access requires HTTPS. Connect via Tailscale HTTPS or localhost.";
 const MICROPHONE_PERMISSION_ERROR =
   "Microphone access is blocked. Allow microphone permission in your browser and try again.";
 const MICROPHONE_NOT_FOUND_ERROR = "No microphone was found. Connect a microphone and try again.";
+const TRANSCRIBE_MAX_ATTEMPTS = 3;
+const TRANSCRIBE_REQUEST_TIMEOUT_MS = 45_000;
+const TRANSCRIBE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+class RetryableTranscriptionError extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
 
 async function readVoiceError(response: Response, fallback: string): Promise<string> {
   const text = await response.text();
@@ -33,6 +45,80 @@ async function readVoiceError(response: Response, fallback: string): Promise<str
   }
 
   return text;
+}
+
+function isRetryableTranscriptionError(error: unknown): boolean {
+  if (error instanceof RetryableTranscriptionError) return true;
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  return error instanceof TypeError;
+}
+
+function formatTranscriptionFailure(message: string): string {
+  return `Failed to transcribe audio after ${TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`;
+}
+
+async function transcribeRecording(audio: Blob): Promise<string> {
+  let lastError = TRANSCRIBE_ERROR;
+
+  for (let attempt = 1; attempt <= TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), TRANSCRIBE_REQUEST_TIMEOUT_MS);
+
+    try {
+      const formData = new FormData();
+      formData.append("audio", audio, "voice-input.webm");
+      const response = await fetch("/api/runtime/voice/transcribe", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const message = await readVoiceError(response, TRANSCRIBE_ERROR);
+        if (!TRANSCRIBE_RETRYABLE_STATUS_CODES.has(response.status)) {
+          throw new Error(message);
+        }
+        lastError = message;
+        if (attempt === TRANSCRIBE_MAX_ATTEMPTS) {
+          throw new Error(formatTranscriptionFailure(message));
+        }
+        await sleep(400 * attempt);
+        continue;
+      }
+
+      const payload = (await response.json()) as { text?: string };
+      const text = payload.text?.trim() ?? "";
+      if (!text) {
+        throw new RetryableTranscriptionError("Transcription returned empty text");
+      }
+      return text;
+    } catch (error) {
+      const message =
+        error instanceof DOMException && error.name === "AbortError"
+          ? TRANSCRIBE_TIMEOUT_ERROR
+          : error instanceof Error
+            ? error.message
+            : TRANSCRIBE_ERROR;
+
+      if (!isRetryableTranscriptionError(error)) {
+        throw new Error(message, error instanceof Error ? { cause: error } : undefined);
+      }
+
+      lastError = message;
+      if (attempt === TRANSCRIBE_MAX_ATTEMPTS) {
+        throw new Error(
+          formatTranscriptionFailure(message),
+          error instanceof Error ? { cause: error } : undefined,
+        );
+      }
+
+      await sleep(400 * attempt);
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }
+
+  throw new Error(formatTranscriptionFailure(lastError));
 }
 
 function readRecordingStartError(error: unknown): string {
@@ -74,8 +160,13 @@ export interface UseVoiceInput {
   voiceModalOpen: boolean;
   voiceDraft: string;
   setVoiceDraft: (value: string) => void;
+  openDraft: (value?: string) => void;
   toggleRecording: () => void;
-  confirmDraft: (onInsert: (text: string) => unknown) => Promise<void>;
+  stopAndSend: (onSend: (text: string) => void | Promise<void>) => void;
+  confirmDraft: (
+    onInsert: (text: string) => unknown,
+    options?: { allowEmpty?: boolean },
+  ) => Promise<void>;
   dismissModal: () => void;
   voiceError: string | null;
   clearVoiceError: () => void;
@@ -99,6 +190,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaChunksRef = useRef<Blob[]>([]);
+  const pendingSendCallbackRef = useRef<((text: string) => void | Promise<void>) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,6 +213,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       mediaRecorderRef.current = null;
       mediaStreamRef.current = null;
       mediaChunksRef.current = [];
+      pendingSendCallbackRef.current = null;
     };
   }, []);
 
@@ -159,32 +252,46 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         recorder.addEventListener("dataavailable", (event) => {
           if (event.data.size > 0) mediaChunksRef.current.push(event.data);
         });
+        recorder.addEventListener("error", (event) => {
+          const recorderError =
+            ("error" in (event ?? {}) && (event as { error?: DOMException }).error?.message) ||
+            "Voice recording failed before transcription";
+          dismissedRef.current = false;
+          pendingSendCallbackRef.current = null;
+          stopStream();
+          setVoiceBusy(null);
+          setVoiceError(recorderError);
+        });
 
         recorder.addEventListener("stop", () => {
           const chunks = [...mediaChunksRef.current];
           const wasDismissed = dismissedRef.current;
           dismissedRef.current = false;
           stopStream();
-          if (wasDismissed) return;
+          if (wasDismissed) {
+            pendingSendCallbackRef.current = null;
+            return;
+          }
           if (chunks.length === 0) {
+            pendingSendCallbackRef.current = null;
             setVoiceError(EMPTY_AUDIO_ERROR);
             return;
           }
+          // Precedence: stopAndSend > onTranscribed > modal.
           void (async () => {
             setVoiceBusy("transcribing");
             try {
               const audio = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-              const formData = new FormData();
-              formData.append("audio", audio, "voice-input.webm");
-              const response = await fetch("/api/runtime/voice/transcribe", {
-                method: "POST",
-                body: formData,
-              });
-              if (!response.ok) throw new Error(await readVoiceError(response, TRANSCRIBE_ERROR));
-              const payload = (await response.json()) as { text?: string };
-              const text = payload.text?.trim() ?? "";
-              if (!text) throw new Error("Transcription returned empty text");
-              if (onTranscribedRef.current) {
+              const text = await transcribeRecording(audio);
+              const pendingSend = pendingSendCallbackRef.current;
+              if (pendingSend) {
+                pendingSendCallbackRef.current = null;
+                try {
+                  await pendingSend(text);
+                } catch (error) {
+                  throw error instanceof Error ? error : new Error(INSERT_ERROR);
+                }
+              } else if (onTranscribedRef.current) {
                 try {
                   onTranscribedRef.current(text);
                 } catch (error) {
@@ -200,6 +307,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
                 setVoiceModalOpen(true);
               }
             } catch (err) {
+              pendingSendCallbackRef.current = null;
               setVoiceError(err instanceof Error ? err.message : TRANSCRIBE_ERROR);
             } finally {
               setVoiceBusy(null);
@@ -210,6 +318,7 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
         recorder.start();
         setRecording(true);
       } catch (err) {
+        pendingSendCallbackRef.current = null;
         stopStream();
         setVoiceError(readRecordingStartError(err));
       } finally {
@@ -219,9 +328,9 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
   }, [recording, stopStream, voiceStatus]);
 
   const confirmDraft = useCallback(
-    async (onInsert: (text: string) => unknown) => {
+    async (onInsert: (text: string) => unknown, options?: { allowEmpty?: boolean }) => {
       const trimmed = voiceDraft.trim();
-      if (!trimmed) return;
+      if (!trimmed && !options?.allowEmpty) return;
       try {
         const inserted = await onInsert(trimmed);
         if (inserted === false) {
@@ -242,11 +351,19 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
       dismissedRef.current = true;
       mediaRecorderRef.current.stop();
     }
+    pendingSendCallbackRef.current = null;
     stopStream();
     setVoiceBusy(null);
     setVoiceModalOpen(false);
     setVoiceDraft("");
   }, [stopStream]);
+
+  const stopAndSend = useCallback((onSend: (text: string) => void | Promise<void>) => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    pendingSendCallbackRef.current = onSend;
+    recorder.stop();
+  }, []);
 
   return {
     canUseVoice: Boolean(voiceStatus?.available),
@@ -255,7 +372,13 @@ export function useVoiceInput(options?: { onTranscribed?: (text: string) => void
     voiceModalOpen,
     voiceDraft,
     setVoiceDraft,
+    openDraft: useCallback((value = "") => {
+      setVoiceError(null);
+      setVoiceDraft(value);
+      setVoiceModalOpen(true);
+    }, []),
     toggleRecording,
+    stopAndSend,
     confirmDraft,
     dismissModal,
     voiceError,

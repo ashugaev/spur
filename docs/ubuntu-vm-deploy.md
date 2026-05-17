@@ -15,7 +15,7 @@ Run three pieces:
 
 - Spur daemon on loopback: `127.0.0.1:4310`
 - web UI on loopback: `127.0.0.1:3012`
-- reverse proxy (`nginx`) on Tailscale IP: `100.80.107.19:5555`
+- reverse proxy (`nginx`) on private Tailscale IP: `100.64.0.10:5555`
 
 Keep the direct terminal websocket server on loopback and advertise the externally reachable proxy port with `DIRECT_TERMINAL_PUBLIC_PORT`.
 
@@ -36,7 +36,7 @@ sudo apt-get update
 sudo apt-get install -y git tmux nginx gh
 ```
 
-Install Node.js 20+ or newer, then install `pnpm` and optional agent CLIs:
+Install Node.js 20+, then install `pnpm` and optional agent CLIs:
 
 ```bash
 sudo corepack enable
@@ -44,13 +44,13 @@ sudo corepack prepare pnpm@9.15.4 --activate
 sudo npm install -g @openai/codex
 ```
 
-If you plan to run Claude sessions too:
+For Claude sessions:
 
 ```bash
 sudo npm install -g @anthropic-ai/claude-code
 ```
 
-Agent CLIs must also be authenticated on the VM. Without that, the daemon and UI can run, but real `spawn` calls will fail.
+Agent CLIs must be authenticated on the VM. Without that, the daemon and UI can run, but real `spawn` calls fail.
 
 ## Clone And Build
 
@@ -84,7 +84,7 @@ ui:
   port: 5555
 ```
 
-Then keep the repo-local project config in the checkout, for example `~/projects/spur/spur.yaml`:
+Keep the repo-local project config in the checkout, for example `~/projects/spur/spur.yaml`:
 
 ```yaml
 projects:
@@ -105,6 +105,19 @@ Notes:
 - add GitHub sources or triggers only after `gh auth login` is working on the VM
 
 ## Systemd Services
+
+Provision daemon secrets out-of-band first. The unit reads them via
+`EnvironmentFile=/etc/spur/daemon.env`:
+
+```bash
+sudo install -d -m 0755 /etc/spur
+printf 'AZURE_OPENAI_API_KEY=<your-key>\n' | sudo tee /etc/spur/daemon.env >/dev/null
+sudo chown root:root /etc/spur/daemon.env
+sudo chmod 0600 /etc/spur/daemon.env
+```
+
+See `deploy/spur-daemon.env.example` for the file format. `pnpm main:deploy`
+aborts if this file is missing.
 
 Create a daemon unit:
 
@@ -169,7 +182,7 @@ Example: localhost plus a private Tailscale IP.
 ```nginx
 server {
     listen 127.0.0.1:5555;
-    listen 100.80.107.19:5555;
+    listen 100.64.0.10:5555;
     server_name _;
 
     location /ws {
@@ -218,8 +231,8 @@ ss -ltnp | egrep ':(4310|3012|5555|14801)\b'
 For a private Tailscale deployment, verify the UI from another tailnet device:
 
 ```bash
-curl -I http://100.80.107.19:5555
-curl http://100.80.107.19:5555/api/runtime/terminal
+curl -I http://100.64.0.10:5555
+curl http://100.64.0.10:5555/api/runtime/terminal
 ```
 
 If the deployment should not be public, confirm the public VM IP does not answer on the proxy port.
@@ -242,9 +255,24 @@ curl http://127.0.0.1:4310/sessions
 curl http://127.0.0.1:5555/api/runtime/terminal
 ```
 
+`pnpm main:deploy` uses `MAIN_DEPLOY_ROOT` when set. Otherwise it keeps its managed release clone under `~/.spur/main-deploy/repo`. It installs systemd units for the script account, or `MAIN_DEPLOY_SERVICE_USER` and `MAIN_DEPLOY_SERVICE_HOME` when set. It fetches latest `origin/main`, builds there, restarts services only after a successful build, and records the last deployed SHA so the next cron run retries a failed release instead of treating a pulled-but-unreleased commit as complete.
+
+## Automated Main Releases
+
+To auto-release `main` every hour from an isolated release clone:
+
+```bash
+crontab -l > /tmp/spur.cron
+printf '%s\n' '0 * * * * MAIN_DEPLOY_ROOT=$HOME/.spur/main-deploy/repo /usr/bin/pnpm -C $HOME/projects/spur run main:deploy >> $HOME/.spur/main-cron-deploy.log 2>&1' >> /tmp/spur.cron
+crontab /tmp/spur.cron
+rm /tmp/spur.cron
+```
+
+Keep hourly cron pointed at a normal repo checkout only as command entrypoint. Deploy work happens inside `MAIN_DEPLOY_ROOT`, which stays reserved for automation, not day-to-day editing.
+
 ## Operational Notes
 
-- `spur-daemon.service` and `spur-web.service` should be `enabled`, not just started
+- `spur-daemon.service` and `spur-web.service` must be enabled, not only started
 - keep the daemon and Next.js app on loopback even when the UI is proxied
 - do not point the browser directly at the terminal bind port
 - set `DIRECT_TERMINAL_PUBLIC_PORT` to the reverse proxy port the browser will actually use
