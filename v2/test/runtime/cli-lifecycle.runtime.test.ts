@@ -18,6 +18,7 @@ import {
   createGitRepo,
   createRuntimeTestContext,
   createTmuxSession,
+  execTmux,
   isTmuxAvailable,
   killTmuxSession,
   killTmuxSessionsByPrefix,
@@ -3045,6 +3046,58 @@ projects:
     expect(finalLog.indexOf("[Spur step 2/2: test]")).toBeGreaterThan(
       finalLog.indexOf("queued follow up"),
     );
+  });
+
+  it("claude submit-ack survives a pane left in tmux copy-mode", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-copy-mode-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const configPath = await context.writeConfig(
+      "copy-mode.yaml",
+      baseConfig(context, sessionPrefix),
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = JSON.parse(
+      (
+        await context.execCli([
+          "--config",
+          configPath,
+          "spawn",
+          "api",
+          "copy-mode initial prompt",
+          "--json",
+        ])
+      ).stdout,
+    ) as SessionView;
+
+    await pollUntil(async () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`), {
+      timeoutMs: 15_000,
+      accept: (value) => value.state === "waiting",
+    });
+
+    await execTmux(["copy-mode", "-t", spawned.tmuxSession]);
+
+    const startedAt = Date.now();
+    await context.execCli(
+      ["--config", configPath, "send", spawned.id, "copy-mode survival", "--json"],
+      { timeoutMs: 10_000 },
+    );
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeLessThan(10_000);
+
+    const log = await pollUntil(async () => context.readAgentLog(spawned.id), {
+      timeoutMs: 10_000,
+      accept: (value) => value.includes("copy-mode survival"),
+    });
+    expect(log).toContain("copy-mode survival");
   });
 
   it("blocks kill from the interactive list when the worktree is dirty", async () => {

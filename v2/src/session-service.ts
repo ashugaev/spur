@@ -19,21 +19,21 @@ import {
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
   buildAgentResumePlan,
+  createAgentSubmitAckBinding,
   findAgentSessionId,
   parseAgentName,
   setupAgentHooks,
+  type SubmitAckBinding,
+  type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
-  captureCodexRolloutBaseline,
   findLatestCodexSessionFile,
   readCodexRolloutState,
-  scanCodexRolloutForMessage,
   type CodexRolloutStateRecord,
-  type RolloutBaseline,
 } from "./agents/codex.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -190,8 +190,8 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
-const CODEX_SUBMIT_RETRY_LIMIT = 1;
+const SUBMIT_ACK_TIMEOUT_MS = 60_000;
+const SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
 const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
@@ -3141,37 +3141,34 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath">,
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
-    const shouldWaitForCodexAck =
+    const shouldWaitForSubmitAck =
       agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const codexSessionsDir = shouldWaitForCodexAck
-      ? join(codexHookHomePath(sessionToolDir), "sessions")
-      : null;
-    const baseline: RolloutBaseline | null = codexSessionsDir
-      ? await captureCodexRolloutBaseline(codexSessionsDir)
+    const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
+      ? await createAgentSubmitAckBinding(session.agent, {
+          worktreePath: session.worktreePath,
+          codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
+        })
       : null;
     const startedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (!shouldWaitForCodexAck || !codexSessionsDir || !baseline) {
+    if (!binding) {
       return;
     }
-    let lastResult: { found: boolean; lastScannedFile: string | null } = {
-      found: false,
-      lastScannedFile: null,
-    };
-    for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForCodexRolloutAck(codexSessionsDir, message, baseline);
+    let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
+    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message);
       if (lastResult.found) {
         return;
       }
-      if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
+      if (attempt < SUBMIT_RETRY_LIMIT) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -3179,32 +3176,29 @@ export class SessionService {
       session.tmuxSession,
       sessionProcessMatchers(session),
     );
-    this.logEvent("session.codex.submit.timeout", {
+    this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
-      message: `Codex submit ack timed out for ${session.id}`,
+      message: `Agent submit ack timed out for ${session.id}`,
       details: {
+        agent: session.agent,
         lastScannedFile: lastResult.lastScannedFile,
         messageLength: message.length,
         elapsedMs: Date.now() - startedAt,
         processAlive,
       },
     });
-    throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
+    throw new Error(`Timed out waiting for agent submit acknowledgment for ${session.id}`);
   }
 
-  private async waitForCodexRolloutAck(
-    sessionsDir: string,
+  private async waitForSubmitAck(
+    binding: SubmitAckBinding,
     messageText: string,
-    baseline: RolloutBaseline,
-  ): Promise<{ found: boolean; lastScannedFile: string | null }> {
-    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
-    let lastResult: { found: boolean; lastScannedFile: string | null } = {
-      found: false,
-      lastScannedFile: null,
-    };
+  ): Promise<SubmitAckScanResult> {
+    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
-      lastResult = await scanCodexRolloutForMessage(sessionsDir, messageText, baseline);
+      lastResult = await binding.scan(messageText);
       if (lastResult.found) {
         return lastResult;
       }

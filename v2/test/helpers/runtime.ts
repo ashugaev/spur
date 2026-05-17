@@ -136,14 +136,19 @@ function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
 fi
 mode="launch"
 resume_id=""
+encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
+session_dir="$HOME/.claude/projects/$encoded_path"
+mkdir -p "$session_dir"
 if [[ "\${1:-}" == "--resume" ]]; then
   mode="resume"
   resume_id="\${2:-}"
+  session_uuid="$resume_id"
+  # Resumed sessions append to the existing JSONL file written during launch.
+  if [[ ! -f "$session_dir/$session_uuid.jsonl" ]]; then
+    printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
+  fi
 else
-  encoded_path=$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/://g; s/[/.]/-/g')
-  session_dir="$HOME/.claude/projects/$encoded_path"
   session_uuid="fake-claude-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
   printf '{"type":"session"}\n' > "$session_dir/$session_uuid.jsonl"
 fi
 jsonl_append() {
@@ -316,6 +321,14 @@ touch_chat_store "$chat_id"`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
+  // Both claude and codex buffer pasted multi-line input and write a single
+  // record with the full message. Claude emits one user JSONL entry whose
+  // content text matches what scanClaudeJsonlForMessage compares against.
+  const claudeEmitBuffered = `if [[ -n "\${session_dir:-}" && -n "\${session_uuid:-}" ]]; then
+    encoded_text="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")"
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":%s}]},"timestamp":"%s","sessionId":"%s"}\\n' "$encoded_text" "$timestamp" "$session_uuid" >> "$session_dir/$session_uuid.jsonl"
+  fi`;
   // Codex uses a buffering read loop that drains pasted lines before emitting
   // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
   // the exact full restore/replay message even across interrupt-driven sends.
@@ -326,8 +339,17 @@ touch_chat_store "$chat_id"`;
   const readLoop =
     agentName === "claude"
       ? `while IFS= read -r line; do
+  full_msg="$line"
   printf '%s\\n' "$line" >> "$log_file"
-  jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'
+  # Drain remaining lines from the same paste. Daemon sends paste then sleeps
+  # DEFAULT_SUBMIT_DELAY_MS (300ms) before the submit Enter; drain must exceed
+  # that so we capture the full message before emitting the JSONL ack record.
+  while IFS= read -r -t 0.5 extra; do
+    full_msg="$full_msg
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  ${claudeEmitBuffered}
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}
