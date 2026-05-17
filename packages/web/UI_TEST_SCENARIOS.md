@@ -221,6 +221,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2: Actions bar
 
 - Terminal button (white filled) when session attachable
+- Terminal-open icon matches the dashboard row terminal icon
 - `Workspace Access` section appears only when daemon `workspaceAccess.items[]` is present, and link items open in a new tab
 - Pause button (bordered) when session pausable
 - Complete button (green bordered) when session completable
@@ -340,6 +341,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S6: Terminal modal (dashboard + detail page)
 
 - Terminal button opens the shared full-screen terminal overlay from both dashboard and detail page
+- Terminal-open icon is consistent across dashboard rows, detail action bar, and sidecar terminal buttons
 - ✕ closes overlay
 - Open/close always syncs `terminal=<session-id>` in query params
 - Reload restores terminal overlay from query on both pages when attachable

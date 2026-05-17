@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -13,6 +13,7 @@ import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
 import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
+import { TerminalOpenIcon } from "@/components/TerminalOpenIcon";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -97,88 +98,6 @@ function StopIcon() {
   );
 }
 
-function TerminalIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 16 16"
-    >
-      <path d="m3 4 3.5 3.5L3 11" />
-      <path d="M8.5 11h4.5" />
-    </svg>
-  );
-}
-
-function PauseIcon() {
-  return (
-    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
-      <path d="M4 3h2.5v10H4zM9.5 3H12v10H9.5z" />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.7"
-      viewBox="0 0 16 16"
-    >
-      <path d="m3.5 8.5 3 3 6-7" />
-    </svg>
-  );
-}
-
-function RefreshIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 16 16"
-    >
-      <path d="M12.5 5.5A5 5 0 0 0 4 4.5L2.5 6" />
-      <path d="M2.5 3v3h3" />
-      <path d="M3.5 10.5A5 5 0 0 0 12 11.5l1.5-1.5" />
-      <path d="M13.5 13v-3h-3" />
-    </svg>
-  );
-}
-
-function LogsIcon() {
-  return (
-    <svg
-      aria-hidden="true"
-      className="h-3.5 w-3.5"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="1.5"
-      viewBox="0 0 16 16"
-    >
-      <path d="M3 4h10" />
-      <path d="M3 8h10" />
-      <path d="M3 12h7" />
-    </svg>
-  );
-}
-
 function formatTodoStatusLabel(status: SpurTodoItemStatus | SpurTodoStatus): string {
   if (status === "running") return "running";
   if (status === "done") return "done";
@@ -248,44 +167,6 @@ function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
     );
   }
   return <span aria-hidden="true" className={className} />;
-}
-
-function ActionIconButton({
-  label,
-  title,
-  tone = "default",
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  title?: string;
-  tone?: "default" | "primary" | "ready" | "danger";
-  disabled?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  const toneClassName =
-    tone === "primary"
-      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
-      : tone === "ready"
-        ? "border-[var(--color-status-ready)] text-[var(--color-status-ready)] hover:bg-[var(--color-status-ready)]/10"
-        : tone === "danger"
-          ? "border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error)]/10"
-          : "border-[var(--color-border-strong)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]";
-
-  return (
-    <button
-      aria-label={label}
-      className={`inline-flex h-8 w-8 items-center justify-center border font-bold uppercase transition disabled:opacity-50 ${toneClassName}`}
-      disabled={disabled}
-      onClick={onClick}
-      title={title ?? label}
-      type="button"
-    >
-      {children}
-    </button>
-  );
 }
 
 function ArtifactFileIcon() {
@@ -1434,69 +1315,72 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Actions bar */}
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-default)] py-3">
             {canAttach ? (
-              <ActionIconButton
-                label="Terminal"
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
                 onClick={() => syncTerminalFilter(session.id)}
-                tone="primary"
               >
-                <TerminalIcon />
-              </ActionIconButton>
+                <TerminalOpenIcon />
+                <span>Terminal</span>
+              </button>
             ) : null}
             {canPause(session) ? (
-              <ActionIconButton
+              <button
+                type="button"
                 disabled={busyAction !== null}
-                label="Pause"
                 onClick={() => void handleAction("pause")}
-                title={busyAction === "pause" ? "Pausing..." : "Pause"}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                <PauseIcon />
-              </ActionIconButton>
+                {busyAction === "pause" ? "Pausing..." : "Pause"}
+              </button>
             ) : null}
             {isRestorable(session) ? (
-              <ActionIconButton
+              <button
+                type="button"
                 disabled={busyAction !== null}
-                label="Restore"
                 onClick={() => void handleAction("restore")}
-                title={busyAction === "restore" ? "Restoring..." : "Restore"}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                <PlayIcon />
-              </ActionIconButton>
+                {busyAction === "restore" ? "Restoring..." : "Restore"}
+              </button>
             ) : null}
             {canComplete(session) ? (
-              <ActionIconButton
+              <button
+                type="button"
                 disabled={busyAction !== null}
-                label="Complete"
                 onClick={() => void handleAction("complete")}
-                title={busyAction === "complete" ? "Completing..." : "Complete"}
-                tone="ready"
+                className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
               >
-                <CheckIcon />
-              </ActionIconButton>
+                {busyAction === "complete" ? "Completing..." : "Complete"}
+              </button>
             ) : null}
             {!isTerminalSession(session) ? (
-              <ActionIconButton
+              <button
+                type="button"
                 disabled={busyAction !== null}
-                label="Kill"
                 onClick={() => void handleAction("kill", { force: true })}
-                title={busyAction === "kill" ? "Killing..." : "Kill"}
-                tone="danger"
+                className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
               >
-                <StopIcon />
-              </ActionIconButton>
+                {busyAction === "kill" ? "Killing..." : "Kill"}
+              </button>
             ) : null}
             {canRespawn(session) ? (
-              <ActionIconButton
+              <button
+                type="button"
                 disabled={busyAction !== null}
-                label="Edit & Respawn"
                 onClick={openRespawnEditor}
-                title={busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
               >
-                <RefreshIcon />
-              </ActionIconButton>
+                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
+              </button>
             ) : null}
-            <ActionIconButton label="Logs" onClick={() => void openLogs()}>
-              <LogsIcon />
-            </ActionIconButton>
+            <button
+              type="button"
+              onClick={() => void openLogs()}
+              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+            >
+              Logs
+            </button>
           </div>
 
           {/* Content */}
@@ -1997,10 +1881,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                           {sc.alive && canAttach ? (
                             <button
                               type="button"
-                              className="border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                              className="inline-flex items-center gap-1.5 border border-[var(--color-border-strong)] px-2 py-0.5 text-xs font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
                               onClick={() => syncTerminalFilter(`${session.id}--${sc.name}`)}
                             >
-                              Terminal
+                              <TerminalOpenIcon />
+                              <span>Terminal</span>
                             </button>
                           ) : null}
                           {sidecarOpenUrl ? (

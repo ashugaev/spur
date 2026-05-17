@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
+import { TerminalOpenIcon } from "@/components/TerminalOpenIcon";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -227,18 +228,7 @@ export function SessionRow({
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
           onClick={() => canAttach && onOpenTerminal?.(session)}
         >
-          <svg
-            aria-hidden="true"
-            className="h-3.5 w-3.5"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            viewBox="0 0 24 24"
-          >
-            <path d="M4 6.75A1.75 1.75 0 0 1 5.75 5h12.5A1.75 1.75 0 0 1 20 6.75v10.5A1.75 1.75 0 0 1 18.25 19H5.75A1.75 1.75 0 0 1 4 17.25Z" />
-            <path d="m8 10 2.5 2L8 14.5" />
-            <path d="M13 15h3" />
-          </svg>
+          <TerminalOpenIcon />
         </IconButton>
       )}
     </div>
