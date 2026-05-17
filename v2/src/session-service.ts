@@ -41,7 +41,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
-import { findProjectConfigPath, loadProjectConfig } from "./config.js";
+import { buildSidecarLinkUrl, findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
@@ -1503,7 +1503,7 @@ export class SessionService {
   }): Promise<void> {
     const { sessionId, sidecarName, reservedPort, url, signal } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
-    const linkUrl = `${url}:${reservedPort}`;
+    const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
       if (signal.aborted) return;
       const perRequest = AbortSignal.any([
