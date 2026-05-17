@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -97,6 +97,88 @@ function StopIcon() {
   );
 }
 
+function TerminalIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 16 16"
+    >
+      <path d="m3 4 3.5 3.5L3 11" />
+      <path d="M8.5 11h4.5" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg aria-hidden="true" className="h-3.5 w-3.5" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 3h2.5v10H4zM9.5 3H12v10H9.5z" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.7"
+      viewBox="0 0 16 16"
+    >
+      <path d="m3.5 8.5 3 3 6-7" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 16 16"
+    >
+      <path d="M12.5 5.5A5 5 0 0 0 4 4.5L2.5 6" />
+      <path d="M2.5 3v3h3" />
+      <path d="M3.5 10.5A5 5 0 0 0 12 11.5l1.5-1.5" />
+      <path d="M13.5 13v-3h-3" />
+    </svg>
+  );
+}
+
+function LogsIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 16 16"
+    >
+      <path d="M3 4h10" />
+      <path d="M3 8h10" />
+      <path d="M3 12h7" />
+    </svg>
+  );
+}
+
 function formatTodoStatusLabel(status: SpurTodoItemStatus | SpurTodoStatus): string {
   if (status === "running") return "running";
   if (status === "done") return "done";
@@ -119,8 +201,100 @@ function todoStatusClassName(status: SpurTodoItemStatus | SpurTodoStatus): strin
   return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
 }
 
+function todoStatusTextClassName(status: SpurTodoItemStatus | SpurTodoStatus): string {
+  if (status === "done" || status === "completed") {
+    return "text-[var(--color-status-ready)]";
+  }
+  if (status === "skipped") {
+    return "text-[var(--color-status-attention)]";
+  }
+  if (status === "failed") {
+    return "text-[var(--color-status-error)]";
+  }
+  return "text-[var(--color-text-secondary)]";
+}
+
 function todoSummaryLabel(status: SpurTodoItemStatus): string {
   return status === "done" ? "Summary" : "Reason";
+}
+
+function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
+  const className = `mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center border ${todoStatusClassName(status)}`;
+  if (status === "done") {
+    return (
+      <span aria-hidden="true" className={className}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path
+            d="m3.5 8.5 3 3 6-7"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth="2"
+          />
+        </svg>
+      </span>
+    );
+  }
+  if (status === "skipped") {
+    return (
+      <span aria-hidden="true" className={className}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path d="M4 8h8" strokeLinecap="round" strokeWidth="2" />
+        </svg>
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span aria-hidden="true" className={className}>
+        <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
+          <path
+            d="m5 5 6 6M11 5l-6 6"
+            strokeLinecap="round"
+            strokeWidth="2"
+          />
+        </svg>
+      </span>
+    );
+  }
+  return <span aria-hidden="true" className={className} />;
+}
+
+function ActionIconButton({
+  label,
+  title,
+  tone = "default",
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  title?: string;
+  tone?: "default" | "primary" | "ready" | "danger";
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  const toneClassName =
+    tone === "primary"
+      ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-text-inverse)] hover:bg-[var(--color-accent-hover)]"
+      : tone === "ready"
+        ? "border-[var(--color-status-ready)] text-[var(--color-status-ready)] hover:bg-[var(--color-status-ready)]/10"
+        : tone === "danger"
+          ? "border-[var(--color-status-error)] text-[var(--color-status-error)] hover:bg-[var(--color-status-error)]/10"
+          : "border-[var(--color-border-strong)] text-[var(--color-text-primary)] hover:bg-[var(--color-hover-overlay)]";
+
+  return (
+    <button
+      aria-label={label}
+      className={`inline-flex h-8 w-8 items-center justify-center border font-bold uppercase transition disabled:opacity-50 ${toneClassName}`}
+      disabled={disabled}
+      onClick={onClick}
+      title={title ?? label}
+      type="button"
+    >
+      {children}
+    </button>
+  );
 }
 
 function ArtifactFileIcon() {
@@ -1121,6 +1295,19 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const todoSkippedCount = session ? (session.todo?.skipped ?? 0) : 0;
   const todoFailedCount = session ? (session.todo?.failed ?? 0) : 0;
   const todoTerminalCount = todoResolvedCount + todoSkippedCount + todoFailedCount;
+  const todoCountLabels: string[] = session?.todo
+    ? [
+        [`${session.todo.done} done`, session.todo.done] as const,
+        [`${session.todo.skipped} skipped`, session.todo.skipped] as const,
+        [`${session.todo.failed} failed`, session.todo.failed] as const,
+        [
+          `${session.todo.total - todoTerminalCount} pending`,
+          session.todo.total - todoTerminalCount,
+        ] as const,
+      ]
+        .filter(([, count]) => count > 0)
+        .map(([label]) => label)
+    : [];
 
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
@@ -1245,8 +1432,9 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               {session.todo ? (
                 <span
                   className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
+                  title={`Todo ${formatTodoStatusLabel(session.todo.status)}`}
                 >
-                  {`todo ${todoTerminalCount}/${session.todo.total} ${formatTodoStatusLabel(session.todo.status)}`}
+                  {`todo ${todoTerminalCount}/${session.todo.total}`}
                 </span>
               ) : null}
             </div>
@@ -1255,71 +1443,72 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
           {/* Actions bar */}
           <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border-default)] py-3">
             {canAttach ? (
-              <button
-                type="button"
-                className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
+              <ActionIconButton
+                label="Terminal"
                 onClick={() => syncTerminalFilter(session.id)}
+                tone="primary"
               >
-                Terminal
-              </button>
+                <TerminalIcon />
+              </ActionIconButton>
             ) : null}
             {canPause(session) ? (
-              <button
-                type="button"
+              <ActionIconButton
                 disabled={busyAction !== null}
+                label="Pause"
                 onClick={() => void handleAction("pause")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title={busyAction === "pause" ? "Pausing..." : "Pause"}
               >
-                {busyAction === "pause" ? "Pausing..." : "Pause"}
-              </button>
+                <PauseIcon />
+              </ActionIconButton>
             ) : null}
             {isRestorable(session) ? (
-              <button
-                type="button"
+              <ActionIconButton
                 disabled={busyAction !== null}
+                label="Restore"
                 onClick={() => void handleAction("restore")}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title={busyAction === "restore" ? "Restoring..." : "Restore"}
               >
-                {busyAction === "restore" ? "Restoring..." : "Restore"}
-              </button>
+                <PlayIcon />
+              </ActionIconButton>
             ) : null}
             {canComplete(session) ? (
-              <button
-                type="button"
+              <ActionIconButton
                 disabled={busyAction !== null}
+                label="Complete"
                 onClick={() => void handleAction("complete")}
-                className="border border-[var(--color-status-ready)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-ready)] transition hover:bg-[var(--color-status-ready)]/10 disabled:opacity-50"
+                title={busyAction === "complete" ? "Completing..." : "Complete"}
+                tone="ready"
               >
-                {busyAction === "complete" ? "Completing..." : "Complete"}
-              </button>
+                <CheckIcon />
+              </ActionIconButton>
             ) : null}
             {!isTerminalSession(session) ? (
-              <button
-                type="button"
+              <ActionIconButton
                 disabled={busyAction !== null}
+                label="Kill"
                 onClick={() => void handleAction("kill", { force: true })}
-                className="border border-[var(--color-status-error)] px-3 py-1.5 font-bold uppercase text-[var(--color-status-error)] transition hover:bg-[var(--color-status-error)]/10 disabled:opacity-50"
+                title={busyAction === "kill" ? "Killing..." : "Kill"}
+                tone="danger"
               >
-                {busyAction === "kill" ? "Killing..." : "Kill"}
-              </button>
+                <StopIcon />
+              </ActionIconButton>
             ) : null}
             {canRespawn(session) ? (
-              <button
-                type="button"
+              <ActionIconButton
                 disabled={busyAction !== null}
+                label="Edit & Respawn"
                 onClick={openRespawnEditor}
-                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                title={busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
               >
-                {busyAction === "respawn" ? "Respawning..." : "Edit & Respawn"}
-              </button>
+                <RefreshIcon />
+              </ActionIconButton>
             ) : null}
-            <button
-              type="button"
+            <ActionIconButton
+              label="Logs"
               onClick={() => void openLogs()}
-              className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
             >
-              Logs
-            </button>
+              <LogsIcon />
+            </ActionIconButton>
           </div>
 
           {/* Content */}
@@ -1410,72 +1599,58 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                     Todo
                     <div className="flex-1 border-t border-[var(--color-border-subtle)]" />
                   </h2>
-                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-3">
-                    <div className="flex flex-wrap items-center gap-2">
+                  <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border-subtle)] px-2.5 py-2 text-[var(--color-text-secondary)]">
                       <span
                         className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
                       >
                         {formatTodoStatusLabel(session.todo.status)}
                       </span>
-                      <span className="text-[var(--color-text-secondary)]">
-                        {`${todoTerminalCount}/${session.todo.total} resolved`}
+                      <span className="font-mono text-[var(--color-text-primary)]">
+                        {`${todoTerminalCount}/${session.todo.total}`}
                       </span>
-                    </div>
-                    <div className="mt-3 grid gap-2 text-[var(--color-text-secondary)] sm:grid-cols-2">
-                      {[
-                        ["Done", String(session.todo.done)],
-                        ["Skipped", String(session.todo.skipped)],
-                        ["Failed", String(session.todo.failed)],
-                        ["Pending", String(session.todo.total - todoTerminalCount)],
-                      ].map(([label, value]) => (
-                        <div
-                          key={label}
-                          className="flex items-center justify-between border-b border-[var(--color-border-subtle)] py-1"
-                        >
-                          <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                            {label}
-                          </span>
-                          <span className="text-[var(--color-text-primary)]">{value}</span>
-                        </div>
+                      {todoCountLabels.map((label) => (
+                        <span key={label} className="text-[var(--color-text-tertiary)]">
+                          {label}
+                        </span>
                       ))}
                     </div>
                     {session.todo.items.length > 0 ? (
-                      <ol aria-label="Todo list" className="mt-3 space-y-2">
+                      <ol aria-label="Todo list" className="divide-y divide-[var(--color-border-subtle)]">
                         {session.todo.items.map((item) => (
                           <li
                             key={`${session.id}:todo:${item.id}`}
-                            className="border border-[var(--color-border-default)] px-3 py-2"
+                            className="flex items-start gap-2 px-2.5 py-2"
                           >
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div className="min-w-0 flex-1">
-                                <div className="text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                            <TodoStatusIcon status={item.status} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                <span className="font-mono text-[var(--color-text-tertiary)]">
                                   #{item.id}
-                                </div>
-                                <div className="mt-1 whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
+                                </span>
+                                <span className="whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
                                   {item.text}
-                                </div>
-                                {item.summary ? (
-                                  <div className="mt-2 border-l border-[var(--color-border-strong)] pl-2 text-[var(--color-text-secondary)]">
-                                    <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
-                                      {todoSummaryLabel(item.status)}
-                                    </span>
-                                    <div className="mt-1 whitespace-pre-wrap break-words">
-                                      {item.summary}
-                                    </div>
-                                  </div>
-                                ) : null}
+                                </span>
+                                <span
+                                  className={`uppercase ${todoStatusTextClassName(item.status)}`}
+                                >
+                                  {formatTodoStatusLabel(item.status)}
+                                </span>
                               </div>
-                              <span
-                                className={`border px-2 py-0.5 uppercase ${todoStatusClassName(item.status)}`}
-                              >
-                                {formatTodoStatusLabel(item.status)}
-                              </span>
+                              {item.summary ? (
+                                <div className="mt-1 whitespace-pre-wrap break-words text-[var(--color-text-secondary)]">
+                                  <span className="uppercase tracking-[0.08em] text-[var(--color-text-tertiary)]">
+                                    {todoSummaryLabel(item.status)}
+                                  </span>
+                                  {`: ${item.summary}`}
+                                </div>
+                              ) : null}
                             </div>
                           </li>
                         ))}
                       </ol>
                     ) : (
-                      <p className="mt-3 text-[var(--color-text-secondary)]">
+                      <p className="px-2.5 py-2 text-[var(--color-text-secondary)]">
                         Waiting for the agent to create <code>.spur/todo.md</code>.
                       </p>
                     )}

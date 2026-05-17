@@ -272,10 +272,10 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 ### S2d: Todo state
 
 - Visible when the session payload includes `todo`
-- Header badge shows `todo <resolved>/<total> <status>`
+- Header badge shows compact progress: `todo <resolved>/<total>`
 - Section header is `TODO`
-- Summary block shows `Done`, `Skipped`, `Failed`, and `Pending` counts
-- Each todo item renders `#ID`, task text, and a status chip (`pending`, `done`, `skipped`, `failed`)
+- Compact summary row shows status, resolved count, and non-zero `done`/`skipped`/`failed`/`pending` counts
+- Each todo item renders as a flat checklist row with status icon, `#ID`, task text, and status label
 - Terminal items show the agent-provided summary/reason text when present
 - When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `.spur/todo.md`
 

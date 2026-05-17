@@ -1873,15 +1873,15 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByRole("heading", { name: /todo/i })).toBeInTheDocument();
     });
 
-    expect(screen.getByText("todo 3/4 failed")).toBeInTheDocument();
-    expect(screen.getByText("3/4 resolved")).toBeInTheDocument();
-    expect(screen.getByText("Done")).toBeInTheDocument();
-    expect(screen.getByText("Skipped")).toBeInTheDocument();
-    expect(screen.getByText("Failed")).toBeInTheDocument();
-    expect(screen.getByText("Pending")).toBeInTheDocument();
-    expect(screen.getByText("Mapped the session flow")).toBeInTheDocument();
-    expect(screen.getByText("Not needed after the merge")).toBeInTheDocument();
-    expect(screen.getByText("Blocked by stale upstream contract")).toBeInTheDocument();
+    expect(screen.getByText("todo 3/4")).toBeInTheDocument();
+    expect(screen.getByText("3/4")).toBeInTheDocument();
+    expect(screen.getByText("1 done")).toBeInTheDocument();
+    expect(screen.getByText("1 skipped")).toBeInTheDocument();
+    expect(screen.getByText("1 failed")).toBeInTheDocument();
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByText(/Mapped the session flow/)).toBeInTheDocument();
+    expect(screen.getByText(/Not needed after the merge/)).toBeInTheDocument();
+    expect(screen.getByText(/Blocked by stale upstream contract/)).toBeInTheDocument();
     expect(screen.getByText("Update the dashboard")).toBeInTheDocument();
     expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("skipped").length).toBeGreaterThan(0);
@@ -1929,11 +1929,13 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("todo 1/2 running")).toBeInTheDocument();
+      expect(screen.getByText("todo 1/2")).toBeInTheDocument();
     });
 
     expect(screen.getAllByText("running").length).toBeGreaterThan(0);
-    expect(screen.getByText("1/2 resolved")).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText("1 done")).toBeInTheDocument();
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
   });
 
   it("renders the full queued stack in FIFO order", async () => {
