@@ -567,7 +567,7 @@ export function Dashboard() {
     setSpawnOpen(true);
   };
 
-  const addSpawnImages = useCallback((files: FileList | null) => {
+  const addSpawnImages = useCallback((files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((attachments) => {
         if (attachments.length === 0) return;

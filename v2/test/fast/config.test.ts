@@ -2,6 +2,7 @@ import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  buildSidecarLinkUrl,
   createProjectConfigScaffold,
   loadConfig,
   loadProjectConfig,
@@ -1083,6 +1084,94 @@ projects:
     );
   });
 
+  it("accepts {port} subdomain token in sidecar port url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("strips trailing slash from {port} subdomain url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("rejects {port} token combined with explicit port", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
+    );
+  });
+
+  it("rejects {port} token combined with path", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/app
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include a path",
+    );
+  });
+
   it("rejects both devServer and sidecars", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1204,5 +1293,25 @@ projects:
       path: repoDir,
       sessionPrefix: "repo",
     });
+  });
+});
+
+describe("buildSidecarLinkUrl", () => {
+  it("appends port with colon when template has no token", () => {
+    expect(buildSidecarLinkUrl("https://host.example.com", 3000)).toBe(
+      "https://host.example.com:3000",
+    );
+  });
+
+  it("substitutes {port} token in subdomain", () => {
+    expect(buildSidecarLinkUrl("https://{port}.local.intelas.com", 3045)).toBe(
+      "https://3045.local.intelas.com",
+    );
+  });
+
+  it("substitutes all {port} occurrences", () => {
+    expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
+      "https://7.example.com/p/7",
+    );
   });
 });

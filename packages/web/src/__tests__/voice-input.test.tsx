@@ -12,8 +12,9 @@ function createVoice(overrides?: Partial<UseVoiceInput>): UseVoiceInput {
     voiceDraft: "terminal hotkey insert",
     voiceError: null,
     setVoiceDraft: vi.fn(),
+    openDraft: vi.fn(),
     toggleRecording: vi.fn(),
-    confirmDraft: vi.fn((onInsert: (text: string) => void) => {
+    confirmDraft: vi.fn((onInsert: (text: string) => void, _options?: { allowEmpty?: boolean }) => {
       onInsert(voice.voiceDraft);
     }),
     dismissModal: vi.fn(),
@@ -65,5 +66,32 @@ describe("VoiceInput", () => {
     });
 
     expect(voice.toggleRecording).toHaveBeenCalledOnce();
+  });
+
+  it("shows image controls and allows attachment-only confirmation", () => {
+    const voice = createVoice({ voiceDraft: "" });
+    const onAddFiles = vi.fn();
+
+    render(
+      <VoiceConfirmModal
+        attachments={[
+          {
+            file: new File(["png"], "terminal.png", { type: "image/png" }),
+            preview: "data:image/png;base64,cG5n",
+          },
+        ]}
+        historyEntries={[]}
+        onAddFiles={onAddFiles}
+        onInsert={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        voice={voice}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Add image" })).toBeVisible();
+    expect(screen.getByRole("img", { name: "terminal.png" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Insert/i }));
+
+    expect(voice.confirmDraft).toHaveBeenCalledWith(expect.any(Function), { allowEmpty: true });
   });
 });

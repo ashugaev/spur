@@ -1873,20 +1873,21 @@ describe("SessionDetail voice input", () => {
       expect(screen.getByRole("heading", { name: /todo/i })).toBeInTheDocument();
     });
 
-    expect(screen.getByText("todo 3/4")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("Todo progress 3 of 4")).toHaveLength(2);
+    expect(screen.queryByText("todo 3/4")).not.toBeInTheDocument();
     expect(screen.getByText("3/4")).toBeInTheDocument();
-    expect(screen.getByText("1 done")).toBeInTheDocument();
-    expect(screen.getByText("1 skipped")).toBeInTheDocument();
-    expect(screen.getByText("1 failed")).toBeInTheDocument();
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.queryByText("1 done")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 skipped")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
     expect(screen.getByText(/Mapped the session flow/)).toBeInTheDocument();
     expect(screen.getByText(/Not needed after the merge/)).toBeInTheDocument();
     expect(screen.getByText(/Blocked by stale upstream contract/)).toBeInTheDocument();
     expect(screen.getByText("Update the dashboard")).toBeInTheDocument();
-    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("skipped").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("done").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("pending").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Todo item failed")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item skipped")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item done")).toBeInTheDocument();
+    expect(screen.getByLabelText("Todo item pending")).toBeInTheDocument();
   });
 
   it("renders running todo status while items are still pending", async () => {
@@ -1929,13 +1930,14 @@ describe("SessionDetail voice input", () => {
     render(<SessionDetail sessionId="api-a1" />);
 
     await waitFor(() => {
-      expect(screen.getByText("todo 1/2")).toBeInTheDocument();
+      expect(screen.getAllByLabelText("Todo progress 1 of 2")).toHaveLength(2);
     });
 
-    expect(screen.getAllByText("running").length).toBeGreaterThan(0);
+    expect(screen.queryByText("todo 1/2")).not.toBeInTheDocument();
+    expect(screen.queryByText("running")).not.toBeInTheDocument();
     expect(screen.getByText("1/2")).toBeInTheDocument();
-    expect(screen.getByText("1 done")).toBeInTheDocument();
-    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.queryByText("1 done")).not.toBeInTheDocument();
+    expect(screen.queryByText("1 pending")).not.toBeInTheDocument();
   });
 
   it("renders the full queued stack in FIFO order", async () => {
@@ -2494,6 +2496,10 @@ describe("SessionDetail artifacts", () => {
       expect(screen.getByText("later-upload.png")).toBeInTheDocument();
     });
 
+    const attachedCard = screen.getByLabelText("Attached Image artifact later-upload.png");
+    expect(attachedCard).toBeInTheDocument();
+    expect(within(attachedCard).getByText("Attached Image")).toBeInTheDocument();
+    expect(within(attachedCard).getByText("PNG", { exact: true })).toBeInTheDocument();
     expect(screen.queryByText("agent-output.txt")).not.toBeInTheDocument();
   });
 

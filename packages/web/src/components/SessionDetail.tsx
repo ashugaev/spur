@@ -14,6 +14,7 @@ import { useInputHistory } from "@/hooks/useInputHistory";
 import { ActivityDot } from "@/components/ActivityDot";
 import { TerminalModal } from "@/components/TerminalModal";
 import { TerminalOpenIcon } from "@/components/TerminalOpenIcon";
+import { getTodoResolvedCount, TodoProgress } from "@/components/TodoProgress";
 import {
   formatAbsoluteTime,
   formatRelativeTime,
@@ -52,7 +53,6 @@ import {
   type ConversationResponse,
   type DashboardSession,
   type SpurTodoItemStatus,
-  type SpurTodoStatus,
   type SpurSessionView,
 } from "@/lib/types";
 
@@ -72,13 +72,23 @@ function splitSessionLinks(
   surfacedLinks: DashboardSession["links"];
   visibleLinks: DashboardSession["links"];
 } {
-  const surfacedLinks = links.filter(
-    (link) => link.label === "tracker" || isReviewLinkLabel(link.label),
-  );
-  const surfacedUrls = new Set(surfacedLinks.map((link) => link.url));
-  const visibleLinks = links.filter(
-    (link) => !sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url),
-  );
+  const surfacedLinks: DashboardSession["links"] = [];
+  const visibleLinks: DashboardSession["links"] = [];
+  const surfacedUrls = new Set<string>();
+
+  for (const link of links) {
+    if (link.label === "tracker" || isReviewLinkLabel(link.label)) {
+      if (!surfacedUrls.has(link.url)) {
+        surfacedLinks.push(link);
+        surfacedUrls.add(link.url);
+      }
+      continue;
+    }
+    if (!sidecarLinkLabels.has(link.label) && !surfacedUrls.has(link.url)) {
+      visibleLinks.push(link);
+    }
+  }
+
   return { surfacedLinks, visibleLinks };
 }
 
@@ -98,75 +108,57 @@ function StopIcon() {
   );
 }
 
-function formatTodoStatusLabel(status: SpurTodoItemStatus | SpurTodoStatus): string {
-  if (status === "running") return "running";
-  if (status === "done") return "done";
-  if (status === "skipped") return "skipped";
-  if (status === "failed") return "failed";
-  if (status === "completed") return "completed";
-  return "pending";
-}
-
-function todoStatusClassName(status: SpurTodoItemStatus | SpurTodoStatus): string {
-  if (status === "done" || status === "completed") {
-    return "border-[var(--color-status-ready)] text-[var(--color-status-ready)]";
-  }
-  if (status === "skipped") {
-    return "border-[var(--color-status-attention)] text-[var(--color-status-attention)]";
-  }
-  if (status === "failed") {
-    return "border-[var(--color-status-error)] text-[var(--color-status-error)]";
-  }
-  return "border-[var(--color-border-strong)] text-[var(--color-text-secondary)]";
-}
-
-function todoStatusTextClassName(status: SpurTodoItemStatus | SpurTodoStatus): string {
-  if (status === "done" || status === "completed") {
-    return "text-[var(--color-status-ready)]";
-  }
-  if (status === "skipped") {
-    return "text-[var(--color-status-attention)]";
-  }
-  if (status === "failed") {
-    return "text-[var(--color-status-error)]";
-  }
-  return "text-[var(--color-text-secondary)]";
-}
-
 function todoSummaryLabel(status: SpurTodoItemStatus): string {
   return status === "done" ? "Summary" : "Reason";
 }
 
 function TodoStatusIcon({ status }: { status: SpurTodoItemStatus }) {
-  const className = `mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center border ${todoStatusClassName(status)}`;
+  const title = `Todo item ${status}`;
+  const className =
+    "group relative mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] outline-none focus-visible:border-[var(--color-accent)]";
   if (status === "done") {
     return (
-      <span aria-hidden="true" className={className}>
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
         <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
           <path d="m3.5 8.5 3 3 6-7" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
         </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
       </span>
     );
   }
   if (status === "skipped") {
     return (
-      <span aria-hidden="true" className={className}>
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
         <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
           <path d="M4 8h8" strokeLinecap="round" strokeWidth="2" />
         </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
       </span>
     );
   }
   if (status === "failed") {
     return (
-      <span aria-hidden="true" className={className}>
+      <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
         <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 16 16">
           <path d="m5 5 6 6M11 5l-6 6" strokeLinecap="round" strokeWidth="2" />
         </svg>
+        <TodoStatusTooltip>{status}</TodoStatusTooltip>
       </span>
     );
   }
-  return <span aria-hidden="true" className={className} />;
+  return (
+    <span aria-label={title} className={className} role="img" tabIndex={0} title={title}>
+      <TodoStatusTooltip>{status}</TodoStatusTooltip>
+    </span>
+  );
+}
+
+function TodoStatusTooltip({ children }: { children: SpurTodoItemStatus }) {
+  return (
+    <span className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1 hidden -translate-x-1/2 whitespace-nowrap border border-[var(--color-border-default)] bg-[var(--color-bg-elevated)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--color-text-secondary)] group-hover:block group-focus:block">
+      {children}
+    </span>
+  );
 }
 
 function ArtifactFileIcon() {
@@ -303,6 +295,13 @@ function artifactExtension(name: string): string {
   return ext ? ext.toUpperCase() : "FILE";
 }
 
+function artifactKindLabel(artifact: SessionArtifact): string {
+  if (artifact.addedByUser && artifact.kind === "image") return "Attached Image";
+  if (artifact.addedByUser) return "Attached";
+  if (artifact.origin === "automatic") return "System";
+  return artifact.kind;
+}
+
 function overlayButtonClass(primary = false): string {
   return [
     "inline-flex h-8 w-8 items-center justify-center border transition",
@@ -316,6 +315,7 @@ function ArtifactCard({
   artifact,
   artifactHref,
   previewState,
+  variant = "compact",
   onPreview,
   onPreviewError,
   onPreviewReady,
@@ -323,17 +323,28 @@ function ArtifactCard({
   artifact: SessionArtifact;
   artifactHref: string;
   previewState: ArtifactPreviewState;
+  variant?: "compact" | "attachedImage";
   onPreview: (artifact: SessionArtifact) => void;
   onPreviewError: (artifactId: string) => void;
   onPreviewReady: (artifactId: string) => void;
 }) {
   const previewable = artifact.kind === "image" || artifact.kind === "video";
   const PreviewIcon = artifact.kind === "video" ? ArtifactPreviewIcon : ArtifactImagePreviewIcon;
+  const polishedAttachedImage = variant === "attachedImage" && artifact.kind === "image";
+  const frameClass = polishedAttachedImage ? "h-48 sm:h-56" : "h-32";
+  const mediaFitClass = polishedAttachedImage ? "object-contain p-2" : "object-cover";
 
   return (
-    <article className="group border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
+    <article
+      aria-label={`${artifactKindLabel(artifact)} artifact ${artifact.name}`}
+      className={`group border bg-[var(--color-bg-surface)] ${
+        polishedAttachedImage
+          ? "border-[var(--color-border-strong)]"
+          : "border-[var(--color-border-default)]"
+      }`}
+    >
       <div
-        className={`relative isolate h-32 overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
+        className={`relative isolate ${frameClass} overflow-hidden border-b border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] ${
           previewable ? "cursor-zoom-in" : ""
         }`}
         onClick={() => {
@@ -344,7 +355,7 @@ function ArtifactCard({
           <>
             <img
               alt={artifact.name}
-              className={`pointer-events-none h-full w-full object-cover transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              className={`pointer-events-none h-full w-full ${mediaFitClass} transition duration-150 ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
               onError={() => onPreviewError(artifact.id)}
               onLoad={() => onPreviewReady(artifact.id)}
               src={artifactHref}
@@ -383,6 +394,17 @@ function ArtifactCard({
           </div>
         ) : null}
 
+        {polishedAttachedImage ? (
+          <div className="pointer-events-none absolute left-2 top-2 flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-primary)]">
+              Attached Image
+            </span>
+            <span className="border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {artifactExtension(artifact.name)}
+            </span>
+          </div>
+        ) : null}
+
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 bg-[color:var(--color-modal-backdrop)] opacity-0 transition duration-150 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
           {previewable ? (
             <button
@@ -416,9 +438,21 @@ function ArtifactCard({
         >
           {artifact.name}
         </div>
-        <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
-          {formatBytes(artifact.size)} · {artifact.kind} · {formatRelativeTime(artifact.updatedAt)}
-        </div>
+        {polishedAttachedImage ? (
+          <div className="flex flex-wrap gap-1.5">
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
+              {formatBytes(artifact.size)}
+            </span>
+            <span className="border border-[var(--color-border-default)] px-1.5 py-0.5 text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+              {formatRelativeTime(artifact.updatedAt)}
+            </span>
+          </div>
+        ) : (
+          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-[10px] text-[var(--color-text-tertiary)]">
+            {formatBytes(artifact.size)} · {artifact.kind} ·{" "}
+            {formatRelativeTime(artifact.updatedAt)}
+          </div>
+        )}
       </div>
     </article>
   );
@@ -1023,13 +1057,13 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
-  const addImageFiles = (files: FileList | null) => {
+  const addImageFiles = (files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((entries) => setAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
   };
 
-  const addRespawnImageFiles = (files: FileList | null) => {
+  const addRespawnImageFiles = (files: FileList | File[] | null) => {
     void imageAttachmentsFromFiles(files)
       .then((entries) => setRespawnAttachments((prev) => [...prev, ...entries]))
       .catch(() => {});
@@ -1163,23 +1197,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
         requestedTerminalSessionId.startsWith(`${session.id}--`))),
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
-  const todoResolvedCount = session ? (session.todo?.done ?? 0) : 0;
-  const todoSkippedCount = session ? (session.todo?.skipped ?? 0) : 0;
-  const todoFailedCount = session ? (session.todo?.failed ?? 0) : 0;
-  const todoTerminalCount = todoResolvedCount + todoSkippedCount + todoFailedCount;
-  const todoCountLabels: string[] = session?.todo
-    ? [
-        [`${session.todo.done} done`, session.todo.done] as const,
-        [`${session.todo.skipped} skipped`, session.todo.skipped] as const,
-        [`${session.todo.failed} failed`, session.todo.failed] as const,
-        [
-          `${session.todo.total - todoTerminalCount} pending`,
-          session.todo.total - todoTerminalCount,
-        ] as const,
-      ]
-        .filter(([, count]) => count > 0)
-        .map(([label]) => label)
-    : [];
+  const todoResolvedCount = session?.todo ? getTodoResolvedCount(session.todo) : 0;
 
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
@@ -1302,12 +1320,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 </span>
               ) : null}
               {session.todo ? (
-                <span
-                  className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
-                  title={`Todo ${formatTodoStatusLabel(session.todo.status)}`}
-                >
-                  {`todo ${todoTerminalCount}/${session.todo.total}`}
-                </span>
+                <TodoProgress todo={session.todo} />
               ) : null}
             </div>
           </header>
@@ -1473,19 +1486,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                   </h2>
                   <div className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)]">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--color-border-subtle)] px-2.5 py-2 text-[var(--color-text-secondary)]">
-                      <span
-                        className={`border px-2 py-0.5 uppercase ${todoStatusClassName(session.todo.status)}`}
-                      >
-                        {formatTodoStatusLabel(session.todo.status)}
-                      </span>
+                      <TodoProgress todo={session.todo} />
                       <span className="font-mono text-[var(--color-text-primary)]">
-                        {`${todoTerminalCount}/${session.todo.total}`}
+                        {`${todoResolvedCount}/${session.todo.total}`}
                       </span>
-                      {todoCountLabels.map((label) => (
-                        <span key={label} className="text-[var(--color-text-tertiary)]">
-                          {label}
-                        </span>
-                      ))}
                     </div>
                     {session.todo.items.length > 0 ? (
                       <ol
@@ -1505,11 +1509,6 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                                 </span>
                                 <span className="whitespace-pre-wrap break-words text-[var(--color-text-primary)]">
                                   {item.text}
-                                </span>
-                                <span
-                                  className={`uppercase ${todoStatusTextClassName(item.status)}`}
-                                >
-                                  {formatTodoStatusLabel(item.status)}
                                 </span>
                               </div>
                               {item.summary ? (
@@ -1718,6 +1717,11 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                               }))
                             }
                             previewState={previewState}
+                            variant={
+                              artifactCategory === "attached" && artifact.kind === "image"
+                                ? "attachedImage"
+                                : "compact"
+                            }
                           />
                         );
                       })}

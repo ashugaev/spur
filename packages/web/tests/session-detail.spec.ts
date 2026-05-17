@@ -337,11 +337,7 @@ test.describe("S2: Actions bar", () => {
     const textarea = page.getByPlaceholder("Edit the initial message...");
     await expect(textarea).toHaveValue("Retry with screenshot");
     await textarea.fill("Retry with a fresh screenshot");
-    await page.evaluate(() => {
-      const textarea = document.querySelector(
-        'textarea[placeholder^="Edit the initial message..."]',
-      );
-      if (!textarea) return;
+    await textarea.evaluate((textarea) => {
       const dt = new DataTransfer();
       dt.items.add(new File(["PNG"], "respawn.png", { type: "image/png" }));
       textarea.dispatchEvent(
@@ -935,6 +931,43 @@ test.describe("S3 mobile voice", () => {
   });
 });
 
+// S2d: Todo state
+test.describe("S2d: Todo state", () => {
+  test("shows circle progress and checkbox tooltips without inline status labels", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({
+      id: "detail-todo-progress",
+      todo: {
+        status: "running",
+        total: 3,
+        done: 1,
+        skipped: 1,
+        failed: 0,
+        items: [
+          { id: 1, text: "Read code", status: "done", summary: "Found todo renderer" },
+          { id: 2, text: "Skip extra state", status: "skipped", summary: "Not needed" },
+          { id: 3, text: "Patch UI", status: "pending" },
+        ],
+      },
+    });
+    await mockSessionDetail(page, session);
+    await page.goto(`/sessions/${session.id}`);
+
+    await expect(page.getByRole("heading", { name: /todo/i })).toBeVisible();
+    await expect(page.getByLabel("Todo progress 2 of 3")).toHaveCount(2);
+    await expect(page.getByText("2/3")).toBeVisible();
+    await expect(page.getByText("todo 2/3")).toHaveCount(0);
+    await expect(page.getByText("1 done")).toHaveCount(0);
+    await expect(page.getByText("1 skipped")).toHaveCount(0);
+    await expect(page.getByText("1 pending")).toHaveCount(0);
+
+    const doneMark = page.getByLabel("Todo item done");
+    await doneMark.hover();
+    await expect(page.getByText("done")).toBeVisible();
+  });
+});
+
 // S3b: Queued messages section
 test.describe("S3b: Queued messages section", () => {
   test("shows the full queued stack in FIFO order", async ({ page }) => {
@@ -1241,6 +1274,12 @@ test.describe("S4b: Artifacts section", () => {
     await page.getByRole("button", { name: "Attached (1)" }).click();
 
     await expect(page.getByText("later-upload.png")).toBeVisible();
+    const attachedCard = page.getByRole("article", {
+      name: "Attached Image artifact later-upload.png",
+    });
+    await expect(attachedCard).toBeVisible();
+    await expect(attachedCard.getByText("Attached Image")).toBeVisible();
+    await expect(attachedCard.getByText("PNG", { exact: true })).toBeVisible();
     await expect(page.getByText("agent-output.txt")).toHaveCount(0);
   });
 
@@ -1664,6 +1703,59 @@ test.describe("S6: Terminal modal from detail page", () => {
     // Pencil click → opens modal (edit flow).
     await pencil.click();
     await expect(page.getByRole("dialog", { name: /confirm voice input/i })).toBeVisible();
+  });
+
+  test("pasted terminal image opens confirmation modal and sends an attachment", async ({
+    page,
+  }) => {
+    const session = makeWorkingSession({ id: "detail-s6-image-paste" });
+    let sendPayload: unknown = null;
+    await mockSessionDetail(page, session);
+    await mockTerminalWebSocket(page);
+    await page.route("**/api/runtime/terminal**", (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ directTerminalPort: 14801 }),
+      });
+    });
+    await page.route(`**/api/sessions/${session.id}/send`, async (route) => {
+      sendPayload = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto(`/sessions/${session.id}`);
+    await page.getByRole("button", { name: /^terminal$/i }).click();
+    await expect(page.getByText("Connected")).toBeVisible();
+
+    await page.locator('[data-testid="direct-terminal-surface"]').evaluate((surface) => {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(new File(["PNG"], "terminal-paste.png", { type: "image/png" }));
+      surface.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer,
+        }),
+      );
+    });
+
+    const modal = page.getByRole("dialog", { name: /confirm voice input/i });
+    await expect(modal.getByRole("img", { name: "terminal-paste.png" })).toBeVisible();
+    await modal.getByRole("button", { name: /insert/i }).click();
+
+    await expect
+      .poll(() => sendPayload)
+      .toMatchObject({
+        attachments: [{ name: "terminal-paste.png" }],
+        interrupt: true,
+        message: "",
+        queue: false,
+      });
   });
 
   test("returning to a visible tab does not reconnect an already-open terminal websocket", async ({

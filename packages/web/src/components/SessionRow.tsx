@@ -4,6 +4,7 @@ import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import { SessionLinkBadge, useSessionLinkPrInfo } from "@/components/SessionLinkBadge";
 import { TerminalOpenIcon } from "@/components/TerminalOpenIcon";
+import { TodoProgress } from "@/components/TodoProgress";
 import { formatRelativeTime, getSessionTitle } from "@/lib/format";
 import { isReviewLinkLabel, primePrInfo, reviewProviderFromUrl } from "@/lib/link-icons";
 import { buildSessionPath } from "@/lib/project-routes";
@@ -107,6 +108,8 @@ export function SessionRow({
       <span className="hidden w-[8rem] shrink-0 truncate text-right font-mono text-[var(--color-text-secondary)] lg:inline">
         {session.branch}
       </span>
+
+      {session.todo ? <TodoProgress todo={session.todo} /> : null}
 
       <span className="w-[4rem] shrink-0 text-right text-[var(--color-text-tertiary)]">
         {formatRelativeTime(session.lastActivityAt)}

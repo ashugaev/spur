@@ -562,7 +562,10 @@ function parseSidecars(
         if (rawUrl !== undefined) {
           const resolvedUrl = resolveOptionalUrl(rawUrl, `${portLabel}.url`, projectEnv);
           if (resolvedUrl !== undefined) {
-            const parsed = new URL(resolvedUrl);
+            const urlForParsing = resolvedUrl.includes("{port}")
+              ? resolvedUrl.replaceAll("{port}", "port")
+              : resolvedUrl;
+            const parsed = new URL(urlForParsing);
             if (parsed.port !== "") {
               throw new Error(`${portLabel}.url must not include an explicit port`);
             }
@@ -1029,4 +1032,10 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
 export function loadConfig(input?: string): AppConfig {
   const { configPath } = ensureInstanceConfig(input);
   return parseConfigFile(configPath, "instance");
+}
+
+export function buildSidecarLinkUrl(template: string, reservedPort: number): string {
+  return template.includes("{port}")
+    ? template.replaceAll("{port}", String(reservedPort))
+    : `${template}:${reservedPort}`;
 }

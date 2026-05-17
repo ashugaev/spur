@@ -122,4 +122,36 @@ describe("SessionRow", () => {
       "https://github.com/test/repo/pull/42",
     );
   });
+
+  it("renders compact todo progress in the dashboard row", () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: null,
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: 0,
+    });
+
+    render(
+      <SessionRow
+        session={makeSession({
+          links: [],
+          todo: {
+            status: "running",
+            total: 3,
+            done: 1,
+            skipped: 1,
+            failed: 0,
+            items: [],
+          },
+        })}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    expect(screen.getByLabelText("Todo progress 2 of 3")).toBeInTheDocument();
+  });
 });

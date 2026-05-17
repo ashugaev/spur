@@ -320,6 +320,26 @@ test.describe("D3: Session rows render with correct columns", () => {
     // Time is shown as relative (e.g. "just now")
     await expect(page.locator(".data-row").first()).toBeVisible();
   });
+
+  test("todo progress renders as a compact circle in the row", async ({ page }) => {
+    const session = makeWorkingSession({
+      id: "row-todo-progress",
+      prompt: "Todo progress session",
+      todo: {
+        status: "running",
+        total: 3,
+        done: 1,
+        skipped: 1,
+        failed: 0,
+        items: [],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.goto("/");
+
+    await expect(page.getByLabel("Todo progress 2 of 3")).toBeVisible();
+    await expect(page.getByText("todo 2/3")).toHaveCount(0);
+  });
 });
 
 // D4: Terminal button state
