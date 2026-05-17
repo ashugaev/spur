@@ -278,7 +278,7 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Compact summary row shows status, resolved count, and non-zero `done`/`skipped`/`failed`/`pending` counts
 - Each todo item renders as a flat checklist row with status icon, `#ID`, task text, and status label
 - Terminal items show the agent-provided summary/reason text when present
-- When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `.spur/todo.md`
+- When the todo list exists but has no parsed items yet, the section explains that Spur is waiting for `$SPUR_SESSION_TOOL_DIR/todo.md`
 
 ### S3: Message section
 

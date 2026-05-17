@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { SessionTodoItem, SessionTodoState, TodoItemStatus } from "./types.js";
 
 const TODO_FILENAME = "todo.md";
-const TODO_DIR = ".spur";
+const TODO_AGENT_PATH = "$SPUR_SESSION_TOOL_DIR/todo.md";
 
 /** Minimum seconds between nudges for the same session. */
 export const TODO_NUDGE_COOLDOWN_MS = 60_000;
@@ -43,8 +43,8 @@ function splitTodoTextAndSummary(value: string): Pick<TodoItem, "text" | "summar
   return summary ? { text, summary } : { text };
 }
 
-export function todoFilePath(worktreePath: string): string {
-  return join(worktreePath, TODO_DIR, TODO_FILENAME);
+export function todoFilePath(sessionToolDir: string): string {
+  return join(sessionToolDir, TODO_FILENAME);
 }
 
 export function parseTodoFile(content: string): TodoItem[] {
@@ -65,8 +65,8 @@ export function parseTodoFile(content: string): TodoItem[] {
   return items;
 }
 
-export function readTodoSnapshot(worktreePath: string): TodoSnapshot | null {
-  const path = todoFilePath(worktreePath);
+export function readTodoSnapshot(sessionToolDir: string): TodoSnapshot | null {
+  const path = todoFilePath(sessionToolDir);
   if (!existsSync(path)) {
     return null;
   }
@@ -111,7 +111,8 @@ export function todoStateFromSnapshot(snapshot: TodoSnapshot | null): SessionTod
 
 export function formatTodoSpawnMessage(prompt: string): string {
   return `[Spur todo]
-Your first step is to analyze the task and create a todo list at .spur/todo.md.
+Your first step is to analyze the task and create a todo list at ${TODO_AGENT_PATH}.
+This file is session-owned and outside the repo worktree; do not copy it into the repository.
 Format: one line per task, using markdown checkboxes with numeric IDs.
 Example:
 - [ ] #1 Research the codebase

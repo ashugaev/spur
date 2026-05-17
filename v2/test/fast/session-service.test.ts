@@ -228,6 +228,8 @@ vi.mock("../../src/session-slots.js", () => ({
     }),
   ),
   removeSessionSlotTool: removeSessionSlotToolMock,
+  sessionToolDir: (dataDir: string, sessionId: string) =>
+    join(dataDir, "session-tools", sessionId),
   withSessionSlotInstructions: withSessionSlotInstructionsMock,
 }));
 
@@ -1294,7 +1296,10 @@ describe("SessionService", () => {
     expect(result.prompt).toBe("ship the task");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("[Spur todo]");
     expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("ship the task");
-    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(".spur/todo.md");
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain(
+      "$SPUR_SESSION_TOOL_DIR/todo.md",
+    );
+    expect(sendMessageToTmuxMock.mock.calls[0]?.[1]).toContain("outside the repo worktree");
 
     expect(sessions.get("api-1")?.todo).toMatchObject({
       status: "running",
@@ -1431,8 +1436,11 @@ describe("SessionService", () => {
   it("sends todo nudges through the agent-aware tmux path", async () => {
     const sessions = createSessionStore();
     const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-codex-"));
-    mkdirSync(`${worktreePath}/.spur`, { recursive: true });
-    writeFileSync(`${worktreePath}/.spur/todo.md`, "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
+    mkdirSync(join(worktreePath, ".spur"), { recursive: true });
+    writeFileSync(join(worktreePath, ".spur", "todo.md"), "- [x] #1 wrong source :: ignored\n", "utf8");
+    const todoDir = "/tmp/spur-data/session-tools/api-1";
+    mkdirSync(todoDir, { recursive: true });
+    writeFileSync(join(todoDir, "todo.md"), "- [x] #1 done\n- [ ] #2 next task\n", "utf8");
     sessions.set("api-1", {
       id: "api-1",
       project: "api",
@@ -1482,6 +1490,7 @@ describe("SessionService", () => {
     } finally {
       service.dispose();
       rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(todoDir, { recursive: true, force: true });
     }
 
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith(
@@ -1497,9 +1506,10 @@ describe("SessionService", () => {
   it("marks todo failed when every item is terminal and one item failed", async () => {
     const sessions = createSessionStore();
     const worktreePath = mkdtempSync(join(tmpdir(), "spur-todo-failed-"));
-    mkdirSync(`${worktreePath}/.spur`, { recursive: true });
+    const todoDir = "/tmp/spur-data/session-tools/api-1";
+    mkdirSync(todoDir, { recursive: true });
     writeFileSync(
-      `${worktreePath}/.spur/todo.md`,
+      join(todoDir, "todo.md"),
       "- [x] #1 Ship API :: Added the endpoint\n- [f] #2 Deploy to staging :: Missing credentials\n",
       "utf8",
     );
@@ -1539,6 +1549,7 @@ describe("SessionService", () => {
     } finally {
       service.dispose();
       rmSync(worktreePath, { recursive: true, force: true });
+      rmSync(todoDir, { recursive: true, force: true });
     }
 
     expect(sessions.get("api-1")?.todo).toMatchObject({

@@ -112,7 +112,8 @@ describe("formatTodoSpawnMessage", () => {
   it("includes the prompt and instructions", () => {
     const msg = formatTodoSpawnMessage("ship the task");
     expect(msg).toContain("[Spur todo]");
-    expect(msg).toContain(".spur/todo.md");
+    expect(msg).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
+    expect(msg).toContain("outside the repo worktree");
     expect(msg).toContain("ship the task");
     expect(msg).toContain("- [ ] #1");
     expect(msg).toContain("- [s] #3");

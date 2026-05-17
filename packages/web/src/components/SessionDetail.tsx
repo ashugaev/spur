@@ -1526,7 +1526,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                       </ol>
                     ) : (
                       <p className="px-2.5 py-2 text-[var(--color-text-secondary)]">
-                        Waiting for the agent to create <code>.spur/todo.md</code>.
+                        Waiting for the agent to create <code>$SPUR_SESSION_TOOL_DIR/todo.md</code>.
                       </p>
                     )}
                   </div>

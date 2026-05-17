@@ -2790,7 +2790,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) =>
         value.includes("[Spur todo]") &&
-        value.includes(".spur/todo.md") &&
+        value.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
         value.includes("[s]") &&
         value.includes("[f]") &&
         value.includes("ship the task"),
@@ -2799,7 +2799,7 @@ projects:
       timeoutMs: 15_000,
       accept: (value) =>
         value.includes("[Spur todo]") &&
-        value.includes(".spur/todo.md") &&
+        value.includes("$SPUR_SESSION_TOOL_DIR/todo.md") &&
         value.includes("[s]") &&
         value.includes("[f]") &&
         value.includes("ship the task"),
@@ -2807,7 +2807,7 @@ projects:
 
     expect(pane).toContain("[Spur todo]");
     expect(log).toContain("[Spur todo]");
-    expect(log).toContain(".spur/todo.md");
+    expect(log).toContain("$SPUR_SESSION_TOOL_DIR/todo.md");
   });
 
   it("spawns a session through the built CLI without sending an initial prompt", async () => {

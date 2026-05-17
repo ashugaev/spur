@@ -98,6 +98,7 @@ import {
   ensureSessionSlotTool,
   normalizeSlotsUpdate,
   removeSessionSlotTool,
+  sessionToolDir,
   withSessionSlotInstructions,
 } from "./session-slots.js";
 import {
@@ -4566,7 +4567,7 @@ export class SessionService {
     if (!session.todo || session.todo.status !== "running") {
       return;
     }
-    const snapshot = readTodoSnapshot(session.worktreePath);
+    const snapshot = readTodoSnapshot(sessionToolDir(this.config.dataDir, sessionId));
     const newState = todoStateFromSnapshot(snapshot);
     const todoChanged =
       newState.status !== session.todo.status ||

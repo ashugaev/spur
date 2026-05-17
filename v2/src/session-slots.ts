@@ -177,7 +177,7 @@ Session metadata:
 - Use \`spur service logs\` to inspect service and sidecar logs when you need to debug local runtimes.`;
 }
 
-function slotToolDir(dataDir: string, sessionId: string): string {
+export function sessionToolDir(dataDir: string, sessionId: string): string {
   return join(dataDir, SLOT_TOOL_DIR, sessionId);
 }
 
@@ -194,7 +194,7 @@ export function ensureSessionSlotTool(args: {
   configPath: string;
   agent?: AgentName;
 }): string {
-  const toolDir = slotToolDir(args.dataDir, args.sessionId);
+  const toolDir = sessionToolDir(args.dataDir, args.sessionId);
   const stateFilePath = join(args.dataDir, "session-agent-state", `${args.sessionId}.json`);
   mkdirSync(toolDir, { recursive: true });
   writeFileSync(
@@ -383,5 +383,5 @@ exec "$SCRIPT_DIR/${SPUR_SESSION_WRAPPER_NAME}" sidecar "$action" --session ${sh
 }
 
 export function removeSessionSlotTool(dataDir: string, sessionId: string): void {
-  rmSync(slotToolDir(dataDir, sessionId), { recursive: true, force: true });
+  rmSync(sessionToolDir(dataDir, sessionId), { recursive: true, force: true });
 }

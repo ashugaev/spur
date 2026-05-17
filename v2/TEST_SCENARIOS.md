@@ -105,7 +105,7 @@ Keep this file lean. Every new Spur scenario must live in exactly one tier.
 - GitHub send triggers can use `send.prompt` to replace the built-in workflow hints for that trigger.
 - `cron` sources suppress ticks that arrive before the schedule's own cadence elapses, including `runOnStart` followed by a near-boundary scheduled tick.
 - PR auto-detect piggybacks on the attention monitor to discover PRs by branch name via `gh pr list --head <branch>`, sets the `pr` slot automatically, skips sessions that already have a `pr` slot or no worktree, throttles `gh` calls to 30s, backs off after 5 checks in `waiting` with no state change, resets backoff on state change, and silently handles `gh` failures.
-- `spawn --todo` enables agent-managed todo list mode, injects todo instructions into the initial prompt, and persists `todo: { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] }` in the session record.
+- `spawn --todo` enables agent-managed todo list mode, instructs the agent to write `$SPUR_SESSION_TOOL_DIR/todo.md`, and persists `todo: { status: "running", total: 0, done: 0, skipped: 0, failed: 0, items: [] }` in the session record.
 - Config can define project default `spawn.todo`, and the request `--todo` flag overrides it.
 - Todo parser extracts markdown checkbox items with `#ID` format, supports `[ ]`, `[x]`, `[s]`, and `[f]`, and preserves optional terminal summaries after `::`.
 - Todo nudge fires when the agent returns to `waiting` with unresolved todo items, respects a 60-second cooldown, and includes resolved counts plus the next pending item hint.
