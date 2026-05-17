@@ -12,6 +12,7 @@ describe("spur help", () => {
     expect(help).toContain("𖤓 Spur");
     expect(help).toContain("Usage");
     expect(help).toContain("Commands");
+    expect(help).toContain("doctor [options]");
     expect(help).toContain("spawn [options] <project> [prompt...]");
     expect(help).toContain("list|ls [options]");
     expect(help).toContain("send [options] <sessionId> <message...>");
@@ -25,6 +26,23 @@ describe("spur help", () => {
     expect(help).not.toContain("daemon");
     expect(help).not.toContain("slots");
     expect(help).not.toContain("internal");
+  });
+
+  it("documents the doctor scaffold flow and follow-up command path", () => {
+    const program = buildProgram();
+    const doctor = program.commands.find((command) => command.name() === "doctor");
+
+    expect(doctor).toBeDefined();
+    if (!doctor) {
+      throw new Error("Expected doctor command to be registered");
+    }
+
+    const help = doctor.helpInformation();
+
+    expect(help).toContain("Scaffold a local Spur project config for this checkout.");
+    expect(help).toContain("--json");
+    expect(help).toContain("Writes a local `spur.yaml` for the current repo");
+    expect(help).toContain("Run `spur list` or `spur spawn` next");
   });
 
   it("renders subcommand help with compact sections and inherited globals", () => {
@@ -70,12 +88,15 @@ describe("spur help", () => {
     const help = spawn.helpInformation();
 
     expect(help).toContain("--branch <name>");
+    expect(help).toContain("--agent <name>");
     expect(help).toContain("--plan");
     expect(help).toContain("--step <label>");
     expect(help).toContain("--worktree [defaultBranch]");
     expect(help).toContain("--shared");
+    expect(help).toContain("Agent to start: claude, codex, or cursor");
     expect(help).toContain("Add a pipeline step; repeatable");
     expect(help).toContain("Start in plan mode");
+    expect(help).toContain("adds a planning-only prompt");
     expect(help).toContain("Use the project path directly for this session (no worktree)");
     expect(help).toContain(
       "If the project enables spawn preflight, worktree spawns can derive a branch before worktree creation.",

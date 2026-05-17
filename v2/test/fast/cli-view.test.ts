@@ -96,7 +96,10 @@ describe("cli-view.describeSession", () => {
 describe("session-link-display", () => {
   it("formats pr and tracker links as compact ids", () => {
     expect(
-      formatSessionLinkDisplay({ label: "pr", url: "https://github.com/acme/api/pull/42" }).text,
+      formatSessionLinkDisplay({
+        label: "pr",
+        url: "https://github.com/acme/api/pull/42",
+      }).text,
     ).toBe("pr #42");
     expect(
       formatSessionLinkDisplay({

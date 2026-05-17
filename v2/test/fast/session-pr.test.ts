@@ -57,6 +57,30 @@ describe("session-pr", () => {
     });
   });
 
+  it("imports a legacy github-pr slot into session.pr and strips it from slots", () => {
+    const normalized = normalizeSessionPrBinding(
+      makeSession({
+        slots: {
+          title: "Investigate CI",
+          links: [
+            { label: "tracker", url: "https://tracker.example.com/TASK-9" },
+            { label: "github-pr", url: "https://github.com/acme/api/pull/42" },
+          ],
+        },
+      }),
+    );
+
+    expect(normalized.pr).toEqual({
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    });
+    expect(normalized.slots).toEqual({
+      title: "Investigate CI",
+      links: [{ label: "tracker", url: "https://tracker.example.com/TASK-9" }],
+    });
+  });
+
   it("keeps non-GitHub pr links as generic slots", () => {
     const normalized = normalizeSessionPrBinding(
       makeSession({
@@ -71,6 +95,21 @@ describe("session-pr", () => {
       links: [{ label: "pr", url: "https://example.com/claude/pull/1" }],
     });
     expect(deriveSessionSlots(normalized)).toEqual(normalized.slots);
+  });
+
+  it("collapses legacy github-pr aliases into generic pr slots for non-GitHub URLs", () => {
+    const normalized = normalizeSessionPrBinding(
+      makeSession({
+        slots: {
+          links: [{ label: "github-pr", url: "https://gitlab.com/acme/api/-/merge_requests/7" }],
+        },
+      }),
+    );
+
+    expect(normalized.pr).toBeUndefined();
+    expect(normalized.slots).toEqual({
+      links: [{ label: "pr", url: "https://gitlab.com/acme/api/-/merge_requests/7" }],
+    });
   });
 
   it("derives the display pr link from the native binding", () => {

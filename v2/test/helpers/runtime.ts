@@ -38,6 +38,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   prsByNumber?: Record<
@@ -50,6 +54,10 @@ export interface FakeGhState {
       mergeable?: string | null;
       mergeStateStatus?: string | null;
       repo?: string;
+      state?: string | null;
+      closed?: boolean | null;
+      closedAt?: string | null;
+      mergedAt?: string | null;
     }
   >;
   checksByPr?: Record<string, Array<{ name: string; state: string }>>;
@@ -104,9 +112,14 @@ export interface RuntimeTestContext {
   cleanup(): Promise<void>;
 }
 
-function fakeAgentScript(agentName: "claude" | "codex"): string {
-  const header = agentName === "claude" ? "Claude Code" : "OpenAI Codex";
-  const prompt = agentName === "claude" ? "❯" : "›";
+function fakeAgentScript(agentName: "claude" | "codex" | "cursor"): string {
+  const header =
+    agentName === "claude"
+      ? "Claude Code"
+      : agentName === "codex"
+        ? "OpenAI Codex"
+        : "Cursor Agent";
+  const prompt = agentName === "claude" ? "❯" : agentName === "codex" ? "›" : "Composer 2 Fast";
   const startup =
     agentName === "claude"
       ? `if [[ "\${1:-}" == "--print" ]]; then
@@ -138,7 +151,8 @@ jsonl_append() {
     printf '%s\n' "$1" >> "$session_dir/$session_uuid.jsonl"
   fi
 }`
-      : `if [[ "\${1:-}" == "exec" ]]; then
+      : agentName === "codex"
+        ? `if [[ "\${1:-}" == "exec" ]]; then
   output_file=""
   args=("$@")
   for ((index = 0; index < \${#args[@]}; index++)); do
@@ -171,36 +185,127 @@ jsonl_append() {
   exit 0
 fi
 codex_base="\${CODEX_HOME:-$HOME/.codex}"
-session_rollout=""
+session_dir="$codex_base/sessions/2026/03/18"
+session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+find_rollout_by_thread_id() {
+  local sessions_root="$1"
+  local wanted_thread_id="$2"
+  if [[ -z "$wanted_thread_id" ]] || [[ ! -d "$sessions_root" ]]; then
+    return 0
+  fi
+  python3 - "$sessions_root" "$wanted_thread_id" <<'PY'
+import json
+import os
+import sys
+
+sessions_root, wanted_thread_id = sys.argv[1], sys.argv[2]
+best_key = None
+best_path = ""
+
+for root, _, files in os.walk(sessions_root):
+    for name in files:
+        if not name.endswith(".jsonl"):
+            continue
+        path = os.path.join(root, name)
+        thread_id = None
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for _ in range(10):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(parsed, dict):
+                        value = parsed.get("threadId")
+                        if isinstance(value, str) and value:
+                            thread_id = value
+                            break
+        except OSError:
+            continue
+        if thread_id != wanted_thread_id:
+            continue
+        try:
+            stat_result = os.stat(path)
+        except OSError:
+            continue
+        key = (stat_result.st_mtime_ns, path)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_path = path
+
+sys.stdout.write(best_path)
+PY
+}
 mode="launch"
 resume_id=""
+thread_id="thread-\${SPUR_SESSION:-no-session}"
 if [[ "\${1:-}" == "resume" ]]; then
   mode="resume"
   resume_id="\${@: -1}"
-  # Discover the existing rollout file so resumed sessions can still write event_msg entries.
-  existing_rollout="$(find "$codex_base/sessions" -name "rollout-\${SPUR_SESSION:-no-session}.jsonl" 2>/dev/null | head -n 1)"
+  thread_id="\${resume_id:-$thread_id}"
+  existing_rollout="$(find_rollout_by_thread_id "$codex_base/sessions" "$thread_id")"
   if [[ -n "$existing_rollout" ]]; then
     session_rollout="$existing_rollout"
   fi
-else
-  session_dir="$codex_base/sessions/2026/03/18"
-  thread_id="thread-\${SPUR_SESSION:-no-session}"
-  mkdir -p "$session_dir"
-  session_rollout="$session_dir/rollout-\${SPUR_SESSION:-no-session}.jsonl"
+fi
+mkdir -p "$session_dir"
+if [[ "$mode" != "resume" || ! -f "$session_rollout" ]]; then
   printf '{"type":"session_meta","cwd":"%s","model":"test-model"}\n' "$PWD" > "$session_rollout"
   printf '{"threadId":"%s"}\n' "$thread_id" >> "$session_rollout"
-fi`;
+fi`
+        : `if [[ "\${1:-}" == "-p" || "\${1:-}" == "--print" ]]; then
+  branch_hint="$(printf '%s' "$*" | sed -n 's/.*branch hint: \\([^[:space:]]*\\).*/\\1/p' | head -n 1)"
+  if [[ -n "$branch_hint" ]]; then
+    printf '%s\n' "$branch_hint"
+  else
+    printf 'NO_PROJECT_RULES\n'
+  fi
+  exit 0
+fi
+cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
+workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
+touch_chat_store() {
+  local chat_id="$1"
+  local chat_dir="$cursor_base/chats/$workspace_hash/$chat_id"
+  mkdir -p "$chat_dir"
+  printf 'cursor-session\n' > "$chat_dir/store.db"
+}
+if [[ "\${1:-}" == "create-chat" ]]; then
+  chat_id="chat-\${SPUR_SESSION:-manual}"
+  touch_chat_store "$chat_id"
+  printf '%s\n' "$chat_id"
+  exit 0
+fi
+mode="launch"
+resume_id=""
+chat_id="chat-\${SPUR_SESSION:-no-session}"
+if [[ "\${1:-}" == "--resume" ]]; then
+  mode="resume"
+  resume_id="\${2:-}"
+  chat_id="$resume_id"
+fi
+touch_chat_store "$chat_id"`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
-      : `emit_hook_event "Stop"`;
+      : agentName === "codex"
+        ? `emit_hook_event "Stop"`
+        : ":";
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
-      : `emit_hook_needs_input
-      emit_rollout_input_required`;
+      : agentName === "codex"
+        ? `emit_hook_needs_input
+      emit_rollout_input_required`
+        : ":";
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -211,14 +316,9 @@ fi`;
       : `printf '%s\\n' "ack: slow tool"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}`;
-  // Claude signals working per-line; codex buffers pasted multi-line input and
-  // writes a single rollout event_msg with the full message (matching real codex).
-  const signalWorking =
-    agentName === "claude"
-      ? `jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'`
-      : "";
   // Codex uses a buffering read loop that drains pasted lines before emitting
-  // one event_msg entry, so scanCodexRolloutForMessage sees the full message.
+  // one event_msg entry at submit time, so scanCodexRolloutForMessage sees
+  // the exact full restore/replay message even across interrupt-driven sends.
   const codexEmitBuffered = `if [[ -n "\${SPUR_SESSION:-}" && -n "\${session_rollout:-}" ]]; then
     printf '{"type":"event_msg","payload":{"type":"user_message","message":%s}}\\n' "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$full_msg")" >> "$session_rollout"
   fi
@@ -227,7 +327,7 @@ fi`;
     agentName === "claude"
       ? `while IFS= read -r line; do
   printf '%s\\n' "$line" >> "$log_file"
-  ${signalWorking}
+  jsonl_append '{"type":"user","message":{"role":"user","content":[]}}'
   case "$line" in
     show-waiting-menu)
       ${signalNeedsInput}
@@ -256,17 +356,20 @@ fi`;
       ;;
   esac
 done`
-      : `while IFS= read -r line; do
-  full_msg="$line"
-  printf '%s\\n' "$line" >> "$log_file"
-  # Drain remaining lines from the same paste (arrive within 0.1s).
-  while IFS= read -r -t 0.1 extra; do
-    full_msg="$full_msg
-$extra"
-    printf '%s\\n' "$extra" >> "$log_file"
-  done
+      : agentName === "codex"
+        ? `trap '' INT
+codex_paste_start=$'\\e[200~'
+codex_paste_end=$'\\e[201~'
+codex_buffer=""
+codex_in_paste=0
+codex_handle_message() {
+  local submitted_msg="$1"
+  if [[ -z "$submitted_msg" ]]; then
+    return
+  fi
+  full_msg="$submitted_msg"
   ${codexEmitBuffered}
-  case "$line" in
+  case "$submitted_msg" in
     show-waiting-menu)
       ${signalNeedsInput}
       printf '%s\\n' "Entered plan mode"
@@ -285,12 +388,96 @@ $extra"
       exit 0
       ;;
     *)
-      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "ack: $submitted_msg"
       printf '%s\\n' "${prompt}"
       ${signalWaiting}
       ;;
   esac
-done`;
+}
+codex_append_line() {
+  local next_line="$1"
+  if [[ -z "$next_line" ]]; then
+    return
+  fi
+  if [[ -n "$codex_buffer" ]]; then
+    codex_buffer="$codex_buffer
+$next_line"
+    return
+  fi
+  codex_buffer="$next_line"
+}
+codex_process_line() {
+  local current_line="$1"
+  current_line="\${current_line//$'\\r'/}"
+  current_line="\${current_line//$'\\003'/}"
+  if [[ -z "$current_line" && $codex_in_paste -eq 0 ]]; then
+    return
+  fi
+  if [[ $codex_in_paste -eq 1 ]]; then
+    if [[ "$current_line" == *"$codex_paste_end"* ]]; then
+      local before_end="\${current_line%%"$codex_paste_end"*}"
+      local after_end="\${current_line#*"$codex_paste_end"}"
+      codex_append_line "$before_end"
+      codex_in_paste=0
+      local submitted_msg="$codex_buffer"
+      codex_buffer=""
+      codex_handle_message "$submitted_msg"
+      if [[ -n "$after_end" ]]; then
+        codex_process_line "$after_end"
+      fi
+      return
+    fi
+    codex_append_line "$current_line"
+    return
+  fi
+  if [[ "$current_line" == *"$codex_paste_start"* ]]; then
+    codex_in_paste=1
+    codex_buffer=""
+    codex_process_line "\${current_line#*"$codex_paste_start"}"
+    return
+  fi
+  codex_handle_message "$current_line"
+}
+while true; do
+  line=""
+  if ! IFS= read -r line; then
+    if [[ -z "$line" ]]; then
+      continue
+    fi
+  fi
+  chunk="$line"
+  printf '%s\\n' "$line" >> "$log_file"
+  # Tmux can still split a single submit across multiple immediate reads.
+  # Drain the pending burst so fake Codex emits one exact rollout ack row.
+  while IFS= read -r -t 0.05 extra; do
+    chunk="$chunk
+$extra"
+    printf '%s\\n' "$extra" >> "$log_file"
+  done
+  codex_process_line "$chunk"
+done`
+        : `while IFS= read -r line; do
+  printf '%s\\n' "$line" >> "$log_file"
+  touch_chat_store "$chat_id"
+  case "$line" in
+    show-waiting-menu)
+      printf '%s\\n' "Workspace Trust Required"
+      printf '%s\\n' "Do you trust the contents of this directory?"
+      ;;
+    simulate-work)
+      printf '%s\\n' "• Working (simulated)"
+      sleep 1
+      printf '%s\\n' "${prompt}"
+      ;;
+    exit-now)
+      exit 0
+      ;;
+    *)
+      printf '%s\\n' "ack: $line"
+      printf '%s\\n' "${prompt}"
+      ;;
+  esac
+	done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"
@@ -315,9 +502,7 @@ emit_rollout_input_required() {
   printf '{"type":"event_msg","payload":{"type":"input_required","turn_id":"%s","questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}\\n' "\${SPUR_SESSION:-no-session}-$hook_seq" >> "$session_rollout"
 }
 printf '%s\n' "startup:$mode:$resume_id:$*" >> "$log_file"
-if [[ "$mode" == "launch" ]]; then
-  printf '%s\n' "${header}"
-fi
+printf '%s\n' "${header}"
 printf '%s\n' "${prompt}"
 ${signalWaiting}
 ${readLoop}
@@ -590,12 +775,15 @@ export async function createRuntimeTestContext(
   if (useFakeTools) {
     await writeExecutable(join(fakeBinDir, "claude"), fakeAgentScript("claude"));
     await writeExecutable(join(fakeBinDir, "codex"), fakeAgentScript("codex"));
+    await writeExecutable(join(fakeBinDir, "agent"), fakeAgentScript("cursor"));
+    await writeExecutable(join(fakeBinDir, "cursor-agent"), fakeAgentScript("cursor"));
     await writeExecutable(join(fakeBinDir, "gh"), FAKE_GH_SCRIPT);
     await writeFile(ghStateFile, "{}\n", "utf8");
   }
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    SPUR_IDLE_WAIT_BEFORE_FLUSH_MS: "0",
     ...(useFakeTools
       ? {
           HOME: rootDir,
@@ -603,6 +791,8 @@ export async function createRuntimeTestContext(
           SPUR_TMUX_SOCKET_NAME: `spur-${port}`,
           SPUR_CLAUDE_BIN: join(fakeBinDir, "claude"),
           SPUR_CODEX_BIN: join(fakeBinDir, "codex"),
+          SPUR_CURSOR_BIN: join(fakeBinDir, "agent"),
+          SPUR_SKIP_CODEX_SUBMIT_ACK: "1",
           SPUR_FAKE_AGENT_LOG_DIR: agentLogDir,
           SPUR_FAKE_GH_STATE_FILE: ghStateFile,
         }

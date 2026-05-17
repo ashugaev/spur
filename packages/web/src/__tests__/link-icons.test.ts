@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fetchPrInfo, extractLinkId, prStateColor, usePrInfo } from "@/lib/link-icons.js";
-import type { SpurSessionLink } from "@/lib/types";
+import type { SpurSessionLink } from "@/lib/types.js";
 
 const mockFetch = vi.fn<typeof fetch>();
 let resetCounter = 0;
@@ -11,7 +11,14 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", mockFetch);
   mockFetch.mockReset();
   mockFetch.mockResolvedValueOnce(
-    jsonResponse({ state: "open", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
+    jsonResponse({
+      state: "open",
+      reviewDecision: null,
+      ciStatus: null,
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+    }),
   );
   await fetchPrInfo(`https://github.com/org/repo/pull/reset-${resetCounter++}`);
   mockFetch.mockReset();
@@ -36,7 +43,9 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "open",
+        reviewDecision: "approved",
         ciStatus: "success",
+        canMerge: true,
         totalThreads: 5,
         unresolvedThreads: 2,
       }),
@@ -44,16 +53,36 @@ describe("fetchPrInfo", () => {
 
     const result = await fetchPrInfo("https://github.com/org/repo/pull/123");
     expect(result.state).toBe("open");
+    expect(result.reviewDecision).toBe("approved");
     expect(result.ciStatus).toBe("success");
+    expect(result.canMerge).toBe(true);
     expect(result.totalThreads).toBe(5);
     expect(result.unresolvedThreads).toBe(2);
+  });
+
+  it("returns null for invalid reviewDecision values", async () => {
+    mockFetch.mockResolvedValueOnce(
+      jsonResponse({
+        state: "open",
+        reviewDecision: "MERGED",
+        ciStatus: "success",
+        canMerge: false,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
+    );
+
+    const result = await fetchPrInfo("https://github.com/org/repo/pull/review-decision");
+    expect(result.reviewDecision).toBeNull();
   });
 
   it("maps null ciStatus correctly", async () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "merged",
+        reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       }),
@@ -68,6 +97,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "unknown-state",
+        reviewDecision: null,
         ciStatus: "success",
         totalThreads: 0,
         unresolvedThreads: 0,
@@ -82,6 +112,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "open",
+        reviewDecision: null,
         ciStatus: "unknown-status",
         totalThreads: 0,
         unresolvedThreads: 0,
@@ -125,6 +156,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "open",
+        reviewDecision: null,
         ciStatus: "pending",
       }),
     );
@@ -138,6 +170,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: null,
+        reviewDecision: null,
         ciStatus: null,
         totalThreads: 0,
         unresolvedThreads: 0,
@@ -146,9 +179,11 @@ describe("fetchPrInfo", () => {
 
     await act(async () => {
       const result = await fetchPrInfo("https://github.com/org/repo/pull/soft-missing");
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         state: null,
+        reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 0,
         unresolvedThreads: 0,
       });
@@ -171,22 +206,27 @@ describe("fetchPrInfo", () => {
     resolveFetch(
       jsonResponse({
         state: "open",
+        reviewDecision: null,
         ciStatus: null,
         totalThreads: 1,
         unresolvedThreads: 0,
       }),
     );
 
-    await expect(Promise.all([first, second])).resolves.toEqual([
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
       {
         state: "open",
+        reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 1,
         unresolvedThreads: 0,
       },
       {
         state: "open",
+        reviewDecision: null,
         ciStatus: null,
+        canMerge: false,
         totalThreads: 1,
         unresolvedThreads: 0,
       },
@@ -201,6 +241,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: "open",
+        reviewDecision: null,
         ciStatus: "success",
         totalThreads: 3,
         unresolvedThreads: 1,
@@ -224,6 +265,7 @@ describe("fetchPrInfo", () => {
     mockFetch.mockResolvedValueOnce(
       jsonResponse({
         state: null,
+        reviewDecision: null,
         ciStatus: null,
         totalThreads: 0,
         unresolvedThreads: 0,
@@ -234,17 +276,58 @@ describe("fetchPrInfo", () => {
     expect(softResult.state).toBe("open");
     expect(softResult.ciStatus).toBe("success");
   });
+
+  it("hydrates duplicate consumers when an equal result is already cached", async () => {
+    let resolveFetch!: (value: Response) => void;
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    mockFetch.mockReturnValueOnce(fetchPromise);
+
+    const url = "https://github.com/org/repo/pull/duplicate-consumers";
+    const first = renderHook(() => usePrInfo(url));
+    const second = renderHook(() => usePrInfo(url));
+
+    await act(async () => {
+      resolveFetch(
+        jsonResponse({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 2,
+          unresolvedThreads: 0,
+        }),
+      );
+      await fetchPromise;
+      await Promise.resolve();
+    });
+
+    expect(first.result.current.reviewDecision).toBe("approved");
+    expect(second.result.current.reviewDecision).toBe("approved");
+    expect(second.result.current.ciStatus).toBe("success");
+  });
 });
 
 describe("extractLinkId", () => {
   it("extracts PR number from GitHub pull URL", () => {
-    const link: SpurSessionLink = { label: "pr", url: "https://github.com/org/repo/pull/123" };
+    const link: SpurSessionLink = {
+      label: "github-pr",
+      url: "https://github.com/org/repo/pull/123",
+    };
     expect(extractLinkId(link)).toBe("#123");
   });
 
   it("returns 'PR' when URL has no pull number", () => {
-    const link: SpurSessionLink = { label: "pr", url: "https://github.com/org/repo" };
+    const link: SpurSessionLink = { label: "github-pr", url: "https://github.com/org/repo" };
     expect(extractLinkId(link)).toBe("PR");
+  });
+
+  it("extracts merge request number from GitLab MR URL", () => {
+    const link: SpurSessionLink = {
+      label: "pr",
+      url: "https://gitlab.com/org/repo/-/merge_requests/123",
+    };
+    expect(extractLinkId(link)).toBe("!123");
   });
 
   it("extracts tracker ID from /browse/ URL", () => {
@@ -303,6 +386,7 @@ describe("usePrInfo hook", () => {
   it("returns EMPTY_PR_INFO when url is undefined", () => {
     const { result } = renderHook(() => usePrInfo(undefined));
     expect(result.current.state).toBeNull();
+    expect(result.current.reviewDecision).toBeNull();
     expect(result.current.ciStatus).toBeNull();
     expect(result.current.totalThreads).toBe(0);
     expect(result.current.unresolvedThreads).toBe(0);
@@ -329,12 +413,19 @@ describe("usePrInfo hook", () => {
     // Resolve the fetch
     await act(async () => {
       resolveFetch(
-        jsonResponse({ state: "open", ciStatus: "success", totalThreads: 2, unresolvedThreads: 1 }),
+        jsonResponse({
+          state: "open",
+          reviewDecision: "approved",
+          ciStatus: "success",
+          totalThreads: 2,
+          unresolvedThreads: 1,
+        }),
       );
       await fetchPromise;
     });
 
     expect(result.current.state).toBe("open");
+    expect(result.current.reviewDecision).toBe("approved");
     expect(result.current.totalThreads).toBe(2);
   });
 
@@ -344,7 +435,13 @@ describe("usePrInfo hook", () => {
 
     // Resolve immediately each time
     mockFetch.mockResolvedValue(
-      jsonResponse({ state: "open", ciStatus: null, totalThreads: 0, unresolvedThreads: 0 }),
+      jsonResponse({
+        state: "open",
+        reviewDecision: null,
+        ciStatus: null,
+        totalThreads: 0,
+        unresolvedThreads: 0,
+      }),
     );
 
     const { unmount } = renderHook(() => usePrInfo(url));

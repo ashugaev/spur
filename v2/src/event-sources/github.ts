@@ -1,109 +1,64 @@
 import { existsSync } from "node:fs";
-import { setInterval as startInterval, clearInterval } from "node:timers";
+import { clearInterval, setInterval as startInterval } from "node:timers";
 import { gh } from "../gh.js";
 import {
-  deleteGitHubSourceSnapshot,
-  listSessions,
-  readGitHubSourceSnapshots,
-  readWorkItemRegistry,
-  recordWorkItem,
-  writeGitHubSourceSnapshot,
-  writeSession,
-} from "../metadata.js";
-import { resolvePrDiscoveryBranch, resolveSessionPrBinding } from "../session-pr.js";
-import {
   GITHUB_WORK_ITEM_NEW_EVENT,
-  type GitHubEventData,
-  type GitHubSignalKind,
-  type GitHubReviewDecision,
-  type GitHubSignal,
+  type GitHubCheck,
+  type GitHubPrSummary,
   type GitHubSourceConfig,
-  type GitHubWorkItemEventData,
+  type ReviewEventData,
+  type ReviewSignal,
+  type ReviewSignalKind,
   type SessionPrBinding,
-  type SessionRecord,
 } from "../types.js";
 import type { SourceHandle, SourceModule, SourceStartDeps } from "./types.js";
+import {
+  clearGitHubMergeConflictRestoreReplay,
+  deleteReviewSourceSnapshot,
+  hasGitHubMergeConflictRestoreReplay,
+  listSessions,
+  readReviewSourceSnapshots,
+  readWorkItemRegistry,
+  recordWorkItem,
+  writeReviewSourceSnapshot,
+} from "../metadata.js";
+import { reviewProvider } from "../review-providers/index.js";
+import { normalizeReviewDecision, parseRepoFromUrl } from "../review-providers/github.js";
 
-export interface GitHubPrSummary {
-  number: number;
-  title: string;
-  url: string;
-  reviewDecision: GitHubReviewDecision;
-  repo: string;
-  mergeable: string;
-  mergeStateStatus: string;
-}
+export {
+  shortText,
+  parseRepoFromUrl,
+  normalizeReviewDecision,
+  summarizeFailingCi,
+  hasMergeConflict,
+  resolvePrSummary,
+  resolveTrackedBranch,
+} from "../review-providers/github.js";
 
-export interface GitHubCheck {
-  name: string;
-  state: string;
-}
+export type { GitHubCheck, GitHubPrSummary };
+function emitSignalsByKind(
+  deps: SourceStartDeps<GitHubSourceConfig>,
+  data: Omit<ReviewEventData, "signals">,
+  signals: ReviewSignal[],
+): void {
+  const grouped = new Map<ReviewSignalKind, ReviewSignal[]>();
+  for (const signal of signals) {
+    const existing = grouped.get(signal.kind);
+    if (existing) {
+      existing.push(signal);
+      continue;
+    }
+    grouped.set(signal.kind, [signal]);
+  }
 
-type IssueComment = {
-  id: number;
-  body: string;
-  user?: { login?: string | null } | null;
-};
-
-type PullRequestReviewComment = {
-  id: number;
-  body: string;
-  path?: string | null;
-  line?: number | null;
-  user?: { login?: string | null } | null;
-};
-
-export function shortText(value: string, limit = 140): string {
-  const clean = value.replace(/\s+/g, " ").trim();
-  if (clean.length <= limit) return clean;
-  return `${clean.slice(0, limit - 1).trimEnd()}…`;
-}
-
-export function parseRepoFromUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/pull\/\d+/);
-    if (!match) return "";
-    return `${match[1]}/${match[2]}`;
-  } catch {
-    return "";
+  for (const [kind, items] of grouped) {
+    deps.emit<ReviewEventData>(`github:${kind}`, {
+      ...data,
+      signals: items,
+    });
   }
 }
-
-export function normalizeReviewDecision(value: string | null | undefined): GitHubReviewDecision {
-  const normalized = (value ?? "").trim().toUpperCase();
-  if (normalized === "APPROVED") return "approved";
-  if (normalized === "CHANGES_REQUESTED") return "changes_requested";
-  if (normalized === "REVIEW_REQUIRED") return "pending";
-  return "none";
-}
-
-export function summarizeFailingCi(checks: GitHubCheck[]): string | null {
-  const failing = checks.filter((check) =>
-    ["FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"].includes(
-      check.state.toUpperCase(),
-    ),
-  );
-  return failing.length > 0
-    ? `CI is failing: ${failing.map((check) => check.name).join(", ")}.`
-    : null;
-}
-
-function normalizeGitHubState(value: string | null | undefined): string {
-  return (value ?? "").trim().toUpperCase();
-}
-
-export function hasMergeConflict(pr: GitHubPrSummary): boolean {
-  return (
-    normalizeGitHubState(pr.mergeable) === "CONFLICTING" ||
-    normalizeGitHubState(pr.mergeStateStatus) === "DIRTY"
-  );
-}
-
-export async function resolveBoundPrSummary(
-  worktreePath: string,
-  pr: SessionPrBinding,
-): Promise<GitHubPrSummary> {
+export async function resolveBoundPrSummary(worktreePath: string, pr: SessionPrBinding) {
   const raw = await gh(
     worktreePath,
     "pr",
@@ -130,164 +85,51 @@ export async function resolveBoundPrSummary(
     mergeStateStatus: summary.mergeStateStatus ?? "",
   };
 }
-
-export async function resolveTrackedBranch(
-  worktreePath: string,
-  sessionBranch: string,
-): Promise<string> {
-  return resolvePrDiscoveryBranch(worktreePath, sessionBranch);
-}
-
-async function fetchChecks(worktreePath: string, prNumber: number): Promise<GitHubCheck[]> {
-  try {
-    const raw = await gh(worktreePath, "pr", "checks", String(prNumber), "--json", "name,state");
-    return JSON.parse(raw) as GitHubCheck[];
-  } catch {
-    return [];
-  }
-}
-
-async function fetchPagedArray<T>(
-  cwd: string,
-  pathBuilder: (page: number) => string,
-): Promise<T[]> {
-  const items: T[] = [];
-  for (let page = 1; ; page += 1) {
-    const raw = await gh(cwd, "api", pathBuilder(page));
-    const next = JSON.parse(raw) as T[];
-    items.push(...next);
-    if (next.length < 100) return items;
-  }
-}
-
-async function fetchReviewSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<GitHubSignal[]> {
-  const comments = await fetchPagedArray<PullRequestReviewComment>(
-    worktreePath,
-    (page) => `repos/${repo}/pulls/${prNumber}/comments?per_page=100&page=${page}`,
-  );
-  const signals: GitHubSignal[] = [];
-  for (const comment of comments) {
-    const author = comment.user?.login ?? "unknown";
-    const location = comment.path
-      ? ` on ${comment.path}${comment.line ? `:${comment.line}` : ""}`
-      : "";
-    signals.push({
-      key: `review-comment:${String(comment.id)}`,
-      kind: "comment",
-      text: `New review comment from ${author}${location}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
-}
-
-async function fetchIssueCommentSignals(
-  worktreePath: string,
-  repo: string,
-  prNumber: number,
-): Promise<GitHubSignal[]> {
-  const comments = await fetchPagedArray<IssueComment>(
-    worktreePath,
-    (page) => `repos/${repo}/issues/${prNumber}/comments?per_page=100&page=${page}`,
-  );
-  const signals: GitHubSignal[] = [];
-  for (const comment of comments) {
-    const author = comment.user?.login ?? "unknown";
-    signals.push({
-      key: `comment:${comment.id}`,
-      kind: "comment",
-      text: `New PR comment from ${author}: "${shortText(comment.body)}"`,
-    });
-  }
-  return signals;
-}
-
-async function collectSignals(
-  dataDir: string,
-  session: SessionRecord,
-): Promise<{ data: GitHubEventData; snapshot: Map<string, GitHubSignal> } | null> {
-  const { binding, updatedSession } = await resolveSessionPrBinding(session);
-  if (updatedSession) {
-    writeSession(dataDir, updatedSession);
-  }
-  if (!binding) return null;
-  const pr = await resolveBoundPrSummary(session.worktreePath, binding);
-
-  const [checks, reviewSignals, commentSignals] = await Promise.all([
-    fetchChecks(session.worktreePath, pr.number),
-    pr.repo ? fetchReviewSignals(session.worktreePath, pr.repo, pr.number) : Promise.resolve([]),
-    pr.repo
-      ? fetchIssueCommentSignals(session.worktreePath, pr.repo, pr.number)
-      : Promise.resolve([]),
-  ]);
-
-  const ciText = summarizeFailingCi(checks);
-  const snapshot = new Map<string, GitHubSignal>();
-  if (pr.reviewDecision === "changes_requested") {
-    snapshot.set("changes_requested", {
-      key: "changes_requested",
-      kind: "changes_requested",
-      text: "Changes requested in review.",
-    });
-  }
-  if (ciText) {
-    snapshot.set("ci_failed", {
-      key: "ci_failed",
-      kind: "ci_failed",
-      text: ciText,
-    });
-  }
-  if (hasMergeConflict(pr)) {
-    snapshot.set("merge_conflict", {
-      key: "merge_conflict",
-      kind: "merge_conflict",
-      text: "Merge conflicts are blocking this PR.",
-    });
-  }
-
-  for (const signal of [...reviewSignals, ...commentSignals]) {
-    snapshot.set(signal.key, signal);
-  }
-
-  return {
-    data: {
-      sessionId: session.id,
-      prNumber: pr.number,
-      prTitle: pr.title,
-      signals: [],
-    },
-    snapshot,
-  };
-}
-
-function emitSignalsByKind(
+async function pollWorkItems(
   deps: SourceStartDeps<GitHubSourceConfig>,
-  data: Omit<GitHubEventData, "signals">,
-  signals: GitHubSignal[],
-): void {
-  const grouped = new Map<GitHubSignalKind, GitHubSignal[]>();
-  for (const signal of signals) {
-    const existing = grouped.get(signal.kind);
-    if (existing) {
-      existing.push(signal);
-      continue;
-    }
-    grouped.set(signal.kind, [signal]);
-  }
-
-  for (const [kind, items] of grouped) {
-    deps.emit<GitHubEventData>(`github:${kind}`, {
-      ...data,
-      signals: items,
+  query: string,
+  seenWorkItems: Set<string>,
+) {
+  const raw = await gh(
+    process.cwd(),
+    "search",
+    "prs",
+    query,
+    "--json",
+    "number,title,url,repository",
+    "--limit",
+    "100",
+  );
+  const items = JSON.parse(raw) as Array<{
+    number: number;
+    title: string;
+    url: string;
+    repository: { nameWithOwner: string };
+  }>;
+  for (const item of items) {
+    const repo = item.repository.nameWithOwner;
+    const externalId = `${repo}#${item.number}`;
+    if (seenWorkItems.has(externalId)) continue;
+    recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
+    seenWorkItems.add(externalId);
+    deps.emit(GITHUB_WORK_ITEM_NEW_EVENT, {
+      externalId,
+      url: item.url,
+      number: item.number,
+      title: item.title,
+      repo,
     });
   }
 }
 
 async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Promise<SourceHandle> {
-  const snapshots = readGitHubSourceSnapshots(deps.dataDir, deps.projectId, deps.sourceId);
+  const provider = reviewProvider("github");
+  const snapshots = readReviewSourceSnapshots(
+    deps.dataDir,
+    "github",
+    deps.projectId,
+    deps.sourceId,
+  );
   const seenWorkItems = deps.config.query
     ? readWorkItemRegistry(deps.dataDir, deps.projectId, deps.sourceId)
     : null;
@@ -295,52 +137,7 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
   let polling = false;
   let pollingWorkItems = false;
 
-  const pollWorkItems = async (): Promise<void> => {
-    if (!deps.config.query || stopped || deps.signal.aborted || !seenWorkItems) return;
-    if (pollingWorkItems) return;
-    pollingWorkItems = true;
-    try {
-      const raw = await gh(
-        process.cwd(),
-        "search",
-        "prs",
-        deps.config.query,
-        "--json",
-        "number,title,url,repository",
-        "--limit",
-        "100",
-      );
-      const items = JSON.parse(raw) as Array<{
-        number: number;
-        title: string;
-        url: string;
-        repository: { nameWithOwner: string };
-      }>;
-      for (const item of items) {
-        const repo = item.repository.nameWithOwner;
-        const externalId = `${repo}#${item.number}`;
-        if (seenWorkItems.has(externalId)) continue;
-        recordWorkItem(deps.dataDir, deps.projectId, deps.sourceId, externalId);
-        seenWorkItems.add(externalId);
-        deps.emit<GitHubWorkItemEventData>(GITHUB_WORK_ITEM_NEW_EVENT, {
-          externalId,
-          url: item.url,
-          number: item.number,
-          title: item.title,
-          repo,
-        });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      deps.logger.warn?.(
-        `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
-      );
-    } finally {
-      pollingWorkItems = false;
-    }
-  };
-
-  const poll = async (emitInitial: boolean): Promise<void> => {
+  const pollSignals = async (emitInitial: boolean): Promise<void> => {
     if (stopped || deps.signal.aborted || polling) return;
     polling = true;
     try {
@@ -356,10 +153,30 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       for (const session of sessions) {
         currentSessionIds.add(session.id);
         try {
-          const collected = await collectSignals(deps.dataDir, session);
+          const restoreReplayRequested = hasGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+          );
+          const collected = await provider.collectSignals(session);
           if (!collected) {
             snapshots.delete(session.id);
-            deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id);
+            deleteReviewSourceSnapshot(
+              deps.dataDir,
+              "github",
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            if (restoreReplayRequested) {
+              clearGitHubMergeConflictRestoreReplay(
+                deps.dataDir,
+                deps.projectId,
+                deps.sourceId,
+                session.id,
+              );
+            }
             continue;
           }
 
@@ -371,7 +188,29 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           });
 
           snapshots.set(session.id, next);
-          writeGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, session.id, next);
+          writeReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            session.id,
+            next,
+          );
+
+          if (restoreReplayRequested) {
+            const mergeConflictSignal = next.get("merge_conflict");
+            if (mergeConflictSignal) {
+              emitSignalsByKind(deps, collected.data, [mergeConflictSignal]);
+            }
+            clearGitHubMergeConflictRestoreReplay(
+              deps.dataDir,
+              deps.projectId,
+              deps.sourceId,
+              session.id,
+            );
+            continue;
+          }
+
           if ((previous && changed.length > 0) || (!previous && emitInitial && next.size > 0)) {
             emitSignalsByKind(deps, collected.data, previous ? changed : [...next.values()]);
           }
@@ -386,7 +225,19 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       for (const sessionId of [...snapshots.keys()]) {
         if (!currentSessionIds.has(sessionId)) {
           snapshots.delete(sessionId);
-          deleteGitHubSourceSnapshot(deps.dataDir, deps.projectId, deps.sourceId, sessionId);
+          deleteReviewSourceSnapshot(
+            deps.dataDir,
+            "github",
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
+          clearGitHubMergeConflictRestoreReplay(
+            deps.dataDir,
+            deps.projectId,
+            deps.sourceId,
+            sessionId,
+          );
         }
       }
     } finally {
@@ -394,24 +245,43 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     }
   };
 
+  const syncWorkItems = async (): Promise<void> => {
+    if (
+      !deps.config.query ||
+      !seenWorkItems ||
+      stopped ||
+      deps.signal.aborted ||
+      pollingWorkItems
+    ) {
+      return;
+    }
+    pollingWorkItems = true;
+    try {
+      await pollWorkItems(deps, deps.config.query, seenWorkItems);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.logger.warn?.(
+        `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
+      );
+    } finally {
+      pollingWorkItems = false;
+    }
+  };
+
   const timer = startInterval(() => {
-    void poll(false);
-    void pollWorkItems();
+    void pollSignals(false);
+    void syncWorkItems();
   }, deps.config.intervalMs);
 
   if (!deps.config.runOnStart) {
     if (deps.deferInitialSync) {
-      void poll(false);
-      void pollWorkItems();
+      void pollSignals(false);
+      void syncWorkItems();
     } else {
-      await poll(false);
-      await pollWorkItems();
+      await pollSignals(false);
+      await syncWorkItems();
     }
   }
-
-  deps.logger.info?.(
-    `[source:${deps.projectId}/${deps.sourceId}] github started: intervalMs=${deps.config.intervalMs}, events="github:*", runOnStart=${deps.config.runOnStart}, query=${deps.config.query ? "set" : "unset"}`,
-  );
 
   return {
     stop(): void {
@@ -421,15 +291,15 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
     ...(deps.config.runOnStart
       ? {
           runOnStart(): void {
-            void poll(true);
-            void pollWorkItems();
+            void pollSignals(true);
+            void syncWorkItems();
           },
         }
       : {}),
   };
 }
 
-export const githubSourceModule: SourceModule = {
+export const githubSourceModule: SourceModule<GitHubSourceConfig> = {
   type: "github",
   start: startGitHubSource,
 };

@@ -1,31 +1,24 @@
-export interface GitHubStatusOk {
-  ok: true;
-  requestedAt: string;
-}
+import {
+  readPlatformStatusCache,
+  type PlatformStatusCacheEntry,
+  type PlatformStatusResponse,
+  resetPlatformStatusCacheForTests,
+  writePlatformStatusCache,
+} from "@/lib/platform-status";
 
-export interface GitHubStatusError {
-  ok: false;
-  error: string;
-  requestedAt: string | null;
-}
+const CACHE_KEY = "github";
 
-export type GitHubStatusResponse = GitHubStatusOk | GitHubStatusError;
-
-export interface GitHubStatusCacheEntry {
-  response: GitHubStatusResponse;
-  expiresAt: number;
-}
-
-let cachedStatus: GitHubStatusCacheEntry | null = null;
+export type GitHubStatusResponse = PlatformStatusResponse;
+export type GitHubStatusCacheEntry = PlatformStatusCacheEntry;
 
 export function readGitHubStatusCache(): GitHubStatusCacheEntry | null {
-  return cachedStatus;
+  return readPlatformStatusCache(CACHE_KEY);
 }
 
 export function writeGitHubStatusCache(entry: GitHubStatusCacheEntry): void {
-  cachedStatus = entry;
+  writePlatformStatusCache(CACHE_KEY, entry);
 }
 
 export function resetGitHubStatusForTests(): void {
-  cachedStatus = null;
+  resetPlatformStatusCacheForTests();
 }

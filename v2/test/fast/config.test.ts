@@ -1,7 +1,13 @@
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
+import {
+  createProjectConfigScaffold,
+  loadConfig,
+  loadProjectConfig,
+  resolveConfigPath,
+  writeProjectConfigScaffold,
+} from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -81,6 +87,21 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("accepts cursor as an instance and project default agent", async () => {
+    const configPath = await writeConfig(`
+defaultAgent: cursor
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: cursor
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.defaultAgent).toBe("cursor");
+    expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
   });
 
   it("parses explicit project worktree defaults and spawn overrides", async () => {
@@ -173,6 +194,37 @@ projects:
     expect(config.projects["backend"]?.triggers["notify"]).toEqual({
       source: "pr-watch",
       event: "github:merge_conflict",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
+  it("accepts gitlab source defaults and gitlab trigger events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: gitlab:comment
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["mr-watch"]).toEqual({
+      type: "gitlab",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "mr-watch",
+      event: "gitlab:comment",
       send: {
         interrupt: false,
       },
@@ -434,6 +486,7 @@ projects:
         event: github:work_item.new
         spawn:
           prompt: "Take this work item."
+          autoComplete: true
 `);
 
     const config = loadConfig(configPath);
@@ -448,8 +501,76 @@ projects:
       event: "github:work_item.new",
       spawn: {
         prompt: "Take this work item.",
+        autoComplete: true,
       },
     });
+  });
+
+  it("rejects autoComplete on non-work-item spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+    );
+  });
+
+  it("rejects autoComplete on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      reply:
+        source: pr-watch
+        event: github:comment
+        send:
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+    );
+  });
+
+  it("rejects legacy autoClose on spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoClose: complete
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+    );
   });
 
   it("rejects github:work_item.new triggers when the source has no query", async () => {
@@ -1042,5 +1163,46 @@ projects:
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
     );
+  });
+
+  it("renders a minimal project config scaffold for the current repo", async () => {
+    const dir = await createTempDir("spur-fast-doctor-");
+    tempDirs.push(dir);
+
+    const scaffold = createProjectConfigScaffold(join(dir, "My Repo"), "release");
+
+    expect(scaffold.configPath).toBe(join(dir, "My Repo", "spur.yaml"));
+    expect(scaffold.projectId).toBe("my-repo");
+    expect(scaffold.sessionPrefix).toBe("my-repo");
+    expect(scaffold.content).toBe(
+      [
+        "projects:",
+        "  my-repo:",
+        "    path: .",
+        "    defaultBranch: release",
+        "    sessionPrefix: my-repo",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("writes a project config scaffold that parses as a normal local config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-write-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const scaffold = createProjectConfigScaffold(repoDir, "main");
+
+    writeProjectConfigScaffold(scaffold);
+
+    process.chdir(repoDir);
+    const config = loadProjectConfig();
+
+    expect(config.configPath).toBe(join(repoDir, "spur.yaml"));
+    expect(config.projects["repo"]).toMatchObject({
+      defaultBranch: "main",
+      path: repoDir,
+      sessionPrefix: "repo",
+    });
   });
 });

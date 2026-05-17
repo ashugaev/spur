@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { relative } from "node:path";
 import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { cancel, isCancel, log, text } from "@clack/prompts";
@@ -20,10 +21,12 @@ import {
 } from "./client.js";
 import {
   defaultVoiceModelPath,
+  createProjectConfigScaffold,
   ensureInstanceConfig,
   findProjectConfigPath,
   loadConfig,
   loadProjectConfig,
+  writeProjectConfigScaffold,
 } from "./config.js";
 import { readSessionEventLog, type SpurLogEntry } from "./event-log.js";
 import {
@@ -60,6 +63,7 @@ import type {
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
+import { readDoctorBranchHint, resolveDoctorRepoRoot } from "./workspace.js";
 
 const LIVE_LIST_REFRESH_MS = 2_000;
 const LIST_FIXED_ROWS = 9;
@@ -536,6 +540,13 @@ interface HelpRow {
   description: string;
 }
 
+interface DoctorResult {
+  configPath: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
+}
+
 function renderHelpLines(
   lines: string[],
   format: (line: string) => string = (line) => line,
@@ -546,6 +557,24 @@ function renderHelpLines(
 function renderHelpRows(rows: HelpRow[]): string {
   const width = Math.max(...rows.map((row) => row.term.length));
   return rows.map((row) => `  ${accent(row.term.padEnd(width))}  ${row.description}`).join("\n");
+}
+
+function displayPathFromCwd(path: string): string {
+  const rendered = relative(process.cwd(), path) || ".";
+  if (rendered === ".") {
+    return "./";
+  }
+  return rendered.startsWith(".") ? rendered : `./${rendered}`;
+}
+
+function renderDoctorResult(result: DoctorResult): string {
+  return [
+    dimText(
+      `project ${result.projectId}  branch ${result.defaultBranch}  prefix ${result.sessionPrefix}`,
+    ),
+    dimText("Next: `spur list` to auto-connect this repo."),
+    dimText(`Or: \`spur spawn ${result.projectId} "your task"\`.`),
+  ].join("\n");
 }
 
 function collectOptionValue(value: string, previous: string[] = []): string[] {
@@ -643,7 +672,13 @@ function helpNotes(command: Command): string[] {
   if (!command.parent) {
     return [
       "Use `spur <command> --help` for per-command details.",
-      "Use `--json` on `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
+      "Use `--json` on `doctor`, `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service run`, and `service status` for scripts.",
+    ];
+  }
+  if (command.name() === "doctor") {
+    return [
+      "Writes a local `spur.yaml` for the current repo and never auto-connects it directly.",
+      "Run `spur list` or `spur spawn` next so the normal auto-connect path can attach the repo.",
     ];
   }
   if (command.name() === "spawn") {
@@ -1003,7 +1038,7 @@ async function runInteractiveSessionList(
     if (!session) return;
 
     busy = true;
-    statusMessage = brandLine(`Pausing ${session.id}...`);
+    statusMessage = brandLine(`Stopping ${session.id}...`);
     render();
 
     try {
@@ -1011,7 +1046,7 @@ async function runInteractiveSessionList(
       sessions = replaceListedSession(sessions, paused);
       selectedSessionId = paused.id;
       pendingKillConfirmationSessionId = null;
-      statusMessage = brandLine(`Paused ${paused.id}.`);
+      statusMessage = brandLine(`Stopped ${paused.id}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       statusMessage = brandLine(message);
@@ -1289,14 +1324,45 @@ export function createProgram(cliEntrypoint: string): Command {
     .version("0.1.0", "-V, --version", "Show version");
 
   program
+    .command("doctor")
+    .description("Scaffold a local Spur project config for this checkout.")
+    .option("--json", "Print raw JSON")
+    .action(async (options) => {
+      await outputResult({
+        json: Boolean(options.json),
+        label: "writing local config",
+        action: async (): Promise<DoctorResult> => {
+          const workspaceRoot = await resolveDoctorRepoRoot(process.cwd());
+          const existingProjectConfigPath = findProjectConfigPath(workspaceRoot);
+          if (existingProjectConfigPath) {
+            throw new Error(`Local project config already exists: ${existingProjectConfigPath}`);
+          }
+          const scaffold = createProjectConfigScaffold(
+            workspaceRoot,
+            await readDoctorBranchHint(workspaceRoot),
+          );
+          writeProjectConfigScaffold(scaffold);
+          return {
+            configPath: scaffold.configPath,
+            defaultBranch: scaffold.defaultBranch,
+            projectId: scaffold.projectId,
+            sessionPrefix: scaffold.sessionPrefix,
+          };
+        },
+        success: (result) => `Created ${displayPathFromCwd(result.configPath)}.`,
+        render: renderDoctorResult,
+      });
+    });
+
+  program
     .command("spawn")
     .description("Start a session for a configured project.")
     .argument("<project>", "Configured project id")
     .argument("[prompt...]", "Optional task prompt")
-    .option("--agent <name>", "Agent to start: claude or codex")
+    .option("--agent <name>", "Agent to start: claude, codex, or cursor")
     .option(
       "--plan",
-      "Start in plan mode (disables spawn steps; Claude startup uses --permission-mode plan; Codex launch is unchanged)",
+      "Start in plan mode (adds a planning-only prompt, disables spawn steps; Claude startup uses --permission-mode plan; Cursor uses --plan; Codex launch is unchanged)",
     )
     .option("--branch <name>", "Branch name to use")
     .option("--step <label>", "Add a pipeline step; repeatable", appendOptionValue)
@@ -1498,7 +1564,7 @@ export function createProgram(cliEntrypoint: string): Command {
         json: Boolean(options.json),
         label: "pausing session",
         action: () => postSessionAction(cliEntrypoint, sessionId, "pause", configPath),
-        success: (session) => `Paused ${session.id}.`,
+        success: (session) => `Stopped ${session.id}.`,
         render: renderSessionCard,
       });
     });
@@ -1676,14 +1742,32 @@ export function createProgram(cliEntrypoint: string): Command {
     .description("Internal session slot updates.")
     .requiredOption("--session <id>", "Session id")
     .option("--title <text>", "Set task title")
+    .option("--title-if-absent <text>", "Set title only if not already set")
     .option("--clear-title", "Remove task title")
     .option("--link <label=url>", "Add or replace a named link", collectOptionValue, [])
-    .option("--unlink <label>", "Remove a named link", collectOptionValue, [])
+    .option(
+      "--unlink <label>",
+      "Remove a named link. When `pr` exists as both a generic link and a native GitHub PR binding, the generic link is removed first.",
+      collectOptionValue,
+      [],
+    )
     .option("--json", "Print raw JSON")
     .action(async (options, command) => {
       const configPath = prepareInstanceConfig(command.parent as Command).configPath;
+      const titleIfAbsent = options.titleIfAbsent as string | undefined;
+      const title = options.title as string | undefined;
+      if (titleIfAbsent !== undefined && (title !== undefined || options.clearTitle)) {
+        throw new Error("--title-if-absent cannot be combined with --title or --clear-title");
+      }
+      const titleFields: Pick<UpdateSessionSlotsRequest, "title" | "setTitleIfAbsent"> = {};
+      if (titleIfAbsent !== undefined) {
+        titleFields.title = titleIfAbsent;
+        titleFields.setTitleIfAbsent = true;
+      } else if (title !== undefined) {
+        titleFields.title = title;
+      }
       const payload: UpdateSessionSlotsRequest = {
-        ...(options.title !== undefined ? { title: options.title as string } : {}),
+        ...titleFields,
         ...(options.clearTitle ? { clearTitle: true } : {}),
         ...((options.link as string[]).length > 0
           ? { links: (options.link as string[]).map(parseSlotLink) }

@@ -1,16 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
-  GITHUB_SIGNAL_KINDS as VALID_GITHUB_SIGNAL_KINDS,
+  GITHUB_WORK_ITEM_NEW_EVENT,
+  REVIEW_SIGNAL_KINDS as VALID_REVIEW_SIGNAL_KINDS,
   type AgentName,
   type AppConfig,
   type CronSourceConfig,
   type GitHubSourceConfig,
+  type GitLabSourceConfig,
   type ProjectConfig,
   type ProjectPreflightConfig,
   type ProjectSpawnConfig,
+  type ReviewProviderId,
   type WorkspaceAccessItemConfig,
   type WorkspaceAccessConfig,
   type SendTriggerConfig,
@@ -55,6 +58,14 @@ interface ConfigDefaults {
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
+}
+
+export interface ProjectConfigScaffold {
+  configPath: string;
+  content: string;
+  defaultBranch: string;
+  projectId: string;
+  sessionPrefix: string;
 }
 
 const projectEnvCache = new Map<string, Record<string, string>>();
@@ -137,10 +148,10 @@ function asOptionalBoolean(value: unknown, label: string): boolean | undefined {
 
 function asOptionalAgent(value: unknown, label: string): AgentName | undefined {
   if (value === undefined) return undefined;
-  if (value === "claude" || value === "codex") {
+  if (value === "claude" || value === "codex" || value === "cursor") {
     return value;
   }
-  throw new Error(`${label} must be "claude" or "codex"`);
+  throw new Error(`${label} must be "claude", "codex", or "cursor"`);
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -273,6 +284,44 @@ function defaultInstanceConfigYaml(): string {
   ].join("\n");
 }
 
+function deriveScaffoldId(repoPath: string): string {
+  const sanitized = basename(resolve(repoPath))
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
+  return sanitized || "project";
+}
+
+export function createProjectConfigScaffold(
+  startDir: string,
+  defaultBranch: string,
+): ProjectConfigScaffold {
+  const repoPath = resolve(startDir);
+  const projectId = deriveScaffoldId(repoPath);
+  return {
+    configPath: join(repoPath, DEFAULT_PROJECT_CONFIG_FILES[0]),
+    content: [
+      "projects:",
+      `  ${projectId}:`,
+      "    path: .",
+      `    defaultBranch: ${defaultBranch}`,
+      `    sessionPrefix: ${projectId}`,
+      "",
+    ].join("\n"),
+    defaultBranch,
+    projectId,
+    sessionPrefix: projectId,
+  };
+}
+
+export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): void {
+  mkdirSync(dirname(scaffold.configPath), { recursive: true });
+  writeFileSync(scaffold.configPath, scaffold.content, "utf8");
+}
+
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
@@ -291,8 +340,8 @@ function expectedEventsForSource(source: SourceConfig): string[] {
   if (source.type === "service") {
     return Object.keys(source.rules).map((ruleId) => `service:${ruleId}`);
   }
-  const events = VALID_GITHUB_SIGNAL_KINDS.map((kind) => `github:${kind}`);
-  if (source.query !== undefined) {
+  const events = VALID_REVIEW_SIGNAL_KINDS.map((kind) => `${source.type}:${kind}`);
+  if (source.type === "github" && source.query !== undefined) {
     events.push("github:work_item.new");
   }
   return events;
@@ -317,19 +366,20 @@ function parseCronSource(
   };
 }
 
-function parseGitHubSource(
+function parseReviewSource<TProvider extends ReviewProviderId>(
+  provider: TProvider,
   projectId: string,
   sourceId: string,
   raw: Record<string, unknown>,
-): GitHubSourceConfig {
+): Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }> {
   const label = `projects.${projectId}.sources.${sourceId}`;
   const query = asOptionalString(raw["query"], `${label}.query`);
   return {
-    type: "github",
+    type: provider,
     runOnStart: asOptionalBoolean(raw["runOnStart"], `${label}.runOnStart`) ?? false,
     intervalMs: asOptionalNumber(raw["intervalMs"], `${label}.intervalMs`) ?? 60_000,
     ...(query !== undefined ? { query } : {}),
-  };
+  } as Extract<GitHubSourceConfig | GitLabSourceConfig, { type: TProvider }>;
 }
 
 function parseServiceRule(
@@ -392,8 +442,8 @@ function parseSource(projectId: string, sourceId: string, value: unknown): Sourc
   if (type === "cron") {
     return parseCronSource(projectId, sourceId, raw);
   }
-  if (type === "github") {
-    return parseGitHubSource(projectId, sourceId, raw);
+  if (type === "github" || type === "gitlab") {
+    return parseReviewSource(type, projectId, sourceId, raw);
   }
   if (type === "service") {
     return parseServiceSource(projectId, sourceId, raw);
@@ -409,6 +459,12 @@ function parseSendConfig(
 ): SendTriggerConfig["send"] {
   const label = `projects.${projectId}.triggers.${triggerId}.send`;
   const sendRaw = asObject(raw["send"], label);
+  if (sendRaw["autoClose"] !== undefined) {
+    throw new Error(`${label}.autoClose is not supported; use spawn.autoComplete`);
+  }
+  if (sendRaw["autoComplete"] !== undefined) {
+    throw new Error(`${label}.autoComplete is only supported on spawn triggers`);
+  }
   const prompt = asOptionalString(sendRaw["prompt"], `${label}.prompt`);
   return {
     interrupt: asOptionalBoolean(sendRaw["interrupt"], `${label}.interrupt`) ?? false,
@@ -654,6 +710,15 @@ function parseTrigger(
   const agent = asOptionalAgent(spawnRaw["agent"], `${label}.spawn.agent`);
   const branch = asOptionalString(spawnRaw["branch"], `${label}.spawn.branch`);
   const overrides = parseSpawnOverrides(spawnRaw["overrides"], `${label}.spawn.overrides`);
+  if (spawnRaw["autoClose"] !== undefined) {
+    throw new Error(`${label}.spawn.autoClose is not supported; use autoComplete: true`);
+  }
+  const autoComplete = asOptionalBoolean(spawnRaw["autoComplete"], `${label}.spawn.autoComplete`);
+  if (autoComplete !== undefined && event !== GITHUB_WORK_ITEM_NEW_EVENT) {
+    throw new Error(
+      `${label}.spawn.autoComplete is only supported for ${GITHUB_WORK_ITEM_NEW_EVENT}`,
+    );
+  }
 
   return {
     source,
@@ -664,6 +729,7 @@ function parseTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(autoComplete !== undefined ? { autoComplete } : {}),
     },
   };
 }
@@ -714,7 +780,7 @@ function parseProject(configDir: string, projectId: string, value: unknown): Pro
 
   const workItemSubs = new Map<string, number>();
   for (const trigger of Object.values(triggers)) {
-    if (trigger.event !== "github:work_item.new") continue;
+    if (trigger.event !== GITHUB_WORK_ITEM_NEW_EVENT) continue;
     workItemSubs.set(trigger.source, (workItemSubs.get(trigger.source) ?? 0) + 1);
   }
   for (const [src, count] of workItemSubs) {

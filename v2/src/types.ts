@@ -1,9 +1,16 @@
-export type AgentName = "claude" | "codex";
+export type AgentName = "claude" | "codex" | "cursor";
 export const SPUR_DAEMON_API_VERSION = 2;
 
-export type SessionStatus = "spawning" | "running" | "paused" | "errored" | "completed" | "killed";
+export type SessionStatus =
+  | "spawning"
+  | "running"
+  | "stopped"
+  | "paused"
+  | "errored"
+  | "completed"
+  | "killed";
 export type SessionState = "working" | "waiting" | "needs_input" | "stopped" | "error" | "killed";
-export type StateSource = "jsonl" | "hook" | "status";
+export type StateSource = "jsonl" | "hook" | "pane" | "status";
 
 export interface SessionStateTransition {
   state: SessionState;
@@ -26,6 +33,7 @@ export interface SessionPrBinding {
 }
 
 export type SessionArtifactKind = "image" | "video" | "download";
+export type SessionArtifactOrigin = "intentional" | "automatic";
 
 export interface SessionArtifact {
   id: string;
@@ -33,6 +41,8 @@ export interface SessionArtifact {
   size: number;
   mimeType: string;
   kind: SessionArtifactKind;
+  origin: SessionArtifactOrigin;
+  addedByUser?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -43,16 +53,17 @@ export interface SessionSlots {
   links: SessionLink[];
 }
 
-export type SourceType = "cron" | "github" | "service";
+export type ReviewProviderId = "github" | "gitlab";
+export type SourceType = "cron" | ReviewProviderId | "service";
 
-export type GitHubReviewDecision = "approved" | "changes_requested" | "pending" | "none";
-export const GITHUB_SIGNAL_KINDS = [
+export type ReviewDecision = "approved" | "changes_requested" | "pending" | "none";
+export const REVIEW_SIGNAL_KINDS = [
   "changes_requested",
   "ci_failed",
   "comment",
   "merge_conflict",
 ] as const;
-export type GitHubSignalKind = (typeof GITHUB_SIGNAL_KINDS)[number];
+export type ReviewSignalKind = (typeof REVIEW_SIGNAL_KINDS)[number];
 
 export const GITHUB_WORK_ITEM_NEW_EVENT = "github:work_item.new" as const;
 
@@ -64,6 +75,11 @@ export interface GitHubWorkItemEventData {
   repo: string;
 }
 
+export interface WorkItemLifecycleRecord extends GitHubWorkItemEventData {
+  sessionId: string;
+  createdAt: string;
+}
+
 interface BaseSourceConfig {
   runOnStart: boolean;
 }
@@ -73,11 +89,15 @@ export interface CronSourceConfig extends BaseSourceConfig {
   schedule: string;
 }
 
-export interface GitHubSourceConfig extends BaseSourceConfig {
-  type: "github";
+interface ReviewSourceConfigBase<TType extends ReviewProviderId> extends BaseSourceConfig {
+  type: TType;
   intervalMs: number;
   query?: string;
 }
+
+export type GitHubSourceConfig = ReviewSourceConfigBase<"github">;
+export type GitLabSourceConfig = ReviewSourceConfigBase<"gitlab">;
+export type ReviewSourceConfig = GitHubSourceConfig | GitLabSourceConfig;
 
 export interface ServiceRuleConfig {
   match: string;
@@ -93,7 +113,7 @@ export interface ServiceSourceConfig extends BaseSourceConfig {
   rules: Record<string, ServiceRuleConfig>;
 }
 
-export type SourceConfig = CronSourceConfig | GitHubSourceConfig | ServiceSourceConfig;
+export type SourceConfig = CronSourceConfig | ReviewSourceConfig | ServiceSourceConfig;
 
 export interface SpawnOverrides {
   worktree?: boolean;
@@ -140,6 +160,7 @@ export interface TriggerSpawnConfig {
   agent?: AgentName;
   branch?: string;
   overrides?: SpawnOverrides;
+  autoComplete?: boolean;
 }
 
 export interface TriggerSendConfig {
@@ -161,18 +182,41 @@ export interface SendTriggerConfig {
 
 export type TriggerConfig = SpawnTriggerConfig | SendTriggerConfig;
 
-export interface GitHubSignal {
+export interface ReviewSignal {
   key: string;
-  kind: GitHubSignalKind;
+  kind: ReviewSignalKind;
   text: string;
 }
 
-export interface GitHubEventData {
+export interface ReviewEventData {
   sessionId: string;
   prNumber: number;
   prTitle: string;
-  signals: GitHubSignal[];
+  signals: ReviewSignal[];
 }
+
+export interface ReviewRequestSummary {
+  number: number;
+  title: string;
+  url: string;
+  reviewDecision: ReviewDecision;
+  repo: string;
+  mergeable: string;
+  mergeStateStatus: string;
+}
+
+export interface ReviewCheck {
+  name: string;
+  state: string;
+  conclusion?: string | null;
+}
+
+export type GitHubReviewDecision = ReviewDecision;
+export type GitHubSignalKind = ReviewSignalKind;
+export type GitHubSignal = ReviewSignal;
+export type GitHubEventData = ReviewEventData;
+export type GitHubPrSummary = ReviewRequestSummary;
+export type GitHubCheck = ReviewCheck;
 
 export interface ServiceProblemEventData {
   sessionId: string;
@@ -251,6 +295,7 @@ export interface SessionRecord {
   tmuxSession: string;
   launchCommand: string;
   status: SessionStatus;
+  stopReason?: "manual_pause";
   createdAt: string;
   updatedAt: string;
   retainInList?: boolean;
@@ -287,6 +332,17 @@ export interface SessionView extends SessionRecord {
   sidecars: { name: string; alive: boolean }[];
   workspaceAccess?: SessionWorkspaceAccess;
 }
+
+export interface DashboardSessionView extends SessionRecord {
+  runtimeAlive: boolean;
+  workspaceExists: boolean;
+  state: SessionState;
+  lastActivityAt: string;
+  slots?: SessionSlots;
+  hasServiceIssues?: boolean;
+}
+
+export type SessionListView = SessionView | DashboardSessionView;
 
 export interface SessionWorkspaceAccessItem {
   label: string;
@@ -361,11 +417,13 @@ export interface RespawnSessionRequest {
   attachments?: SendMessageAttachment[];
   startupAttachmentIds?: string[];
   terminateSessionId?: string;
+  agent?: AgentName;
 }
 
 export interface UpdateSessionSlotsRequest {
   title?: string;
   clearTitle?: boolean;
+  setTitleIfAbsent?: boolean;
   links?: SessionLink[];
   unlinkLabels?: string[];
 }
@@ -373,6 +431,24 @@ export interface UpdateSessionSlotsRequest {
 export interface ProjectListEntry {
   id: string;
   name: string;
+}
+
+export type AgentSuggestionKind = "command" | "skill" | "agent";
+
+export interface AgentSuggestionEntry {
+  id: string;
+  label: string;
+  insertText: string;
+  detail: string;
+  source: "built-in" | "project" | "user" | "plugin" | "session";
+  kind: AgentSuggestionKind;
+}
+
+export interface AgentSuggestionsResponse {
+  agent: AgentName;
+  commands: AgentSuggestionEntry[];
+  skills: AgentSuggestionEntry[];
+  agents: AgentSuggestionEntry[];
 }
 
 export interface ConnectProjectConfigRequest {

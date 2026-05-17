@@ -22,24 +22,44 @@ vi.mock("node:fs/promises", () => ({
   statfs: vi.fn(),
 }));
 
-// Prevent GitHub status routes from shelling out to `gh auth token`
-vi.mock("node:child_process", () => ({ execFileSync: vi.fn(() => "") }));
+// Prevent GitHub/GitLab status routes from shelling out to auth CLIs.
+vi.mock("node:child_process", () => ({
+  execFileSync: vi.fn(() => ""),
+  execFile: vi.fn(
+    (
+      _cmd: string,
+      _args: string[],
+      _opts:
+        | { timeout?: number; maxBuffer?: number }
+        | ((error: Error | null, stdout: string, stderr: string) => void),
+      cb?: (error: Error | null, stdout: string, stderr: string) => void,
+    ) => {
+      const callback = typeof _opts === "function" ? _opts : cb;
+      callback?.(null, "", "");
+    },
+  ),
+}));
 
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
 import { resetGitHubApiStateForTests } from "@/lib/github-api";
 import { resetGitHubStatusForTests } from "@/lib/github-status";
+import { resetGitLabApiStateForTests } from "@/lib/gitlab-api";
+import { resetGitLabStatusForTests } from "@/lib/gitlab-status";
 import { resetResourceMonitoringForTests } from "@/lib/resource-monitoring";
 import { GET as getGitHubStatus } from "@/app/api/github-status/route";
+import { GET as getGitLabStatus } from "@/app/api/gitlab-status/route";
 import { GET as listSessions } from "@/app/api/sessions/route";
 import { GET as getSession } from "@/app/api/sessions/[id]/route";
+import { GET as getProjectSlashCommands } from "@/app/api/projects/[id]/slash-commands/route";
 import { POST as spawnSession } from "@/app/api/spawn/route";
 import { GET as runtimeTerminalConfig } from "@/app/api/runtime/terminal/route";
 import { GET as runtimeVoiceStatus } from "@/app/api/runtime/voice/route";
 import { GET as runtimeResources } from "@/app/api/runtime/resources/route";
 import { POST as transcribeVoice } from "@/app/api/runtime/voice/transcribe/route";
 import { POST as sendMessage } from "@/app/api/sessions/[id]/send/route";
+import { GET as getSessionSlashCommands } from "@/app/api/sessions/[id]/slash-commands/route";
 import { POST as pauseSession } from "@/app/api/sessions/[id]/pause/route";
 import { POST as completeSession } from "@/app/api/sessions/[id]/complete/route";
 import { POST as killSession } from "@/app/api/sessions/[id]/kill/route";
@@ -50,6 +70,7 @@ import { POST as stopSidecar } from "@/app/api/sessions/[id]/sidecars/[name]/sto
 import { GET as getSessionLogs } from "@/app/api/sessions/[id]/logs/route";
 import { GET as getSessionArtifact } from "@/app/api/sessions/[id]/artifacts/[artifactId]/route";
 import { GET as getPrStatus } from "@/app/api/pr-status/route";
+import { POST as mergePr } from "@/app/api/pr-status/merge/route";
 import { POST as runPreflight } from "@/app/api/preflight/route";
 
 const mockedSpurRequestJson = vi.mocked(spurRequestJson);
@@ -113,6 +134,8 @@ describe("Spur web API routes", () => {
     mockedStatfs.mockReset();
     resetGitHubApiStateForTests();
     resetGitHubStatusForTests();
+    resetGitLabApiStateForTests();
+    resetGitLabStatusForTests();
     resetResourceMonitoringForTests();
     if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
     delete process.env["DIRECT_TERMINAL_PORT"];
@@ -145,35 +168,11 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
-    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
-  });
-
-  it("GET /api/sessions filters by project", async () => {
-    mockedSpurRequestJson
-      .mockResolvedValueOnce([
-        sessionFixture(),
-        sessionFixture({
-          id: "web-b2",
-          project: "web",
-          tmuxSession: "web-b2",
-          worktreePath: "/tmp/web-b2",
-        }),
-      ])
-      .mockResolvedValueOnce([
-        { id: "api", name: "API" },
-        { id: "web", name: "Web" },
-      ]);
-
-    const response = await listSessions(
-      new NextRequest("http://localhost:3000/api/sessions?project=api"),
+    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
+      1,
+      "/sessions?includeCompleted=1&view=dashboard",
     );
-    const payload = (await response.json()) as { sessions: Array<{ id: string; project: string }> };
-
-    expect(response.status).toBe(200);
-    expect(payload.sessions).toHaveLength(1);
-    expect(payload.sessions[0]).toMatchObject({ id: "api-a1", project: "api" });
-    expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(1, "/sessions?includeCompleted=1");
+    expect(payload.sessions[1]).toMatchObject({ id: "done-1", status: "completed" });
   });
 
   it("GET /api/sessions returns only configured spawn project options", async () => {
@@ -210,7 +209,12 @@ describe("Spur web API routes", () => {
 
   it("GET /api/sessions/:id returns session by id", async () => {
     const session = sessionFixture({ id: "sid-1" });
-    mockedSpurRequestJson.mockResolvedValue(session);
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(session), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await getSession(new Request("http://localhost:3000/api/sessions/sid-1"), {
       params: Promise.resolve({ id: "sid-1" }),
@@ -219,29 +223,91 @@ describe("Spur web API routes", () => {
 
     expect(response.status).toBe(200);
     expect(payload).toMatchObject({ id: "sid-1" });
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/sid-1");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/sid-1");
   });
 
   it("GET /api/sessions/:id URL-encodes the session id", async () => {
-    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "my/session 1" }));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify(sessionFixture({ id: "my/session 1" })), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     await getSession(new Request("http://localhost:3000/api/sessions/my%2Fsession%201"), {
       params: Promise.resolve({ id: "my/session 1" }),
     });
 
-    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
+    expect(mockedSpurRequest).toHaveBeenCalledWith("/sessions/my%2Fsession%201");
   });
 
   it("GET /api/sessions/:id returns 502 when daemon fails", async () => {
-    mockedSpurRequestJson.mockRejectedValue(new Error("Session not found"));
+    mockedSpurRequest.mockResolvedValue(
+      new Response(JSON.stringify({ error: "Session not found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
 
     const response = await getSession(new Request("http://localhost:3000/api/sessions/bad-id"), {
       params: Promise.resolve({ id: "bad-id" }),
     });
     const payload = (await response.json()) as { error: string };
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(404);
     expect(payload.error).toBe("Session not found");
+  });
+
+  it("GET /api/projects/:id/slash-commands proxies the daemon route", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      agent: "claude",
+      commands: [
+        {
+          id: "c1",
+          label: "/compact",
+          insertText: "/compact",
+          detail: "Compact",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
+      skills: [],
+      agents: [],
+    });
+
+    const response = await getProjectSlashCommands(
+      new NextRequest("http://localhost:3000/api/projects/api/slash-commands?agent=claude"),
+      { params: Promise.resolve({ id: "api" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/projects/api/slash-commands?agent=claude");
+  });
+
+  it("GET /api/sessions/:id/slash-commands proxies the daemon route", async () => {
+    mockedSpurRequestJson.mockResolvedValue({
+      agent: "codex",
+      commands: [
+        {
+          id: "c1",
+          label: "/permissions",
+          insertText: "/permissions",
+          detail: "Permissions",
+          source: "built-in",
+          kind: "command",
+        },
+      ],
+      skills: [],
+      agents: [],
+    });
+
+    const response = await getSessionSlashCommands(
+      new NextRequest("http://localhost:3000/api/sessions/api-a1/slash-commands"),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockedSpurRequestJson).toHaveBeenCalledWith("/sessions/api-a1/slash-commands");
   });
 
   it("GET /api/sessions/:id/artifacts/:artifactId proxies artifact content from the daemon", async () => {
@@ -333,7 +399,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           projectId: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           branch: "feat/new",
           planMode: true,
           steps: ["step 1", "  ", "step 2"],
@@ -349,7 +415,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           project: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           branch: "feat/new",
           planMode: true,
           steps: ["step 1", "step 2"],
@@ -599,6 +665,7 @@ describe("Spur web API routes", () => {
           prompt: "Retry with screenshot",
           startupAttachmentIds: ["1715000000000-source.png"],
           attachments: [{ name: "shot.png", data: "cG5n" }],
+          agent: "codex",
         }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
@@ -616,8 +683,30 @@ describe("Spur web API routes", () => {
         prompt: "Retry with screenshot",
         startupAttachmentIds: ["1715000000000-source.png"],
         attachments: [{ name: "shot.png", data: "cG5n" }],
+        agent: "codex",
       },
     );
+  });
+
+  it("POST /api/sessions/:id/respawn drops invalid agent values", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry",
+          agent: "not-an-agent",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect("agent" in body).toBe(false);
+    expect(body.prompt).toBe("Retry");
   });
 
   it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {
@@ -812,7 +901,7 @@ describe("Spur web API routes", () => {
         body: JSON.stringify({
           projectId: "api",
           prompt: "Do work",
-          agent: "codex",
+          agent: "cursor",
           overrides: { worktree: true },
         }),
       }),
@@ -821,7 +910,7 @@ describe("Spur web API routes", () => {
     const body = JSON.parse(
       (mockedSpurRequestJson.mock.calls[0][1] as { body: string }).body,
     ) as Record<string, unknown>;
-    expect(body).toMatchObject({ agent: "codex", overrides: { worktree: true } });
+    expect(body).toMatchObject({ agent: "cursor", overrides: { worktree: true } });
   });
 
   it("POST /api/preflight returns 502 on daemon error", async () => {
@@ -1177,6 +1266,101 @@ describe("Spur web API routes", () => {
     });
   });
 
+  describe("GET /api/gitlab-status", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+      resetGitLabStatusForTests();
+      vi.stubGlobal("fetch", fetchMock);
+      fetchMock.mockReset();
+      process.env["GITLAB_TOKEN"] = "test-token";
+      delete process.env["GLAB_TOKEN"];
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+    });
+
+    it("returns a healthy payload with the request timestamp", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; requestedAt: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://gitlab.com/api/v4/user",
+        expect.objectContaining({ method: "GET", cache: "no-store" }),
+      );
+    });
+
+    it("returns an error payload when GitLab responds with an error", async () => {
+      fetchMock.mockResolvedValue(ghErr(503));
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as {
+        ok: boolean;
+        error: string;
+        requestedAt: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitLab API 503");
+      expect(payload.requestedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("returns an auth error payload when no GitLab token is available", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitLab auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns a network error payload when the request throws", async () => {
+      fetchMock.mockRejectedValue(new Error("ECONNREFUSED"));
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("ECONNREFUSED");
+    });
+
+    it("returns cached results for repeated requests", async () => {
+      fetchMock.mockResolvedValue(ghOk());
+
+      await getGitLabStatus(new NextRequest("http://localhost:3000/api/gitlab-status"));
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(payload.ok).toBe(true);
+    });
+  });
+
   describe("GET /api/pr-status", () => {
     const fetchMock = vi.fn();
 
@@ -1207,6 +1391,9 @@ describe("Spur web API routes", () => {
               state: "OPEN",
               isDraft: false,
               merged: false,
+              mergeable: null,
+              mergeStateStatus: null,
+              reviewDecision: null,
               reviewThreads: { nodes: [] },
               commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
               ...overrides,
@@ -1222,7 +1409,7 @@ describe("Spur web API routes", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
-    it("returns 400 for a non-GitHub URL", async () => {
+    it("returns 400 for a non-review URL", async () => {
       const response = await getPrStatus(
         new NextRequest(
           "http://localhost:3000/api/pr-status?url=https://gitlab.com/foo/bar/issues/1",
@@ -1230,6 +1417,47 @@ describe("Spur web API routes", () => {
       );
       expect(response.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("returns GitLab MR status when given a GitLab merge request URL", async () => {
+      process.env["GITLAB_TOKEN"] = "gitlab-token";
+      fetchMock
+        .mockResolvedValueOnce(
+          ghOk({
+            state: "opened",
+            draft: false,
+            merged_at: null,
+          }),
+        )
+        .mockResolvedValueOnce(
+          ghOk([
+            { notes: [{ resolvable: true, resolved: false }] },
+            { notes: [{ resolvable: true, resolved: true }] },
+          ]),
+        )
+        .mockResolvedValueOnce(ghOk([{ status: "running" }]));
+
+      const response = await getPrStatus(
+        new NextRequest(
+          "http://localhost:3000/api/pr-status?url=https://gitlab.com/acme/api/-/merge_requests/42",
+        ),
+      );
+      const payload = (await response.json()) as {
+        state: string;
+        ciStatus: string | null;
+        totalThreads: number;
+        unresolvedThreads: number;
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload).toMatchObject({
+        state: "open",
+        ciStatus: "pending",
+        totalThreads: 2,
+        unresolvedThreads: 1,
+        stale: false,
+      });
+      expect(typeof payload.fetchedAt).toBe("number");
     });
 
     it("returns 400 for a GitHub URL without a PR number", async () => {
@@ -1250,6 +1478,7 @@ describe("Spur web API routes", () => {
       expect(response.status).toBe(200);
       expect(payload.state).toBe("open");
       expect(payload.ciStatus).toBeNull();
+      expect(payload.canMerge).toBe(false);
     });
 
     it("returns draft state for a draft PR", async () => {
@@ -1285,6 +1514,41 @@ describe("Spur web API routes", () => {
       expect(payload.state).toBe("closed");
     });
 
+    it("returns approved reviewDecision from GitHub without inferring it", async () => {
+      fetchMock.mockResolvedValue(ghOk(makePrGql({ reviewDecision: "APPROVED" })));
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { reviewDecision: string | null };
+
+      expect(payload.reviewDecision).toBe("approved");
+    });
+
+    it("does not infer approval from resolved review threads", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            reviewDecision: null,
+            reviewThreads: {
+              nodes: [{ isResolved: true }, { isResolved: true }],
+            },
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as {
+        reviewDecision: string | null;
+        unresolvedThreads: number;
+      };
+
+      expect(payload.reviewDecision).toBeNull();
+      expect(payload.unresolvedThreads).toBe(0);
+    });
+
     it("returns CI success status", async () => {
       fetchMock.mockResolvedValue(
         ghOk(
@@ -1300,6 +1564,42 @@ describe("Spur web API routes", () => {
       const payload = (await response.json()) as { ciStatus: string };
 
       expect(payload.ciStatus).toBe("success");
+    });
+
+    it("returns canMerge when GitHub reports a clean mergeable PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "MERGEABLE",
+            mergeStateStatus: "CLEAN",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { canMerge: boolean };
+
+      expect(payload.canMerge).toBe(true);
+    });
+
+    it("returns canMerge false for a dirty PR", async () => {
+      fetchMock.mockResolvedValue(
+        ghOk(
+          makePrGql({
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+          }),
+        ),
+      );
+
+      const response = await getPrStatus(
+        new NextRequest(`http://localhost:3000/api/pr-status?url=${nextPrUrl()}`),
+      );
+      const payload = (await response.json()) as { canMerge: boolean };
+
+      expect(payload.canMerge).toBe(false);
     });
 
     it("returns CI failure for FAILURE rollup", async () => {
@@ -1620,6 +1920,71 @@ describe("Spur web API routes", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.state).toBeNull();
       expect(payload.error).toContain("GitHub rate limit");
+    });
+  });
+
+  describe("POST /api/pr-status/merge", () => {
+    beforeEach(() => {
+      vi.stubGlobal("fetch", vi.fn());
+      delete process.env["GITHUB_TOKEN"];
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("returns 400 when url is missing", async () => {
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(response.status).toBe(400);
+    });
+
+    it("merges a PR with squash and returns ok", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        ghOk({
+          merged: true,
+          sha: "abc123",
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({ url: "https://github.com/owner/repo/pull/42" }),
+        }),
+      );
+      const payload = (await response.json()) as { ok: boolean; sha: string };
+
+      expect(response.status).toBe(200);
+      expect(payload.ok).toBe(true);
+      expect(payload.sha).toBe("abc123");
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.github.com/repos/owner/repo/pulls/42/merge",
+        expect.objectContaining({
+          method: "PUT",
+          body: JSON.stringify({ merge_method: "squash" }),
+        }),
+      );
+    });
+
+    it("surfaces GitHub merge errors", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(ghErr(405, { message: "Not mergeable" })));
+
+      const response = await mergePr(
+        new NextRequest("http://localhost:3000/api/pr-status/merge", {
+          method: "POST",
+          body: JSON.stringify({ url: "https://github.com/owner/repo/pull/42" }),
+        }),
+      );
+      const payload = (await response.json()) as { error: string };
+
+      expect(response.status).toBe(405);
+      expect(payload.error).toBe("Not mergeable");
     });
   });
 });

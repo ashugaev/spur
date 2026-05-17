@@ -3,20 +3,26 @@ import type { SessionRecord } from "../../src/types.js";
 
 const ghMock = vi.fn();
 const listSessionsMock = vi.fn();
-const readGitHubSourceSnapshotsMock = vi.fn();
-const writeGitHubSourceSnapshotMock = vi.fn();
-const deleteGitHubSourceSnapshotMock = vi.fn();
-const writeSessionMock = vi.fn();
+const readReviewSourceSnapshotsMock = vi.fn();
+const writeReviewSourceSnapshotMock = vi.fn();
+const deleteReviewSourceSnapshotMock = vi.fn();
+const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
+const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
+const readWorkItemRegistryMock = vi.fn();
+const recordWorkItemMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
 }));
 vi.mock("../../src/metadata.js", () => ({
-  deleteGitHubSourceSnapshot: deleteGitHubSourceSnapshotMock,
+  clearGitHubMergeConflictRestoreReplay: clearGitHubMergeConflictRestoreReplayMock,
+  deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
+  hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
-  readGitHubSourceSnapshots: readGitHubSourceSnapshotsMock,
-  writeGitHubSourceSnapshot: writeGitHubSourceSnapshotMock,
-  writeSession: writeSessionMock,
+  readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
+  readWorkItemRegistry: readWorkItemRegistryMock,
+  recordWorkItem: recordWorkItemMock,
+  writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
 vi.mock("../../src/workspace.js", () => ({
   readCurrentBranch: vi.fn(),
@@ -53,6 +59,8 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
+    readWorkItemRegistryMock.mockReturnValue(new Set());
   });
 
   afterEach(() => {
@@ -70,7 +78,7 @@ describe("github source", () => {
         },
       ],
     ]);
-    readGitHubSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existingSnapshot]]));
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", existingSnapshot]]));
     listSessionsMock.mockReturnValue([makeSession()]);
     ghMock.mockRejectedValueOnce(new Error("gh offline"));
     const logger = { info: vi.fn(), warn: vi.fn() };
@@ -85,11 +93,107 @@ describe("github source", () => {
       logger,
     });
 
-    expect(deleteGitHubSourceSnapshotMock).not.toHaveBeenCalled();
-    expect(writeGitHubSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(deleteReviewSourceSnapshotMock).not.toHaveBeenCalled();
+    expect(writeReviewSourceSnapshotMock).not.toHaveBeenCalled();
     expect(logger.warn).toHaveBeenCalledWith(
       expect.stringContaining("failed to poll api-a1b2: gh offline"),
     );
+
+    handle.stop();
+  });
+
+  it("does not emit ci_failed when the GitHub rollup is successful with skipped rows", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map([["api-a1b2", new Map()]]));
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          title: "Fix CI alert",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+          statusCheckRollup: [
+            { name: "workflow", conclusion: "SUCCESS" },
+            { name: "skipped job", conclusion: "SKIPPED" },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          { name: "old failed row", state: "FAILURE" },
+          { name: "skipped job", state: "SKIPPED" },
+          { name: "neutral job", state: "NEUTRAL" },
+        ]),
+      )
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(emit).not.toHaveBeenCalledWith("github:ci_failed", expect.anything());
+    const snapshot = writeReviewSourceSnapshotMock.mock.calls[0]?.[5] as unknown;
+    expect(snapshot).toBeInstanceOf(Map);
+    if (snapshot instanceof Map) {
+      expect(snapshot.has("ci_failed")).toBe(false);
+    }
+
+    handle.stop();
+  });
+
+  it("emits github:work_item.new for unseen query results", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        {
+          number: 7,
+          title: "Work item",
+          url: "https://github.com/acme/api/pull/7",
+          repository: { nameWithOwner: "acme/api" },
+        },
+      ]),
+    );
+    const emit = vi.fn();
+
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+        query: "is:pr is:open label:spur",
+      },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordWorkItemMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      "api",
+      "pr-watch",
+      "acme/api#7",
+    );
+    expect(emit).toHaveBeenCalledWith("github:work_item.new", {
+      externalId: "acme/api#7",
+      url: "https://github.com/acme/api/pull/7",
+      number: 7,
+      title: "Work item",
+      repo: "acme/api",
+    });
 
     handle.stop();
   });

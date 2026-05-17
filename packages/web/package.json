@@ -1,5 +1,5 @@
 {
-  "name": "@composio/spur-web",
+  "name": "spur-web",
   "version": "0.1.0",
   "description": "UI dashboard for Spur",
   "private": true,
