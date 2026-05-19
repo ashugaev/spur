@@ -402,7 +402,7 @@ describe("SessionService", () => {
           agent,
           launchCommand:
             agent === "codex"
-              ? "codex --dangerously-bypass-approvals-and-sandbox"
+              ? "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust"
               : options?.planMode
                 ? "claude --dangerously-skip-permissions --permission-mode plan"
                 : "claude --dangerously-skip-permissions",
@@ -1115,9 +1115,13 @@ describe("SessionService", () => {
     );
     expect(createTmuxSessionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        launchCommand:
+          "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
         agent: "codex",
       }),
+    );
+    expect(createTmuxSessionMock.mock.calls[0]?.[0]?.launchCommand).toContain(
+      "--dangerously-bypass-hook-trust",
     );
     expect(result.planMode).toBe(true);
   });
@@ -1514,7 +1518,7 @@ describe("SessionService", () => {
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: "codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -1560,7 +1564,7 @@ describe("SessionService", () => {
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: "codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -2089,7 +2093,7 @@ describe("SessionService", () => {
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: "codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -3730,7 +3734,7 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand:
-        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "stopped",
       stopReason: "manual_pause",
       createdAt: "2026-03-18T10:00:00.000Z",
@@ -3738,7 +3742,7 @@ describe("SessionService", () => {
     });
     buildAgentResumePlanMock.mockReturnValue({
       launchCommand:
-        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+        "CODEX_HOME=/tmp/spur-data/session-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
       readyMarkers: ["›"],
     });
     setupAgentHooksMock.mockResolvedValue({
@@ -5113,7 +5117,7 @@ describe("SessionService", () => {
       worktree: true,
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
-      launchCommand: "codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      launchCommand: "codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -5145,7 +5149,8 @@ describe("SessionService", () => {
     expect(createTmuxSessionMock).toHaveBeenCalledWith({
       sessionName: "api-1",
       cwd: "/tmp/spur-worktrees/api/api-1",
-      launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+      launchCommand:
+        "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
       agent: "codex",
       env: {
         SPUR_SESSION: "api-1",
@@ -5181,7 +5186,7 @@ describe("SessionService", () => {
   it("does not wait for codex replay readiness when the project has no github replay source", async () => {
     buildAgentRestorePlanMock.mockResolvedValue({
       launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
       initialMessage: "restore prompt",
       readyMarkers: ["›"],
     });
@@ -5195,7 +5200,7 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
@@ -5235,7 +5240,7 @@ describe("SessionService", () => {
 
     buildAgentRestorePlanMock.mockResolvedValue({
       launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable hooks --dangerously-bypass-approvals-and-sandbox thread-123",
       initialMessage: "restore prompt",
       readyMarkers: ["›"],
     });
@@ -5249,7 +5254,7 @@ describe("SessionService", () => {
       worktreePath: "/tmp/spur-worktrees/api/api-1",
       tmuxSession: "api-1",
       launchCommand:
-        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable hooks --dangerously-bypass-approvals-and-sandbox",
       status: "running",
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",

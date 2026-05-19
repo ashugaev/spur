@@ -384,7 +384,7 @@ export function buildCodexPlan(
   const command = withCodexHome(
     appendCodexImages(
       appendCodexArgs(
-        `${codexCommand()} --enable codex_hooks --dangerously-bypass-approvals-and-sandbox`,
+        `${codexCommand()} --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust`,
         options?.codexArgs,
       ),
       options?.startupImagePaths,
@@ -413,7 +413,7 @@ export function buildCodexResumePlan(
   return {
     launchCommand: withCodexHome(
       appendCodexArgs(
-        `${shellEscape(binary)} resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox ${shellEscape(threadId)}`,
+        `${shellEscape(binary)} resume --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust ${shellEscape(threadId)}`,
         options?.codexArgs,
       ),
       options?.codexHomePath,

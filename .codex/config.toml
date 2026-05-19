@@ -1,6 +1,6 @@
 [features]
 multi_agent = true
-codex_hooks = true
+hooks = true
 
 [agents]
 max_threads = 8
