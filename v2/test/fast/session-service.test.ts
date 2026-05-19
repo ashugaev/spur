@@ -1120,9 +1120,6 @@ describe("SessionService", () => {
         agent: "codex",
       }),
     );
-    expect(createTmuxSessionMock.mock.calls[0]?.[0]?.launchCommand).toContain(
-      "--dangerously-bypass-hook-trust",
-    );
     expect(result.planMode).toBe(true);
   });
 

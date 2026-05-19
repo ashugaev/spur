@@ -97,7 +97,6 @@ describe("buildCodexPlan", () => {
     expect(plan.launchCommand).toBe(
       "codex --enable hooks --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust",
     );
-    expect(plan.launchCommand).toContain("--dangerously-bypass-hook-trust");
     expect(plan.initialMessage).toBe("do something");
     expect(plan.readyMarkers).toEqual(["OpenAI Codex", "›"]);
   });
