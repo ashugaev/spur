@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { clearInterval, setInterval as startInterval } from "node:timers";
+import { logSpurEvent } from "../event-log.js";
 import { gh } from "../gh.js";
 import {
   GITHUB_WORK_ITEM_NEW_EVENT,
@@ -219,6 +220,14 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
           deps.logger.warn?.(
             `[source:${deps.projectId}/${deps.sourceId}] failed to poll ${session.id}: ${message}`,
           );
+          logSpurEvent(deps.dataDir, {
+            event: "source.poll.error",
+            level: "error",
+            projectId: deps.projectId,
+            sourceId: deps.sourceId,
+            sessionId: session.id,
+            message: `Signal poll failed for ${deps.projectId}/${deps.sourceId}/${session.id}: ${message}`,
+          });
         }
       }
 
@@ -263,6 +272,13 @@ async function startGitHubSource(deps: SourceStartDeps<GitHubSourceConfig>): Pro
       deps.logger.warn?.(
         `[source:${deps.projectId}/${deps.sourceId}] work-item poll failed: ${message}`,
       );
+      logSpurEvent(deps.dataDir, {
+        event: "source.work_item_poll.error",
+        level: "error",
+        projectId: deps.projectId,
+        sourceId: deps.sourceId,
+        message: `Work-item poll failed for ${deps.projectId}/${deps.sourceId}: ${message}`,
+      });
     } finally {
       pollingWorkItems = false;
     }

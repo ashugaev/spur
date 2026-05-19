@@ -58,7 +58,7 @@ projects:
         type: github
         intervalMs: 600000
         runOnStart: false
-        query: "is:pr is:open repo:example-org/example-repo"
+        query: "is:pr is:open repo:ashugaev/ao"
     triggers:
       gh-changes-requested:
         source: gh
