@@ -1,7 +1,14 @@
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
+import {
+  buildSidecarLinkUrl,
+  createProjectConfigScaffold,
+  loadConfig,
+  loadProjectConfig,
+  resolveConfigPath,
+  writeProjectConfigScaffold,
+} from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
@@ -480,6 +487,7 @@ projects:
         event: github:work_item.new
         spawn:
           prompt: "Take this work item."
+          autoComplete: true
 `);
 
     const config = loadConfig(configPath);
@@ -494,8 +502,76 @@ projects:
       event: "github:work_item.new",
       spawn: {
         prompt: "Take this work item.",
+        autoComplete: true,
       },
     });
+  });
+
+  it("rejects autoComplete on non-work-item spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+    );
+  });
+
+  it("rejects autoComplete on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      reply:
+        source: pr-watch
+        event: github:comment
+        send:
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+    );
+  });
+
+  it("rejects legacy autoClose on spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoClose: complete
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+    );
   });
 
   it("rejects github:work_item.new triggers when the source has no query", async () => {
@@ -1008,6 +1084,94 @@ projects:
     );
   });
 
+  it("accepts {port} subdomain token in sidecar port url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("strips trailing slash from {port} subdomain url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("rejects {port} token combined with explicit port", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
+    );
+  });
+
+  it("rejects {port} token combined with path", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/app
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include a path",
+    );
+  });
+
   it("rejects both devServer and sidecars", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -1087,6 +1251,67 @@ projects:
 
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+    );
+  });
+
+  it("renders a minimal project config scaffold for the current repo", async () => {
+    const dir = await createTempDir("spur-fast-doctor-");
+    tempDirs.push(dir);
+
+    const scaffold = createProjectConfigScaffold(join(dir, "My Repo"), "release");
+
+    expect(scaffold.configPath).toBe(join(dir, "My Repo", "spur.yaml"));
+    expect(scaffold.projectId).toBe("my-repo");
+    expect(scaffold.sessionPrefix).toBe("my-repo");
+    expect(scaffold.content).toBe(
+      [
+        "projects:",
+        "  my-repo:",
+        "    path: .",
+        "    defaultBranch: release",
+        "    sessionPrefix: my-repo",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("writes a project config scaffold that parses as a normal local config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-write-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const scaffold = createProjectConfigScaffold(repoDir, "main");
+
+    writeProjectConfigScaffold(scaffold);
+
+    process.chdir(repoDir);
+    const config = loadProjectConfig();
+
+    expect(config.configPath).toBe(join(repoDir, "spur.yaml"));
+    expect(config.projects["repo"]).toMatchObject({
+      defaultBranch: "main",
+      path: repoDir,
+      sessionPrefix: "repo",
+    });
+  });
+});
+
+describe("buildSidecarLinkUrl", () => {
+  it("appends port with colon when template has no token", () => {
+    expect(buildSidecarLinkUrl("https://host.example.com", 3000)).toBe(
+      "https://host.example.com:3000",
+    );
+  });
+
+  it("substitutes {port} token in subdomain", () => {
+    expect(buildSidecarLinkUrl("https://{port}.local.intelas.com", 3045)).toBe(
+      "https://3045.local.intelas.com",
+    );
+  });
+
+  it("substitutes all {port} occurrences", () => {
+    expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
+      "https://7.example.com/p/7",
     );
   });
 });

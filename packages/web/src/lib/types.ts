@@ -122,9 +122,31 @@ export interface AgentSuggestionsResponse {
 export interface SpurSessionsResponse {
   sessions: SpurSessionView[];
   projects?: ProjectInfo[];
+  daemonAlive?: boolean;
 }
 
 export type AttentionLevel = "respond" | "working" | "pending" | "stopped" | "done";
+
+export const ATTENTION_ZONE_ORDER: AttentionLevel[] = [
+  "respond",
+  "working",
+  "pending",
+  "stopped",
+  "done",
+];
+
+export function worstAttentionLevel(levels: readonly AttentionLevel[]): AttentionLevel {
+  let bestRank = ATTENTION_ZONE_ORDER.length;
+  let result: AttentionLevel = "done";
+  for (const level of levels) {
+    const rank = ATTENTION_ZONE_ORDER.indexOf(level);
+    if (rank !== -1 && rank < bestRank) {
+      bestRank = rank;
+      result = level;
+    }
+  }
+  return result;
+}
 
 export interface DashboardSession {
   id: string;
@@ -297,4 +319,45 @@ export function getAttentionLevel(session: DashboardSession): AttentionLevel {
   }
 
   return "working";
+}
+
+export interface DeskCollapsedRow {
+  session: DashboardSession;
+  deskMemberCount: number;
+  lane: AttentionLevel;
+}
+
+export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCollapsedRow[] {
+  const byDesk = new Map<string, DashboardSession[]>();
+  for (const s of sessions) {
+    const group = byDesk.get(s.deskKey);
+    if (group) {
+      group.push(s);
+    } else {
+      byDesk.set(s.deskKey, [s]);
+    }
+  }
+
+  const rows: DeskCollapsedRow[] = [];
+  for (const [deskKey, members] of byDesk) {
+    const anchor =
+      members.find((m) => m.id === deskKey) ??
+      [...members].sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
+    if (!anchor) continue;
+    rows.push({
+      session: anchor,
+      deskMemberCount: members.length,
+      lane: worstAttentionLevel(members.map(getAttentionLevel)),
+    });
+  }
+
+  rows.sort((a, b) => {
+    const byDeskKey = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
+      sensitivity: "base",
+    });
+    if (byDeskKey !== 0) return byDeskKey;
+    return a.session.id.localeCompare(b.session.id);
+  });
+
+  return rows;
 }

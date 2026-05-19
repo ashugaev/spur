@@ -17,6 +17,7 @@ import type {
   ServiceSourceState,
   SessionPipelineState,
   SessionRecord,
+  WorkItemLifecycleRecord,
 } from "./types.js";
 import { normalizeSessionPrBinding, parseSessionPrBinding } from "./session-pr.js";
 
@@ -39,6 +40,10 @@ function reviewSnapshotDir(
 
 function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
+}
+
+function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
 
 function serviceInstanceDir(dataDir: string, sessionId: string): string {
@@ -178,6 +183,43 @@ function deleteSessionIndexEntry(dataDir: string, sessionId: string): void {
   }
   const { [sessionId]: _removed, ...nextIndex } = index;
   writeJsonFile(sessionIndexFilePath(dataDir), nextIndex);
+}
+
+function readWorkItemLifecycleFile(path: string): Map<string, WorkItemLifecycleRecord> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return new Map();
+    const records = (parsed as { records?: unknown }).records;
+    if (!Array.isArray(records)) return new Map();
+    const result = new Map<string, WorkItemLifecycleRecord>();
+    for (const record of records) {
+      if (!record || typeof record !== "object") continue;
+      const raw = record as Partial<Record<keyof WorkItemLifecycleRecord, unknown>>;
+      if (
+        typeof raw.externalId !== "string" ||
+        typeof raw.sessionId !== "string" ||
+        typeof raw.url !== "string" ||
+        typeof raw.number !== "number" ||
+        typeof raw.title !== "string" ||
+        typeof raw.repo !== "string" ||
+        typeof raw.createdAt !== "string"
+      ) {
+        continue;
+      }
+      result.set(raw.externalId, {
+        externalId: raw.externalId,
+        sessionId: raw.sessionId,
+        url: raw.url,
+        number: raw.number,
+        title: raw.title,
+        repo: raw.repo,
+        createdAt: raw.createdAt,
+      });
+    }
+    return result;
+  } catch {
+    return new Map();
+  }
 }
 
 function findSessionFilePath(dataDir: string, sessionId: string): string | null {
@@ -594,6 +636,45 @@ export function recordWorkItem(
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
+  });
+}
+
+export function readWorkItemLifecycles(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Map<string, WorkItemLifecycleRecord> {
+  const path = workItemLifecycleFilePath(dataDir, projectId, sourceId);
+  return existsSync(path) ? readWorkItemLifecycleFile(path) : new Map();
+}
+
+export function recordWorkItemLifecycle(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  record: WorkItemLifecycleRecord,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  records.set(record.externalId, record);
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()].sort((left, right) =>
+      left.externalId.localeCompare(right.externalId),
+    ),
+  });
+}
+
+export function deleteWorkItemLifecycle(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  externalId: string,
+): void {
+  const records = readWorkItemLifecycles(dataDir, projectId, sourceId);
+  if (!records.delete(externalId)) return;
+  writeJsonFile(workItemLifecycleFilePath(dataDir, projectId, sourceId), {
+    records: [...records.values()].sort((left, right) =>
+      left.externalId.localeCompare(right.externalId),
+    ),
   });
 }
 

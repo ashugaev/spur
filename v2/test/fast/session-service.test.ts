@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
 import type {
+  AgentName,
   ServiceInstanceRecord,
   SessionRecord,
   SessionStateTransition,
@@ -23,6 +24,7 @@ const agentQueuedSendPromptGraceMsMock = vi.fn();
 const agentSessionConfigMock = vi.fn();
 const agentStateStrategyMock = vi.fn();
 const agentWaitsForSubmitAckMock = vi.fn();
+const createAgentSubmitAckBindingMock = vi.fn();
 const parseAgentNameMock = vi.fn((agent: string) => agent);
 const setupAgentHooksMock = vi.fn();
 const deleteAgentHookStateMock = vi.fn();
@@ -125,6 +127,7 @@ vi.mock("../../src/agents/index.js", () => ({
   agentSessionConfig: agentSessionConfigMock,
   agentStateStrategy: agentStateStrategyMock,
   agentWaitsForSubmitAck: agentWaitsForSubmitAckMock,
+  createAgentSubmitAckBinding: createAgentSubmitAckBindingMock,
   parseAgentName: parseAgentNameMock,
   setupAgentHooks: setupAgentHooksMock,
 }));
@@ -355,10 +358,9 @@ function mockClaudeJsonlState(state: string) {
 }
 
 type SessionServiceInternals = {
-  waitForCodexRolloutAck(
-    sessionsDir: string,
+  waitForSubmitAck(
+    binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
     messageText: string,
-    baseline: Map<string, number>,
   ): Promise<{ found: boolean; lastScannedFile: string | null }>;
   sendAgentMessage(
     session: {
@@ -366,10 +368,12 @@ type SessionServiceInternals = {
       tmuxSession: string;
       agent: "claude" | "codex" | "cursor";
       launchCommand: string;
+      worktreePath: string;
     },
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void>;
+  enrichDashboard(session: SessionRecord): Promise<{ id: string }>;
 };
 
 function sessionServiceInternals(service: unknown): SessionServiceInternals {
@@ -463,7 +467,28 @@ describe("SessionService", () => {
       .mockImplementation((agent: string) =>
         agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
       );
-    agentWaitsForSubmitAckMock.mockReset().mockImplementation((agent: string) => agent === "codex");
+    agentWaitsForSubmitAckMock
+      .mockReset()
+      .mockImplementation((agent: string) => agent === "codex" || agent === "claude");
+    captureCodexRolloutBaselineMock.mockReset().mockResolvedValue(new Map());
+    scanCodexRolloutForMessageMock
+      .mockReset()
+      .mockResolvedValue({ found: true, lastScannedFile: null });
+    createAgentSubmitAckBindingMock
+      .mockReset()
+      .mockImplementation(async (agent: string, ctx: { codexSessionsDir: string }) => {
+        if (agent !== "codex") {
+          return null;
+        }
+        const baseline: Map<string, number> = await captureCodexRolloutBaselineMock(
+          ctx.codexSessionsDir,
+        );
+        return {
+          async scan(text: string) {
+            return scanCodexRolloutForMessageMock(ctx.codexSessionsDir, text, baseline);
+          },
+        };
+      });
     parseAgentNameMock.mockReset().mockImplementation((agent: string) => agent);
     setupAgentHooksMock.mockReset().mockResolvedValue({});
     deleteAgentHookStateMock.mockReset();
@@ -1066,7 +1091,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1111,7 +1136,7 @@ describe("SessionService", () => {
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1498,7 +1523,7 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: null,
     });
@@ -1510,6 +1535,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         agent: "codex",
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
       },
       "follow up",
       { interrupt: false },
@@ -1562,7 +1588,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
-      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValueOnce({ found: false, lastScannedFile: null })
       .mockResolvedValue({ found: true, lastScannedFile: "/some/file.jsonl" });
 
@@ -1572,6 +1598,7 @@ describe("SessionService", () => {
         tmuxSession: "api-1",
         agent: "codex",
         launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
       },
       "follow up",
     );
@@ -1585,7 +1612,7 @@ describe("SessionService", () => {
     const service = await createDisposedSessionService();
     captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
     const waitForAckMock = vi
-      .spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck")
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
       .mockResolvedValue({ found: false, lastScannedFile: "/some/file.jsonl" });
 
     await expect(
@@ -1595,10 +1622,11 @@ describe("SessionService", () => {
           tmuxSession: "api-1",
           agent: "codex",
           launchCommand: "codex --dangerously-bypass-approvals-and-sandbox",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
         },
         "follow up",
       ),
-    ).rejects.toThrow("Timed out waiting for Codex submit acknowledgment for api-1");
+    ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
     expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", {
       agent: "codex",
     });
@@ -1608,16 +1636,110 @@ describe("SessionService", () => {
     expect(logSpurEventMock).toHaveBeenCalledWith(
       "/tmp/spur-data",
       expect.objectContaining({
-        event: "session.codex.submit.timeout",
+        event: "session.submit.timeout",
         level: "warn",
         sessionId: "api-1",
         details: expect.objectContaining({
+          agent: "codex",
           lastScannedFile: "/some/file.jsonl",
           messageLength: "follow up".length,
           elapsedMs: expect.any(Number),
         }),
       }),
     );
+  });
+
+  it("acknowledges claude submit when the JSONL scanner finds the message on first poll", async () => {
+    const claudeScanMock = vi.fn().mockResolvedValue({
+      found: true,
+      lastScannedFile: "/home/test/.claude/projects/api-1/abc.jsonl",
+    });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: claudeScanMock } : null,
+    );
+
+    const service = await createDisposedSessionService();
+
+    await sessionServiceInternals(service).sendAgentMessage(
+      {
+        id: "api-1",
+        tmuxSession: "api-1",
+        agent: "claude",
+        launchCommand: "claude --dangerously-skip-permissions",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      },
+      "follow up",
+    );
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
+    expect(claudeScanMock).toHaveBeenCalledWith("follow up");
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
+  });
+
+  it("retries claude submit with a bare Enter and throws when the ack never arrives", async () => {
+    const claudeScanMock = vi
+      .fn()
+      .mockResolvedValue({ found: false, lastScannedFile: "/home/test/.claude/abc.jsonl" });
+    createAgentSubmitAckBindingMock.mockImplementation(async (agent: string) =>
+      agent === "claude" ? { scan: claudeScanMock } : null,
+    );
+
+    const service = await createDisposedSessionService();
+    const waitForAckMock = vi
+      .spyOn(sessionServiceInternals(service), "waitForSubmitAck")
+      .mockResolvedValue({ found: false, lastScannedFile: "/home/test/.claude/abc.jsonl" });
+
+    await expect(
+      sessionServiceInternals(service).sendAgentMessage(
+        {
+          id: "api-1",
+          tmuxSession: "api-1",
+          agent: "claude",
+          launchCommand: "claude --dangerously-skip-permissions",
+          worktreePath: "/tmp/spur-worktrees/api/api-1",
+        },
+        "follow up",
+      ),
+    ).rejects.toThrow("Timed out waiting for agent submit acknowledgment for api-1");
+
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledWith("api-1");
+    expect(sendSubmitKeyToTmuxMock).toHaveBeenCalledTimes(1);
+    expect(waitForAckMock).toHaveBeenCalledTimes(2);
+    expect(logSpurEventMock).toHaveBeenCalledWith(
+      "/tmp/spur-data",
+      expect.objectContaining({
+        event: "session.submit.timeout",
+        level: "warn",
+        sessionId: "api-1",
+        details: expect.objectContaining({
+          agent: "claude",
+          lastScannedFile: "/home/test/.claude/abc.jsonl",
+          messageLength: "follow up".length,
+        }),
+      }),
+    );
+  });
+
+  it("fires-and-forgets a claude send when no JSONL baseline is captured", async () => {
+    createAgentSubmitAckBindingMock.mockResolvedValue(null);
+
+    const service = await createDisposedSessionService();
+    const waitForAckSpy = vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck");
+
+    await sessionServiceInternals(service).sendAgentMessage(
+      {
+        id: "api-1",
+        tmuxSession: "api-1",
+        agent: "claude",
+        launchCommand: "claude --dangerously-skip-permissions",
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+      },
+      "follow up",
+    );
+
+    expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "follow up", { agent: "claude" });
+    expect(waitForAckSpy).not.toHaveBeenCalled();
+    expect(sendSubmitKeyToTmuxMock).not.toHaveBeenCalled();
   });
 
   it("queues manual send messages while the agent is busy", async () => {
@@ -1798,6 +1920,81 @@ describe("SessionService", () => {
       agent: "claude",
     });
     expect(sessions.get("api-1")?.queuedMessages).toBeUndefined();
+  });
+
+  it("holds queued message delivery while tmux activity is fresher than 30s", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).not.toHaveBeenCalled();
+      expect(sessions.get("api-1")?.queuedMessages?.messages).toEqual(["queued follow up"]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("delivers a queued message once tmux activity is older than 30s", async () => {
+    mockClaudeJsonlState("waiting");
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "ship the task",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      queuedMessages: {
+        messages: ["queued follow up"],
+        awaitingPrompt: false,
+      },
+    });
+    listSessionsMock.mockReturnValue([sessions.get("api-1")]);
+    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:00.000Z"));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendMessageToTmuxMock).toHaveBeenCalledWith("api-1", "queued follow up", {
+        interrupt: false,
+        agent: "claude",
+      });
+      expect(sessions.get("api-1")?.queuedMessages?.messages ?? []).toEqual([]);
+    } finally {
+      service.dispose();
+    }
   });
 
   it("stores outbound attachments in the session artifacts dir and references the session env path", async () => {
@@ -2674,12 +2871,19 @@ describe("SessionService", () => {
       }),
     );
     const jsonlReader = { filePath: "test.jsonl", lastOffset: 0, lastMtimeMs: 0, tailRecords: [] };
-    readClaudeJsonlStateMock
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "waiting", reader: jsonlReader })
-      .mockResolvedValueOnce({ state: "needs_input", reader: jsonlReader });
+    const startMs = new Date("2026-03-18T10:05:00.000Z").getTime();
+    readClaudeJsonlStateMock.mockImplementation(async () => {
+      const elapsedSec = Math.round((Date.now() - startMs) / 1000);
+      const stateForElapsed =
+        elapsedSec < 5
+          ? "waiting"
+          : elapsedSec < 15
+            ? "needs_input"
+            : elapsedSec < 30
+              ? "waiting"
+              : "needs_input";
+      return { state: stateForElapsed, reader: jsonlReader };
+    });
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2696,10 +2900,10 @@ describe("SessionService", () => {
     await advanceSeconds(5);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    await advanceSeconds(5);
+    await advanceSeconds(19);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(1);
 
-    await advanceSeconds(5);
+    await advanceSeconds(6);
     expect(sendDesktopNotificationMock).toHaveBeenCalledTimes(2);
     service.dispose();
   });
@@ -3546,7 +3750,7 @@ describe("SessionService", () => {
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: "/tmp/rollout.jsonl",
     });
@@ -3918,7 +4122,9 @@ describe("SessionService", () => {
         },
       },
     });
-    tmuxSessionExistsMock.mockRejectedValueOnce(new Error("enrich boom"));
+    tmuxSessionExistsMock
+      .mockRejectedValueOnce(new Error("enrich boom"))
+      .mockRejectedValueOnce(new Error("enrich boom"));
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -4923,7 +5129,7 @@ describe("SessionService", () => {
       .mockResolvedValueOnce(true);
 
     const service = await createDisposedSessionService();
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: true,
       lastScannedFile: "/some/rollout.jsonl",
     });
@@ -4972,6 +5178,58 @@ describe("SessionService", () => {
     ).toBe(true);
   }, 10_000);
 
+  it("does not wait for codex replay readiness when the project has no github replay source", async () => {
+    buildAgentRestorePlanMock.mockResolvedValue({
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex resume --enable codex_hooks --dangerously-bypass-approvals-and-sandbox thread-123",
+      initialMessage: "restore prompt",
+      readyMarkers: ["›"],
+    });
+    readSessionMock.mockReturnValue({
+      id: "api-1",
+      project: "api",
+      agent: "codex",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand:
+        "CODEX_HOME=/tmp/spur-tools/api-1/codex-home codex --enable codex_hooks --dangerously-bypass-approvals-and-sandbox",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    tmuxSessionExistsMock.mockResolvedValue(true);
+    tmuxSessionExistsMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    isProcessRunningInTmuxMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    captureCodexRolloutBaselineMock.mockResolvedValue(new Map());
+    readAgentHookStateMock.mockReturnValue({
+      state: "working",
+      updatedAt: "2026-03-18T10:05:00.500Z",
+      hookEvent: "UserPromptSubmit",
+    });
+
+    const service = await createDisposedSessionService();
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
+      found: true,
+      lastScannedFile: "/some/rollout.jsonl",
+    });
+
+    const restorePromise = service.restore("api-1");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const restored = await restorePromise;
+
+    expect(requestGitHubMergeConflictRestoreReplayMock).not.toHaveBeenCalled();
+    expect(restored.state).toBe("working");
+  });
+
   it("restore throws 'Failed to restore' when codex rollout ack times out", async () => {
     vi.useRealTimers();
 
@@ -5002,7 +5260,7 @@ describe("SessionService", () => {
 
     const service = await createDisposedSessionService();
 
-    vi.spyOn(sessionServiceInternals(service), "waitForCodexRolloutAck").mockResolvedValue({
+    vi.spyOn(sessionServiceInternals(service), "waitForSubmitAck").mockResolvedValue({
       found: false,
       lastScannedFile: "/some/rollout.jsonl",
     });
@@ -6317,6 +6575,113 @@ describe("SessionService", () => {
       expect(result.branchSource).toBeUndefined();
     });
 
+    it("kills an errored respawn source after spawning the replacement", async () => {
+      mockClaudeJsonlState("waiting");
+      hasUncommittedChangesMock.mockResolvedValue(false);
+      hasUnpushedCommitsMock.mockResolvedValue(false);
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "errored",
+        error: "boom",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1");
+
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+      expect(removeWorktreeMock).toHaveBeenCalledWith("/repo/api", "/tmp/spur-worktrees/api/api-1");
+    });
+
+    it("does not tmux-kill a completed respawn source", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1");
+
+      expect(killTmuxSessionMock.mock.calls.some((call) => call[0] === "api-1")).toBe(false);
+    });
+
+    it("rejects respawn for dirty errored worktrees unless forced", async () => {
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "errored",
+        error: "boom",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      hasUncommittedChangesMock.mockResolvedValue(true);
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("api-1")).rejects.toThrow("Kill confirmation required");
+      expect(createWorktreeMock).not.toHaveBeenCalled();
+    });
+
+    it("respawns dirty errored sessions when forceKillSource is true", async () => {
+      mockClaudeJsonlState("waiting");
+      hasUncommittedChangesMock.mockResolvedValue(true);
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "errored",
+        error: "boom",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.respawn("api-1", { forceKillSource: true });
+
+      expect(createWorktreeMock).toHaveBeenCalled();
+      expect(killTmuxSessionMock).toHaveBeenCalledWith("api-1");
+    });
+
     it("rejects respawn of a running session", async () => {
       readSessionMock.mockReturnValue({
         id: "api-1",
@@ -6426,6 +6791,87 @@ describe("SessionService", () => {
       );
     });
 
+    it("respawns with an agent override", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1", { agent: "codex" });
+
+      expect(result.agent).toBe("codex");
+    });
+
+    it("falls back to the original agent when agent is omitted", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const result = await service.respawn("api-1", {});
+
+      expect(result.agent).toBe("claude");
+    });
+
+    it("rejects an invalid agent on respawn", async () => {
+      mockClaudeJsonlState("waiting");
+      readSessionMock.mockReturnValue({
+        id: "api-1",
+        project: "api",
+        agent: "claude",
+        prompt: "fix the bug",
+        branch: "api-1",
+        worktree: true,
+        worktreePath: "/tmp/spur-worktrees/api/api-1",
+        tmuxSession: "api-1",
+        launchCommand: "claude --dangerously-skip-permissions",
+        status: "completed",
+        createdAt: "2026-03-18T10:00:00.000Z",
+        updatedAt: "2026-03-18T10:05:00.000Z",
+      });
+      parseAgentNameMock.mockImplementation((agent: string) => {
+        if (agent === "claude" || agent === "codex" || agent === "cursor") {
+          return agent;
+        }
+        throw new Error(`Unsupported agent: ${agent}`);
+      });
+
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await expect(service.respawn("api-1", { agent: "wat" as AgentName })).rejects.toThrow(
+        "Unsupported agent: wat",
+      );
+    });
+
     it("rejects unknown startup attachment ids on respawn", async () => {
       readSessionMock.mockReturnValue({
         id: "api-1",
@@ -6531,6 +6977,140 @@ describe("SessionService", () => {
       const result = await service.getConversation("api-1");
 
       expect(result.state).toBe("waiting");
+    });
+  });
+
+  describe("dashboard cache", () => {
+    function seedDashboardSessions(count: number): Map<string, SessionRecord> {
+      const sessions = createSessionStore();
+      for (let index = 1; index <= count; index += 1) {
+        const id = `api-${index}`;
+        sessions.set(id, {
+          id,
+          project: "api",
+          agent: "claude",
+          prompt: `task ${index}`,
+          branch: id,
+          worktree: true,
+          worktreePath: `/tmp/spur-worktrees/api/${id}`,
+          tmuxSession: id,
+          launchCommand: "claude --dangerously-skip-permissions",
+          status: "running",
+          createdAt: "2026-03-18T10:00:00.000Z",
+          updatedAt: "2026-03-18T10:01:00.000Z",
+        });
+      }
+      return sessions;
+    }
+
+    it("loop populates cache and list returns from cache without re-running enrichDashboard", async () => {
+      seedDashboardSessions(3);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const enrichSpy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
+
+      const first = await service.list({ view: "dashboard" });
+      const callsAfterFirst = enrichSpy.mock.calls.length;
+      const second = await service.list({ view: "dashboard" });
+
+      expect(first).toHaveLength(3);
+      expect(second).toHaveLength(3);
+      expect(enrichSpy.mock.calls.length).toBe(callsAfterFirst);
+      service.dispose();
+    });
+
+    it("kill refreshes cache entry eagerly", async () => {
+      const sessions = seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      await service.list({ view: "dashboard" });
+      tmuxSessionExistsMock.mockResolvedValue(false);
+
+      await service.kill("api-1", { force: true });
+
+      const listed = await service.list({ view: "dashboard", includeCompleted: true });
+      const killed = listed.find((view) => view.id === "api-1");
+      expect(killed).toBeUndefined();
+      expect(sessions.get("api-1")?.status).toBe("killed");
+      service.dispose();
+    });
+
+    it("re-entrancy guard prevents overlapping ticks", async () => {
+      seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      let calls = 0;
+      vi.spyOn(sessionServiceInternals(service), "enrichDashboard").mockImplementation(
+        (session: SessionRecord) =>
+          new Promise((resolveDelay) => {
+            calls += 1;
+            setTimeout(() => resolveDelay({ id: session.id }), 3_000);
+          }),
+      );
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(calls).toBe(1);
+      service.dispose();
+    });
+
+    it("cache evicts removed sessions", async () => {
+      const sessions = seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const before = await service.list({ view: "dashboard" });
+      expect(before.map((view) => view.id).sort()).toEqual(["api-1", "api-2"]);
+
+      sessions.delete("api-2");
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      const after = await service.list({ view: "dashboard" });
+      expect(after.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
+    });
+
+    it("boot warm-up populates cache before first list call", async () => {
+      seedDashboardSessions(2);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const listed = await service.list({ view: "dashboard" });
+      expect(listed).toHaveLength(2);
+      service.dispose();
+    });
+
+    it("survives a tick failure and keeps prior cache values", async () => {
+      seedDashboardSessions(1);
+      const { SessionService } = await loadSessionServiceModule();
+      const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+      const before = await service.list({ view: "dashboard" });
+      expect(before.map((view) => view.id)).toEqual(["api-1"]);
+
+      const enrichSpy = vi.spyOn(sessionServiceInternals(service), "enrichDashboard");
+      enrichSpy.mockImplementationOnce(() => {
+        throw new Error("boom");
+      });
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(enrichSpy).toHaveBeenCalledTimes(1);
+
+      const afterFailure = await service.list({ view: "dashboard" });
+      expect(afterFailure.map((view) => view.id)).toEqual(["api-1"]);
+
+      enrichSpy.mockImplementation((session: SessionRecord) => Promise.resolve({ id: session.id }));
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(enrichSpy).toHaveBeenCalledTimes(2);
+
+      const afterRecovery = await service.list({ view: "dashboard" });
+      expect(afterRecovery.map((view) => view.id)).toEqual(["api-1"]);
+      service.dispose();
     });
   });
 });

@@ -19,21 +19,21 @@ import {
   buildAgentLaunchPlan,
   buildAgentRestorePlan,
   buildAgentResumePlan,
+  createAgentSubmitAckBinding,
   findAgentSessionId,
   parseAgentName,
   setupAgentHooks,
+  type SubmitAckBinding,
+  type SubmitAckScanResult,
 } from "./agents/index.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import { deleteAgentHookState, readAgentHookState } from "./agent-hook-state.js";
 import { findLatestSessionFile as findLatestClaudeSessionFile } from "./agents/claude.js";
 import {
   codexHookHomePath,
-  captureCodexRolloutBaseline,
   findLatestCodexSessionFile,
   readCodexRolloutState,
-  scanCodexRolloutForMessage,
   type CodexRolloutStateRecord,
-  type RolloutBaseline,
 } from "./agents/codex.js";
 import { loadProjectSuggestions, loadSessionSuggestions } from "./agent-suggestions.js";
 import {
@@ -41,7 +41,7 @@ import {
   readClaudeJsonlState,
   type ClaudeJsonlReaderState,
 } from "./claude-jsonl-state.js";
-import { findProjectConfigPath, loadProjectConfig } from "./config.js";
+import { buildSidecarLinkUrl, findProjectConfigPath, loadProjectConfig } from "./config.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { reserveNextSessionId } from "./ids.js";
 import { isHostPortFree } from "./port-probe.js";
@@ -124,6 +124,7 @@ import {
   type PreflightRequest,
   type PreflightResponse,
   type ProjectConfig,
+  type RespawnSessionRequest,
   type RunServiceRequest,
   type RuntimeInfo,
   type ServiceInstanceRecord,
@@ -172,6 +173,12 @@ const PIPELINE_POLL_INTERVAL_MS = 1_000;
 const PIPELINE_STEP_DELAY_MS = 30_000;
 const MESSAGE_READY_GRACE_MS = 15_000;
 const STATE_HOLD_MS = 4_000;
+export const IDLE_WAIT_BEFORE_FLUSH_MS = 30_000;
+
+export function getIdleWaitBeforeFlushMs(): number {
+  const raw = Number(process.env.SPUR_IDLE_WAIT_BEFORE_FLUSH_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : IDLE_WAIT_BEFORE_FLUSH_MS;
+}
 
 const ALLOWED_EXT = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const NAME_RE = /^[\w.-]+$/;
@@ -184,9 +191,10 @@ const AGENT_SESSION_ID_INITIAL_WAIT_MS = 5_000;
 const AGENT_SESSION_ID_REFRESH_WAIT_MS = 1_500;
 const AGENT_SESSION_ID_POLL_INTERVAL_MS = 250;
 const SPAWN_RETRY_ATTEMPTS = 3;
-const CODEX_SUBMIT_ACK_TIMEOUT_MS = 60_000;
-const CODEX_SUBMIT_RETRY_LIMIT = 1;
+const SUBMIT_ACK_TIMEOUT_MS = 60_000;
+const SUBMIT_RETRY_LIMIT = 1;
 const ATTENTION_POLL_INTERVAL_MS = 5_000;
+const DASHBOARD_CACHE_INTERVAL_MS = 2_000;
 const PR_CHECK_THROTTLE_MS = 30_000;
 const WORKTREE_PATH_TOKEN = "$" + "{worktreePath}";
 const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
@@ -389,6 +397,17 @@ function latestActivityAt(...timestamps: Array<Date | null>): Date | null {
   return latest;
 }
 
+export function isIdleEnoughToReceive(
+  lastActivityAt: string | Date | null,
+  idleMs: number,
+  now: number = Date.now(),
+): boolean {
+  if (!lastActivityAt) return true;
+  const ts =
+    typeof lastActivityAt === "string" ? Date.parse(lastActivityAt) : lastActivityAt.getTime();
+  return now - ts >= idleMs;
+}
+
 function shouldUseCodexRolloutState(
   hookState: { state: SessionState; updatedAt: string; turnId?: string } | null,
   rolloutState: CodexRolloutStateRecord,
@@ -578,15 +597,23 @@ function sidecarPortEnv(
   return Object.fromEntries(entries.map(([key, value]) => [key, String(value)]));
 }
 
+function githubReplaySourceIds(config: AppConfig, projectId: string): string[] {
+  const project = config.projects[projectId];
+  if (!project) return [];
+  const sourceIds: string[] = [];
+  for (const [sourceId, source] of Object.entries(project.sources)) {
+    if (source.type !== "github") continue;
+    sourceIds.push(sourceId);
+  }
+  return sourceIds;
+}
+
 function requestGitHubMergeConflictRestoreReplays(
   config: AppConfig,
   projectId: string,
   sessionId: string,
 ): void {
-  const project = config.projects[projectId];
-  if (!project) return;
-  for (const [sourceId, source] of Object.entries(project.sources)) {
-    if (source.type !== "github") continue;
+  for (const sourceId of githubReplaySourceIds(config, projectId)) {
     requestGitHubMergeConflictRestoreReplay(config.dataDir, projectId, sourceId, sessionId);
   }
 }
@@ -733,13 +760,13 @@ interface PreparedSpawn {
 
 function resolveRespawnRequest(
   session: SessionRecord,
-  options?: { prompt?: string; attachments?: SendMessageAttachment[] },
+  options?: { prompt?: string; attachments?: SendMessageAttachment[]; agent?: AgentName },
 ): SpawnSessionRequest {
   return {
     project: session.project,
     prompt: options?.prompt ?? session.prompt,
     ...(options?.attachments?.length ? { attachments: options.attachments } : {}),
-    agent: session.agent,
+    agent: options?.agent ?? session.agent,
     ...(session.planMode !== undefined && { planMode: session.planMode }),
     ...(session.pipeline?.steps && { steps: session.pipeline.steps }),
     overrides: { worktree: session.worktree },
@@ -793,6 +820,10 @@ export class SessionService {
   private readonly attentionStates = new Map<string, AttentionState>();
   private attentionMonitorTimer: NodeJS.Timeout | null = null;
   private attentionMonitorRunning = false;
+  private dashboardCache: Map<string, DashboardSessionView> = new Map();
+  private dashboardCacheTimer: NodeJS.Timeout | null = null;
+  private dashboardLoopRunning: boolean = false;
+  private dashboardCacheReady: Promise<void> | null = null;
   private readonly stateCache = new Map<string, { state: SessionState; classifiedAt: number }>();
   private readonly claudeJsonlReaders = new Map<string, ClaudeJsonlReaderState>();
   private readonly stateHistory = new Map<string, SessionStateTransition[]>();
@@ -825,6 +856,8 @@ export class SessionService {
     this.config = bootstrap.config;
     this.applyConfig(merged.config, merged.configPaths);
     this.startAttentionMonitor();
+    this.dashboardCacheReady = this.runDashboardCacheTick();
+    this.startDashboardCacheLoop();
   }
 
   dispose(): void {
@@ -832,6 +865,7 @@ export class SessionService {
       clearInterval(this.attentionMonitorTimer);
       this.attentionMonitorTimer = null;
     }
+    this.stopDashboardCacheLoop();
   }
 
   previewConfigConnect(configPath: string): {
@@ -998,6 +1032,77 @@ export class SessionService {
       }
     } finally {
       this.attentionMonitorRunning = false;
+    }
+  }
+
+  private startDashboardCacheLoop(): void {
+    if (this.dashboardCacheTimer) {
+      return;
+    }
+    this.dashboardCacheTimer = setInterval(() => {
+      void this.runDashboardCacheTick();
+    }, DASHBOARD_CACHE_INTERVAL_MS);
+    this.dashboardCacheTimer.unref();
+  }
+
+  private stopDashboardCacheLoop(): void {
+    if (this.dashboardCacheTimer) {
+      clearInterval(this.dashboardCacheTimer);
+      this.dashboardCacheTimer = null;
+    }
+  }
+
+  private async runDashboardCacheTick(): Promise<void> {
+    if (this.dashboardLoopRunning) {
+      return;
+    }
+    this.dashboardLoopRunning = true;
+    try {
+      const sessions = listSessions(this.config.dataDir).filter((session) => {
+        if (session.status === "completed") {
+          return true;
+        }
+        return session.status !== "killed" || session.retainInList === true;
+      });
+      const liveIds = new Set(sessions.map((session) => session.id));
+      const enriched = await Promise.all(sessions.map((session) => this.enrichDashboard(session)));
+      for (const view of enriched) {
+        this.dashboardCache.set(view.id, view);
+      }
+      for (const id of this.dashboardCache.keys()) {
+        if (!liveIds.has(id)) {
+          this.dashboardCache.delete(id);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.dashboard_cache.failed", {
+        level: "warn",
+        message: `Dashboard cache tick failed: ${message}`,
+      });
+    } finally {
+      this.dashboardLoopRunning = false;
+    }
+  }
+
+  private async refreshDashboardCacheEntry(record: SessionRecord): Promise<void> {
+    try {
+      const included =
+        record.status === "completed"
+          ? true
+          : record.status !== "killed" || record.retainInList === true;
+      if (!included) {
+        this.dashboardCache.delete(record.id);
+        return;
+      }
+      this.dashboardCache.set(record.id, await this.enrichDashboard(record));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logEvent("session.dashboard_cache.refresh_failed", {
+        level: "warn",
+        sessionId: record.id,
+        message: `Dashboard cache refresh failed for ${record.id}: ${message}`,
+      });
     }
   }
 
@@ -1400,7 +1505,7 @@ export class SessionService {
   }): Promise<void> {
     const { sessionId, sidecarName, reservedPort, url, signal } = args;
     const targetUrl = `http://127.0.0.1:${reservedPort}/`;
-    const linkUrl = `${url}:${reservedPort}`;
+    const linkUrl = buildSidecarLinkUrl(url, reservedPort);
     for (let i = 0; i < SIDECAR_PROBE_BUDGET_ITERATIONS; i += 1) {
       if (signal.aborted) return;
       const perRequest = AbortSignal.any([
@@ -1477,20 +1582,24 @@ export class SessionService {
     includeCompleted?: boolean;
     view?: "full" | "dashboard";
   }): Promise<SessionListView[]> {
+    if (options?.view === "dashboard") {
+      if (this.dashboardCacheReady) {
+        await this.dashboardCacheReady;
+      }
+      return Array.from(this.dashboardCache.values()).filter((view) => {
+        if (view.status === "completed") {
+          return options.includeCompleted === true || view.retainInList === true;
+        }
+        return view.status !== "killed" || view.retainInList === true;
+      });
+    }
     const sessions = listSessions(this.config.dataDir).filter((session) => {
       if (session.status === "completed") {
         return options?.includeCompleted === true || session.retainInList === true;
       }
       return session.status !== "killed" || session.retainInList === true;
     });
-    const views: SessionListView[] = [];
-    for (const session of sessions) {
-      views.push(
-        options?.view === "dashboard"
-          ? await this.enrichDashboard(session)
-          : await this.enrich(session),
-      );
-    }
+    const views = await Promise.all(sessions.map((session) => this.enrich(session)));
     return views;
   }
 
@@ -2145,6 +2254,7 @@ export class SessionService {
       }
 
       writeSession(this.config.dataDir, updatedRecord);
+      await this.refreshDashboardCacheEntry(updatedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -2797,6 +2907,7 @@ export class SessionService {
       }
 
       writeSession(this.config.dataDir, persistedRecord);
+      await this.refreshDashboardCacheEntry(persistedRecord);
       this.logEvent("session.spawn.completed", {
         level: "info",
         sessionId,
@@ -3149,35 +3260,34 @@ export class SessionService {
   }
 
   private async sendAgentMessage(
-    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand">,
+    session: Pick<SessionRecord, "id" | "tmuxSession" | "agent" | "launchCommand" | "worktreePath">,
     message: string,
     options?: { interrupt?: boolean },
   ): Promise<void> {
+    const shouldWaitForSubmitAck =
+      agentWaitsForSubmitAck(session.agent) && !process.env["SPUR_SKIP_CODEX_SUBMIT_ACK"];
     const sessionToolDir = join(this.config.dataDir, "session-tools", session.id);
-    const codexSessionsDir = agentWaitsForSubmitAck(session.agent)
-      ? join(codexHookHomePath(sessionToolDir), "sessions")
-      : null;
-    const baseline: RolloutBaseline | null = codexSessionsDir
-      ? await captureCodexRolloutBaseline(codexSessionsDir)
+    const binding: SubmitAckBinding | null = shouldWaitForSubmitAck
+      ? await createAgentSubmitAckBinding(session.agent, {
+          worktreePath: session.worktreePath,
+          codexSessionsDir: join(codexHookHomePath(sessionToolDir), "sessions"),
+        })
       : null;
     const startedAt = Date.now();
     await sendMessageToTmux(session.tmuxSession, message, {
       agent: session.agent,
       ...(options?.interrupt !== undefined ? { interrupt: options.interrupt } : {}),
     });
-    if (!agentWaitsForSubmitAck(session.agent) || !codexSessionsDir || !baseline) {
+    if (!binding) {
       return;
     }
-    let lastResult: { found: boolean; lastScannedFile: string | null } = {
-      found: false,
-      lastScannedFile: null,
-    };
-    for (let attempt = 0; attempt <= CODEX_SUBMIT_RETRY_LIMIT; attempt += 1) {
-      lastResult = await this.waitForCodexRolloutAck(codexSessionsDir, message, baseline);
+    let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
+    for (let attempt = 0; attempt <= SUBMIT_RETRY_LIMIT; attempt += 1) {
+      lastResult = await this.waitForSubmitAck(binding, message);
       if (lastResult.found) {
         return;
       }
-      if (attempt < CODEX_SUBMIT_RETRY_LIMIT) {
+      if (attempt < SUBMIT_RETRY_LIMIT) {
         await sendSubmitKeyToTmux(session.tmuxSession);
       }
     }
@@ -3185,32 +3295,29 @@ export class SessionService {
       session.tmuxSession,
       sessionProcessMatchers(session),
     );
-    this.logEvent("session.codex.submit.timeout", {
+    this.logEvent("session.submit.timeout", {
       level: "warn",
       sessionId: session.id,
-      message: `Codex submit ack timed out for ${session.id}`,
+      message: `Agent submit ack timed out for ${session.id}`,
       details: {
+        agent: session.agent,
         lastScannedFile: lastResult.lastScannedFile,
         messageLength: message.length,
         elapsedMs: Date.now() - startedAt,
         processAlive,
       },
     });
-    throw new Error(`Timed out waiting for Codex submit acknowledgment for ${session.id}`);
+    throw new Error(`Timed out waiting for agent submit acknowledgment for ${session.id}`);
   }
 
-  private async waitForCodexRolloutAck(
-    sessionsDir: string,
+  private async waitForSubmitAck(
+    binding: SubmitAckBinding,
     messageText: string,
-    baseline: RolloutBaseline,
-  ): Promise<{ found: boolean; lastScannedFile: string | null }> {
-    const deadline = Date.now() + CODEX_SUBMIT_ACK_TIMEOUT_MS;
-    let lastResult: { found: boolean; lastScannedFile: string | null } = {
-      found: false,
-      lastScannedFile: null,
-    };
+  ): Promise<SubmitAckScanResult> {
+    const deadline = Date.now() + SUBMIT_ACK_TIMEOUT_MS;
+    let lastResult: SubmitAckScanResult = { found: false, lastScannedFile: null };
     while (Date.now() < deadline) {
-      lastResult = await scanCodexRolloutForMessage(sessionsDir, messageText, baseline);
+      lastResult = await binding.scan(messageText);
       if (lastResult.found) {
         return lastResult;
       }
@@ -3478,6 +3585,7 @@ export class SessionService {
       }
       writeSession(this.config.dataDir, migrated);
       this.stateCache.delete(sessionId);
+      await this.refreshDashboardCacheEntry(migrated);
       return this.enrich(migrated);
     }
     if (session.status === targetStatus) {
@@ -3525,6 +3633,7 @@ export class SessionService {
     }
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    await this.refreshDashboardCacheEntry(record);
     this.logEvent(`session.${eventAction}.completed`, {
       level: "info",
       sessionId,
@@ -3537,6 +3646,26 @@ export class SessionService {
     return this.enrich(record);
   }
 
+  private async ensureKillDirtyWorktreeAllowed(
+    session: SessionRecord,
+    force: boolean,
+  ): Promise<void> {
+    if (!(session.worktree && session.worktreePath && workspaceExists(session.worktreePath))) {
+      return;
+    }
+    const cleanup = await this.resolveCleanupContext(session);
+    const reasons: string[] = [];
+    if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
+      reasons.push("uncommitted changes in its worktree");
+    }
+    if (await hasUnpushedCommits(session.worktreePath)) {
+      reasons.push("unpushed commits");
+    }
+    if (reasons.length > 0 && !force) {
+      throw new Error(buildKillConfirmationRequiredMessage(session.id, reasons));
+    }
+  }
+
   async kill(sessionId: string, request: KillSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
@@ -3546,19 +3675,7 @@ export class SessionService {
       throw new Error(`Session ${sessionId} is already completed`);
     }
 
-    if (session.worktree && session.worktreePath && workspaceExists(session.worktreePath)) {
-      const cleanup = await this.resolveCleanupContext(session);
-      const reasons: string[] = [];
-      if (await hasUncommittedChanges(session.worktreePath, cleanup.symlinks)) {
-        reasons.push("uncommitted changes in its worktree");
-      }
-      if (await hasUnpushedCommits(session.worktreePath)) {
-        reasons.push("unpushed commits");
-      }
-      if (reasons.length > 0 && request.force !== true) {
-        throw new Error(buildKillConfirmationRequiredMessage(sessionId, reasons));
-      }
-    }
+    await this.ensureKillDirtyWorktreeAllowed(session, request.force === true);
 
     try {
       await killTmuxSession(session.tmuxSession);
@@ -3599,6 +3716,7 @@ export class SessionService {
     delete record.retainInList;
     delete record.sidecarPorts;
     writeSession(this.config.dataDir, record);
+    await this.refreshDashboardCacheEntry(record);
     this.logEvent("session.kill.completed", {
       level: "info",
       sessionId,
@@ -3829,6 +3947,7 @@ export class SessionService {
       updatedAt: nowIso(),
     };
     writeSession(this.config.dataDir, recovered);
+    await this.refreshDashboardCacheEntry(recovered);
     this.logEvent("session.recover.completed", {
       level: "info",
       sessionId: session.id,
@@ -4018,6 +4137,7 @@ export class SessionService {
       AGENT_SESSION_ID_REFRESH_WAIT_MS,
     );
     writeSession(this.config.dataDir, persistedRestored);
+    await this.refreshDashboardCacheEntry(persistedRestored);
     requestGitHubMergeConflictRestoreReplays(
       this.config,
       persistedRestored.project,
@@ -4040,14 +4160,7 @@ export class SessionService {
     return this.enrich(persistedRestored);
   }
 
-  async respawn(
-    sessionId: string,
-    request: {
-      prompt?: string;
-      attachments?: SendMessageAttachment[];
-      startupAttachmentIds?: string[];
-    } = {},
-  ): Promise<SessionView> {
+  async respawn(sessionId: string, request: RespawnSessionRequest = {}): Promise<SessionView> {
     const session = readSession(this.config.dataDir, sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -4060,6 +4173,11 @@ export class SessionService {
       throw new Error(
         `Session ${sessionId} is not in a terminal state (status: ${session.status})`,
       );
+    }
+
+    const forceKillSource = request.forceKillSource === true;
+    if (session.status !== "completed") {
+      await this.ensureKillDirtyWorktreeAllowed(session, forceKillSource);
     }
 
     this.logEvent("session.respawn.started", {
@@ -4082,12 +4200,17 @@ export class SessionService {
       requestedStartupAttachmentIds,
     );
     const mergedAttachments = [...clonedAttachments, ...(request.attachments ?? [])];
-    return this.spawn(
+    const spawned = await this.spawn(
       resolveRespawnRequest(session, {
         ...(request.prompt !== undefined ? { prompt: request.prompt } : {}),
         ...(mergedAttachments.length > 0 ? { attachments: mergedAttachments } : {}),
+        ...(request.agent ? { agent: parseAgentName(request.agent) } : {}),
       }),
     );
+    if (session.status !== "completed") {
+      await this.kill(session.id, { force: forceKillSource });
+    }
+    return spawned;
   }
 
   private resumeSessionDelivery(): void {
@@ -4130,8 +4253,11 @@ export class SessionService {
     }
 
     const readySession = await this.ensureSessionReadyForSend(session);
-    const agentState = await this.classifySessionState(readySession);
-    if (agentState !== "waiting") {
+    const classified = await this.classifySessionRecord(readySession);
+    if (classified.state !== "waiting") {
+      return false;
+    }
+    if (!isIdleEnoughToReceive(classified.runtime.tmuxActivityAt, getIdleWaitBeforeFlushMs())) {
       return false;
     }
 

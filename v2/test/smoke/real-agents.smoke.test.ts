@@ -347,12 +347,10 @@ After the file and the session metadata are set, wait for more instructions.`,
         expect(liveState.slots.links).toHaveLength(expectedLinks.length);
         expect(liveState.slots.links).toEqual(expect.arrayContaining([...expectedLinks]));
         const statusLeft = await readTmuxOption(session.id, "status-left");
-        const statusRight = await readTmuxOption(session.id, "status-right");
+        const status = await readTmuxOption(session.id, "status");
+        expect(status).toBe("status on");
         expect(statusLeft).toContain(expectedTitle);
-        for (const link of expectedLinks) {
-          expect(statusRight).toContain(`#[hyperlink=${link.url}]`);
-          expect(statusRight).toContain(link.label);
-        }
+        expect(statusLeft).not.toContain(session.id);
         const links = liveState.slots.links.map((link) => `${link.label}=${link.url}`).sort();
         expect(links).toEqual(expectedLinkPairs);
       }

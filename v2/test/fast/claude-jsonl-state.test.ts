@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,8 +59,8 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
-  it("returns working for tool_use within stale window", () => {
-    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 2_000 })];
+  it("returns working for tool_use within activity window", () => {
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 30_000 })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
   });
 
@@ -76,8 +76,20 @@ describe("classifyClaudeJsonlState", () => {
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
-  it("returns needs_input for tool_use past stale window with no progress", () => {
-    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 5_000 })];
+  it("returns waiting for tool_use past activity window with no progress", () => {
+    const records = [rec({ type: "assistant", hasToolUse: true, timestampMs: NOW - 70_000 })];
+    expect(classifyClaudeJsonlState(records, NOW)).toBe("waiting");
+  });
+
+  it("returns needs_input for assistant AskUserQuestion tool_use regardless of timing", () => {
+    const records = [
+      rec({
+        type: "assistant",
+        hasToolUse: true,
+        requestsUserInput: true,
+        timestampMs: NOW - 10 * 60_000,
+      }),
+    ];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
@@ -115,11 +127,6 @@ describe("classifyClaudeJsonlState", () => {
   it("returns working for user tool_result", () => {
     const records = [rec({ type: "user", role: "tool_result" })];
     expect(classifyClaudeJsonlState(records, NOW)).toBe("working");
-  });
-
-  it("returns needs_input for AskUserQuestion tool references", () => {
-    const records = [rec({ type: "user", role: "tool_result", requestsUserInput: true })];
-    expect(classifyClaudeJsonlState(records, NOW)).toBe("needs_input");
   });
 
   // ── progress → working ─────────────────────────────────────────────
@@ -258,7 +265,7 @@ describe("parseConversationLines", () => {
     expect(state).toBe("waiting");
   });
 
-  it("keeps the same spur-0190 tail fixture working inside the stale window", async () => {
+  it("keeps the same spur-0190 tail fixture working inside the activity window", async () => {
     const fixturePath = join(
       __dirname,
       "../fixtures/agent-history/claude/needs-input-spur-0190-tail.jsonl",
@@ -287,21 +294,21 @@ describe("parseConversationLines", () => {
     }
   });
 
-  it("classifies the spur-052a tail as working inside the declared timeout budget", async () => {
+  it("classifies the stale activity tail as waiting once the activity window elapses without an identified question", async () => {
     const fixturePath = join(
       __dirname,
-      "../fixtures/agent-history/claude/working-spur-052a-tail.jsonl",
+      "../fixtures/agent-history/claude/waiting-stale-activity-tail.jsonl",
     );
     const fixture = await readFile(fixturePath, "utf8");
-    const tempDir = await mkdtemp(join(tmpdir(), "spur-052a-tail-"));
-    const tempFile = join(tempDir, "spur-052a-tail.jsonl");
+    const tempDir = await mkdtemp(join(tmpdir(), "stale-activity-tail-"));
+    const tempFile = join(tempDir, "stale-activity-tail.jsonl");
     vi.useFakeTimers();
-    // Last tool_use timestamp is 2026-04-15T12:47:58.984Z with timeout=900000ms.
-    // At now+60s we are well inside the 903s budget → working.
-    vi.setSystemTime(new Date("2026-04-15T12:48:58.000Z"));
+    vi.setSystemTime(new Date("2026-05-04T08:27:00.000Z"));
 
     try {
       await writeFile(tempFile, fixture, "utf8");
+      const lastActivity = new Date("2026-05-04T08:25:28.551Z");
+      await utimes(tempFile, lastActivity, lastActivity);
       const result = await readClaudeJsonlState(tempDir, {
         filePath: tempFile,
         lastOffset: 0,
@@ -312,7 +319,7 @@ describe("parseConversationLines", () => {
       if (!result) {
         throw new Error("expected fixture result");
       }
-      expect(result.state).toBe("working");
+      expect(result.state).toBe("waiting");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

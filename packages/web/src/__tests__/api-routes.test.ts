@@ -164,10 +164,11 @@ describe("Spur web API routes", () => {
       ]);
 
     const response = await listSessions(new NextRequest("http://localhost:3000/api/sessions"));
-    const payload = (await response.json()) as { sessions: unknown[] };
+    const payload = (await response.json()) as { sessions: unknown[]; daemonAlive: boolean };
 
     expect(response.status).toBe(200);
     expect(payload.sessions).toHaveLength(2);
+    expect(payload.daemonAlive).toBe(true);
     expect(mockedSpurRequestJson).toHaveBeenNthCalledWith(
       1,
       "/sessions?includeCompleted=1&view=dashboard",
@@ -687,6 +688,23 @@ describe("Spur web API routes", () => {
 
   // ── POST /api/sessions/:id/respawn ─────────────────────────────────────
 
+  it("POST /api/sessions/:id/respawn forwards terminateSessionId to daemon", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    const response = await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-source/respawn", {
+        method: "POST",
+        body: JSON.stringify({ terminateSessionId: " api-caller " }),
+      }),
+      { params: Promise.resolve({ id: "api-source" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse((mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body)).toEqual(
+      { terminateSessionId: "api-caller" },
+    );
+  });
+
   it("POST /api/sessions/:id/respawn proxies to daemon", async () => {
     mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
 
@@ -697,6 +715,7 @@ describe("Spur web API routes", () => {
           prompt: "Retry with screenshot",
           startupAttachmentIds: ["1715000000000-source.png"],
           attachments: [{ name: "shot.png", data: "cG5n" }],
+          agent: "codex",
         }),
       }),
       { params: Promise.resolve({ id: "api-a1" }) },
@@ -714,8 +733,30 @@ describe("Spur web API routes", () => {
         prompt: "Retry with screenshot",
         startupAttachmentIds: ["1715000000000-source.png"],
         attachments: [{ name: "shot.png", data: "cG5n" }],
+        agent: "codex",
       },
     );
+  });
+
+  it("POST /api/sessions/:id/respawn drops invalid agent values", async () => {
+    mockedSpurRequestJson.mockResolvedValue(sessionFixture({ id: "api-b2" }));
+
+    await respawnSession(
+      new Request("http://localhost:3000/api/sessions/api-a1/respawn", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt: "Retry",
+          agent: "not-an-agent",
+        }),
+      }),
+      { params: Promise.resolve({ id: "api-a1" }) },
+    );
+
+    const body = JSON.parse(
+      (mockedSpurRequestJson.mock.calls[0]?.[1] as { body: string }).body,
+    ) as Record<string, unknown>;
+    expect("agent" in body).toBe(false);
+    expect(body.prompt).toBe("Retry");
   });
 
   it("POST /api/sessions/:id/respawn returns 502 on daemon error", async () => {
@@ -1061,7 +1102,6 @@ describe("Spur web API routes", () => {
 
   it("GET /api/runtime/resources returns metrics on linux after the first CPU baseline request", async () => {
     Object.defineProperty(process, "platform", { value: "linux" });
-    mockedSpurRequestJson.mockResolvedValue([]);
     let cpuReads = 0;
     mockedReadFile.mockImplementation(async (path: string) => {
       if (path === "/proc/stat") {
@@ -1082,7 +1122,7 @@ describe("Spur web API routes", () => {
 
     const firstResponse = await runtimeResources();
     expect(firstResponse.status).toBe(200);
-    expect(await firstResponse.json()).toEqual({ available: false, daemonAlive: true });
+    expect(await firstResponse.json()).toEqual({ available: false });
 
     const secondResponse = await runtimeResources();
     const secondPayload = (await secondResponse.json()) as {
@@ -1095,26 +1135,26 @@ describe("Spur web API routes", () => {
     expect(secondResponse.status).toBe(200);
     expect(secondPayload).toEqual({
       available: true,
-      daemonAlive: true,
       cpuPercent: 33,
       memoryPercent: 75,
       diskPercent: 75,
     });
     expect(cpuReads).toBe(2);
+    expect(mockedSpurRequestJson).not.toHaveBeenCalledWith("/projects");
   });
 
   it("GET /api/runtime/resources returns available:false on unsupported platforms and read errors", async () => {
     Object.defineProperty(process, "platform", { value: "darwin" });
-    mockedSpurRequestJson.mockRejectedValue(new Error("daemon unavailable"));
     const unsupported = await runtimeResources();
     expect(unsupported.status).toBe(200);
-    expect(await unsupported.json()).toEqual({ available: false, daemonAlive: false });
+    expect(await unsupported.json()).toEqual({ available: false });
 
     Object.defineProperty(process, "platform", { value: "linux" });
     mockedReadFile.mockRejectedValue(new Error("read failed"));
     const errored = await runtimeResources();
     expect(errored.status).toBe(200);
-    expect(await errored.json()).toEqual({ available: false, daemonAlive: false });
+    expect(await errored.json()).toEqual({ available: false });
+    expect(mockedSpurRequestJson).not.toHaveBeenCalledWith("/projects");
   });
 
   it("POST /api/runtime/voice/transcribe returns 400 when audio field is absent", async () => {
