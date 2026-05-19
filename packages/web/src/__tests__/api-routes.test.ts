@@ -445,10 +445,7 @@ describe("Spur web API routes", () => {
     expect(response.status).toBe(201);
     expect(mockedSpurRequestJson).toHaveBeenCalledTimes(1);
     expect(mockedSpurRequestJson.mock.calls[0][0]).toBe("/sessions/background");
-    const [, init] = mockedSpurRequestJson.mock.calls[0] as unknown as [
-      string,
-      { body?: string },
-    ];
+    const [, init] = mockedSpurRequestJson.mock.calls[0] as unknown as [string, { body?: string }];
     expect(JSON.parse(init.body ?? "{}")).toEqual({
       project: "api",
       prompt: "Pair task",

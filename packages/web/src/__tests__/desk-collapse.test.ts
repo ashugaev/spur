@@ -30,9 +30,7 @@ describe("collapseDeskRows", () => {
       agent: "codex",
       prompt: "child",
     });
-    const rows = collapseDeskRows(
-      [root, child].map((s) => toDashboardSession(s, s.project)),
-    );
+    const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
     expect(rows).toHaveLength(1);
     expect(rows[0].session.id).toBe("root-a");
     expect(rows[0].deskMemberCount).toBe(2);
@@ -45,9 +43,7 @@ describe("collapseDeskRows", () => {
       state: "needs_input",
       prompt: "blocked",
     });
-    const rows = collapseDeskRows(
-      [root, child].map((s) => toDashboardSession(s, s.project)),
-    );
+    const rows = collapseDeskRows([root, child].map((s) => toDashboardSession(s, s.project)));
     expect(rows).toHaveLength(1);
     expect(rows[0].lane).toBe("respond");
   });

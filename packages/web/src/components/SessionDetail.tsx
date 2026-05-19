@@ -1184,9 +1184,7 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
-  const canDeskSpawn = Boolean(
-    session && session.workspaceExists && !isTerminalSession(session),
-  );
+  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
 
   const openRespawnEditor = useCallback(() => {
     if (!session) return;

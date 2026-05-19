@@ -1900,13 +1900,7 @@ export class SessionService {
       let effectiveBranch = request.branch;
       let effectiveBranchSource: Extract<BranchSource, "explicit" | "preflight"> | undefined =
         request.branch ? "explicit" : undefined;
-      if (
-        !reuseCtx &&
-        !effectiveBranch &&
-        worktree &&
-        project.preflight &&
-        prompt
-      ) {
+      if (!reuseCtx && !effectiveBranch && worktree && project.preflight && prompt) {
         stage = "preflight";
         const preflight = await runSpawnPreflight({
           agent,
