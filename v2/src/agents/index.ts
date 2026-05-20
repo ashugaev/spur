@@ -50,7 +50,7 @@ interface AgentSessionConfig {
   planOptions?: AgentPlanOptions;
 }
 
-export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_pane";
+export type AgentStateStrategy = "claude_jsonl" | "hook" | "cursor_jsonl";
 export type AgentSendMode = "default" | "bracketed_paste";
 
 export interface AgentSubmitAckContext {
@@ -227,7 +227,7 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       const derived = defaultProcessMatchers(launchCommand, cursorCommand());
       return [...new Set([...derived, "agent", "cursor-agent"])];
     },
-    stateStrategy: "cursor_pane",
+    stateStrategy: "cursor_jsonl",
     sendMode: "default",
     waitsForSubmitAck: false,
     busyQueuedSendAwaitsPrompt: true,

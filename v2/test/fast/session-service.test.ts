@@ -465,7 +465,7 @@ describe("SessionService", () => {
     agentStateStrategyMock
       .mockReset()
       .mockImplementation((agent: string) =>
-        agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
+        agent === "codex" ? "hook" : agent === "cursor" ? "cursor_jsonl" : "claude_jsonl",
       );
     agentWaitsForSubmitAckMock
       .mockReset()
