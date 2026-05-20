@@ -84,7 +84,7 @@ describe("createWorktree", () => {
     });
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
-      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
+      ["worktree", "add", "--no-track", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
       { cwd: "/repo/api" },
     );
   });
@@ -106,7 +106,7 @@ describe("createWorktree", () => {
 
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
-      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
+      ["worktree", "add", "--no-track", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "origin/main"],
       { cwd: "/repo/api" },
     );
     expect(mockExecFileAsync).not.toHaveBeenCalledWith(
@@ -137,7 +137,7 @@ describe("createWorktree", () => {
     });
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
-      ["worktree", "add", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
+      ["worktree", "add", "--no-track", "-b", "api-1", "/tmp/spur-worktrees/api/api-1", "main"],
       { cwd: "/repo/api" },
     );
   });
@@ -159,7 +159,7 @@ describe("createWorktree", () => {
 
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
-      ["worktree", "add", "-b", "release", "/tmp/spur-worktrees/api/api-1", "origin/release"],
+      ["worktree", "add", "--no-track", "-b", "release", "/tmp/spur-worktrees/api/api-1", "origin/release"],
       { cwd: "/repo/api" },
     );
   });

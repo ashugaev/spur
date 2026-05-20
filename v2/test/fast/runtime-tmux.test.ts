@@ -273,4 +273,36 @@ describe("runtime-tmux", () => {
     ).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
+
+  it("auto-confirms the Codex hook trust prompt before reporting ready", async () => {
+    let captureCount = 0;
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        captureCount += 1;
+        return {
+          stdout:
+            captureCount === 1
+              ? "Hooks need review\n7 hooks are new or changed.\n› 1. Review hooks\n  2. Trust all and continue"
+              : "OpenAI Codex\n›",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await waitForTmuxReady("api-1", ["OpenAI Codex", "›"], 5_000, { agent: "codex" });
+
+    expect(
+      execFileAsyncMock.mock.calls.some(
+        ([, args]) => args[0] === "send-keys" && args.includes("2"),
+      ),
+    ).toBe(true);
+    expect(
+      execFileAsyncMock.mock.calls.some(
+        ([, args]) => args[0] === "send-keys" && args.includes("Enter"),
+      ),
+    ).toBe(true);
+  });
 });

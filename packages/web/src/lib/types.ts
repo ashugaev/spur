@@ -214,6 +214,7 @@ export function isTerminalSession(session: Pick<DashboardSession, "status">): bo
 
 export function isRestorable(session: DashboardSession): boolean {
   if (isTerminalSession(session)) return false;
+  if (session.status === "errored") return false;
   if (session.status === "paused" || session.status === "stopped") return true;
   return !session.runtimeAlive;
 }

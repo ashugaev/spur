@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { SessionRow } from "@/components/SessionRow.js";
 import type { DashboardSession, SpurSessionLink } from "@/lib/types.js";
+import { isRestorable } from "@/lib/types.js";
 
 const useSessionLinkPrInfoMock = vi.fn();
 
@@ -121,5 +122,16 @@ describe("SessionRow", () => {
       "href",
       "https://github.com/test/repo/pull/42",
     );
+  });
+
+  it("does not treat errored sessions as restorable", () => {
+    expect(
+      isRestorable(
+        makeSession({
+          status: "errored",
+          runtimeAlive: false,
+        }),
+      ),
+    ).toBe(false);
   });
 });

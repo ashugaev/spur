@@ -22,9 +22,41 @@ interface GitWorktreeEntry {
 
 const DEFAULT_BRANCH_HINT = "main";
 
+const GIT_CONFIG_LOCK_RE = /could not lock config file .*\.git\/config/i;
+const WORKTREE_ADD_RETRY_ATTEMPTS = 5;
+const WORKTREE_ADD_RETRY_DELAY_MS = 200;
+
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout.trimEnd();
+}
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isGitConfigLockError(error: unknown): boolean {
+  return GIT_CONFIG_LOCK_RE.test(errorMessage(error));
+}
+
+async function gitWorktreeAdd(cwd: string, ...args: string[]): Promise<string> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= WORKTREE_ADD_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await git(cwd, "worktree", "add", ...args);
+    } catch (error) {
+      lastError = error;
+      if (!isGitConfigLockError(error) || attempt === WORKTREE_ADD_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await sleep(WORKTREE_ADD_RETRY_DELAY_MS * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function tryGit(cwd: string, ...args: string[]): Promise<string | undefined> {
@@ -33,10 +65,6 @@ async function tryGit(cwd: string, ...args: string[]): Promise<string | undefine
   } catch {
     return undefined;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function parseWorktreeList(output: string): GitWorktreeEntry[] {
@@ -223,7 +251,7 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
     if (input.branch !== input.defaultBranch) {
       await resolveFreshBranchRef(input.repoPath, input.branch);
     }
-    await git(input.repoPath, "worktree", "add", worktreePath, input.branch);
+    await gitWorktreeAdd(input.repoPath, worktreePath, input.branch);
   } else {
     let baseRef = defaultBranchRef;
     if (input.branch !== input.defaultBranch) {
@@ -232,7 +260,7 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
         baseRef = branchRef;
       }
     }
-    await git(input.repoPath, "worktree", "add", "-b", input.branch, worktreePath, baseRef);
+    await gitWorktreeAdd(input.repoPath, "--no-track", "-b", input.branch, worktreePath, baseRef);
   }
 
   try {

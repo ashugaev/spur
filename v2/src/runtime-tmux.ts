@@ -7,6 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { agentSendMode } from "./agents/index.js";
+import { codexShowsHookTrustPrompt } from "./codex-state.js";
 import { cursorShowsReadyPrompt, cursorShowsWorkspaceTrustPrompt } from "./cursor-state.js";
 import { shellEscape } from "./agents/shell-escape.js";
 import type { AgentName, SessionSlots } from "./types.js";
@@ -28,6 +29,8 @@ let activeTmuxSocketName: string | null = null;
 const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
+const CODEX_HOOK_TRUST_CONFIRM_DELAY_MS = 1_000;
+const CODEX_HOOK_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
 
 export function setTmuxSocketName(socketName: string | undefined): void {
@@ -335,6 +338,8 @@ export async function waitForTmuxReady(
   let lastCapture = "";
   let lastCursorTrustConfirmAt = 0;
   let cursorTrustConfirmAttempts = 0;
+  let lastCodexHookTrustConfirmAt = 0;
+  let codexHookTrustConfirmAttempts = 0;
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
     lastCapture = capture;
@@ -359,6 +364,20 @@ export async function waitForTmuxReady(
     ) {
       cursorTrustConfirmAttempts += 1;
       lastCursorTrustConfirmAt = Date.now();
+      await sendSubmitKeyToTmux(sessionName);
+      await sleep(500);
+      continue;
+    }
+    if (
+      options?.agent === "codex" &&
+      codexShowsHookTrustPrompt(capture) &&
+      codexHookTrustConfirmAttempts < CODEX_HOOK_TRUST_CONFIRM_MAX_ATTEMPTS &&
+      Date.now() - lastCodexHookTrustConfirmAt >= CODEX_HOOK_TRUST_CONFIRM_DELAY_MS
+    ) {
+      codexHookTrustConfirmAttempts += 1;
+      lastCodexHookTrustConfirmAt = Date.now();
+      const target = exactPaneTarget(sessionName);
+      await tmux("send-keys", "-t", target, "2");
       await sendSubmitKeyToTmux(sessionName);
       await sleep(500);
       continue;
