@@ -105,7 +105,7 @@ function readSidecarBaseUrl(env: NodeJS.ProcessEnv): string | null {
     const uiSidecarAlive = session.sidecars?.some(
       (sidecar) => sidecar.name === "isolated-ui" && sidecar.alive,
     );
-    const uiPort = session.sidecarPorts?.["isolated-ui"]?.SPUR_RESERVED_PORT_UI;
+    const uiPort = readIsolatedUiPort(session);
     if (!uiSidecarAlive || !uiPort) return readMetadataSidecarBaseUrl(env);
 
     return `http://127.0.0.1:${uiPort}`;
