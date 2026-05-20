@@ -492,6 +492,62 @@ test.describe("D4b: Merged-PR done button", () => {
     await expect(doneBtn).toBeVisible({ timeout: 8000 });
   });
 
+  test("done click hides the row optimistically before complete API resolves", async ({ page }) => {
+    const session = makeSessionWithPR({
+      id: "done-optimistic-1",
+      prompt: "Optimistic done row",
+      status: "running",
+      state: "needs_input",
+      slots: {
+        title: "Optimistic done row",
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/42" }],
+      },
+    });
+    await mockSessions(page, [session]);
+    await page.route(/\/api\/pr-status/, (route) => {
+      void route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "merged",
+          reviewDecision: null,
+          ciStatus: "success",
+          canMerge: false,
+          totalThreads: 0,
+          unresolvedThreads: 0,
+        }),
+      });
+    });
+
+    let releaseComplete: () => void = () => undefined;
+    let completeRequestSeen = false;
+    const completeHold = new Promise<void>((resolve) => {
+      releaseComplete = resolve;
+    });
+    await page.route(`/api/sessions/${session.id}/complete`, async (route) => {
+      completeRequestSeen = true;
+      await completeHold;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+    });
+
+    await page.goto("/");
+
+    await page.getByRole("button", { name: new RegExp(`Mark ${session.id} as done`, "i") }).click();
+
+    await expect.poll(() => completeRequestSeen).toBe(true);
+    await expect(page.getByText("Optimistic done row")).not.toBeVisible();
+    await expect(page.getByRole("button", { name: /Completed:\s*1/i })).toBeVisible();
+
+    await page.getByRole("button", { name: /Completed/i }).click();
+    await expect(page.getByText("Optimistic done row")).toBeVisible();
+
+    releaseComplete();
+  });
+
   test("merge button replaces terminal button when PR can merge", async ({ page }) => {
     const session = makeSessionWithPR({
       id: "merge-btn-1",

@@ -48,6 +48,7 @@ interface SessionRowProps {
   projectFilterId?: string;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
+  onCompleteSession: (session: DashboardSession) => Promise<void>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
@@ -55,6 +56,7 @@ export function SessionRow({
   projectFilterId,
   session,
   onOpenTerminal,
+  onCompleteSession,
   onRestoreSession,
 }: SessionRowProps) {
   const title = getSessionTitle(session);
@@ -117,12 +119,10 @@ export function SessionRow({
           disabled={completing}
           activeClass="border-[var(--color-border-default)] text-[var(--color-text-secondary)] hover:border-[var(--color-status-ready)] hover:text-[var(--color-status-ready)]"
           onClick={async () => {
+            if (completing) return;
             setCompleting(true);
             try {
-              const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/complete`, {
-                method: "POST",
-              });
-              if (!res.ok) throw new Error(`complete: ${res.status}`);
+              await onCompleteSession(session);
             } catch (err) {
               console.error("complete failed", err);
               setCompleting(false);

@@ -511,6 +511,144 @@ describe("Dashboard", () => {
     expect(screen.queryByRole("link", { name: "Ship auth" })).not.toBeInTheDocument();
   });
 
+  it("optimistically hides a completed merged-PR row before the complete request resolves", async () => {
+    const completeSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-complete-1",
+      prompt: "Complete merged PR",
+      slots: {
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/8801" }],
+      },
+    };
+    let completeRequestSeen = false;
+    let resolveComplete: () => void = () => undefined;
+    const completeRequest = new Promise<Response>((resolve) => {
+      resolveComplete = () => {
+        resolve(new Response("{}", { status: 200 }));
+      };
+    });
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [completeSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/pr-status?")) {
+        return new Response(
+          JSON.stringify({
+            state: "merged",
+            reviewDecision: null,
+            ciStatus: "success",
+            canMerge: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-complete-1/complete") {
+        expect(init?.method).toBe("POST");
+        completeRequestSeen = true;
+        return completeRequest;
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    const doneButton = await screen.findByRole("button", { name: "Mark api-complete-1 as done" });
+    fireEvent.click(doneButton);
+
+    await waitFor(() => {
+      expect(completeRequestSeen).toBe(true);
+      expect(screen.queryByRole("link", { name: "Complete merged PR" })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Completed:\s*1/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Completed/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "Complete merged PR" })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      resolveComplete();
+      await completeRequest;
+    });
+  });
+
+  it("rolls back optimistic complete failures and re-enables the done button", async () => {
+    const completeSession = {
+      ...sessionsPayload().sessions[0],
+      id: "api-complete-fail-1",
+      prompt: "Complete rollback",
+      slots: {
+        links: [{ label: "github-pr", url: "https://github.com/test/repo/pull/8802" }],
+      },
+    };
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/runtime/resources")
+        return new Response(JSON.stringify({ available: false }));
+      if (url === "/api/runtime/voice") {
+        return new Response(JSON.stringify({ available: false, modelPath: "", language: "" }));
+      }
+      if (url === "/api/sessions") {
+        return new Response(
+          JSON.stringify({
+            projects: [{ id: "api", name: "API" }],
+            sessions: [completeSession],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.startsWith("/api/pr-status?")) {
+        return new Response(
+          JSON.stringify({
+            state: "merged",
+            reviewDecision: null,
+            ciStatus: "success",
+            canMerge: false,
+            totalThreads: 0,
+            unresolvedThreads: 0,
+          }),
+          { status: 200 },
+        );
+      }
+      if (url === "/api/sessions/api-complete-fail-1/complete") {
+        expect(init?.method).toBe("POST");
+        return new Response("Complete failed", { status: 502 });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+
+    render(<Dashboard />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Mark api-complete-fail-1 as done" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Complete failed")).toBeInTheDocument();
+      expect(screen.getByRole("link", { name: "Complete rollback" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Mark api-complete-fail-1 as done" }),
+      ).not.toBeDisabled();
+    });
+  });
+
   it("shows stopped sessions in a dedicated Stopped category", async () => {
     vi.spyOn(global, "fetch").mockImplementation(async (input) => {
       const url = typeof input === "string" ? input : input.url;
