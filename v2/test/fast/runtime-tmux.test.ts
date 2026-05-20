@@ -63,55 +63,71 @@ describe("runtime-tmux", () => {
     expect(sleepMock).toHaveBeenCalledWith(300);
   });
 
-  it("registers status-right link click handling when syncing tmux status", async () => {
+  it("hides the tmux status bar when no slot title exists", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "ok", stderr: "" });
 
     const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
 
-    await syncTmuxStatus("api-1", {
-      links: [{ label: "pr", url: "https://github.com/org/repo/pull/42" }],
-    });
+    await syncTmuxStatus("api-1", undefined);
 
-    const bindCall = execFileAsyncMock.mock.calls.find(
-      (call) => call[1]?.[0] === "bind-key" && call[1]?.[2] === "MouseUp1StatusRight",
+    const statusLeftCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
     );
-    expect(bindCall?.[0]).toBe("tmux");
-    expect(bindCall?.[1]?.slice(0, 6)).toEqual([
-      "bind-key",
-      "-n",
-      "MouseUp1StatusRight",
-      "if-shell",
-      "-F",
-      "#{mouse_hyperlink}",
+    expect(statusLeftCall?.[1]?.at(-1)).toBe("");
+
+    const statusCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status"),
+    );
+    expect(statusCall?.[1]?.at(-1)).toBe("off");
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
     ]);
-    expect(bindCall?.[1]?.[6]).toContain("run-shell -b");
-    expect(bindCall?.[1]?.[6]).toContain(process.execPath);
-    expect(bindCall?.[1]?.[6]).toContain("open-link.js");
-    expect(bindCall?.[1]?.[6]).toContain("q:mouse_hyperlink");
   });
 
-  it("renders compact link ids in tmux status", async () => {
+  it("renders only the slot title in tmux status", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { syncTmuxStatus } = await import("../../src/runtime-tmux.js");
 
     await syncTmuxStatus("api-1", {
+      title: "Investigate session display cleanup",
       links: [
         { label: "pr", url: "https://github.com/acme/api/pull/42" },
         { label: "tracker", url: "https://tracker.example.com/browse/API-7" },
       ],
     });
 
-    const statusRightCall = execFileAsyncMock.mock.calls.find(
-      ([, args]) => args[0] === "set-option" && args.includes("status-right"),
+    const statusLeftCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status-left"),
     );
-    if (!statusRightCall) {
-      throw new Error("Expected syncTmuxStatus to set status-right");
+    if (!statusLeftCall) {
+      throw new Error("Expected syncTmuxStatus to set status-left");
     }
-    const [, args] = statusRightCall;
-    const rendered = args.at(-1);
-    expect(rendered).toContain("]pr ##42#[");
-    expect(rendered).toContain("tracker API-7");
+    const [, leftArgs] = statusLeftCall;
+    expect(leftArgs.at(-1)).toContain("Investigate session display cleanup");
+    expect(leftArgs.at(-1)).not.toContain("api-1");
+
+    const statusCall = execFileAsyncMock.mock.calls.find(
+      ([, args]) => args[0] === "set-option" && args.includes("status"),
+    );
+    if (!statusCall) {
+      throw new Error("Expected syncTmuxStatus to set status");
+    }
+    const [, args] = statusCall;
+    expect(args.at(-1)).toBe("on");
+    const statusRightCall = execFileAsyncMock.mock.calls.find(
+      ([, setArgs]) => setArgs[0] === "set-option" && setArgs.includes("status-right"),
+    );
+    expect(statusRightCall?.[1]?.at(-1)).toBe("");
+    expect(execFileAsyncMock.mock.calls).toContainEqual([
+      "tmux",
+      ["unbind-key", "-n", "MouseUp1StatusRight"],
+    ]);
   });
 
   it("keeps the default submit delay for non-codex sends", async () => {
@@ -123,25 +139,96 @@ describe("runtime-tmux", () => {
 
     expect(sleepMock).toHaveBeenCalledWith(300);
     expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
       "C-u",
       "follow up",
       "Enter",
     ]);
   });
 
-  it("uses atomic newline paste for codex sends without a separate Enter", async () => {
+  it("uses the default send path for cursor sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "cursor" });
+
+    expect(sleepMock).toHaveBeenCalledWith(300);
+    expect(execFileAsyncMock.mock.calls.map(([, args]) => args.slice(-1)[0])).toEqual([
+      "cancel",
+      "C-u",
+      "follow up",
+      "Enter",
+    ]);
+  });
+
+  it("exits copy-mode before issuing edit keys for codex bracketed-paste sends", async () => {
     execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
 
     const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
 
     await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
 
-    const commandCalls = execFileAsyncMock.mock.calls.map(([, args]) => args[0]);
-    expect(commandCalls).toContain("load-buffer");
-    expect(commandCalls).toContain("paste-buffer");
-    expect(commandCalls).toContain("delete-buffer");
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    const cancelIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "send-keys" && args.includes("-X") && args.includes("cancel"),
+    );
+    const cuIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("C-u"));
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
+    expect(cancelIndex).toBeGreaterThanOrEqual(0);
+    expect(cuIndex).toBeGreaterThan(cancelIndex);
+    expect(pasteIndex).toBeGreaterThan(cuIndex);
+  });
+
+  it("swallows tmux cancel failure and continues the send path", async () => {
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "send-keys" && args.includes("-X") && args.includes("cancel")) {
+        throw new Error("cancel not available");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up");
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
+  });
+
+  it("uses bracketed paste plus a real Enter for codex sends", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "follow up", { agent: "codex" });
+
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(pasteCall?.[1]).toContain("-d");
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
+    const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
     expect(sleepMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps multiline codex payloads inside bracketed paste before submit", async () => {
+    execFileAsyncMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const { sendMessageToTmux } = await import("../../src/runtime-tmux.js");
+
+    await sendMessageToTmux("api-1", "line one\nline two", { agent: "codex" });
+
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("-l"))).toBe(false);
+    const pasteIndex = execFileAsyncMock.mock.calls.findIndex(
+      ([, args]) => args[0] === "paste-buffer",
+    );
+    const enterIndex = execFileAsyncMock.mock.calls.findIndex(([, args]) => args.includes("Enter"));
+    expect(pasteIndex).toBeGreaterThan(-1);
+    expect(enterIndex).toBeGreaterThan(pasteIndex);
   });
 
   it("keeps interrupt behavior before codex atomic send", async () => {
@@ -153,7 +240,37 @@ describe("runtime-tmux", () => {
 
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-c"))).toBe(true);
     expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("C-u"))).toBe(true);
-    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(false);
+    const pasteCall = execFileAsyncMock.mock.calls.find(([, args]) => args[0] === "paste-buffer");
+    expect(pasteCall?.[1]).toContain("-p");
+    expect(execFileAsyncMock.mock.calls.some(([, args]) => args.includes("Enter"))).toBe(true);
     expect(sleepMock).toHaveBeenCalledWith(500);
+  });
+
+  it("auto-confirms the Cursor workspace trust prompt before reporting ready", async () => {
+    let captureCount = 0;
+    execFileAsyncMock.mockImplementation(async (_file, args) => {
+      if (args[0] === "capture-pane") {
+        captureCount += 1;
+        return {
+          stdout:
+            captureCount === 1
+              ? "Cursor Agent can execute code and access files.\nWorkspace Trust Required\nDo you trust the contents of this directory?"
+              : "Cursor Agent\nComposer 2 Fast",
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const { waitForTmuxReady } = await import("../../src/runtime-tmux.js");
+
+    await waitForTmuxReady("api-1", ["Cursor Agent", "Composer"], 5_000, { agent: "cursor" });
+
+    expect(
+      execFileAsyncMock.mock.calls.some(
+        ([, args]) => args[0] === "send-keys" && args.includes("Enter"),
+      ),
+    ).toBe(true);
+    expect(sleepMock).toHaveBeenCalledWith(1_000);
   });
 });

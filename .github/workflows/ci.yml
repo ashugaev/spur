@@ -16,11 +16,11 @@ jobs:
     name: Quality
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - run: pnpm install --frozen-lockfile
@@ -30,15 +30,41 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+  playwright:
+    name: Playwright E2E
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+        with:
+          dest: ${{ runner.temp }}/pnpm-setup
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir packages/web exec playwright install chromium
+      - run: pnpm --dir packages/web build
+      - name: Select Playwright port
+        run: |
+          PORT="$(node -e 'const net = require("node:net"); const server = net.createServer(); server.listen(0, "127.0.0.1", () => { const address = server.address(); if (!address || typeof address === "string") process.exit(1); console.log(address.port); server.close(); });')"
+          echo "PLAYWRIGHT_PORT=$PORT" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BASE_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+      - name: Start Next.js
+        run: pnpm --dir packages/web exec next start -p "$PLAYWRIGHT_PORT" &
+      - name: Wait for server
+        run: npx wait-on "$PLAYWRIGHT_BASE_URL" --timeout 30000
+      - run: pnpm --dir packages/web exec playwright test
+
   runtime-integration:
     name: Runtime Integration
     runs-on: self-hosted
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           dest: ${{ runner.temp }}/pnpm-setup
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
       - name: Start tmux server

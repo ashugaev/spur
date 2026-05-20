@@ -1,16 +1,34 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  type ClipboardEvent as ReactClipboardEvent,
+} from "react";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
 import { VoiceButton, VoiceConfirmModal } from "@/components/VoiceInput";
 import "xterm/css/xterm.css";
 import type { FitAddon as FitAddonType } from "@xterm/addon-fit";
-import type { ITheme, Terminal as TerminalType } from "xterm";
+import type { Terminal as TerminalType } from "xterm";
+import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
-import { getAgentHotkeys, type AgentName } from "@/lib/agent-hotkeys";
+import { getAgentHotkeys } from "@/lib/agent-hotkeys";
+import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import {
+  encodeImageAttachments,
+  imageFilesFromDataTransfer,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 
 interface DirectTerminalProps {
   sessionId: string;
+  apiSessionId?: string;
+  agentInputEnabled?: boolean;
   agent?: AgentName;
   label?: string;
   title?: string;
@@ -23,46 +41,75 @@ interface TerminalLocation {
   port: string;
 }
 
-const terminalTheme: ITheme = {
-  background: "#0a0a0f",
-  foreground: "#d4d4d8",
-  cursor: "#5b7ef8",
-  cursorAccent: "#0a0a0f",
-  selectionBackground: "rgba(91, 126, 248, 0.3)",
-  selectionInactiveBackground: "rgba(128, 128, 128, 0.2)",
-  black: "#1a1a24",
-  red: "#ef4444",
-  green: "#22c55e",
-  yellow: "#f59e0b",
-  blue: "#5b7ef8",
-  magenta: "#a371f7",
-  cyan: "#22d3ee",
-  white: "#d4d4d8",
-  brightBlack: "#50506a",
-  brightRed: "#f87171",
-  brightGreen: "#4ade80",
-  brightYellow: "#fbbf24",
-  brightBlue: "#7b9cfb",
-  brightMagenta: "#c084fc",
-  brightCyan: "#67e8f9",
-  brightWhite: "#eeeef5",
-};
+interface DirectTerminalConfig {
+  directTerminalPort?: string | number;
+}
 
 /** Pixels of touch movement that count as one scroll line. */
 const TOUCH_SCROLL_THRESHOLD = 20;
 const RECONNECT_DELAY_MS = 1_000;
-const VISIBILITY_REFRESH_AFTER_MS = 1_000;
 const INPUT_ACK_TIMEOUT_MS = 600;
 const INPUT_RETRY_DELAY_MS = 200;
 const INPUT_MAX_ATTEMPTS = 4;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+const TERMINAL_DRAFT_HISTORY_STORAGE_KEY = "spur:input-history:terminal-draft";
 
 function isRetryableClose(code: number): boolean {
   return code !== 1000 && code !== 1008 && code !== 4004;
 }
 
-export function buildDirectTerminalWsUrl(location: TerminalLocation, sessionId: string): string {
+function normalizeTerminalPort(value: string | number | undefined, fallback: string): string {
+  if (typeof value === "number") {
+    return Number.isInteger(value) && value > 0 && value <= 65535 ? String(value) : fallback;
+  }
+  const trimmed = value?.trim();
+  if (!trimmed) return fallback;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
+}
+
+function StopSquareIcon() {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4" fill="currentColor" viewBox="0 0 16 16">
+      <path d="M4 4h8v8H4z" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.5"
+      viewBox="0 0 24 24"
+    >
+      <path d="M4 20h4l10-10-4-4L4 16v4z" />
+      <path d="M14 6l4 4" />
+    </svg>
+  );
+}
+
+function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
+  if (!agentUsesBracketedPaste(agent)) {
+    return [`${text}\r`];
+  }
+  return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
+}
+
+export function buildDirectTerminalWsUrl(
+  location: TerminalLocation,
+  sessionId: string,
+  portOverride?: string | number,
+): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const portSuffix = location.port ? `:${location.port}` : "";
+  const port = normalizeTerminalPort(portOverride, location.port);
+  const portSuffix = port ? `:${port}` : "";
   return `${protocol}//${location.hostname}${portSuffix}/ws?session=${encodeURIComponent(sessionId)}`;
 }
 
@@ -93,6 +140,8 @@ interface PendingInputAck {
 
 export function DirectTerminal({
   sessionId,
+  apiSessionId,
+  agentInputEnabled = true,
   agent = "claude",
   label,
   title,
@@ -109,6 +158,9 @@ export function DirectTerminal({
   );
   const [hotkeysOpen, setHotkeysOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [voiceAttachments, setVoiceAttachments] = useState<ImageAttachment[]>([]);
+  const sessionApiId = apiSessionId ?? sessionId;
 
   const sendTerminalInput = useCallback((data: string): boolean => {
     if (websocketRef.current?.readyState !== WebSocket.OPEN) return false;
@@ -191,8 +243,98 @@ export function DirectTerminal({
     [rejectPendingAck],
   );
 
+  const voice = useVoiceInput();
+  const draftHistory = useInputHistory(TERMINAL_DRAFT_HISTORY_STORAGE_KEY);
+
+  const addVoiceImageFiles = useCallback((files: FileList | File[] | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setVoiceAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
+
+  const sendSessionMessage = useCallback(
+    async (text: string, attachments: ImageAttachment[]) => {
+      const encodedAttachments = encodeImageAttachments(attachments);
+      const message = text.trim();
+      if (!message && encodedAttachments.length === 0) return;
+
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionApiId)}/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          attachments: encodedAttachments,
+          queue: false,
+          interrupt: true,
+        }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => ({}))) as { error?: string };
+        throw new Error(payload.error ?? "Failed to send image attachment");
+      }
+      setSubmitError(null);
+    },
+    [sessionApiId],
+  );
+
+  const openAttachmentDraft = useCallback(
+    (files: File[]) => {
+      if (!agentInputEnabled) return;
+      void imageAttachmentsFromFiles(files)
+        .then((attachments) => {
+          if (attachments.length === 0) return;
+          setVoiceAttachments((current) => [...current, ...attachments]);
+          voice.openDraft(voice.voiceModalOpen ? voice.voiceDraft : "");
+        })
+        .catch(() => {});
+    },
+    [agentInputEnabled, voice],
+  );
+
+  const handleTerminalPaste = useCallback(
+    (event: ReactClipboardEvent<HTMLDivElement>) => {
+      if (!agentInputEnabled) return;
+      const files = imageFilesFromDataTransfer(event.clipboardData);
+      if (files.length === 0) return;
+      event.preventDefault();
+      openAttachmentDraft(files);
+    },
+    [agentInputEnabled, openAttachmentDraft],
+  );
+
+  useEffect(() => {
+    const target = terminalRef.current;
+    if (!target || !agentInputEnabled) return;
+    const onPaste = (event: ClipboardEvent) => {
+      if (!(event.target instanceof Node) || !target.contains(event.target)) return;
+      const dataTransfer = event.clipboardData;
+      const files = imageFilesFromDataTransfer(dataTransfer);
+      if (files.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openAttachmentDraft(files);
+    };
+    target.addEventListener("paste", onPaste, { capture: true });
+    document.addEventListener("paste", onPaste, { capture: true });
+    return () => {
+      target.removeEventListener("paste", onPaste, { capture: true });
+      document.removeEventListener("paste", onPaste, { capture: true });
+    };
+  }, [agentInputEnabled, openAttachmentDraft]);
+
   const submitVoiceDraft = useCallback(
-    (text: string) => {
+    async (text: string) => {
+      if (voiceAttachments.length > 0) {
+        await sendSessionMessage(text, voiceAttachments);
+        setVoiceAttachments([]);
+        if (text.trim()) {
+          draftHistory.saveEntry(text);
+        }
+        return;
+      }
       const socket = websocketRef.current;
       if (
         !socket ||
@@ -202,12 +344,50 @@ export function DirectTerminal({
         throw new Error("Failed to insert transcription");
       }
       setError(null);
-      return sendWithAck(`${text}\r`);
+      setSubmitError(null);
+      for (const payload of buildSubmittedTextPayloads(agent, text)) {
+        await sendWithAck(payload);
+      }
+      draftHistory.saveEntry(text);
     },
-    [sendWithAck],
+    [agent, draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
   );
 
-  const voice = useVoiceInput();
+  const sendHotkey = useCallback(
+    async (hotkey: (typeof hotkeys)[number]) => {
+      try {
+        if (hotkey.submit) {
+          setSubmitError(null);
+          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
+            await sendWithAck(payload);
+          }
+          return;
+        }
+        sendTerminalInput(hotkey.sequence);
+      } catch (hotkeyError) {
+        setSubmitError(
+          hotkeyError instanceof Error ? hotkeyError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [agent, sendTerminalInput, sendWithAck],
+  );
+
+  const submitSlash = useCallback(
+    async (text: string) => {
+      try {
+        setSubmitError(null);
+        for (const payload of buildSubmittedTextPayloads(agent, text)) {
+          await sendWithAck(payload);
+        }
+      } catch (slashError) {
+        setSubmitError(
+          slashError instanceof Error ? slashError.message : "Failed to insert transcription",
+        );
+      }
+    },
+    [agent, sendWithAck],
+  );
 
   useEffect(() => {
     const closeOnOutsideClick = (event: PointerEvent) => {
@@ -240,7 +420,6 @@ export function DirectTerminal({
     let resizeHandler: (() => void) | null = null;
     let touchCleanup: (() => void) | null = null;
     let reconnectTimer: number | null = null;
-    let hiddenAt: number | null = null;
     let websocket: WebSocket | null = null;
     let closingForUnmount = false;
 
@@ -256,7 +435,7 @@ export function DirectTerminal({
           fontSize: 12,
           fontFamily:
             'var(--font-mono), "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace',
-          theme: terminalTheme,
+          theme: TERMINAL_THEME,
           minimumContrastRatio: 1,
           scrollback: 10_000,
           allowProposedApi: true,
@@ -332,7 +511,8 @@ export function DirectTerminal({
           touchTarget.removeEventListener("touchmove", onTouchMove);
         };
 
-        const wsUrl = buildDirectTerminalWsUrl(window.location, sessionId);
+        let directTerminalPort: string | number | undefined;
+
         const sendResize = () => {
           if (!terminal || !fit || websocket?.readyState !== WebSocket.OPEN) return;
           fit.fit();
@@ -361,25 +541,31 @@ export function DirectTerminal({
           }, RECONNECT_DELAY_MS);
         };
 
-        const connect = (force = false) => {
+        const connect = async () => {
           if (!mounted || !terminal) return;
           const readyState = websocket?.readyState;
-          if (!force && (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN)) {
-            return;
-          }
+          if (readyState === WebSocket.CONNECTING || readyState === WebSocket.OPEN) return;
           clearReconnectTimer();
-          if (force && websocket && websocket.readyState < WebSocket.CLOSING) {
-            websocket.onopen = null;
-            websocket.onmessage = null;
-            websocket.onerror = null;
-            websocket.onclose = null;
-            websocket.close();
-          }
 
           setStatus((current) =>
             current === "connected" || current === "reconnecting" ? "reconnecting" : "connecting",
           );
-          const nextSocket = new WebSocket(wsUrl);
+
+          if (directTerminalPort === undefined) {
+            try {
+              const response = await fetch("/api/runtime/terminal", { cache: "no-store" });
+              if (response.ok) {
+                const payload = (await response.json()) as DirectTerminalConfig;
+                directTerminalPort = payload.directTerminalPort;
+              }
+            } catch {
+              // Fall back to the current page port when the terminal config request fails.
+            }
+          }
+
+          const nextSocket = new WebSocket(
+            buildDirectTerminalWsUrl(window.location, sessionId, directTerminalPort),
+          );
           websocket = nextSocket;
           websocketRef.current = nextSocket;
           nextSocket.binaryType = "arraybuffer";
@@ -447,18 +633,7 @@ export function DirectTerminal({
 
         const maybeRefreshConnection = () => {
           if (document.visibilityState === "hidden") return;
-          const wasHiddenLongEnough =
-            hiddenAt !== null && Date.now() - hiddenAt >= VISIBILITY_REFRESH_AFTER_MS;
-          hiddenAt = null;
-
-          if (wasHiddenLongEnough) {
-            connect(true);
-            return;
-          }
-
-          if (!websocket || websocket.readyState === WebSocket.CLOSED) {
-            connect();
-          }
+          connect();
         };
 
         inputDisposable = terminal.onData((data) => {
@@ -473,25 +648,17 @@ export function DirectTerminal({
           }
         });
 
-        const handleVisibilityChange = () => {
-          if (document.visibilityState === "hidden") {
-            hiddenAt = Date.now();
-            return;
-          }
-          maybeRefreshConnection();
-        };
-
         window.addEventListener("resize", resizeHandler);
         window.addEventListener("focus", maybeRefreshConnection);
         window.addEventListener("online", maybeRefreshConnection);
-        document.addEventListener("visibilitychange", handleVisibilityChange);
+        document.addEventListener("visibilitychange", maybeRefreshConnection);
 
         touchCleanup = () => {
           touchTarget.removeEventListener("touchstart", onTouchStart);
           touchTarget.removeEventListener("touchmove", onTouchMove);
           window.removeEventListener("focus", maybeRefreshConnection);
           window.removeEventListener("online", maybeRefreshConnection);
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
+          document.removeEventListener("visibilitychange", maybeRefreshConnection);
         };
       })
       .catch(() => {
@@ -538,63 +705,78 @@ export function DirectTerminal({
           ? (error ?? "Error")
           : "Connecting…";
   const terminalControlButtonClass =
-    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-3 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 items-center justify-center border border-[var(--color-border-strong)] px-2 font-bold uppercase text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:px-3";
   const terminalControlIconButtonClass =
-    "flex h-8 w-10 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-white/5";
+    "flex h-8 w-8 items-center justify-center border border-[var(--color-border-strong)] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] active:bg-[var(--color-hover-overlay)] sm:w-10";
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[#0a0a0f]">
-      <div className="flex items-center gap-2 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2">
-        <div className={cn("h-2 w-2 shrink-0 rounded-full", statusDotClass)} />
-        <div className="min-w-0">
-          <div className="truncate font-mono text-[10px] text-[var(--color-accent)]">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)]">
+      <div
+        className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-2 gap-y-1 border-b border-[var(--color-border-subtle)] bg-[var(--color-bg-elevated)] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
+        data-testid="direct-terminal-header"
+      >
+        <div className={cn("mt-1 h-2 w-2 shrink-0 rounded-full sm:mt-0", statusDotClass)} />
+        <div className="min-w-0 sm:flex sm:items-center sm:gap-2">
+          <div className="break-all font-mono text-[10px] leading-4 text-[var(--color-accent)] sm:shrink-0 sm:break-normal">
             {label ?? sessionId}
           </div>
           {title ? (
-            <div className="truncate text-[10px] text-[var(--color-text-secondary)]">{title}</div>
+            <div
+              className="min-w-0 overflow-hidden whitespace-normal text-[10px] leading-4 text-[var(--color-text-secondary)] [display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] [overflow-wrap:anywhere]"
+              data-testid="direct-terminal-header-title"
+              title={title}
+            >
+              {title}
+            </div>
           ) : null}
         </div>
-        <div className="ml-auto text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
-          {statusText}
-        </div>
-        {onClose ? (
-          <button
-            aria-label="Close terminal"
-            className="ml-2 inline-flex h-7 w-7 items-center justify-center rounded-sm text-[var(--color-text-secondary)] transition hover:bg-white/5 hover:text-[var(--color-text-primary)]"
-            onClick={onClose}
-            type="button"
-          >
-            <svg
-              aria-hidden="true"
-              className="h-4 w-4"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              viewBox="0 0 24 24"
+        <div className="col-start-2 row-start-2 flex shrink-0 items-center justify-self-end gap-2 sm:col-start-3 sm:row-start-1 sm:pl-2">
+          <div className="text-right text-[10px] font-medium uppercase tracking-[0.06em] text-[var(--color-text-tertiary)]">
+            {statusText}
+          </div>
+          {onClose ? (
+            <button
+              aria-label="Close terminal"
+              className="inline-flex h-7 w-7 items-center justify-center text-[var(--color-text-secondary)] transition hover:bg-[var(--color-hover-overlay)] hover:text-[var(--color-text-primary)]"
+              onClick={onClose}
+              type="button"
             >
-              <path d="M6 6l12 12M18 6L6 18" />
-            </svg>
-          </button>
-        ) : null}
+              <svg
+                aria-hidden="true"
+                className="h-4 w-4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          ) : null}
+        </div>
       </div>
 
-      <div className="min-h-0 flex-1 p-1.5">
+      <div
+        className="min-h-0 flex-1 p-1.5"
+        data-testid="direct-terminal-surface"
+        onPasteCapture={handleTerminalPaste}
+      >
         <div ref={terminalRef} className="h-full min-h-0" />
       </div>
-      {voice.voiceError ? (
-        <div className="border-t border-red-500/30 bg-red-500/[0.08] px-3 py-2 text-red-100">
-          {voice.voiceError}
+      {(voice.voiceError ?? submitError) ? (
+        <div className="border-t border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2 text-[var(--color-chip-error-text)]">
+          {voice.voiceError ?? submitError}
         </div>
       ) : null}
 
       <div className="shrink-0 border-t border-[var(--color-border-default)] bg-[var(--color-bg-base)] px-2 py-1.5">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
           <div className="relative" ref={hotkeyMenuRef}>
             <button
               aria-expanded={hotkeysOpen}
               aria-haspopup="menu"
               aria-label={`Open ${agent} shortcuts`}
-              className={cn(terminalControlButtonClass, "w-10 px-0 text-sm")}
+              className={cn(terminalControlButtonClass, "w-8 px-0 text-sm sm:w-10")}
               onClick={() => setHotkeysOpen((current) => !current)}
               type="button"
             >
@@ -603,18 +785,18 @@ export function DirectTerminal({
             {hotkeysOpen ? (
               <div
                 aria-label={`${agent} shortcuts`}
-                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_rgba(0,0,0,0.3)]"
+                className="absolute bottom-9 left-0 z-20 flex max-h-72 min-w-[18rem] flex-col overflow-y-auto border border-[var(--color-border-strong)] bg-[var(--color-bg-base)] p-1 shadow-[0_8px_30px_var(--color-shadow-menu)]"
                 role="menu"
               >
                 <div className="border-b border-[var(--color-border-subtle)] px-2 py-1.5 text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  {agent === "claude" ? "Claude Code" : "Codex CLI"}
+                  {getAgentDisplayName(agent)}
                 </div>
                 {hotkeys.map((hotkey) => (
                   <button
-                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-white/5"
+                    className="grid w-full grid-cols-[1fr_auto] gap-x-3 border-b border-[var(--color-border-subtle)] px-2 py-2 text-left transition last:border-b-0 hover:bg-[var(--color-hover-overlay)]"
                     key={hotkey.id}
                     onClick={() => {
-                      sendTerminalInput(hotkey.sequence);
+                      void sendHotkey(hotkey);
                       setHotkeysOpen(false);
                     }}
                     role="menuitem"
@@ -638,6 +820,15 @@ export function DirectTerminal({
               </div>
             ) : null}
           </div>
+          <SlashSuggestions
+            buttonClassName={cn(terminalControlButtonClass, "text-[10px] tracking-[0.1em]")}
+            endpoint={
+              agentInputEnabled
+                ? `/api/sessions/${encodeURIComponent(sessionApiId)}/slash-commands`
+                : null
+            }
+            onSelect={(entry) => void submitSlash(entry.insertText)}
+          />
           <button
             className={cn(terminalControlButtonClass, "font-mono text-[10px] tracking-[0.1em]")}
             onClick={() => sendTerminalInput("\r")}
@@ -711,10 +902,49 @@ export function DirectTerminal({
               </svg>
             </button>
           </div>
-          <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          {voice.recording ? (
+            <div className="ml-2 flex items-center gap-1">
+              <button
+                aria-label="Edit voice transcript"
+                className={cn(
+                  terminalControlIconButtonClass,
+                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                )}
+                onClick={voice.toggleRecording}
+                type="button"
+              >
+                <PencilIcon />
+              </button>
+              <button
+                aria-label="Stop and send voice"
+                className={cn(
+                  terminalControlIconButtonClass,
+                  "border-[var(--color-status-error)] bg-[var(--color-status-error)]/12 text-[var(--color-status-error)]",
+                )}
+                onClick={() => voice.stopAndSend(submitVoiceDraft)}
+                type="button"
+              >
+                <StopSquareIcon />
+              </button>
+            </div>
+          ) : (
+            <VoiceButton voice={voice} className={cn(terminalControlIconButtonClass, "ml-2")} />
+          )}
         </div>
       </div>
-      <VoiceConfirmModal voice={voice} onInsert={submitVoiceDraft} />
+      <VoiceConfirmModal
+        attachments={voiceAttachments}
+        historyEntries={draftHistory.entries}
+        onAddFiles={agentInputEnabled ? addVoiceImageFiles : undefined}
+        onDismiss={() => setVoiceAttachments([])}
+        onInsert={submitVoiceDraft}
+        onRemoveAttachment={(index) =>
+          setVoiceAttachments((current) =>
+            current.filter((_, currentIndex) => currentIndex !== index),
+          )
+        }
+        voice={voice}
+      />
     </div>
   );
 }

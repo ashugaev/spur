@@ -1,11 +1,8 @@
-version: "3.8"
-
 services:
   onboarding-test:
     build:
       context: ../..
       dockerfile: tests/integration/Dockerfile
-    container_name: spur-onboarding-test
     command: /workspace/spur/tests/integration/onboarding-test.sh
     environment:
       - NODE_ENV=test

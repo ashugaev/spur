@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockVoiceState = {
@@ -8,8 +8,14 @@ const mockVoiceState = {
   voiceModalOpen: true,
   voiceDraft: "git status",
   setVoiceDraft: vi.fn(),
+  openDraft: vi.fn((value = "") => {
+    mockVoiceState.voiceDraft = value;
+    mockVoiceState.voiceModalOpen = true;
+  }),
   toggleRecording: vi.fn(),
-  confirmDraft: vi.fn((onInsert: (text: string) => void) => {
+  stopAndSend: vi.fn(),
+  confirmDraft: vi.fn((onInsert: (text: string) => void, options?: { allowEmpty?: boolean }) => {
+    if (!mockVoiceState.voiceDraft.trim() && !options?.allowEmpty) return;
     onInsert(mockVoiceState.voiceDraft);
   }),
   dismissModal: vi.fn(),
@@ -51,16 +57,29 @@ vi.mock("@/hooks/useVoiceInput", () => ({
 vi.mock("@/components/VoiceInput", () => ({
   VoiceButton: () => <button type="button">Voice</button>,
   VoiceConfirmModal: ({
+    attachments = [],
+    onAddFiles,
     onInsert,
     voice,
   }: {
+    attachments?: Array<{ file: File; preview: string }>;
+    onAddFiles?: (files: FileList | File[] | null) => void;
     onInsert: (text: string) => void;
     voice: typeof mockVoiceState;
   }) =>
     voice.voiceModalOpen ? (
-      <button onClick={() => voice.confirmDraft(onInsert)} type="button">
-        Confirm voice input
-      </button>
+      <div role="dialog" aria-label="Confirm voice input">
+        {onAddFiles ? <button type="button">Add image</button> : null}
+        {attachments.map((attachment) => (
+          <img alt={attachment.file.name} key={attachment.file.name} src={attachment.preview} />
+        ))}
+        <button
+          onClick={() => voice.confirmDraft(onInsert, { allowEmpty: attachments.length > 0 })}
+          type="button"
+        >
+          Confirm voice input
+        </button>
+      </div>
     ) : null,
 }));
 
@@ -104,18 +123,36 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function sentInputPayloads(): string[] {
+  return wsSend.mock.calls
+    .map(([payload]) => payload)
+    .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
+    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
+    .filter(
+      (payload): payload is { type: "input"; data: string } =>
+        payload.type === "input" && typeof payload.data === "string",
+    )
+    .map((payload) => payload.data);
+}
+
 describe("DirectTerminal voice confirm", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     wsSend.mockClear();
     mockVoiceState.confirmDraft.mockClear();
+    mockVoiceState.openDraft.mockClear();
+    mockVoiceState.toggleRecording.mockClear();
+    mockVoiceState.stopAndSend.mockClear();
+    mockVoiceState.recording = false;
+    mockVoiceState.voiceModalOpen = true;
     MockWebSocket.mockClear();
   });
 
-  it("submits confirmed voice input with enter", async () => {
+  it("submits confirmed voice input as bracketed paste plus enter for claude", async () => {
     const { DirectTerminal } = await import("@/components/DirectTerminal");
 
     await act(async () => {
-      render(<DirectTerminal sessionId="voice-session" />);
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
     });
 
     await waitFor(() => {
@@ -126,8 +163,255 @@ describe("DirectTerminal voice confirm", () => {
 
     expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
     await waitFor(() => {
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"type":"input"'));
-      expect(wsSend).toHaveBeenCalledWith(expect.stringContaining('"data":"git status\\r"'));
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
     });
+  });
+
+  it("submits confirmed voice input as bracketed paste plus enter for codex", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="codex" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
+    });
+  });
+
+  it("renders pencil and stop buttons while recording with stop on the right", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    const pencil = screen.getByRole("button", { name: "Edit voice transcript" });
+    const stop = screen.getByRole("button", { name: "Stop and send voice" });
+    expect(pencil).toBeInTheDocument();
+    expect(stop).toBeInTheDocument();
+    // Source order = visual order with flex-row.
+    expect(pencil.compareDocumentPosition(stop) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("stop click invokes stopAndSend", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop and send voice" }));
+    expect(mockVoiceState.stopAndSend).toHaveBeenCalledOnce();
+    expect(typeof mockVoiceState.stopAndSend.mock.calls[0]?.[0]).toBe("function");
+  });
+
+  it("pencil click invokes toggleRecording (opens edit flow)", async () => {
+    mockVoiceState.recording = true;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit voice transcript" }));
+    expect(mockVoiceState.toggleRecording).toHaveBeenCalledOnce();
+  });
+
+  it("renders single mic VoiceButton when not recording", async () => {
+    mockVoiceState.recording = false;
+    mockVoiceState.voiceModalOpen = false;
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    expect(screen.queryByRole("button", { name: "Edit voice transcript" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Stop and send voice" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Voice" })).toBeInTheDocument();
+  });
+
+  it("stores confirmed terminal voice input in history", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="claude" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem("spur:input-history:terminal-draft")).toContain(
+        "git status",
+      );
+    });
+  });
+
+  it("opens image paste in the terminal confirm modal and sends attachments through the session API", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      if (url === "/api/sessions/canonical-session/send") {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockVoiceState.voiceModalOpen = false;
+    mockVoiceState.voiceDraft = "";
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal apiSessionId="canonical-session" sessionId="tmux-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    const file = new File(["PNG"], "terminal.png", { type: "image/png" });
+    fireEvent.paste(screen.getByTestId("direct-terminal-surface"), {
+      clipboardData: {
+        files: [] as unknown as FileList,
+        items: [
+          {
+            getAsFile: () => file,
+            kind: "file",
+            type: "image/png",
+          },
+        ],
+      },
+    });
+
+    await waitFor(() => {
+      expect(mockVoiceState.openDraft).toHaveBeenCalledWith("");
+      expect(screen.getByRole("img", { name: "terminal.png" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/sessions/canonical-session/send",
+        expect.objectContaining({
+          body: expect.stringContaining("terminal.png"),
+          method: "POST",
+        }),
+      );
+    });
+    expect(sentInputPayloads()).toEqual([]);
+  });
+
+  it("leaves text-only terminal paste for xterm", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockVoiceState.voiceModalOpen = false;
+    mockVoiceState.voiceDraft = "";
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal apiSessionId="canonical-session" sessionId="tmux-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    const surface = screen.getByTestId("direct-terminal-surface");
+    const pasteEvent = createEvent.paste(surface, {
+      clipboardData: {
+        files: [] as unknown as FileList,
+        items: [{ getAsFile: () => null, kind: "string", type: "text/plain" }],
+      },
+    });
+    const preventDefault = vi.spyOn(pasteEvent, "preventDefault");
+
+    fireEvent(surface, pasteEvent);
+
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(mockVoiceState.openDraft).not.toHaveBeenCalled();
+  });
+
+  it("does not route sidecar terminal image paste to the session API", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/runtime/terminal") {
+        return new Response(JSON.stringify({ directTerminalPort: 14801 }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockVoiceState.voiceModalOpen = false;
+    mockVoiceState.voiceDraft = "";
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(
+        <DirectTerminal
+          agentInputEnabled={false}
+          apiSessionId="canonical-session"
+          sessionId="sidecar-session"
+        />,
+      );
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.paste(screen.getByTestId("direct-terminal-surface"), {
+      clipboardData: {
+        files: [new File(["PNG"], "sidecar.png", { type: "image/png" })] as unknown as FileList,
+      },
+    });
+
+    expect(mockVoiceState.openDraft).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/api/sessions/canonical-session/send",
+      expect.anything(),
+    );
   });
 });

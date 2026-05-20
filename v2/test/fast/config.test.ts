@@ -1,13 +1,22 @@
-import { realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadConfig, loadProjectConfig, resolveConfigPath } from "../../src/config.js";
+import {
+  buildSidecarLinkUrl,
+  createProjectConfigScaffold,
+  loadConfig,
+  loadProjectConfig,
+  resolveConfigPath,
+  writeProjectConfigScaffold,
+} from "../../src/config.js";
 import { DEFAULT_PROJECT_PREFLIGHT_PROMPT } from "../../src/preflight-contract.js";
 import { createTempDir } from "../helpers/common.js";
 
 const tempDirs: string[] = [];
 const initialCwd = process.cwd();
 const initialSpurConfig = process.env["SPUR_CONFIG"];
+const WORKTREE_PATH_SHELL_TOKEN = "$" + "{worktreePathShell}";
+const WORKTREE_PATH_URL_TOKEN = "$" + "{worktreePathUrl}";
 
 async function writeConfig(content: string): Promise<string> {
   return writeNamedConfig("spur.yaml", content);
@@ -17,9 +26,14 @@ async function writeNamedConfig(name: string, content: string): Promise<string> 
   const dir = await createTempDir("spur-fast-config-");
   tempDirs.push(dir);
   const repoPath = join(dir, "repo");
+  await mkdir(repoPath, { recursive: true });
   const configPath = join(dir, name);
   await writeFile(configPath, content.replaceAll("$REPO_PATH", repoPath), "utf8");
   return configPath;
+}
+
+async function writeProjectEnv(configPath: string, content: string): Promise<void> {
+  await writeFile(join(configPath, "..", "repo", ".env"), content, "utf8");
 }
 
 afterEach(async () => {
@@ -74,6 +88,21 @@ projects:
         interrupt: false,
       },
     });
+  });
+
+  it("accepts cursor as an instance and project default agent", async () => {
+    const configPath = await writeConfig(`
+defaultAgent: cursor
+projects:
+  backend:
+    path: $REPO_PATH
+    defaultAgent: cursor
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.defaultAgent).toBe("cursor");
+    expect(config.projects["backend"]?.defaultAgent).toBe("cursor");
   });
 
   it("parses explicit project worktree defaults and spawn overrides", async () => {
@@ -172,6 +201,37 @@ projects:
     });
   });
 
+  it("accepts gitlab source defaults and gitlab trigger events", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      mr-watch:
+        type: gitlab
+    triggers:
+      notify:
+        source: mr-watch
+        event: gitlab:comment
+        send: {}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sources["mr-watch"]).toEqual({
+      type: "gitlab",
+      intervalMs: 60_000,
+      runOnStart: false,
+    });
+    expect(config.projects["backend"]?.triggers["notify"]).toEqual({
+      source: "mr-watch",
+      event: "gitlab:comment",
+      send: {
+        interrupt: false,
+      },
+    });
+  });
+
   it("parses service sources with rule defaults and matching trigger events", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -252,6 +312,43 @@ projects:
     expect(config.projects["backend"]?.spawn).toEqual({
       steps: ["research", "test"],
     });
+  });
+
+  it("parses project codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - 'model_reasoning_effort="high"'
+      - --enable
+      - fast_mode
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.codexArgs).toEqual([
+      "-c",
+      'model_reasoning_effort="high"',
+      "--enable",
+      "fast_mode",
+    ]);
+  });
+
+  it("rejects non-string project codex args", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    codexArgs:
+      - -c
+      - true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.codexArgs[1] must be a non-empty string",
+    );
   });
 
   it("parses a custom voice model path from the instance config", async () => {
@@ -373,6 +470,156 @@ projects:
     expect(config.projects["backend"]?.preflight).toEqual({
       prompt: DEFAULT_PROJECT_PREFLIGHT_PROMPT,
     });
+  });
+
+  it("parses github source query and accepts github:work_item.new triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open label:spur"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.sources["pr-watch"]).toEqual({
+      type: "github",
+      intervalMs: 60_000,
+      runOnStart: false,
+      query: "is:pr is:open label:spur",
+    });
+    expect(config.projects["backend"]?.triggers["pick-up"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        prompt: "Take this work item.",
+        autoComplete: true,
+      },
+    });
+  });
+
+  it("rejects autoComplete on non-work-item spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      morning:
+        type: cron
+        schedule: "* * * * *"
+    triggers:
+      kickoff:
+        source: morning
+        event: cron:tick
+        spawn:
+          prompt: "Take this work item."
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.kickoff.spawn.autoComplete is only supported for github:work_item.new",
+    );
+  });
+
+  it("rejects autoComplete on send triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      reply:
+        source: pr-watch
+        event: github:comment
+        send:
+          autoComplete: true
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.reply.send.autoComplete is only supported on spawn triggers",
+    );
+  });
+
+  it("rejects legacy autoClose on spawn triggers", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+          autoClose: complete
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.pick-up.spawn.autoClose is not supported; use autoComplete: true",
+    );
+  });
+
+  it("rejects github:work_item.new triggers when the source has no query", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+    triggers:
+      pick-up:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Take this work item."
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.triggers.pick-up.event uses unsupported event "github:work_item.new"',
+    );
+  });
+
+  it("rejects multiple work-item triggers on the same github source", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      one:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "first"
+      two:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "second"
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend: source "pr-watch" has 2 triggers subscribed to "github:work_item.new"; at most one is allowed',
+    );
   });
 
   it("rejects removed GitHub event names during config validation", async () => {
@@ -509,6 +756,293 @@ projects:
     });
   });
 
+  it("resolves env placeholders in sidecar env and port url", async () => {
+    process.env["SPUR_PUBLIC_HOST_TEST"] = "host.example.com";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_HOST: \${SPUR_PUBLIC_HOST_TEST}
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://\${SPUR_PUBLIC_HOST_TEST}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.sidecars).toEqual({
+        dev: {
+          command: "pnpm dev",
+          autoStart: false,
+          env: { PUBLIC_HOST: "host.example.com" },
+          ports: {
+            http: {
+              env: "SPUR_RESERVED_PORT_DEV",
+              start: 3000,
+              end: 3099,
+              url: "http://host.example.com",
+            },
+          },
+        },
+      });
+    } finally {
+      delete process.env["SPUR_PUBLIC_HOST_TEST"];
+    }
+  });
+
+  it("reads bare env names for sidecar env and port url from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        env:
+          PUBLIC_URL: SPUR_SIDECAR_PUBLIC_URL
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: SPUR_SIDECAR_PUBLIC_URL
+`);
+    await writeProjectEnv(configPath, "SPUR_SIDECAR_PUBLIC_URL=http://public.example.com\n");
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars).toEqual({
+      dev: {
+        command: "pnpm dev",
+        autoStart: false,
+        env: { PUBLIC_URL: "http://public.example.com" },
+        ports: {
+          http: {
+            env: "SPUR_RESERVED_PORT_DEV",
+            start: 3000,
+            end: 3099,
+            url: "http://public.example.com",
+          },
+        },
+      },
+    });
+  });
+
+  it("parses optional workspace access block", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+100.80.107.19 \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: https://code.example.com/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+        },
+        {
+          label: "Web IDE",
+          kind: "link",
+          value: `https://code.example.com/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+        },
+      ],
+    });
+  });
+
+  it("resolves env placeholders in optional workspace access", async () => {
+    process.env["SPUR_WORKSPACE_HOST_TEST"] = "100.80.107.19";
+    process.env["SPUR_WORKSPACE_PORT_TEST"] = "9090";
+    try {
+      const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_TEST} \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_TEST}:\${SPUR_WORKSPACE_PORT_TEST}/?folder=\${worktreePathUrl}
+`);
+
+      const config = loadConfig(configPath);
+
+      expect(config.projects["backend"]?.workspaceAccess).toEqual({
+        items: [
+          {
+            label: "Cursor",
+            kind: "copy",
+            value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+          },
+          {
+            label: "Web IDE",
+            kind: "link",
+            value: `http://100.80.107.19:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+          },
+        ],
+      });
+    } finally {
+      delete process.env["SPUR_WORKSPACE_HOST_TEST"];
+      delete process.env["SPUR_WORKSPACE_PORT_TEST"];
+    }
+  });
+
+  it("reads bare env names for optional workspace access from project .env", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
+`);
+    await writeProjectEnv(
+      configPath,
+      [
+        "SPUR_SIDECAR_PUBLIC_HOST=100.80.107.19",
+        "SPUR_VSCODE_WEB_URL=http://code.example.com:9090",
+        "",
+      ].join("\n"),
+    );
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [
+        {
+          label: "Cursor",
+          kind: "copy",
+          value: `cursor --remote ssh-remote+100.80.107.19 ${WORKTREE_PATH_SHELL_TOKEN}`,
+        },
+        {
+          label: "Web IDE",
+          kind: "link",
+          value: `http://code.example.com:9090/?folder=${WORKTREE_PATH_URL_TOKEN}`,
+        },
+      ],
+    });
+  });
+
+  it("omits unresolved bare env names for optional workspace access", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: SPUR_VSCODE_WEB_URL/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("omits unresolved optional workspace access entries", async () => {
+    delete process.env["SPUR_WORKSPACE_HOST_MISSING"];
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+\${SPUR_WORKSPACE_HOST_MISSING} \${worktreePathShell}
+        - label: Web IDE
+          kind: link
+          value: http://\${SPUR_WORKSPACE_HOST_MISSING}:9090/?folder=\${worktreePathUrl}
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toBeUndefined();
+  });
+
+  it("requires workspace access items", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess: {}
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.workspaceAccess.items must be an array",
+    );
+  });
+
+  it("rejects invalid workspace access item kind", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Nope
+          kind: shell
+          value: echo hi
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'projects.backend.workspaceAccess.items[0].kind must be "copy" or "link"',
+    );
+  });
+
+  it("omits only unresolved workspace access items", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    workspaceAccess:
+      items:
+        - label: Cursor
+          kind: copy
+          value: cursor --remote ssh-remote+SPUR_SIDECAR_PUBLIC_HOST \${worktreePathShell}
+        - label: Stable docs
+          kind: link
+          value: https://example.com/docs
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.workspaceAccess).toEqual({
+      items: [{ label: "Stable docs", kind: "link", value: "https://example.com/docs" }],
+    });
+  });
+
   it("rejects invalid sidecar port ranges", async () => {
     const configPath = await writeConfig(`
 projects:
@@ -526,6 +1060,115 @@ projects:
 
     expect(() => loadConfig(configPath)).toThrow(
       "projects.backend.sidecars.dev.ports.http.end must be greater than or equal to projects.backend.sidecars.dev.ports.http.start",
+    );
+  });
+
+  it("rejects sidecar port urls with explicit ports", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: http://host.example.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
+    );
+  });
+
+  it("accepts {port} subdomain token in sidecar port url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("strips trailing slash from {port} subdomain url", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.projects["backend"]?.sidecars["dev"]?.ports?.["http"]?.url).toBe(
+      "https://{port}.local.intelas.com",
+    );
+  });
+
+  it("rejects {port} token combined with explicit port", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com:9090
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include an explicit port",
+    );
+  });
+
+  it("rejects {port} token combined with path", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sidecars:
+      dev:
+        command: "pnpm dev"
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: 3000
+            end: 3099
+            url: https://{port}.local.intelas.com/app
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.sidecars.dev.ports.http.url must not include a path",
     );
   });
 
@@ -608,6 +1251,67 @@ projects:
 
     expect(() => resolveConfigPath()).toThrow(
       `Config file not found: ${join(canonicalDir, "spur.yaml")}`,
+    );
+  });
+
+  it("renders a minimal project config scaffold for the current repo", async () => {
+    const dir = await createTempDir("spur-fast-doctor-");
+    tempDirs.push(dir);
+
+    const scaffold = createProjectConfigScaffold(join(dir, "My Repo"), "release");
+
+    expect(scaffold.configPath).toBe(join(dir, "My Repo", "spur.yaml"));
+    expect(scaffold.projectId).toBe("my-repo");
+    expect(scaffold.sessionPrefix).toBe("my-repo");
+    expect(scaffold.content).toBe(
+      [
+        "projects:",
+        "  my-repo:",
+        "    path: .",
+        "    defaultBranch: release",
+        "    sessionPrefix: my-repo",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("writes a project config scaffold that parses as a normal local config", async () => {
+    const dir = await createTempDir("spur-fast-doctor-write-");
+    tempDirs.push(dir);
+    const repoDir = join(dir, "repo");
+    await mkdir(repoDir, { recursive: true });
+    const scaffold = createProjectConfigScaffold(repoDir, "main");
+
+    writeProjectConfigScaffold(scaffold);
+
+    process.chdir(repoDir);
+    const config = loadProjectConfig();
+
+    expect(config.configPath).toBe(join(repoDir, "spur.yaml"));
+    expect(config.projects["repo"]).toMatchObject({
+      defaultBranch: "main",
+      path: repoDir,
+      sessionPrefix: "repo",
+    });
+  });
+});
+
+describe("buildSidecarLinkUrl", () => {
+  it("appends port with colon when template has no token", () => {
+    expect(buildSidecarLinkUrl("https://host.example.com", 3000)).toBe(
+      "https://host.example.com:3000",
+    );
+  });
+
+  it("substitutes {port} token in subdomain", () => {
+    expect(buildSidecarLinkUrl("https://{port}.local.intelas.com", 3045)).toBe(
+      "https://3045.local.intelas.com",
+    );
+  });
+
+  it("substitutes all {port} occurrences", () => {
+    expect(buildSidecarLinkUrl("https://{port}.example.com/p/{port}", 7)).toBe(
+      "https://7.example.com/p/7",
     );
   });
 });

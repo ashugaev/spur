@@ -49,6 +49,7 @@ describe("client.ensureServer", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -178,15 +179,15 @@ describe("client.ensureServer", () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
-  it("falls back to spawnDaemon when external restart does not appear", async () => {
+  it("falls back to spawnDaemon after a short external restart grace period", async () => {
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
     const fetchMock = vi.mocked(fetch);
     // Probe: running daemon
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(runtimeInfo()), { status: 200 }));
     // waitUntilDaemonPidChanges: daemon stopped
     fetchMock.mockRejectedValueOnce(new Error("daemon stopped"));
-    // First waitForReadyDaemon: all 160 attempts fail (no external restart)
-    for (let attempt = 0; attempt < 160; attempt += 1) {
+    // First waitForReadyDaemon: external restart grace period expires without a daemon
+    for (let attempt = 0; attempt < 20; attempt += 1) {
       fetchMock.mockRejectedValueOnce(new Error("still down"));
     }
     // Second waitForReadyDaemon (after spawnDaemon): daemon comes up
@@ -236,6 +237,17 @@ describe("client.ensureServer", () => {
       restarted: false,
     });
     expect(killSpy).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to auto-start the daemon when SPUR_DISABLE_AUTOSTART=1", async () => {
+    vi.stubEnv("SPUR_DISABLE_AUTOSTART", "1");
+    vi.mocked(fetch).mockRejectedValue(new Error("connect ECONNREFUSED"));
+
+    const { ensureServer } = await loadClientModule();
+    await expect(ensureServer("/tmp/dist/cli.js", "/tmp/spur.yaml")).rejects.toThrow(
+      /SPUR_DISABLE_AUTOSTART/,
+    );
     expect(spawnMock).not.toHaveBeenCalled();
   });
 

@@ -1,13 +1,38 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  clearGitHubMergeConflictRestoreReplay,
+  hasGitHubMergeConflictRestoreReplay,
+  requestGitHubMergeConflictRestoreReplay,
+  writeGitHubSourceSnapshot,
+  writeSession,
+} from "../../src/metadata.js";
+import type { SessionRecord } from "../../src/types.js";
+import type { GitHubCheck, GitHubPrSummary } from "../../src/event-sources/github.js";
+
+const { ghMock, readCurrentBranchMock } = vi.hoisted(() => ({
+  ghMock: vi.fn(),
+  readCurrentBranchMock: vi.fn(),
+}));
+vi.mock("../../src/gh.js", () => ({
+  gh: ghMock,
+}));
+vi.mock("../../src/workspace.js", () => ({
+  readCurrentBranch: readCurrentBranchMock,
+}));
+
+const {
   shortText,
   parseRepoFromUrl,
   normalizeReviewDecision,
   summarizeFailingCi,
   hasMergeConflict,
-  type GitHubCheck,
-  type GitHubPrSummary,
-} from "../../src/event-sources/github.js";
+  resolveBoundPrSummary,
+  resolveTrackedBranch,
+  githubSourceModule,
+} = await import("../../src/event-sources/github.js");
 
 function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
   return {
@@ -19,6 +44,28 @@ function prSummary(overrides: Partial<GitHubPrSummary> = {}): GitHubPrSummary {
     mergeable: "MERGEABLE",
     mergeStateStatus: "CLEAN",
     ...overrides,
+  };
+}
+
+function sourceSession(worktreePath: string): SessionRecord {
+  return {
+    id: "api-1",
+    project: "api",
+    agent: "claude",
+    prompt: "hello",
+    branch: "feature/test",
+    pr: {
+      number: 42,
+      repo: "acme/api",
+      url: "https://github.com/acme/api/pull/42",
+    },
+    worktree: true,
+    worktreePath,
+    tmuxSession: "api-1",
+    launchCommand: "claude",
+    status: "running",
+    createdAt: "2026-03-18T10:00:00.000Z",
+    updatedAt: "2026-03-18T10:00:00.000Z",
   };
 }
 
@@ -126,18 +173,33 @@ describe("summarizeFailingCi", () => {
   });
 
   it("recognizes all failing state values", () => {
-    const states = [
-      "FAILURE",
-      "TIMED_OUT",
-      "CANCELLED",
-      "ACTION_REQUIRED",
-      "STARTUP_FAILURE",
-      "STALE",
-    ];
+    const states = ["FAILURE", "FAILED", "TIMED_OUT", "CANCELLED", "CANCELED", "ACTION_REQUIRED"];
     for (const state of states) {
       const result = summarizeFailingCi([{ name: "check", state }]);
       expect(result).toContain("check");
     }
+  });
+
+  it("ignores skipped, neutral, and stale GitHub checks", () => {
+    const checks: GitHubCheck[] = [
+      { name: "skipped", state: "SKIPPED" },
+      { name: "neutral", state: "NEUTRAL" },
+      { name: "stale", state: "STALE" },
+    ];
+
+    expect(summarizeFailingCi(checks)).toBeNull();
+  });
+
+  it("uses conclusion values when GitHub provides them", () => {
+    const checks: GitHubCheck[] = [
+      { name: "build", state: "COMPLETED", conclusion: "failure" },
+      { name: "docs", state: "COMPLETED", conclusion: "skipped" },
+    ];
+
+    const result = summarizeFailingCi(checks);
+
+    expect(result).toContain("build");
+    expect(result).not.toContain("docs");
   });
 });
 
@@ -156,5 +218,318 @@ describe("hasMergeConflict", () => {
 
   it("returns false for null-ish fields", () => {
     expect(hasMergeConflict(prSummary({ mergeable: "", mergeStateStatus: "" }))).toBe(false);
+  });
+});
+
+describe("resolveBoundPrSummary", () => {
+  beforeEach(() => {
+    ghMock.mockReset();
+  });
+  afterEach(() => {
+    ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
+  });
+
+  it("loads the tracked PR directly from the persisted binding", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        url: "https://github.com/o/r/pull/212",
+        reviewDecision: "CHANGES_REQUESTED",
+        mergeable: "CONFLICTING",
+        mergeStateStatus: "DIRTY",
+      }),
+    );
+
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
+
+    expect(pr).toMatchObject({
+      number: 212,
+      title: "native binding",
+      url: "https://github.com/o/r/pull/212",
+      reviewDecision: "changes_requested",
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      "/wt",
+      "pr",
+      "view",
+      "212",
+      "--json",
+      "number,title,url,reviewDecision,mergeable,mergeStateStatus",
+    );
+  });
+
+  it("falls back to the stored URL when gh omits url", async () => {
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 212,
+        title: "native binding",
+        reviewDecision: "APPROVED",
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+      }),
+    );
+
+    const pr = await resolveBoundPrSummary("/wt", {
+      number: 212,
+      repo: "o/r",
+      url: "https://github.com/o/r/pull/212",
+    });
+
+    expect(pr?.url).toBe("https://github.com/o/r/pull/212");
+    expect(pr?.repo).toBe("o/r");
+  });
+
+  it("returns null when gh pr view fails", async () => {
+    ghMock.mockRejectedValueOnce(new Error("gh offline"));
+
+    await expect(
+      resolveBoundPrSummary("/wt", {
+        number: 212,
+        repo: "o/r",
+        url: "https://github.com/o/r/pull/212",
+      }),
+    ).rejects.toThrow("gh offline");
+  });
+});
+
+describe("resolveTrackedBranch", () => {
+  beforeEach(() => {
+    readCurrentBranchMock.mockReset();
+  });
+
+  it("prefers the current worktree branch over stale session metadata", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("feature/live");
+
+    await expect(resolveTrackedBranch("/wt", "stale-session-branch")).resolves.toBe("feature/live");
+    expect(readCurrentBranchMock).toHaveBeenCalledWith("/wt");
+  });
+
+  it("falls back to the persisted session branch when git reports detached HEAD", async () => {
+    readCurrentBranchMock.mockResolvedValueOnce("HEAD");
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+
+  it("falls back to the persisted session branch when the worktree lookup fails", async () => {
+    readCurrentBranchMock.mockRejectedValueOnce(new Error("missing worktree"));
+
+    await expect(resolveTrackedBranch("/wt", "feature/session")).resolves.toBe("feature/session");
+  });
+});
+
+describe("github source rearm", () => {
+  const tempDirs: string[] = [];
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    ghMock.mockReset();
+    readCurrentBranchMock.mockReset().mockResolvedValue("feature/test");
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    ghMock.mockReset();
+    readCurrentBranchMock.mockReset();
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function createRuntimeState(): Promise<{ dataDir: string; worktreePath: string }> {
+    const dataDir = await mkdtemp(join(tmpdir(), "spur-gh-source-"));
+    const worktreePath = join(dataDir, "worktree");
+    await mkdir(worktreePath, { recursive: true });
+    tempDirs.push(dataDir);
+    return { dataDir, worktreePath };
+  }
+
+  it("re-delivers active signals on rearm and clears the marker", async () => {
+    const { dataDir, worktreePath } = await createRuntimeState();
+    writeSession(dataDir, sourceSession(worktreePath));
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "CONFLICTING",
+          mergeStateStatus: "DIRTY",
+        }),
+      )
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const events: Array<{ name: string; data?: unknown }> = [];
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit(name, data) {
+        events.push({ name, data });
+      },
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        name: "github:merge_conflict",
+        data: {
+          sessionId: "api-1",
+          prNumber: 42,
+        },
+      });
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+    } finally {
+      controller.abort();
+      handle.stop();
+    }
+  });
+
+  it("keeps quiet and clears the marker when rearm finds no active signals", async () => {
+    const { dataDir, worktreePath } = await createRuntimeState();
+    writeSession(dataDir, sourceSession(worktreePath));
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        }),
+      )
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]");
+
+    const events: Array<{ name: string; data?: unknown }> = [];
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit(name, data) {
+        events.push({ name, data });
+      },
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(events).toEqual([]);
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+    } finally {
+      controller.abort();
+      handle.stop();
+    }
+  });
+
+  it("does not replay non-conflict GitHub signals during restore replay", async () => {
+    const { dataDir, worktreePath } = await createRuntimeState();
+    writeSession(dataDir, sourceSession(worktreePath));
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    ghMock
+      .mockResolvedValueOnce(
+        JSON.stringify({
+          number: 42,
+          title: "Keep branch mergeable",
+          url: "https://github.com/acme/api/pull/42",
+          reviewDecision: null,
+          mergeable: "MERGEABLE",
+          mergeStateStatus: "CLEAN",
+        }),
+      )
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce("[]")
+      .mockResolvedValueOnce(
+        JSON.stringify([
+          {
+            id: 1001,
+            body: "Please rerun the focused runtime test.",
+            user: {
+              login: "reviewer",
+            },
+          },
+        ]),
+      );
+
+    const events: Array<{ name: string; data?: unknown }> = [];
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit(name, data) {
+        events.push({ name, data });
+      },
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(events).toEqual([]);
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+    } finally {
+      controller.abort();
+      handle.stop();
+    }
+  });
+
+  it("clears stale rearm markers when the session disappears", async () => {
+    const { dataDir } = await createRuntimeState();
+    requestGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    writeGitHubSourceSnapshot(dataDir, "api", "pr-watch", "api-1", new Map());
+
+    const controller = new AbortController();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir,
+      config: {
+        type: "github",
+        intervalMs: 60_000,
+        runOnStart: false,
+      },
+      emit() {},
+      signal: controller.signal,
+      logger: {},
+    });
+
+    try {
+      expect(hasGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1")).toBe(false);
+    } finally {
+      controller.abort();
+      handle.stop();
+      clearGitHubMergeConflictRestoreReplay(dataDir, "api", "pr-watch", "api-1");
+    }
   });
 });

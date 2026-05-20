@@ -1,11 +1,12 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export interface AgentHookStateRecord {
-  state: "working" | "waiting";
+  state: "working" | "waiting" | "needs_input";
   updatedAt: string;
   hookEvent?: string;
   turnId?: string;
+  fileMtimeMs?: number;
 }
 
 function hookStateFilePath(dataDir: string, sessionId: string): string {
@@ -21,9 +22,12 @@ export function readAgentHookState(
     return null;
   }
   try {
+    const fileMtimeMs = statSync(path).mtimeMs;
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as Partial<AgentHookStateRecord>;
     if (
-      (parsed.state === "working" || parsed.state === "waiting") &&
+      (parsed.state === "working" ||
+        parsed.state === "waiting" ||
+        parsed.state === "needs_input") &&
       typeof parsed.updatedAt === "string"
     ) {
       return {
@@ -31,6 +35,7 @@ export function readAgentHookState(
         updatedAt: parsed.updatedAt,
         ...(typeof parsed.hookEvent === "string" ? { hookEvent: parsed.hookEvent } : {}),
         ...(typeof parsed.turnId === "string" ? { turnId: parsed.turnId } : {}),
+        ...(Number.isFinite(fileMtimeMs) ? { fileMtimeMs } : {}),
       };
     }
   } catch {

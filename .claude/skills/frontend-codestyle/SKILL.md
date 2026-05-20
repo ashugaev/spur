@@ -1,16 +1,9 @@
 ---
 name: frontend-codestyle
-description: "Visual codestyle and design system rules for packages/web. Use when reviewing or implementing frontend changes."
+description: Visual codestyle and design system rules for packages/web. Use when reviewing or implementing frontend changes.
 ---
 
 # Frontend Codestyle
-
-Visual style rules for the Spur web dashboard (`packages/web`).
-
-## Use when
-
-- Implementing or reviewing UI changes in `packages/web`
-- Checking visual consistency across components
 
 ## Design system
 
@@ -37,11 +30,11 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 
 ### Typography
 
-- **Font**: JetBrains Mono everywhere (monospace-first)
-- **Body size**: 12px set on `<body>`, components inherit
-- **Letter-spacing**: `0.02em` base, `0.06em`–`0.14em` for uppercase labels
-- **Uppercase**: all labels, headers, button text, stat items
-- **Tracking**: tighter on large headings (`-0.02em`), wider on small labels
+- Font: JetBrains Mono everywhere (monospace-first)
+- Body size: 12px set on `<body>`, components inherit
+- Letter-spacing: `0.02em` base, `0.06em`–`0.14em` for uppercase labels
+- Uppercase: all labels, headers, button text, stat items
+- Tracking: tighter on large headings (`-0.02em`), wider on small labels
 
 ### Spacing
 
@@ -51,18 +44,18 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 
 ### Borders and corners
 
-- **All border-radius is 0px** (set in theme). No rounded corners anywhere.
+- All border-radius is 0px (set in theme). No rounded corners anywhere.
 - Use `border-[var(--color-border-default)]` for structural borders
 - Use `border-[var(--color-border-subtle)]` for row separators
 
 ### Components
 
-- **Buttons**: square, uppercase, bold. Primary = white bg + dark text. Secondary = bordered + text color. Danger = red border + red text.
-- **Inputs/selects**: dark surface bg, default border, accent border on focus.
-- **Session rows**: flat flex rows with `data-row` class for hover. Columns hide responsively (`hidden sm:inline`, `hidden md:inline`, `hidden lg:inline`).
-- **Section headers**: colored dot + uppercase label + `border-t` divider line + count.
-- **Stats bar**: horizontal, `border-y`, SVG icon per stat, secondary label, bold primary value. Colored when non-zero.
-- **Modals**: fixed overlay `bg-black/60`, centered content box, ✕ close button.
+- Buttons: square, uppercase, bold. Primary = white bg + dark text. Secondary = bordered + text color. Danger = red border + red text.
+- Inputs/selects: dark surface bg, default border, accent border on focus.
+- Session rows: flat flex rows with `data-row` class for hover. Columns hide responsively (`hidden sm:inline`, `hidden md:inline`, `hidden lg:inline`).
+- Section headers: colored dot + uppercase label + `border-t` divider line + count.
+- Stats bar: horizontal, `border-y`, SVG icon per stat, secondary label, bold primary value. Colored when non-zero.
+- Modals: fixed overlay `bg-black/60`, centered content box, ✕ close button.
 
 ### Icons
 
@@ -92,6 +85,12 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - During transcription, the mic button shows a red spinning loader replacing the mic icon.
 - Recording state: red border + red tint on the button.
 
+### Color literals policy
+
+- Color literals (hex, `rgb`, `rgba`, `hsl`, Tailwind `*-white/N`, `*-black/N`, `*-red-*`, `*-zinc-*`, etc.) are only allowed in `packages/web/src/app/globals.css` inside `@theme { ... }` and in `packages/web/src/design/colors.ts`.
+- Components, stylesheets, and metadata files reference the palette via `var(--color-*)` (CSS/Tailwind) or by importing from `@/design/colors` (TS that cannot use CSS vars: Next.js metadata, xterm `ITheme`, palette-guard tests).
+- Adding a new color means adding a `--color-*` token in `globals.css` first, then exposing it via `@/design/colors` if TS needs it.
+
 ### Do not
 
 - Use `UNDER_SCORE` style in visible UI text — always use spaces
@@ -101,9 +100,17 @@ Visual style rules for the Spur web dashboard (`packages/web`).
 - Add gradient overlays or shadows heavier than `shadow-[0_8px_30px_rgba(0,0,0,0.3)]`
 - Show empty attention zones — filter them out
 
-### Visual verification
+### Validation
 
-- Every UI change must include a manual browser test via Playwright before completion.
-- Create a dedicated task/step for visual verification in every UI update checklist.
-- Take screenshots of each touched state (idle, active, error, loading) and review them.
-- Test on the Tailscale HTTPS URL, not just localhost, to catch secure-context issues.
+`packages/web` has two mandatory test layers; both must stay green before completion:
+
+- Vitest unit/component — `pnpm --dir packages/web test`
+- Playwright E2E — `pnpm --dir packages/web exec playwright test` on the isolated-ui sidecar
+
+Playwright E2E covers 100% of UI surfaces. Every new or changed UI surface requires matching E2E coverage in `packages/web/tests/` in the same commit; existing scenarios must stay green.
+
+- Build must pass: `pnpm --dir packages/web build`.
+- Every visible-behavior change updates `packages/web/UI_TEST_SCENARIOS.md` in the same commit.
+- Run a manual browser check via Chrome automation: dev server up, navigate to `localhost` (and the Tailscale HTTPS URL when secure-context matters), verify touched scenarios visually.
+- Use the official Playwright MCP agent (`playwright-test-generator`) for new E2E tests.
+- Capture screenshots for each touched state (idle, active, error, loading) and review them.

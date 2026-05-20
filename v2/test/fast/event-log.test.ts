@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -43,7 +43,10 @@ describe("appendEventLog", () => {
     const entries = readEventLog(dataDir);
     const ts = entries[0]?.timestamp;
     expect(ts).toBeTruthy();
-    expect(new Date(ts!).getTime()).not.toBeNaN();
+    if (!ts) {
+      throw new Error("expected timestamp to be present");
+    }
+    expect(new Date(ts).getTime()).not.toBeNaN();
   });
 
   it("preserves an explicit timestamp", () => {
@@ -109,5 +112,62 @@ describe("readSessionEventLog", () => {
     expect(entries).toHaveLength(2);
     expect(entries[0]?.event).toBe("e3");
     expect(entries[1]?.event).toBe("e4");
+  });
+
+  it("filters runtime entries by scope and name", () => {
+    const dataDir = makeTempDir();
+    appendEventLog(dataDir, {
+      event: "session.spawn.completed",
+      level: "info",
+      sessionId: "api-1",
+    });
+    appendEventLog(dataDir, {
+      event: "service.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "SERVICE_BOOT",
+      details: { serviceId: "web" },
+    });
+    appendEventLog(dataDir, {
+      event: "sidecar.output",
+      level: "info",
+      sessionId: "api-1",
+      message: "BROWSER_READY",
+      details: { sidecarName: "isolated-ui" },
+    });
+
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "runtime" })).toHaveLength(2);
+    expect(readSessionEventLog(dataDir, "api-1", { scope: "service" })).toEqual([
+      expect.objectContaining({ event: "service.output", message: "SERVICE_BOOT" }),
+    ]);
+    expect(
+      readSessionEventLog(dataDir, "api-1", { scope: "sidecar", name: "isolated-ui" }),
+    ).toEqual([expect.objectContaining({ event: "sidecar.output", message: "BROWSER_READY" })]);
+  });
+
+  it("tolerates logs larger than the single-string limit via chunked reads", () => {
+    const dataDir = makeTempDir();
+    const logFile = eventLogPath(dataDir);
+    const filler = "x".repeat(900);
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i += 1) {
+      lines.push(
+        JSON.stringify({
+          timestamp: "2026-01-01T00:00:00.000Z",
+          event: "sidecar.output",
+          level: "info",
+          sessionId: i % 2 === 0 ? "api-1" : "api-2",
+          message: `${filler}-${i}`,
+          details: { sidecarName: "isolated-ui" },
+        }),
+      );
+    }
+    writeFileSync(logFile, "");
+    appendFileSync(logFile, `${lines.join("\n")}\n`);
+
+    const entries = readSessionEventLog(dataDir, "api-1", 3);
+    expect(entries).toHaveLength(3);
+    expect(entries[0]?.message).toBe(`${filler}-4994`);
+    expect(entries[2]?.message).toBe(`${filler}-4998`);
   });
 });

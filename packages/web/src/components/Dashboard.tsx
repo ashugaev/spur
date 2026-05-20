@@ -1,14 +1,33 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AgentSelect } from "@/components/AgentSelect";
 import { AttentionZone } from "@/components/AttentionZone";
 import { StatusBar } from "@/components/StatusBar";
 import { EmptyState } from "@/components/EmptyState";
+import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
+import { InputHistoryButton } from "@/components/InputHistory";
+import { SlashSuggestions } from "@/components/SlashSuggestions";
 import { TerminalModal } from "@/components/TerminalModal";
-import { VoiceButton, VoiceStatusHint } from "@/components/VoiceInput";
+import { VoiceStatusHint, voicePlaceholder } from "@/components/VoiceInput";
+import { INPUT_CLASS } from "@/design/classes";
+import { useInputHistory } from "@/hooks/useInputHistory";
 import { MOBILE_BREAKPOINT, useMediaQuery } from "@/hooks/useMediaQuery";
 import { useVoiceInput } from "@/hooks/useVoiceInput";
+import {
+  encodeImageAttachments,
+  imageAttachmentsFromFiles,
+  type ImageAttachment,
+} from "@/lib/image-attachments";
 import { getTerminalQuerySessionId, withTerminalQuery } from "@/lib/project-routes";
+import type { AgentName } from "@/lib/agents";
+import { insertTextAtCursor } from "@/lib/textarea";
+import {
+  isPrimarySubmitHotkey,
+  isVoiceToggleHotkey,
+  PRIMARY_SUBMIT_HINT,
+} from "@/lib/submit-hotkeys";
 import {
   getAttentionLevel,
   isTerminalSession,
@@ -21,16 +40,18 @@ import {
   type SpurSessionsResponse,
 } from "@/lib/types";
 
-const POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "done"];
+const SESSIONS_POLL_INTERVAL_MS = 5_000;
+const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
 const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
+const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
+const SPAWN_PROMPT_HISTORY_STORAGE_KEY = "spur:input-history:spawn-prompt";
 
 function readCollapsedCategories(): Set<AttentionLevel> {
   if (typeof window === "undefined") return new Set();
   const raw = window.localStorage.getItem(COLLAPSED_CATEGORIES_STORAGE_KEY);
-  if (!raw) return new Set();
+  if (!raw) return new Set(DEFAULT_COLLAPSED_MOBILE_CATEGORIES);
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return new Set();
@@ -121,6 +142,36 @@ function IconBolt() {
     </svg>
   );
 }
+function IconCheck() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+function IconStop() {
+  return (
+    <svg
+      className="h-4 w-4"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="5" width="14" height="14" />
+    </svg>
+  );
+}
 
 function readLocationSearch(): string {
   if (typeof window === "undefined") return "";
@@ -142,18 +193,15 @@ function buildSpawnOverrides(
 export function Dashboard() {
   const [locationSearch, setLocationSearch] = useState(readLocationSearch);
   const isMobile = useMediaQuery(MOBILE_BREAKPOINT);
-  const [rawSessions, setRawSessions] = useState<SpurSessionView[]>([]);
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState(() => {
     const params = new URLSearchParams(readLocationSearch());
     return params.get("project")?.trim() ?? "";
   });
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [spawnProjectId, setSpawnProjectId] = useState("");
   const [spawnPrompt, setSpawnPrompt] = useState("");
-  const [spawnAgent, setSpawnAgent] = useState<"claude" | "codex">("claude");
+  const [spawnAgent, setSpawnAgent] = useState<AgentName>("claude");
   const [spawnBranch, setSpawnBranch] = useState("");
   const [spawnPlanMode, setSpawnPlanMode] = useState(false);
   const [spawnSteps, setSpawnSteps] = useState<{ id: number; value: string }[]>([]);
@@ -161,8 +209,12 @@ export function Dashboard() {
     "default",
   );
   const [spawnDefaultBranch, setSpawnDefaultBranch] = useState("");
+  const [spawnAttachments, setSpawnAttachments] = useState<ImageAttachment[]>([]);
   const [spawning, setSpawning] = useState(false);
+  const spawningRef = useRef(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
+  const spawnPromptRef = useRef<HTMLTextAreaElement>(null);
+  const spawnHistory = useInputHistory(SPAWN_PROMPT_HISTORY_STORAGE_KEY);
   const voice = useVoiceInput({
     onTranscribed: (text) =>
       setSpawnPrompt((current) => (current.trim() ? `${current}\n${text}` : text)),
@@ -200,50 +252,30 @@ export function Dashboard() {
     [locationSearch],
   );
 
-  const fetchSessions = useCallback(async (selectedProject: string, silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-
-    try {
-      const query = selectedProject ? `?project=${encodeURIComponent(selectedProject)}` : "";
-      const response = await fetch(`/api/sessions${query}`, { cache: "no-store" });
-      if (!response.ok) throw new Error(await response.text());
-      const payload = (await response.json()) as SpurSessionsResponse;
-      setRawSessions(payload.sessions);
-      setProjects(payload.projects ?? []);
-      setError(null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Failed to load Spur sessions");
-    } finally {
-      if (!silent) {
-        setLoading(false);
-      }
-    }
-  }, []);
-
   useEffect(() => {
     setProjectId(requestedProject);
   }, [requestedProject]);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const run = async (silent = false) => {
-      if (cancelled) return;
-      await fetchSessions(projectId, silent);
-    };
-
-    void run(false);
-    const timer = setInterval(() => {
-      void run(true);
-    }, POLL_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [fetchSessions, projectId]);
+  const queryClient = useQueryClient();
+  const sessionsQueryKey = ["sessions"] as const;
+  const {
+    data,
+    isPending,
+    error: sessionsError,
+  } = useQuery<SpurSessionsResponse>({
+    queryKey: sessionsQueryKey,
+    queryFn: async ({ signal }) => {
+      const response = await fetch("/api/sessions", { signal });
+      if (!response.ok) throw new Error(`sessions ${response.status}`);
+      return (await response.json()) as SpurSessionsResponse;
+    },
+    refetchInterval: SESSIONS_POLL_INTERVAL_MS,
+    refetchIntervalInBackground: true,
+    placeholderData: (prev) => prev,
+  });
+  const rawSessions = data?.sessions ?? [];
+  const projects = data?.projects ?? [];
+  const loading = isPending;
 
   const filterProjectOptions = useMemo(() => {
     const merged = new Map(projects.map((project) => [project.id, project]));
@@ -271,10 +303,16 @@ export function Dashboard() {
     [projectNameMap, rawSessions],
   );
 
+  const projectSessions = useMemo(
+    () =>
+      projectId ? allSessions.filter((session) => session.projectId === projectId) : allSessions,
+    [allSessions, projectId],
+  );
+
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return allSessions;
-    return allSessions.filter(
+    if (!q) return projectSessions;
+    return projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -282,13 +320,14 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
-  }, [allSessions, searchQuery]);
+  }, [projectSessions, searchQuery]);
 
   const grouped = useMemo(() => {
     const lanes: Record<AttentionLevel, DashboardSession[]> = {
       respond: [],
-      pending: [],
       working: [],
+      pending: [],
+      stopped: [],
       done: [],
     };
 
@@ -302,15 +341,35 @@ export function Dashboard() {
   const stats = useMemo(
     () => ({
       respond: grouped.respond.length,
-      pending: grouped.pending.length,
       working: grouped.working.length,
+      pending: grouped.pending.length,
+      stopped: grouped.stopped.length,
+      done: grouped.done.length,
     }),
     [grouped],
   );
 
+  const visibleLevels = useMemo(
+    () =>
+      LANE_ORDER.filter(
+        (level) =>
+          grouped[level].length > 0 &&
+          (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
+      ),
+    [activeStatFilter, grouped],
+  );
+
+  const hasActiveFilters =
+    projectId.length > 0 || searchQuery.trim().length > 0 || activeStatFilter !== null;
+  const hasVisibleSessions = visibleLevels.length > 0;
   const activeProjectName = projectId
     ? (filterProjectOptions.find((project) => project.id === projectId)?.name ?? projectId)
     : "All Projects";
+  const emptyStateMessage = hasActiveFilters
+    ? `No sessions match the current filters${projectId ? ` in ${activeProjectName}` : ""}.`
+    : grouped.done.length > 0
+      ? "No current sessions are visible."
+      : undefined;
 
   const isValidSpawnProject = (candidateProjectId: string) =>
     filterProjectOptions.some((project) => project.id === candidateProjectId);
@@ -426,8 +485,9 @@ export function Dashboard() {
   const handleSpawn = async () => {
     const nextProjectId = spawnProjectId.trim();
     const nextPrompt = spawnPrompt.trim();
-    if (!nextProjectId) return;
+    if (!nextProjectId || spawningRef.current) return;
 
+    spawningRef.current = true;
     setSpawning(true);
     try {
       const filteredSteps = spawnSteps.map((s) => s.value.trim()).filter((s) => s.length > 0);
@@ -438,6 +498,8 @@ export function Dashboard() {
         prompt: nextPrompt,
         agent: spawnAgent,
       };
+      const encodedAttachments = encodeImageAttachments(spawnAttachments);
+      if (encodedAttachments.length > 0) payload.attachments = encodedAttachments;
       if (spawnBranch.trim()) payload.branch = spawnBranch.trim();
       if (spawnPlanMode) payload.planMode = true;
       if (filteredSteps.length > 0) payload.steps = filteredSteps;
@@ -449,20 +511,31 @@ export function Dashboard() {
         body: JSON.stringify(payload),
       });
       if (!response.ok) throw new Error(await response.text());
+      spawnHistory.saveEntry(nextPrompt);
+      const session = (await response.json()) as SpurSessionView;
+      queryClient.setQueryData<SpurSessionsResponse>(sessionsQueryKey, (current) => {
+        const currentSessions = (current?.sessions ?? []).filter(
+          (existingSession) => existingSession.id !== session.id,
+        );
+        return {
+          sessions: [session, ...currentSessions],
+          projects: current?.projects ?? [],
+        };
+      });
       setSpawnPrompt("");
       setSpawnBranch("");
       setSpawnPlanMode(false);
       setSpawnSteps([]);
       setSpawnWorkspaceMode("default");
       setSpawnDefaultBranch("");
+      setSpawnAttachments([]);
       setSpawnOpen(false);
       syncSpawnProject(nextProjectId);
-      syncProjectFilter(nextProjectId);
-      await fetchSessions(nextProjectId, true);
       setError(null);
     } catch (spawnError) {
       setError(spawnError instanceof Error ? spawnError.message : "Failed to spawn Spur session");
     } finally {
+      spawningRef.current = false;
       setSpawning(false);
     }
   };
@@ -472,10 +545,36 @@ export function Dashboard() {
     setError(null);
   };
 
+  const handleRestoreSession = async (session: DashboardSession) => {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/restore`, {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error(await response.text());
+      setError(null);
+      await queryClient.invalidateQueries({ queryKey: sessionsQueryKey });
+    } catch (restoreError) {
+      setError(
+        restoreError instanceof Error ? restoreError.message : "Failed to restore Spur session",
+      );
+      throw restoreError;
+    }
+  };
+
   const openSpawnModal = () => {
     setSpawnProjectId(resolvePreferredSpawnProjectId());
+    setSpawnAttachments([]);
     setSpawnOpen(true);
   };
+
+  const addSpawnImages = useCallback((files: FileList | File[] | null) => {
+    void imageAttachmentsFromFiles(files)
+      .then((attachments) => {
+        if (attachments.length === 0) return;
+        setSpawnAttachments((current) => [...current, ...attachments]);
+      })
+      .catch(() => {});
+  }, []);
 
   const terminalSession = useMemo(() => {
     if (!requestedTerminalSessionId) return null;
@@ -509,92 +608,129 @@ export function Dashboard() {
   return (
     <>
       <main className="mx-auto max-w-[1500px] px-4 py-4 pb-8 sm:px-5 lg:px-6">
-        <header className="mb-4 flex flex-wrap items-center gap-3">
-          <div className="flex shrink-0 flex-wrap items-center gap-3">
-            <div className="flex shrink-0 items-center gap-3">
+        <header className="mb-4 flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="relative inline-flex min-w-0 max-w-full focus-within:outline focus-within:outline-1 focus-within:outline-[var(--color-accent)] focus-within:outline-offset-2">
+            <div className="flex min-w-0 items-center gap-3">
               <span className="text-xl text-[var(--color-accent)]">𖤓</span>
-              <h1 className="min-w-0 truncate text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
-                {activeProjectName}
+              <h1 className="inline-flex min-w-0 max-w-full items-center gap-1 text-xl font-bold uppercase tracking-[-0.02em] text-[var(--color-text-primary)] sm:text-2xl">
+                <span className="block min-w-0 truncate">{activeProjectName}</span>
+                <svg
+                  aria-hidden="true"
+                  data-testid="project-filter-chevron"
+                  className="pointer-events-none mt-px h-4 w-4 shrink-0 text-[var(--color-text-primary)]"
+                  fill="currentColor"
+                  viewBox="0 0 16 16"
+                >
+                  <path d="M4 6.5 8 10.5 12 6.5Z" />
+                </svg>
               </h1>
             </div>
-            <div className="flex shrink-0 items-center gap-2 uppercase tracking-[0.06em]">
-              <StatItem
-                icon={<IconChat />}
-                label="Needs Input"
-                value={stats.respond}
-                color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
-                active={activeStatFilter === "respond"}
-                onClick={() => toggleStatFilter("respond")}
-              />
-              <StatItem
-                icon={<IconBolt />}
-                label="Working"
-                value={stats.working}
-                color={stats.working > 0 ? "var(--color-status-working)" : undefined}
-                active={activeStatFilter === "working"}
-                onClick={() => toggleStatFilter("working")}
-              />
-              <StatItem
-                icon={<IconClock />}
-                label="Waiting"
-                value={stats.pending}
-                color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
-                active={activeStatFilter === "pending"}
-                onClick={() => toggleStatFilter("pending")}
-              />
-            </div>
+            <select
+              aria-label="Project filter"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none opacity-0 outline-none"
+              onChange={(event) => syncProjectFilter(event.target.value)}
+              value={projectId}
+            >
+              <option value="">All Projects</option>
+              {filterProjectOptions.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
           </div>
-          <div className="flex min-w-0 shrink grow basis-[400px] flex-wrap items-center gap-2">
-            <div className="flex min-w-[120px] flex-1 items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5">
-              <svg
-                className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-              </svg>
-              <input
-                className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Filter sessions..."
-                value={searchQuery}
-              />
-            </div>
-            <div className="flex min-w-[280px] flex-1 items-center gap-2">
-              <select
-                className="min-w-0 flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 uppercase text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                onChange={(event) => syncProjectFilter(event.target.value)}
-                value={projectId}
-              >
-                <option value="">All projects</option>
-                {filterProjectOptions.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-              <button
-                className="whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)]"
-                onClick={openSpawnModal}
-                type="button"
-              >
-                Spawn Session
-              </button>
-            </div>
+          <StatItem
+            icon={<IconChat />}
+            label="Needs Input"
+            value={stats.respond}
+            color={stats.respond > 0 ? "var(--color-status-error)" : undefined}
+            active={activeStatFilter === "respond"}
+            onClick={() => toggleStatFilter("respond")}
+          />
+          <StatItem
+            icon={<IconBolt />}
+            label="Working"
+            value={stats.working}
+            color={stats.working > 0 ? "var(--color-status-working)" : undefined}
+            active={activeStatFilter === "working"}
+            onClick={() => toggleStatFilter("working")}
+          />
+          <StatItem
+            icon={<IconClock />}
+            label="Waiting"
+            value={stats.pending}
+            color={stats.pending > 0 ? "var(--color-status-attention)" : undefined}
+            active={activeStatFilter === "pending"}
+            onClick={() => toggleStatFilter("pending")}
+          />
+          <StatItem
+            icon={<IconStop />}
+            label="Stopped"
+            value={stats.stopped}
+            color={stats.stopped > 0 ? "var(--color-text-tertiary)" : undefined}
+            active={activeStatFilter === "stopped"}
+            onClick={() => toggleStatFilter("stopped")}
+          />
+          <StatItem
+            icon={<IconCheck />}
+            label="Completed"
+            value={stats.done}
+            color={
+              activeStatFilter === "done" && stats.done > 0
+                ? "var(--color-status-ready)"
+                : undefined
+            }
+            active={activeStatFilter === "done"}
+            onClick={() => toggleStatFilter("done")}
+          />
+          <div className="flex min-w-[12rem] flex-[999_1_16rem] items-center gap-1.5 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2 py-1.5 sm:ml-auto">
+            <svg
+              className="h-3.5 w-3.5 text-[var(--color-text-tertiary)]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              className="min-w-0 border-none bg-transparent uppercase text-[var(--color-text-primary)] outline-none"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Filter sessions..."
+              value={searchQuery}
+            />
           </div>
+          <button
+            className="w-full whitespace-nowrap bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] sm:w-auto sm:shrink-0"
+            onClick={openSpawnModal}
+            type="button"
+          >
+            Spawn Session
+          </button>
         </header>
 
         {spawnOpen ? (
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
             onClick={(event) => {
               if (event.target === event.currentTarget) setSpawnOpen(false);
             }}
           >
-            <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_rgba(0,0,0,0.5)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+            <div
+              className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5"
+              onKeyDown={(event) => {
+                if (isVoiceToggleHotkey(event)) {
+                  event.preventDefault();
+                  voice.toggleRecording();
+                  return;
+                }
+                if (isPrimarySubmitHotkey(event)) {
+                  event.preventDefault();
+                  void handleSpawn();
+                }
+              }}
+            >
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
                   Spawn Session
@@ -610,7 +746,8 @@ export function Dashboard() {
               <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
                 <div className="flex gap-2">
                   <select
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    aria-label="Spawn project"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => syncSpawnProject(event.target.value)}
                     value={spawnProjectId}
                   >
@@ -621,26 +758,23 @@ export function Dashboard() {
                       </option>
                     ))}
                   </select>
-                  <select
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
-                    onChange={(event) => setSpawnAgent(event.target.value as "claude" | "codex")}
+                  <AgentSelect
+                    ariaLabel="Spawn agent"
+                    onChange={setSpawnAgent}
                     value={spawnAgent}
-                  >
-                    <option value="claude">claude</option>
-                    <option value="codex">codex</option>
-                  </select>
+                  />
                 </div>
                 <div className="flex gap-2">
                   <input
                     aria-label="branch name"
-                    className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`flex-1 ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnBranch(event.target.value)}
                     placeholder="Branch name"
                     value={spawnBranch}
                   />
                   <select
                     aria-label="workspace mode"
-                    className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={INPUT_CLASS}
                     onChange={(event) =>
                       setSpawnWorkspaceMode(event.target.value as "default" | "worktree" | "shared")
                     }
@@ -664,7 +798,7 @@ export function Dashboard() {
                 </div>
                 {spawnWorkspaceMode === "worktree" ? (
                   <input
-                    className="w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                    className={`w-full ${INPUT_CLASS}`}
                     onChange={(event) => setSpawnDefaultBranch(event.target.value)}
                     placeholder="Base branch"
                     value={spawnDefaultBranch}
@@ -676,7 +810,7 @@ export function Dashboard() {
                       <div className="flex gap-2" key={step.id}>
                         <input
                           aria-label={`step ${index + 1}`}
-                          className="flex-1 border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+                          className={`flex-1 ${INPUT_CLASS}`}
                           onChange={(event) => updateStep(step.id, event.target.value)}
                           placeholder={`Step ${index + 1}`}
                           value={step.value}
@@ -699,21 +833,35 @@ export function Dashboard() {
                     + Step
                   </button>
                 </div>
-                <div className="relative flex min-h-0 flex-1 flex-col">
-                  <textarea
-                    className="h-full min-h-[8rem] w-full flex-1 resize-y border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 pr-12 text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)] sm:min-h-[10rem]"
-                    onChange={(event) => setSpawnPrompt(event.target.value)}
-                    onKeyDown={(event) => {
-                      if ((event.ctrlKey || event.metaKey) && event.key === "Enter")
-                        void handleSpawn();
-                    }}
-                    placeholder="Prompt for the new session..."
-                    value={spawnPrompt}
-                  />
-                  <VoiceButton voice={voice} />
-                </div>
+                <ImageAttachmentTextarea
+                  ariaLabel="Prompt for the new session..."
+                  attachments={spawnAttachments}
+                  minHeightClass="min-h-[8rem] sm:min-h-[10rem]"
+                  onAddFiles={addSpawnImages}
+                  onChange={setSpawnPrompt}
+                  onKeyDown={(event) => {
+                    if (isVoiceToggleHotkey(event)) {
+                      event.preventDefault();
+                      voice.toggleRecording();
+                      return;
+                    }
+                    if (isPrimarySubmitHotkey(event)) {
+                      event.preventDefault();
+                      void handleSpawn();
+                    }
+                  }}
+                  onRemoveAttachment={(index) =>
+                    setSpawnAttachments((current) =>
+                      current.filter((_, currentIndex) => currentIndex !== index),
+                    )
+                  }
+                  placeholder={voicePlaceholder("Prompt for the new session...", voice)}
+                  textareaRef={spawnPromptRef}
+                  value={spawnPrompt}
+                  voice={voice}
+                />
                 {voice.voiceError ? (
-                  <div className="border border-red-500/30 bg-red-500/[0.08] px-2.5 py-1.5 text-xs text-red-100">
+                  <div className="border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-2.5 py-1.5 text-xs text-[var(--color-chip-error-text)]">
                     {voice.voiceError}
                   </div>
                 ) : null}
@@ -721,31 +869,47 @@ export function Dashboard() {
                   <span className="text-[10px] text-[var(--color-text-tertiary)]">
                     <VoiceStatusHint voice={voice} />
                   </span>
-                  <button
-                    className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
-                    disabled={spawning || !spawnProjectId.trim()}
-                    onClick={() => void handleSpawn()}
-                    type="button"
-                  >
-                    <span>{spawning ? "Spawning..." : "Spawn"}</span>
-                    {!spawning ? (
-                      <span
-                        aria-hidden="true"
-                        className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-black/55"
-                      >
-                        CMD + ⏎
-                      </span>
-                    ) : null}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <SlashSuggestions
+                      endpoint={
+                        spawnProjectId.trim()
+                          ? `/api/projects/${encodeURIComponent(spawnProjectId.trim())}/slash-commands?agent=${encodeURIComponent(spawnAgent)}`
+                          : null
+                      }
+                      onSelect={(entry) =>
+                        insertTextAtCursor(spawnPromptRef.current, entry.insertText, setSpawnPrompt)
+                      }
+                    />
+                    <InputHistoryButton entries={spawnHistory.entries} onSelect={setSpawnPrompt} />
+                    <button
+                      className="inline-flex min-w-32 items-center justify-center gap-2 bg-[var(--color-accent)] px-4 py-2 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={spawning || !spawnProjectId.trim()}
+                      onClick={() => void handleSpawn()}
+                      type="button"
+                    >
+                      <span>{spawning ? "Spawning..." : "Spawn"}</span>
+                      {!spawning ? (
+                        <span
+                          aria-hidden="true"
+                          className="whitespace-nowrap font-mono text-[10px] font-medium normal-case tracking-normal text-[var(--color-text-tertiary)]"
+                        >
+                          {PRIMARY_SUBMIT_HINT}
+                        </span>
+                      ) : null}
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         ) : null}
 
-        {error ? (
-          <div className="mt-4 border border-red-500/30 bg-red-500/[0.08] px-3 py-2.5 text-sm text-red-100">
-            {error}
+        {error || sessionsError ? (
+          <div className="mt-4 border border-[var(--color-chip-error-border)] bg-[var(--color-chip-error-bg)] px-3 py-2.5 text-sm text-[var(--color-chip-error-text)]">
+            {error ??
+              (sessionsError instanceof Error
+                ? sessionsError.message
+                : "Failed to load Spur sessions")}
           </div>
         ) : null}
 
@@ -753,30 +917,36 @@ export function Dashboard() {
           <p className="mt-4 text-sm text-[var(--color-text-secondary)]">Loading sessions...</p>
         ) : null}
 
-        {!loading && sessions.length === 0 ? (
+        {!loading && !hasVisibleSessions ? (
           <section className="mt-5">
-            <EmptyState
-              message={
-                projectId
-                  ? `No sessions are visible for ${activeProjectName}. Spawn one from the panel above or clear the filter.`
-                  : undefined
-              }
-            />
+            <EmptyState message={emptyStateMessage} />
+            {hasActiveFilters ? (
+              <div className="mt-3 flex justify-center">
+                <button
+                  className="border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setActiveStatFilter(null);
+                    syncProjectFilter("");
+                  }}
+                  type="button"
+                >
+                  Reset Filters
+                </button>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
-        {!loading && sessions.length > 0 ? (
+        {!loading && hasVisibleSessions ? (
           <section className="mt-5 space-y-4">
-            {LANE_ORDER.filter(
-              (level) =>
-                grouped[level].length > 0 &&
-                (activeStatFilter === null || level === activeStatFilter),
-            ).map((level) => (
+            {visibleLevels.map((level) => (
               <AttentionZone
                 key={level}
                 collapsed={isMobile ? collapsedLevels.has(level) : undefined}
                 level={level}
                 onOpenTerminal={openTerminal}
+                onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
                 sessions={grouped[level]}
@@ -789,7 +959,7 @@ export function Dashboard() {
           <TerminalModal onClose={() => syncTerminalFilter(null)} session={terminalSession} />
         ) : null}
       </main>
-      <StatusBar sessions={rawSessions} />
+      <StatusBar />
     </>
   );
 }
