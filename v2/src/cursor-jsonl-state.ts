@@ -155,13 +155,11 @@ export function classifyCursorJsonlState(
       }
       return record.hasToolUse ? "working" : "waiting";
     }
-    if (record.role === "user") {
-      if (record.hasToolResult) {
-        return "working";
-      }
-      const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
-      return nowMs - lastActivityMs <= CURSOR_JSONL_ACTIVITY_WINDOW_MS ? "working" : "waiting";
+    if (record.hasToolResult) {
+      return "working";
     }
+    const lastActivityMs = Math.max(record.timestampMs, fileMtimeMs ?? 0);
+    return nowMs - lastActivityMs <= CURSOR_JSONL_ACTIVITY_WINDOW_MS ? "working" : "waiting";
   }
   return "working";
 }

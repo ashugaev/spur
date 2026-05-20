@@ -4750,7 +4750,7 @@ export class SessionService {
         }
       : await this.readRuntimeSnapshot(session);
     let effectiveSession = session;
-    let state: SessionState = "working";
+    let state: SessionState;
     let stateSource: StateSource = "status";
     let historySourcePath: string | null = null;
     if (effectiveSession.status === "running" || effectiveSession.status === "spawning") {
@@ -4832,7 +4832,7 @@ export class SessionService {
             message: `State: ${state} (no hook/jsonl)`,
           });
         }
-      } else if (strategy === "cursor_jsonl") {
+      } else {
         const jsonlResult = await readCursorJsonlState(
           session.worktreePath,
           this.cursorJsonlReaders.get(session.id),
@@ -4858,8 +4858,6 @@ export class SessionService {
             message: `State: ${state} (no cursor jsonl)`,
           });
         }
-      } else {
-        state = "working";
       }
     }
 
