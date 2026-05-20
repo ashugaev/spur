@@ -8,6 +8,7 @@ export interface CursorParsedRecord {
   role: "user" | "assistant";
   hasToolUse: boolean;
   hasToolResult: boolean;
+  requestsUserInput?: boolean;
   timestampMs: number;
 }
 
@@ -112,13 +113,18 @@ export function parseCursorJsonlRecord(
     : [];
   let hasToolUse = false;
   let hasToolResult = false;
+  let requestsUserInput = false;
   for (const block of content) {
     if (typeof block !== "object" || block === null) {
       continue;
     }
-    const type = (block as Record<string, unknown>)["type"];
+    const tool = block as Record<string, unknown>;
+    const type = tool["type"];
     if (type === "tool_use") {
       hasToolUse = true;
+      if (tool["name"] === "AskUserQuestion") {
+        requestsUserInput = true;
+      }
     }
     if (type === "tool_result") {
       hasToolResult = true;
@@ -128,6 +134,7 @@ export function parseCursorJsonlRecord(
     role,
     hasToolUse,
     hasToolResult,
+    ...(requestsUserInput ? { requestsUserInput: true } : {}),
     timestampMs: fallbackTimestampMs,
   };
 }
@@ -143,6 +150,9 @@ export function classifyCursorJsonlState(
       continue;
     }
     if (record.role === "assistant") {
+      if (record.requestsUserInput) {
+        return "needs_input";
+      }
       return record.hasToolUse ? "working" : "waiting";
     }
     if (record.role === "user") {
@@ -161,7 +171,8 @@ export async function readCursorJsonlState(
   reader?: CursorJsonlReaderState,
   agentSessionId?: string,
 ): Promise<{ state: SessionState; reader: CursorJsonlReaderState } | null> {
-  const filePath = reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
+  const filePath =
+    reader?.filePath ?? (await findLatestCursorTranscriptFile(worktreePath, agentSessionId));
   if (!filePath) {
     return null;
   }

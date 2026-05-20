@@ -60,15 +60,15 @@ describe("classifyCursorJsonlState", () => {
   });
 
   it("returns working when the last user record has tool_result", () => {
-    expect(
-      classifyCursorJsonlState([rec({ role: "user", hasToolResult: true })], NOW),
-    ).toBe("working");
+    expect(classifyCursorJsonlState([rec({ role: "user", hasToolResult: true })], NOW)).toBe(
+      "working",
+    );
   });
 
   it("returns waiting for a stale user prompt past the activity window", () => {
-    expect(
-      classifyCursorJsonlState([rec({ role: "user", timestampMs: NOW - 120_000 })], NOW),
-    ).toBe("waiting");
+    expect(classifyCursorJsonlState([rec({ role: "user", timestampMs: NOW - 120_000 })], NOW)).toBe(
+      "waiting",
+    );
   });
 });
 
@@ -77,6 +77,7 @@ describe("Cursor JSONL fixtures", () => {
     ["working-tool-use.jsonl", "working"],
     ["working-tool-result.jsonl", "working"],
     ["waiting-final-text.jsonl", "waiting"],
+    ["needs-input-ask-user.jsonl", "needs_input"],
   ])("classifies %s as %s", async (fixture, expectedState) => {
     const content = await readFile(join(CURSOR_FIXTURES_DIR, fixture), "utf8");
     const records = parseFixture(content);
@@ -106,7 +107,10 @@ describe("findLatestCursorTranscriptFile", () => {
     );
     await mkdir(join(transcriptsDir, "older-chat"), { recursive: true });
     await mkdir(join(transcriptsDir, "newer-chat"), { recursive: true });
-    await writeFile(join(transcriptsDir, "older-chat", "older-chat.jsonl"), '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n');
+    await writeFile(
+      join(transcriptsDir, "older-chat", "older-chat.jsonl"),
+      '{"role":"assistant","message":{"content":[{"type":"text","text":"old"}]}}\n',
+    );
     await new Promise((resolve) => setTimeout(resolve, 20));
     await writeFile(
       join(transcriptsDir, "newer-chat", "newer-chat.jsonl"),

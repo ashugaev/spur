@@ -145,10 +145,7 @@ import {
   type StateSource,
   type UpdateSessionSlotsRequest,
 } from "./types.js";
-import {
-  readCursorJsonlState,
-  type CursorJsonlReaderState,
-} from "./cursor-jsonl-state.js";
+import { readCursorJsonlState, type CursorJsonlReaderState } from "./cursor-jsonl-state.js";
 import {
   formatNestedSidecarStartError,
   MAX_SIDECAR_DEPTH,

@@ -275,11 +275,17 @@ fi`
 fi
 cursor_base="\${CURSOR_CONFIG_DIR:-$HOME/.cursor}"
 workspace_hash="$(node -e 'const { createHash } = require("node:crypto"); const { resolve } = require("node:path"); process.stdout.write(createHash("md5").update(resolve(process.argv[1])).digest("hex"));' "$PWD")"
+cursor_project_slug="$(printf '%s' "$PWD" | tr '\\\\' '/' | sed 's/^\\/\\+//; s/\\.//g; s/\\//-/g')"
 touch_chat_store() {
   local chat_id="$1"
   local chat_dir="$cursor_base/chats/$workspace_hash/$chat_id"
   mkdir -p "$chat_dir"
   printf 'cursor-session\n' > "$chat_dir/store.db"
+}
+jsonl_append() {
+  if [[ -n "\${transcript_file:-}" ]]; then
+    printf '%s\\n' "$1" >> "$transcript_file"
+  fi
 }
 if [[ "\${1:-}" == "create-chat" ]]; then
   chat_id="chat-\${SPUR_SESSION:-manual}"
@@ -295,7 +301,15 @@ if [[ "\${1:-}" == "--resume" ]]; then
   resume_id="\${2:-}"
   chat_id="$resume_id"
 fi
-touch_chat_store "$chat_id"`;
+touch_chat_store "$chat_id"
+transcript_dir="$HOME/.cursor/projects/$cursor_project_slug/agent-transcripts/$chat_id"
+mkdir -p "$transcript_dir"
+transcript_file="$transcript_dir/$chat_id.jsonl"
+if [[ "$mode" == "resume" && -f "$transcript_file" ]]; then
+  :
+else
+  printf '{"role":"assistant","message":{"content":[{"type":"text","text":"ready"}]}}\\n' > "$transcript_file"
+fi`;
   // State signal helpers — Claude writes JSONL records, Codex writes hook state
   // plus structured rollout events for question/waiting metadata.
   const signalWaiting =
@@ -303,14 +317,14 @@ touch_chat_store "$chat_id"`;
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[],"stop_reason":"end_turn"}}'`
       : agentName === "codex"
         ? `emit_hook_event "Stop"`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'`;
   const signalNeedsInput =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"header":"Plan","question":"Which tier should I run next?","options":[{"label":"fast","description":"Run fast tests first"},{"label":"runtime","description":"Run runtime integration next"}]}]}}]}}'`
       : agentName === "codex"
         ? `emit_hook_needs_input
       emit_rollout_input_required`
-        : ":";
+        : `jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{}}]}}'`;
   const signalSlowToolResult =
     agentName === "claude"
       ? `jsonl_append '{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","input":{"timeout":6000}}]}}'
@@ -483,13 +497,19 @@ done`
   touch_chat_store "$chat_id"
   case "$line" in
     show-waiting-menu)
-      printf '%s\\n' "Workspace Trust Required"
-      printf '%s\\n' "Do you trust the contents of this directory?"
+      ${signalNeedsInput}
+      printf '%s\\n' "Entered plan mode"
+      printf '%s\\n' "1. fast"
+      printf '%s\\n' "2. runtime"
+      printf '%s\\n' "Enter to select"
+      printf '%s\\n' "Esc to cancel"
       ;;
     simulate-work)
+      jsonl_append '{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{}}]}}'
       printf '%s\\n' "• Working (simulated)"
       sleep 1
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
     exit-now)
       exit 0
@@ -497,9 +517,10 @@ done`
     *)
       printf '%s\\n' "ack: $line"
       printf '%s\\n' "${prompt}"
+      ${signalWaiting}
       ;;
   esac
-	done`;
+done`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 log_dir="\${SPUR_FAKE_AGENT_LOG_DIR:?missing SPUR_FAKE_AGENT_LOG_DIR}"

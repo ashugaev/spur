@@ -47,4 +47,3 @@ export function cursorShowsReadyPrompt(pane: string): boolean {
   const needsInputMarker = lastMatchingMarker(pane, CURSOR_NEEDS_INPUT_MARKERS);
   return !needsInputMarker || readyMarker.index > needsInputMarker.index;
 }
-
