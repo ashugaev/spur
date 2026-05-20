@@ -296,7 +296,7 @@ describe("runtime-tmux", () => {
 
     expect(
       execFileAsyncMock.mock.calls.some(
-        ([, args]) => args[0] === "send-keys" && args.includes("2"),
+        ([, args]) => args[0] === "send-keys" && args.includes("Down"),
       ),
     ).toBe(true);
     expect(

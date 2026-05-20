@@ -377,7 +377,7 @@ export async function waitForTmuxReady(
       codexHookTrustConfirmAttempts += 1;
       lastCodexHookTrustConfirmAt = Date.now();
       const target = exactPaneTarget(sessionName);
-      await tmux("send-keys", "-t", target, "2");
+      await tmux("send-keys", "-t", target, "Down");
       await sendSubmitKeyToTmux(sessionName);
       await sleep(500);
       continue;
