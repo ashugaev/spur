@@ -12,31 +12,31 @@ Keep the direct terminal websocket on loopback; set `DIRECT_TERMINAL_PUBLIC_PORT
 
 ## Local Vs Portable Inventory
 
-| Artifact | Path | Source of truth | Notes |
-|---|---|---|---|
-| Repo checkout | `~/projects/spur` | git | Clone target; `pnpm main:deploy` builds against the managed deploy clone |
-| Managed deploy clone | `~/.spur/main-deploy/repo` | git (auto) | Created by `scripts/main-deploy.sh`; never edit directly |
-| Last-deployed SHA stamp | `~/.spur/main-deploy/repo/.git/main-deploy-last-successful` | local | Override via `MAIN_DEPLOY_STAMP_FILE` |
-| Cron deploy log | `~/.spur/main-cron-deploy.log` | local | Rotate manually if needed |
-| Instance config | `~/.spur/config.yaml` | local | Host/port, dataDir, tmux socket, UI port |
-| Project config (this repo) | `~/projects/spur/spur.yaml` | git (tracked) | Dogfooded; safe to commit |
-| Project config (generic repo) | `<repo>/spur.yaml` | per-repo policy | Tracked or local depending on repo |
-| Daemon env secret | `/etc/spur/daemon.env` | local | Mode 0600 root:root; read via `EnvironmentFile=` |
-| Daemon env template | `deploy/spur-daemon.env.example` | git (tracked) | Safe copyable baseline |
-| Daemon systemd unit (template) | `deploy/spur-daemon.service` | git (tracked) | Placeholders substituted at install |
-| Web systemd unit (template) | `deploy/spur-web.service` | git (tracked) | Placeholders substituted at install |
-| Daemon systemd unit (installed) | `/etc/systemd/system/spur-daemon.service` | written by `main-deploy.sh` | Never hand-edit |
-| Web systemd unit (installed) | `/etc/systemd/system/spur-web.service` | written by `main-deploy.sh` | Never hand-edit |
-| Nginx site | `/etc/nginx/sites-enabled/spur` | local | Hand-managed |
-| GitHub auth | `~/.config/gh/` | local | `gh auth login` |
-| Codex auth | `~/.codex/` | local | `codex login` |
-| Claude auth | `~/.claude/` | local | `claude login` |
-| Voice secrets | `~/.spur/.env` | local | Mode 0600; Azure keys for voice providers |
-| Voice models | `~/.cache/whisper.cpp/`, `~/.spur/venvs/faster-whisper/` | local | Per voice provider |
-| Built daemon | `~/projects/spur/v2/dist/` | local (gitignored) | Produced by `pnpm build` |
-| Web build | `~/projects/spur/packages/web/.next/` | local (gitignored) | Produced by `pnpm build` |
-| Sidecar deps | `~/projects/spur/.next-sidecars/`, sidecar `node_modules` | local (gitignored) | Installed on first sidecar start |
-| Worktrees root | `~/.spur/worktrees` | local | Per `worktreeDir` in instance config |
+| Artifact                        | Path                                                        | Source of truth             | Notes                                                                    |
+| ------------------------------- | ----------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------ |
+| Repo checkout                   | `~/projects/spur`                                           | git                         | Clone target; `pnpm main:deploy` builds against the managed deploy clone |
+| Managed deploy clone            | `~/.spur/main-deploy/repo`                                  | git (auto)                  | Created by `scripts/main-deploy.sh`; never edit directly                 |
+| Last-deployed SHA stamp         | `~/.spur/main-deploy/repo/.git/main-deploy-last-successful` | local                       | Override via `MAIN_DEPLOY_STAMP_FILE`                                    |
+| Cron deploy log                 | `~/.spur/main-cron-deploy.log`                              | local                       | Rotate manually if needed                                                |
+| Instance config                 | `~/.spur/config.yaml`                                       | local                       | Host/port, dataDir, tmux socket, UI port                                 |
+| Project config (this repo)      | `~/projects/spur/spur.yaml`                                 | git (tracked)               | Dogfooded; safe to commit                                                |
+| Project config (generic repo)   | `<repo>/spur.yaml`                                          | per-repo policy             | Tracked or local depending on repo                                       |
+| Daemon env secret               | `/etc/spur/daemon.env`                                      | local                       | Mode 0600 root:root; read via `EnvironmentFile=`                         |
+| Daemon env template             | `deploy/spur-daemon.env.example`                            | git (tracked)               | Safe copyable baseline                                                   |
+| Daemon systemd unit (template)  | `deploy/spur-daemon.service`                                | git (tracked)               | Placeholders substituted at install                                      |
+| Web systemd unit (template)     | `deploy/spur-web.service`                                   | git (tracked)               | Placeholders substituted at install                                      |
+| Daemon systemd unit (installed) | `/etc/systemd/system/spur-daemon.service`                   | written by `main-deploy.sh` | Never hand-edit                                                          |
+| Web systemd unit (installed)    | `/etc/systemd/system/spur-web.service`                      | written by `main-deploy.sh` | Never hand-edit                                                          |
+| Nginx site                      | `/etc/nginx/sites-enabled/spur`                             | local                       | Hand-managed                                                             |
+| GitHub auth                     | `~/.config/gh/`                                             | local                       | `gh auth login`                                                          |
+| Codex auth                      | `~/.codex/`                                                 | local                       | `codex login`                                                            |
+| Claude auth                     | `~/.claude/`                                                | local                       | `claude login`                                                           |
+| Voice secrets                   | `~/.spur/.env`                                              | local                       | Mode 0600; Azure keys for voice providers                                |
+| Voice models                    | `~/.cache/whisper.cpp/`, `~/.spur/venvs/faster-whisper/`    | local                       | Per voice provider                                                       |
+| Built daemon                    | `~/projects/spur/v2/dist/`                                  | local (gitignored)          | Produced by `pnpm build`                                                 |
+| Web build                       | `~/projects/spur/packages/web/.next/`                       | local (gitignored)          | Produced by `pnpm build`                                                 |
+| Sidecar deps                    | `~/projects/spur/.next-sidecars/`, sidecar `node_modules`   | local (gitignored)          | Installed on first sidecar start                                         |
+| Worktrees root                  | `~/.spur/worktrees`                                         | local                       | Per `worktreeDir` in instance config                                     |
 
 ## Quick Start
 
