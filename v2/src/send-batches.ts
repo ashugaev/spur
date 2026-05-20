@@ -1,7 +1,9 @@
-import { readGitHubSourceSnapshot } from "./metadata.js";
+import { readGitHubSourceSnapshot, readReviewSourceSnapshot } from "./metadata.js";
+import { reviewProvider } from "./review-providers/index.js";
 import type {
-  GitHubEventData,
-  GitHubSignal,
+  ReviewEventData,
+  ReviewProviderId,
+  ReviewSignal,
   ServiceProblemEventData,
   SourceType,
 } from "./types.js";
@@ -16,39 +18,41 @@ export interface SendBatch {
 
 export type SendBatchParser = (data: unknown) => SendBatch | null;
 
-class GitHubSendBatch implements SendBatch {
+class ReviewSendBatch implements SendBatch {
   static parse(
+    providerId: ReviewProviderId,
     projectId: string,
     sourceId: string,
     prompt: string | undefined,
     data: unknown,
-  ): GitHubSendBatch | null {
-    if (!isGitHubEventData(data)) return null;
-    return new GitHubSendBatch(projectId, sourceId, prompt, data);
+  ): ReviewSendBatch | null {
+    if (!isReviewEventData(data)) return null;
+    return new ReviewSendBatch(providerId, projectId, sourceId, prompt, data);
   }
 
   readonly sessionId: string;
   private prNumber: number;
   private prTitle: string;
-  private readonly signals: Map<string, GitHubSignal>;
+  private readonly signals: Map<string, ReviewSignal>;
 
   private constructor(
+    private readonly providerId: ReviewProviderId,
     private readonly projectId: string,
     private readonly sourceId: string,
     private readonly prompt: string | undefined,
-    data: GitHubEventData,
+    data: ReviewEventData,
   ) {
     this.sessionId = data.sessionId;
     this.prNumber = data.prNumber;
     this.prTitle = data.prTitle;
-    this.signals = new Map<string, GitHubSignal>();
+    this.signals = new Map<string, ReviewSignal>();
     for (const signal of data.signals) {
       this.signals.set(signal.key, signal);
     }
   }
 
   merge(incoming: SendBatch): void {
-    const next = incoming as GitHubSendBatch;
+    const next = incoming as ReviewSendBatch;
     this.prNumber = next.prNumber;
     this.prTitle = next.prTitle;
     for (const signal of next.signals.values()) {
@@ -57,15 +61,17 @@ class GitHubSendBatch implements SendBatch {
   }
 
   prune(dataDir: string): void {
-    const snapshot = readGitHubSourceSnapshot(
-      dataDir,
-      this.projectId,
-      this.sourceId,
-      this.sessionId,
-    );
+    const snapshot =
+      this.providerId === "github"
+        ? readGitHubSourceSnapshot(dataDir, this.projectId, this.sourceId, this.sessionId)
+        : readReviewSourceSnapshot(
+            dataDir,
+            this.providerId,
+            this.projectId,
+            this.sourceId,
+            this.sessionId,
+          );
 
-    // The latest source snapshot is the truth before delivery, so queued
-    // GitHub updates may expire while a session stays busy.
     for (const key of [...this.signals.keys()]) {
       if (snapshot?.has(key)) continue;
       this.signals.delete(key);
@@ -77,34 +83,36 @@ class GitHubSendBatch implements SendBatch {
   }
 
   private buildActionLines(): string[] {
+    const provider = reviewProvider(this.providerId);
     if (this.prompt !== undefined) {
       return [this.prompt];
     }
 
     const kinds = new Set([...this.signals.values()].map((signal) => signal.kind));
-    const lines = ["Review the latest GitHub updates on the active PR and act on them."];
+    const lines = [provider.instructionsLine];
     if (kinds.has("changes_requested")) {
-      lines.push("Address the requested review changes on the active PR.");
+      lines.push(`Address the requested review changes on the active ${provider.requestLabel}.`);
     }
     if (kinds.has("ci_failed")) {
       lines.push("Inspect the failing checks, fix them, and rerun the relevant validation.");
     }
     if (kinds.has("merge_conflict")) {
-      lines.push("Resolve the active PR merge conflicts, rerun the relevant validation, and push.");
+      lines.push(
+        `Resolve the active ${provider.requestLabel} merge conflicts, rerun the relevant validation, and push.`,
+      );
     }
     if (kinds.has("comment")) {
-      lines.push("Read the latest PR comments and act on them.");
+      lines.push(`Read the latest ${provider.requestLabel} comments and act on them.`);
     }
-    lines.push(
-      "Use `gh pr view --comments` and `gh pr checks`, then fix, push, and reply if needed.",
-    );
+    lines.push(provider.commandLine);
     return lines;
   }
 
   format(): string {
     const lines = [...this.signals.values()].map((signal) => `- ${signal.text}`);
+    const provider = reviewProvider(this.providerId);
     return [
-      `GitHub updates on PR #${this.prNumber} "${this.prTitle}":`,
+      `${provider.displayName} updates on ${provider.requestLabel} #${this.prNumber} "${this.prTitle}":`,
       ...lines,
       "",
       ...this.buildActionLines(),
@@ -158,7 +166,7 @@ class ServiceSendBatch implements SendBatch {
   }
 }
 
-export function isGitHubEventData(value: unknown): value is GitHubEventData {
+export function isReviewEventData(value: unknown): value is ReviewEventData {
   if (!value || typeof value !== "object") return false;
   const data = value as Record<string, unknown>;
   return (
@@ -167,6 +175,10 @@ export function isGitHubEventData(value: unknown): value is GitHubEventData {
     typeof data["prTitle"] === "string" &&
     Array.isArray(data["signals"])
   );
+}
+
+export function isGitHubEventData(value: unknown): value is ReviewEventData {
+  return isReviewEventData(value);
 }
 
 export function isServiceProblemEventData(value: unknown): value is ServiceProblemEventData {
@@ -185,8 +197,8 @@ export function createSendBatchParser(
   sourceId: string,
   prompt?: string,
 ): SendBatchParser {
-  if (sourceType === "github") {
-    return (data) => GitHubSendBatch.parse(projectId, sourceId, prompt, data);
+  if (sourceType === "github" || sourceType === "gitlab") {
+    return (data) => ReviewSendBatch.parse(sourceType, projectId, sourceId, prompt, data);
   }
   if (sourceType === "service") {
     return (data) => ServiceSendBatch.parse(prompt, data);

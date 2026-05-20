@@ -1,7 +1,7 @@
-# Gitleaks configuration for Agent Orchestrator
+# Gitleaks configuration for Spur
 # Prevents accidental commits of secrets, API keys, tokens, etc.
 
-title = "Agent Orchestrator Secret Scanning"
+title = "Spur Secret Scanning"
 
 # Use all default gitleaks rules
 [extend]

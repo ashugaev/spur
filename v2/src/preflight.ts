@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { claudeCommand } from "./agents/claude.js";
-import { codexCommand } from "./agents/codex.js";
+import { buildEphemeralCodexConfig, codexCommand } from "./agents/codex.js";
+import { cursorCommand } from "./agents/cursor.js";
 import { PREFLIGHT_DEFER_SENTINEL } from "./preflight-contract.js";
 import type { AgentName, ProjectConfig } from "./types.js";
 
@@ -57,7 +58,7 @@ function buildSpawnPreflightPrompt(args: RunSpawnPreflightInput): string {
 function parseSpawnPreflightResult(raw: string): SpawnPreflightResult {
   const trimmed = raw.trim();
   if (!trimmed) {
-    throw new Error("Spawn preflight returned empty output");
+    return {};
   }
   if (trimmed === PREFLIGHT_DEFER_SENTINEL) {
     return {};
@@ -88,25 +89,42 @@ async function runClaudePreflight(prompt: string, cwd: string): Promise<string> 
   return stdout;
 }
 
-async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
+async function runCodexPreflight(
+  prompt: string,
+  cwd: string,
+  codexArgs: string[] | undefined,
+): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-"));
   const outputPath = join(tempDir, "output.txt");
+  const codexHomePath = join(tempDir, "codex-home");
 
   try {
+    await mkdir(codexHomePath, { recursive: true });
+    const ephemeralConfig = await buildEphemeralCodexConfig([cwd]);
+    await writeFile(join(codexHomePath, "config.toml"), ephemeralConfig, "utf8");
+
     const { stdout } = await execFileAsync(
-      "/bin/sh",
+      codexCommand(),
       [
-        "-lc",
-        'printf "%s" "$SPUR_PREFLIGHT_PROMPT" | "$SPUR_CODEX_BIN" exec --ephemeral --disable codex_hooks --disable apps --disable plugins --dangerously-bypass-approvals-and-sandbox --output-last-message "$SPUR_PREFLIGHT_OUTPUT" -',
+        "exec",
+        "--ephemeral",
+        "--disable",
+        "hooks",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
+        "--dangerously-bypass-approvals-and-sandbox",
+        ...(codexArgs ?? []),
+        "--output-last-message",
+        outputPath,
+        prompt,
       ],
       {
         cwd,
         env: {
           ...process.env,
-          CODEX_HOME: undefined,
-          SPUR_CODEX_BIN: codexCommand(),
-          SPUR_PREFLIGHT_OUTPUT: outputPath,
-          SPUR_PREFLIGHT_PROMPT: prompt,
+          CODEX_HOME: codexHomePath,
         },
         timeout: PREFLIGHT_TIMEOUT_MS,
         maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
@@ -128,6 +146,45 @@ async function runCodexPreflight(prompt: string, cwd: string): Promise<string> {
   }
 }
 
+async function runCursorPreflight(prompt: string, cwd: string): Promise<string> {
+  const tempDir = await mkdtemp(join(tmpdir(), "spur-preflight-cursor-"));
+
+  try {
+    const { stdout } = await execFileAsync(
+      cursorCommand(),
+      [
+        "-p",
+        "--output-format",
+        "text",
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--workspace",
+        cwd,
+        prompt,
+      ],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          CURSOR_CONFIG_DIR: tempDir,
+        },
+        timeout: PREFLIGHT_TIMEOUT_MS,
+        maxBuffer: PREFLIGHT_MAX_BUFFER_BYTES,
+      },
+    );
+    return stdout;
+  } finally {
+    await rm(tempDir, {
+      recursive: true,
+      force: true,
+      maxRetries: PREFLIGHT_RM_RETRIES,
+      retryDelay: PREFLIGHT_RM_RETRY_DELAY_MS,
+    }).catch(() => {});
+  }
+}
+
 export async function runSpawnPreflight(
   input: RunSpawnPreflightInput,
 ): Promise<SpawnPreflightResult> {
@@ -135,6 +192,8 @@ export async function runSpawnPreflight(
   const raw =
     input.agent === "claude"
       ? await runClaudePreflight(prompt, input.project.path)
-      : await runCodexPreflight(prompt, input.project.path);
+      : input.agent === "codex"
+        ? await runCodexPreflight(prompt, input.project.path, input.project.codexArgs)
+        : await runCursorPreflight(prompt, input.project.path);
   return parseSpawnPreflightResult(raw);
 }

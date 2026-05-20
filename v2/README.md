@@ -2,25 +2,62 @@
 
 Local daemon + CLI orchestrator.
 
-- Spawns agents (`claude` / `codex`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
+- Spawns agents (`claude` / `codex` / `cursor`) in `tmux` sessions, using either an owned `git worktree` or the shared project path
 - Watches sources (`cron`, `github`, `service`) and routes events to triggers
 - Triggers either spawn a new session or send a message into an existing one
 
-No UI. No tracker flow. No plugin layer.
+## Run From Source
+
+```bash
+pnpm --dir v2 build
+node v2/dist/cli.js doctor
+node v2/dist/cli.js list
+node v2/dist/cli.js spawn <project> "Fix the flaky auth test"
+```
+
+First run in a repo you want Spur to manage:
+
+```bash
+spur doctor
+spur list
+spur spawn <project> "Fix the flaky auth test"
+```
+
+`spur doctor` writes a minimal local `spur.yaml` at the git repo root for the current checkout. It
+does not call `connect`, does not start the daemon, and does not create `~/.spur/config.yaml`. The
+first normal Spur command still auto-initializes that global instance config, and `spur list` /
+`spur spawn` auto-connect the local project config through the existing config path.
+
+If you are developing this repository itself, use `bash scripts/setup.sh` instead. Contributor bootstrap lives in [../SETUP.md](../SETUP.md).
+
+## Local Project Config
+
+`spur doctor` writes the same minimal shape shown below:
+
+```yaml
+projects:
+  my-project:
+    path: .
+    defaultBranch: main
+    sessionPrefix: my-project
+```
+
+Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `symlinks`, `sources`,
+`triggers`, `sidecars`, or agent overrides only when the repo needs them.
 
 ## Commands
 
 `spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
 
 ```bash
-spur spawn <project> [prompt...] [--agent claude|codex] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
+spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
 ```
 
 `spawn` can take a task prompt, or it can start an empty agent session. Optional `steps` are a pipeline skeleton around that task:
 
 - The positional `[prompt...]` is optional. Leave it empty to open the agent session without sending an initial message.
 - `--step <label>` appends manual pipeline phases; repeat it to add more than one.
-- `--plan` enables plan-mode startup for the session. Claude startup adds `--permission-mode plan`; Codex accepts the flag but launch behavior stays unchanged.
+- `--plan` enables plan-mode startup for the session, disables configured/manual spawn steps, and appends a planning-only instruction to the task prompt. Claude startup adds `--permission-mode plan`; Cursor uses `--plan`; Codex accepts the flag but launch behavior stays unchanged.
 - `steps` are optional phase labels such as `research`, `develop`, `test`.
 - Spur sends the next phase only after the agent returns to its prompt, then waits 30 seconds before auto-sending it.
 - Project configs can set default `spawn.steps`, and manual/API/trigger steps override that default.
@@ -42,7 +79,7 @@ spawn:
     - "test"
 ```
 
-When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt as-is. With an empty prompt, Spur just opens the session and waits at the agent prompt.
+When `steps` are present, Spur sends messages like "step 1/N: research" plus the original task prompt. Without `steps`, Spur sends the task prompt directly unless `--plan` is set, in which case it appends the planning-only instruction. With an empty prompt, Spur just opens the session and waits at the agent prompt.
 
 `list` on a TTY opens a live selector: `Enter` attaches in place, `l` opens the selected session's live log view, `p` pause, `c` complete, `r` restore, `k` kill, `Esc` quit. `Ctrl+G` returns from either attach target or the log view back to the selector. Non-TTY prints a one-shot summary.
 
@@ -60,12 +97,12 @@ Agents run with full access:
 - `claude --dangerously-skip-permissions`
 - `codex --dangerously-bypass-approvals-and-sandbox`
 
-Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent must return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming.
+Project spawn preflight is opt-in. If `projects.<id>.preflight` is set and `spawn` does not receive `--branch`, Spur asks the selected agent one-shot before worktree creation. The agent should return exactly one branch name, or `NO_PROJECT_RULES` to defer to Spur's default branch naming. Empty output also defers to Spur's default branch naming.
 If that preflight-suggested branch is already checked out in another worktree, Spur falls back to the fresh session id branch instead of failing the spawn.
 An explicit `--branch` stays strict and rejects the conflict with the conflicting worktree path.
 
 Each live session also gets a `spur-slots` helper command on its shell `PATH`.
-Use it inside the session to update the task title and any named links shown in the tmux status line. In attached tmux sessions, clicking a status-right link label opens its URL:
+Use it inside the session to update the task title shown in the tmux status line and any named links stored with the session:
 
 ```bash
 spur-slots --title "Fix flaky auth test"
@@ -78,15 +115,22 @@ Use it from inside the session workspace when the agent needs to start a session
 
 ```bash
 spur service run web --port 3000 -- pnpm dev
+spur service logs
+spur service logs "$SPUR_SESSION" web
 spur service status api-a1b2
 ```
 
 `service run` is session-bound: it reads `SPUR_SESSION`, starts the command in a separate `tmux` sidecar, and stores metadata under Spur's data dir. Spur does not manage stop/restart yet; the service simply stays bound to the session while it is alive.
-If the agent already knows the devserver port, pass it with `--port` so `list` can surface it.
+If the agent already knows the service port, pass it with `--port` so `list` can surface it.
+Spur also collects sidecar and service output into the session event log, so `spur service logs` and `/sessions/:id/logs` can inspect those runtime lines alongside the normal session log stream.
 
-For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs.
+For repo testing, prefer the session helper at `"$SPUR_SESSION_TOOL_DIR/spur-sidecar"` over direct `pnpm dev` or `next dev` launches. Run `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` to start a configured sidecar from `projects.<id>.sidecars`. In this repo, `isolated-daemon` starts an isolated Spur daemon and `isolated-ui` starts the web UI against that daemon, then publishes a `sidecar-ui` link back into the session. `isolated-ui` uses its own Next `distDir`, so its dev cache stays isolated from normal `packages/web` build/test runs. New isolated worktrees inherit the current worktree's `spur.yaml`, agent instructions, and `.env` through the isolated config overlay plus symlinks, so sidecar testing sees the same workspace-access settings as the active branch.
 
-If a sidecar defines `ports`, Spur reserves those ports when the session is spawned and injects them into the sidecar env, so sibling sessions cannot race onto the same sidecar port range before anything starts listening.
+`autoStart` applies only when the main session spawns. From inside a sidecar, starting another sidecar is always manual through the same helper, and nesting stops after one more level: `session -> sidecar -> nested sidecar`. Nested sidecars never auto-start.
+
+If a sidecar defines `ports`, Spur reserves those ports when that sidecar starts and injects them into the sidecar env. Reservation also probes each candidate port on the host, so sibling sessions and unrelated host processes cannot race onto the same port range before anything starts listening.
+
+Spur commands run through `bash -lc`, so sidecar commands may start with `VAR=value other_cmd ...` and may rely on login-shell initialization. If the launching agent runs in a sandbox that remaps `$HOME` to a scratch directory (e.g. `/tmp/spur-runtime-*`), the sidecar inherits that `$HOME`. To reach the real user home from a sidecar command, use `$SPUR_REAL_HOME` — Spur resolves it from `/etc/passwd` and exports it into every session and sidecar env. For example: `source "$SPUR_REAL_HOME/.nvm/nvm.sh"` instead of `source "$HOME/.nvm/nvm.sh"`.
 
 ## Start
 
@@ -196,7 +240,7 @@ sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 ```
 pnpm --dir v2 test            # fast (mocked, in-process)
 pnpm --dir v2 test:runtime    # runtime integration (CLI, tmux, worktree, process boundaries)
-pnpm --dir v2 test:smoke      # real-agent smoke on the real ao repo (skips if tmux/binaries/auth missing)
+pnpm --dir v2 test:smoke      # real-agent smoke against this repo (skips if tmux/binaries/auth missing)
 ```
 
 Run `runtime integration` when touching CLI, daemon, transport, session lifecycle, worktree, or tmux.
@@ -206,11 +250,13 @@ Scenarios: [`TEST_SCENARIOS.md`](./TEST_SCENARIOS.md)
 ## Automation
 
 - `cron` emits `cron:tick`
-- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`
+- `github` emits `github:changes_requested`, `github:ci_failed`, `github:comment`, `github:merge_conflict`, and — when `query` is set on the source — `github:work_item.new` (one event per matching PR, ever)
 - `service` emits `service:<ruleId>` when a bound service log tail matches a configured regex rule
 - triggers either `spawn` a new session or `send` into an existing one
 
 `github` polls running sessions, matches each to a PR branch, and emits only changed signals. State persists under `dataDir` across restarts.
+
+When `query` is set, the same source also runs a second branch on the same `intervalMs`: it executes `gh search prs <query>`, emits `github:work_item.new` for each unseen PR, and persists the seen externalIds (`<owner>/<repo>#<n>`) in an append-only registry under `<dataDir>/source-state/github-work-items/`. One PR ↔ one Spur session, ever. No respawn on session death. At most one trigger per source may subscribe to `github:work_item.new` (parser rejects more). GitHub PR URLs seed the native `session.pr` binding; non-GitHub review URLs stay in `slots.links` with `label: "pr"`. Spawn prompts may reference work-item fields with `{{url}}`, `{{number}}`, `{{title}}`, `{{repo}}`, and `{{externalId}}`. When `spawn.autoComplete` is `true`, Spur stores the spawned session binding and completes it only after it has existed for at least five minutes and is in `waiting`; `working`, `needs_input`, paused, and spawning sessions block completion.
 
 `send.interrupt`:
 
@@ -271,6 +317,12 @@ projects:
         type: github
         intervalMs: 60000
         runOnStart: false
+      pr-review-queue:
+        type: github
+        intervalMs: 600000
+        runOnStart: false
+        # `gh search prs` query. One Spur session per matched PR, ever.
+        query: "is:pr is:open repo:acme/backend-api label:needs-review"
       web-watch:
         type: service
         service: web
@@ -317,6 +369,13 @@ projects:
         send:
           interrupt: false # queued, deduped, flushed as one batch
           prompt: "Run $manager and $github. Review the latest PR comments on the active PR and address them."
+      pr-review-queue-spawn:
+        source: pr-review-queue
+        event: github:work_item.new
+        spawn:
+          agent: claude
+          prompt: "/code-review {{url}}"
+          autoComplete: true
       web-watch-crash:
         source: web-watch
         event: service:crash
@@ -330,7 +389,7 @@ Field reference:
 - `server.port`: optional, default `4310`.
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
-- `defaultAgent`: optional, `claude|codex`, default `claude`.
+- `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
 - `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
@@ -343,7 +402,7 @@ Field reference:
 - `projects.<id>.spawn.steps`: optional default phase list for project spawns; overridden by request or trigger `steps`.
 - `projects.<id>.preflight`: optional preflight config object; enables one-shot branch suggestion before worktree creation.
 - `projects.<id>.preflight.prompt`: optional one-shot branch-suggestion prompt; defaults to Spur's built-in rule-or-defer prompt when omitted.
-- `projects.<id>.defaultAgent`: optional per-project `claude|codex`, falls back to top-level `defaultAgent`.
+- `projects.<id>.defaultAgent`: optional per-project `claude|codex|cursor`, falls back to top-level `defaultAgent`.
 - `projects.<id>.sources.<sourceId>.type`: required, `cron|github|service`.
 - `projects.<id>.sources.<sourceId>.runOnStart`: optional, default `false`.
 - `projects.<id>.sources.<sourceId>.schedule`: required for `cron`.
@@ -360,8 +419,8 @@ Field reference:
 - `projects.<id>.triggers.<triggerId>.spawn.prompt`: required task prompt.
 - `projects.<id>.triggers.<triggerId>.spawn.steps`: optional ordered phase list.
 - `spawn --step <label>`: optional repeatable manual phase override for one CLI spawn.
-- `spawn --plan`: optional CLI-only startup mode toggle. Claude startup enters plan mode; Codex currently accepts this flag but startup behavior is unchanged.
-- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex`.
+- `spawn --plan`: optional CLI-only startup mode toggle. It disables configured/manual spawn steps, appends a planning-only instruction to the task prompt, makes Claude startup enter plan mode, uses `--plan` for Cursor, and leaves Codex launch behavior unchanged.
+- `projects.<id>.triggers.<triggerId>.spawn.agent`: optional `claude|codex|cursor`.
 - `projects.<id>.triggers.<triggerId>.spawn.branch`: optional explicit branch; bypasses preflight.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.worktree`: optional boolean spawn override.
 - `projects.<id>.triggers.<triggerId>.spawn.overrides.defaultBranch`: optional base-branch override, valid only with `worktree: true`.
@@ -382,7 +441,7 @@ Event surface:
 
 `spawn` can override that default for one session with `--worktree` or `--shared`, and automation can do the same with `trigger.spawn.overrides.worktree`.
 
-If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES`, Spur falls back to its default naming. `--branch` bypasses preflight.
+If `projects.<id>.preflight` is set, Spur runs a one-shot spawn preflight with the selected agent before worktree branch selection. Spur gives that preflight the project instructions plus the spawn task prompt. `preflight.prompt` is optional; when omitted Spur uses a built-in prompt that says to return only a branch name that follows the project rules, or `NO_PROJECT_RULES` when no branch-naming rules exist. If the preflight returns a branch name, Spur uses it. If it returns `NO_PROJECT_RULES` or empty output, Spur falls back to its default naming. `--branch` bypasses preflight.
 
 When `spawn` creates a new worktree branch, it fetches `origin`, fast-forwards the configured base branch when it is only behind `origin/<branch>`, and uses the freshest remote-tracking ref available for the new worktree branch. Override the base branch per session with `--worktree <defaultBranch>` or `trigger.spawn.overrides.defaultBranch`.
 

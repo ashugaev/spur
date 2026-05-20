@@ -8,7 +8,7 @@ tools: Read, Grep, Glob, Bash
 Review the diff. Run build checks. Verify no regressions, no security holes, requirements covered.
 
 ## Process
-1. Get diff: `git diff origin/dev...HEAD`
+1. Get diff: `git diff origin/HEAD...HEAD`
 2. Run checks:
    ```bash
    pnpm typecheck && pnpm lint && pnpm test
@@ -25,10 +25,12 @@ Review the diff. Run build checks. Verify no regressions, no security holes, req
 ### Requirements (critical)
 - All acceptance criteria addressed in code
 - No missing edge cases from the plan
-- No overheads
+
+### Lean (high; skip when `code-simplifier` already ran on this diff)
+- No overheads — branches, helpers, or types not used by current behavior
 - No dead code left
 - No duplicates for the same logic
-- Can it be simpler?
+- Could the same outcome be reached with a simpler shape?
 
 ### Regressions (critical)
 - Changed interfaces don't break call-sites

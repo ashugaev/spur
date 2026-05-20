@@ -5,9 +5,7 @@ description: Validate manager close-out for repo work. Use when implementation i
 
 # Self Verify
 
-Run this at the end of repo work.
-
-## Procedure
+## Process
 
 1. Confirm scope:
    - current branch
@@ -25,12 +23,16 @@ Run this at the end of repo work.
    - local changes are committed or intentionally left uncommitted
    - branch is pushed when default close-out requires it
    - PR link is known
-5. Report only:
+5. Re-walk routing:
+   - Read `AGENTS.md` routing rules and the diff.
+   - List the gates that should have run for this diff.
+   - Compare to actual run evidence; collect any gap as `Missing: <gate>`.
+6. Report only:
    - PASS
-   - BLOCKED: <missing requirement>
+   - MISSING: <gate or evidence>
    - RERUN: <stale check>
 
-## Hard Rules
+## Rules
 
 - Do not claim PASS without an open PR.
 - Do not claim PASS if a required build or test tier is missing.

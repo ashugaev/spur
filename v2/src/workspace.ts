@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +19,8 @@ interface GitWorktreeEntry {
   path: string;
   branch?: string;
 }
+
+const DEFAULT_BRANCH_HINT = "main";
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
@@ -70,6 +72,45 @@ export async function readCurrentBranch(repoPath: string): Promise<string> {
   return git(repoPath, "rev-parse", "--abbrev-ref", "HEAD");
 }
 
+function normalizeBranchHint(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed === "HEAD") {
+    return undefined;
+  }
+  return trimmed.startsWith("origin/") ? trimmed.slice("origin/".length) : trimmed;
+}
+
+export async function readDoctorBranchHint(repoPath: string): Promise<string> {
+  const currentBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "HEAD"),
+  );
+  if (currentBranch) {
+    return currentBranch;
+  }
+
+  const checkedOutBranch = normalizeBranchHint(await tryGit(repoPath, "branch", "--show-current"));
+  if (checkedOutBranch) {
+    return checkedOutBranch;
+  }
+
+  const remoteDefaultBranch = normalizeBranchHint(
+    await tryGit(repoPath, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"),
+  );
+  if (remoteDefaultBranch) {
+    return remoteDefaultBranch;
+  }
+
+  return (
+    normalizeBranchHint(await tryGit(repoPath, "config", "--get", "init.defaultBranch")) ??
+    DEFAULT_BRANCH_HINT
+  );
+}
+
+export async function resolveDoctorRepoRoot(startDir: string): Promise<string> {
+  const repoRoot = await tryGit(startDir, "rev-parse", "--path-format=absolute", "--show-toplevel");
+  return repoRoot ? resolve(repoRoot) : resolve(startDir);
+}
+
 export async function findWorktreePathForBranch(
   repoPath: string,
   branch: string,
@@ -110,7 +151,15 @@ async function fetchOrigin(repoPath: string): Promise<void> {
   }
 }
 
-async function resolveFreshBranchRef(repoPath: string, branch: string): Promise<string> {
+interface ResolveFreshBranchRefOptions {
+  useRemoteWhenCheckedOutDirty?: boolean;
+}
+
+async function resolveFreshBranchRef(
+  repoPath: string,
+  branch: string,
+  options?: ResolveFreshBranchRefOptions,
+): Promise<string> {
   const remoteBranch = `origin/${branch}`;
   if (!(await refExists(repoPath, `refs/remotes/origin/${branch}`))) {
     return branch;
@@ -129,6 +178,9 @@ async function resolveFreshBranchRef(repoPath: string, branch: string): Promise<
 
   try {
     if ((await readCurrentBranch(repoPath)) === branch) {
+      if (options?.useRemoteWhenCheckedOutDirty && (await hasUncommittedChanges(repoPath))) {
+        return remoteBranch;
+      }
       await git(repoPath, "merge", "--ff-only", remoteBranch);
       return branch;
     }
@@ -162,7 +214,9 @@ export async function createWorktree(input: CreateWorktreeInput): Promise<string
   mkdirSync(projectDir, { recursive: true });
   await pruneWorktrees(input.repoPath);
   await fetchOrigin(input.repoPath);
-  const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch);
+  const defaultBranchRef = await resolveFreshBranchRef(input.repoPath, input.defaultBranch, {
+    useRemoteWhenCheckedOutDirty: true,
+  });
   const branchExistsLocally = await refExists(input.repoPath, `refs/heads/${input.branch}`);
 
   if (branchExistsLocally) {

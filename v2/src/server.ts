@@ -1,10 +1,12 @@
+import { createReadStream } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import { EventBus } from "./event-bus.js";
 import { logSpurEvent, type SpurLogEntry } from "./event-log.js";
 import { startConfiguredSources } from "./event-sources/index.js";
 import { writeStderr } from "./io.js";
-import { SessionService } from "./session-service.js";
+import { startRuntimeLogCollector, type RuntimeLogCollector } from "./runtime-log-collector.js";
+import { SessionResourceNotFoundError, SessionService } from "./session-service.js";
 import { startConfiguredTriggers, type TriggerGroupController } from "./triggers.js";
 import type {
   ConnectProjectConfigRequest,
@@ -14,6 +16,7 @@ import type {
   RespawnSessionRequest,
   RunServiceRequest,
   SendMessageRequest,
+  StartSidecarRequest,
   SpawnSessionRequest,
   UpdateSessionSlotsRequest,
 } from "./types.js";
@@ -78,6 +81,7 @@ export async function startServer(
   let ready = false;
   let triggers: TriggerGroupController | null = null;
   let sources: Awaited<ReturnType<typeof startConfiguredSources>> | null = null;
+  let runtimeLogs: RuntimeLogCollector | null = null;
   const logEvent = (event: string, entry: Omit<SpurLogEntry, "timestamp" | "event">): void => {
     logSpurEvent(service.config.dataDir, { event, ...entry });
   };
@@ -102,6 +106,7 @@ export async function startServer(
       });
       triggers = nextTriggers;
       sources = nextSources;
+      runtimeLogs = startRuntimeLogCollector(service.config);
     } catch (error) {
       await nextTriggers.stop();
       throw error;
@@ -128,6 +133,8 @@ export async function startServer(
 
     sources?.stop();
     sources = null;
+    runtimeLogs?.stop();
+    runtimeLogs = null;
     if (triggers) {
       await triggers.stop();
       triggers = null;
@@ -202,7 +209,12 @@ export async function startServer(
       }
 
       if (method === "GET" && path === "/sessions") {
-        sendJson(response, 200, await service.list());
+        const includeCompleted =
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "1" ||
+          (url.searchParams.get("includeCompleted")?.trim().toLowerCase() ?? "") === "true";
+        const requestedView = url.searchParams.get("view")?.trim().toLowerCase();
+        const view = requestedView === "dashboard" ? "dashboard" : "full";
+        sendJson(response, 200, await service.list({ includeCompleted, view }));
         return;
       }
 
@@ -250,6 +262,19 @@ export async function startServer(
         return;
       }
 
+      const projectSuggestionsId = path.match(/^\/projects\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && projectSuggestionsId) {
+        sendJson(
+          response,
+          200,
+          await service.getProjectSuggestions(
+            projectSuggestionsId,
+            url.searchParams.get("agent")?.trim() || undefined,
+          ),
+        );
+        return;
+      }
+
       const sessionId = path.match(/^\/sessions\/([^/]+)$/)?.[1];
       if (method === "GET" && sessionId) {
         sendJson(response, 200, await service.get(sessionId));
@@ -260,7 +285,23 @@ export async function startServer(
       if (method === "GET" && logsSessionId) {
         const { readSessionEventLog } = await import("./event-log.js");
         const info = service.info();
-        const entries = readSessionEventLog(info.dataDir, logsSessionId, 200);
+        const scopeParam = url.searchParams.get("scope");
+        const scope =
+          scopeParam === "all" ||
+          scopeParam === "runtime" ||
+          scopeParam === "service" ||
+          scopeParam === "sidecar"
+            ? scopeParam
+            : undefined;
+        const name = url.searchParams.get("name")?.trim() || undefined;
+        const limitValue = url.searchParams.get("limit");
+        const limit =
+          limitValue && /^\d+$/.test(limitValue) ? Number.parseInt(limitValue, 10) : 200;
+        const entries = readSessionEventLog(info.dataDir, logsSessionId, {
+          limit,
+          ...(scope ? { scope } : {}),
+          ...(name ? { name } : {}),
+        });
         sendJson(response, 200, entries);
         return;
       }
@@ -271,9 +312,48 @@ export async function startServer(
         return;
       }
 
+      const sessionSuggestionsId = path.match(/^\/sessions\/([^/]+)\/slash-commands$/)?.[1];
+      if (method === "GET" && sessionSuggestionsId) {
+        sendJson(response, 200, await service.getSessionSuggestions(sessionSuggestionsId));
+        return;
+      }
+
+      const artifactMatch = path.match(/^\/sessions\/([^/]+)\/artifacts\/([^/]+)$/);
+      if (method === "GET" && artifactMatch?.[1] && artifactMatch[2]) {
+        const artifact = service.getArtifact(
+          decodeURIComponent(artifactMatch[1]),
+          decodeURIComponent(artifactMatch[2]),
+        );
+        response.writeHead(200, {
+          "content-type": artifact.mimeType,
+          "content-length": String(artifact.size),
+          "content-disposition":
+            artifact.kind === "download"
+              ? `attachment; filename="${encodeURIComponent(artifact.name)}"`
+              : `inline; filename="${encodeURIComponent(artifact.name)}"`,
+          "cache-control": "no-store",
+        });
+        const stream = createReadStream(artifact.path);
+        stream.on("error", () => {
+          if (!response.headersSent) {
+            sendError(response, 500, "Failed to read artifact");
+          } else {
+            response.destroy();
+          }
+        });
+        stream.pipe(response);
+        return;
+      }
+
       if (method === "POST" && path === "/sessions") {
-        const body = await readJsonBody<SpawnSessionRequest>(request);
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
         sendJson(response, 201, await service.spawn(body));
+        return;
+      }
+
+      if (method === "POST" && path === "/sessions/background") {
+        const body = await readJsonBody<SpawnSessionRequest>(request, 15_000_000);
+        sendJson(response, 201, await service.spawnInBackground(body));
         return;
       }
 
@@ -311,8 +391,8 @@ export async function startServer(
 
       const respawnSessionId = path.match(/^\/sessions\/([^/]+)\/respawn$/)?.[1];
       if (method === "POST" && respawnSessionId) {
-        const body = await readJsonBody<RespawnSessionRequest>(request);
-        const respawned = await service.respawn(respawnSessionId);
+        const body = await readJsonBody<RespawnSessionRequest>(request, 15_000_000);
+        const respawned = await service.respawn(respawnSessionId, body);
         sendJson(response, 200, respawned);
         const terminateSessionId = body.terminateSessionId?.trim();
         if (
@@ -341,7 +421,18 @@ export async function startServer(
 
       const sidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/start$/);
       if (method === "POST" && sidecarMatch?.[1] && sidecarMatch[2]) {
-        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2]));
+        const body = await readJsonBody<StartSidecarRequest>(request);
+        sendJson(response, 200, await service.startSidecar(sidecarMatch[1], sidecarMatch[2], body));
+        return;
+      }
+
+      const stopSidecarMatch = path.match(/^\/sessions\/([^/]+)\/sidecars\/([^/]+)\/stop$/);
+      if (method === "POST" && stopSidecarMatch?.[1] && stopSidecarMatch[2]) {
+        sendJson(
+          response,
+          200,
+          await service.stopSidecar(stopSidecarMatch[1], stopSidecarMatch[2]),
+        );
         return;
       }
 
@@ -383,6 +474,16 @@ export async function startServer(
       sendError(response, 404, `Route not found: ${method} ${path}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof SessionResourceNotFoundError) {
+        logEvent("http.request.failed", {
+          level: "warn",
+          ...(method ? { method } : {}),
+          ...(path ? { path } : {}),
+          message,
+        });
+        sendError(response, error.statusCode, message);
+        return;
+      }
       logEvent("http.request.failed", {
         level: "error",
         ...(method ? { method } : {}),
@@ -425,6 +526,21 @@ export async function startServer(
     throw error;
   }
 
+  try {
+    const { scanned, alive, drifted } = await service.reconcileStoppedSessions();
+    logEvent("daemon.startup.reconciled", {
+      level: "info",
+      message: `Reconciled sessions at boot: scanned=${scanned}, alive=${alive}, drifted=${drifted}`,
+      details: { scanned, alive, drifted },
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logEvent("daemon.startup.reconcile.failed", {
+      level: "warn",
+      message: `Reconcile at boot failed: ${message}`,
+    });
+  }
+
   ready = true;
   logEvent("daemon.started", {
     level: "info",
@@ -447,6 +563,7 @@ export async function startServer(
     service.dispose();
     const closePromise = closeServer();
     sources?.stop();
+    runtimeLogs?.stop();
     const triggerController = triggers;
     if (triggerController) {
       await triggerController.stop();

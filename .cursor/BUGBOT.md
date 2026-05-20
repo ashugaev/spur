@@ -2,28 +2,25 @@
 
 ## Project Context
 
-Agent Orchestrator is a TypeScript monorepo for managing parallel AI coding agents. It uses pnpm workspaces with packages under `packages/`.
+Spur is a TypeScript monorepo: a local daemon plus CLI, and an optional Next.js UI in `packages/web/` that proxies to the daemon HTTP API.
 
 ## Tech Stack
 
 - TypeScript (strict mode, ESM with `.js` extensions in imports)
 - Node.js 20+ (use `node:` prefix for built-in modules)
 - pnpm workspaces
-- Next.js 15 (App Router) for web dashboard
+- Next.js 15 (App Router) for the web UI
 - Commander.js for CLI
 - vitest for testing
 
 ## Review Focus
 
-- **Security**: Watch for command injection (especially in shell/tmux/git commands), AppleScript injection, GraphQL injection, unsanitized user input in API routes
-- **Shell execution**: Prefer `execFile` over `exec` to avoid shell injection. Flag any use of `exec` or string concatenation in shell commands
-- **Plugin pattern**: Plugins must export `{ manifest, create } satisfies PluginModule<T>` with types from `@composio/ao-core`
-- **Type safety**: Flag `as unknown as T` casts, unguarded `JSON.parse`, and type re-declarations that should import from core
-- **Resource leaks**: Check for uncleared intervals/timeouts, uncleaned event listeners, missing `cancel()` on streams
-- **ESM compliance**: Imports must use `.js` extension for local files, `node:` prefix for builtins
+- **Security**: command injection (especially in shell/tmux/git commands), unsanitized user input in API routes, GraphQL injection
+- **Shell execution**: prefer `execFile` over `exec`. Flag any `exec` or string concatenation in shell commands
+- **Type safety**: flag `as unknown as T` casts and unguarded `JSON.parse`
+- **Resource leaks**: uncleared intervals/timeouts, uncleaned event listeners, missing `cancel()` on streams
+- **ESM compliance**: imports must use `.js` extension for local files, `node:` prefix for builtins
 
 ## Ignore
 
-- `packages/web/src/lib/mock-data.ts` — temporary mock data, will be replaced
-- `scripts/` — legacy bash scripts, not part of the TypeScript codebase
-- `artifacts/` — design documents, not code
+- `scripts/` — bash deploy and sidecar helpers, not part of the TypeScript codebase

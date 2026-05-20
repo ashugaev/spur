@@ -5,7 +5,9 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  return NextResponse.json(await readResourceSnapshot(), {
+  const resourceSnapshot = await readResourceSnapshot();
+
+  return NextResponse.json(resourceSnapshot, {
     headers: { "Cache-Control": "no-store" },
   });
 }

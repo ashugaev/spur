@@ -1,4 +1,5 @@
 import type { MetadataRoute } from "next";
+import { BG_BASE_HEX } from "@/design/colors";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
@@ -7,8 +8,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Spur dashboard UI",
     start_url: "/",
     display: "standalone",
-    background_color: "#0D0D0E",
-    theme_color: "#0D0D0E",
+    background_color: BG_BASE_HEX,
+    theme_color: BG_BASE_HEX,
     icons: [
       {
         src: "/icon-192",

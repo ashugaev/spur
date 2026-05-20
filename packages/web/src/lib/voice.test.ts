@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockCreateInterface = vi.fn();
 const mockExecFile = vi.fn();
@@ -90,6 +90,19 @@ function mockExecFileSuccess() {
   );
 }
 
+function mockAzureResponse(
+  body: unknown,
+  init?: { status?: number; headers?: Record<string, string> },
+): Response {
+  const status = init?.status ?? 200;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(init?.headers),
+    json: async () => body,
+  } as Response;
+}
+
 function configureAzureOpenAIConfig(language = "auto") {
   mockExistsSync.mockImplementation((path: string) => {
     if (path === "/tmp/config.yaml") return true;
@@ -119,6 +132,8 @@ AZURE_OPENAI_API_VERSION=2024-10-21
 
 describe("voice runtime", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.resetModules();
     vi.clearAllMocks();
     delete process.env["SPUR_CONFIG"];
@@ -131,6 +146,11 @@ describe("voice runtime", () => {
     mockWriteFile.mockResolvedValue(undefined);
     mockReadFile.mockResolvedValue("transcribed text");
     mockRm.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("surfaces invalid voice.provider instead of silently coercing it", async () => {
@@ -367,16 +387,15 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-          status: 429,
-          headers: { "retry-after": "0" },
-        }),
+        mockAzureResponse(
+          { error: { message: "rate limited" } },
+          {
+            status: 429,
+            headers: { "retry-after": "0" },
+          },
+        ),
       )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after retry" }));
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 
@@ -399,16 +418,15 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-          status: 429,
-          headers: { "retry-after": retryAt },
-        }),
+        mockAzureResponse(
+          { error: { message: "rate limited" } },
+          {
+            status: 429,
+            headers: { "retry-after": retryAt },
+          },
+        ),
       )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after date retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after date retry" }));
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       handler: TimerHandler,
     ) => {
@@ -440,10 +458,13 @@ AZURE_OPENAI_API_VERSION=2024-10-21
   it("fails with explicit message after exhausting retryable azure errors and still cleans up temp files", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       Promise.resolve(
-        new Response(JSON.stringify({ error: { message: "service unavailable" } }), {
-          status: 503,
-          headers: { "retry-after": "0" },
-        }),
+        mockAzureResponse(
+          { error: { message: "service unavailable" } },
+          {
+            status: 503,
+            headers: { "retry-after": "0" },
+          },
+        ),
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
@@ -472,11 +493,7 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     const fetchMock = vi
       .fn()
       .mockRejectedValueOnce(new TypeError("fetch failed"))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ text: "azure ok after network retry" }), {
-          status: 200,
-        }),
-      );
+      .mockResolvedValueOnce(mockAzureResponse({ text: "azure ok after network retry" }));
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
       handler: TimerHandler,
     ) => {
@@ -504,11 +521,9 @@ AZURE_OPENAI_API_VERSION=2024-10-21
   });
 
   it("does not retry non-retryable azure 400 errors", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ error: { message: "bad request" } }), {
-        status: 400,
-      }),
-    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(mockAzureResponse({ error: { message: "bad request" } }, { status: 400 }));
     vi.stubGlobal("fetch", fetchMock);
     configureAzureOpenAIConfig("uk");
 

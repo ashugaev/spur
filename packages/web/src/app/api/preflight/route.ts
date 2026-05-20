@@ -1,11 +1,12 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { spurJsonInit, spurRequestJson } from "@/lib/spur-daemon";
+import type { AgentName } from "@/lib/agents";
 import type { SpawnOverrides } from "@/lib/types";
 
 interface PreflightBody {
   projectId?: string;
   prompt?: string;
-  agent?: "claude" | "codex";
+  agent?: AgentName;
   overrides?: SpawnOverrides;
 }
 
