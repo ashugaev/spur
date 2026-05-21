@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionRow } from "@/components/SessionRow.js";
 import type { DashboardSession, SpurSessionLink } from "@/lib/types.js";
 
@@ -62,8 +62,16 @@ function makeSession(overrides?: Partial<DashboardSession>): DashboardSession {
 }
 
 const onRestoreSession = vi.fn().mockResolvedValue(undefined);
+const onCompleteSession = vi.fn().mockResolvedValue(undefined);
 
 describe("SessionRow", () => {
+  beforeEach(() => {
+    onCompleteSession.mockReset();
+    onCompleteSession.mockResolvedValue(undefined);
+    onRestoreSession.mockReset();
+    onRestoreSession.mockResolvedValue(undefined);
+  });
+
   it("renders tracker and PR badges alongside the merge action", () => {
     useSessionLinkPrInfoMock.mockReturnValue({
       state: "open",
@@ -76,7 +84,13 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    render(<SessionRow session={makeSession()} onRestoreSession={onRestoreSession} />);
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
 
     expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.getByRole("link", { name: "Remove row link strip" })).toHaveAttribute(
@@ -109,7 +123,13 @@ describe("SessionRow", () => {
       fetchedAt: Date.now(),
     });
 
-    render(<SessionRow session={makeSession()} onRestoreSession={onRestoreSession} />);
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
 
     expect(screen.getAllByRole("link")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "Mark api-a1 as done" })).toBeInTheDocument();
@@ -121,5 +141,36 @@ describe("SessionRow", () => {
       "href",
       "https://github.com/test/repo/pull/42",
     );
+  });
+
+  it("delegates the done action and re-enables on failure", async () => {
+    useSessionLinkPrInfoMock.mockReturnValue({
+      state: "merged",
+      reviewDecision: null,
+      ciStatus: "success",
+      canMerge: false,
+      totalThreads: 0,
+      unresolvedThreads: 0,
+      stale: false,
+      fetchedAt: Date.now(),
+    });
+    onCompleteSession.mockRejectedValue(new Error("Complete failed"));
+
+    render(
+      <SessionRow
+        session={makeSession()}
+        onCompleteSession={onCompleteSession}
+        onRestoreSession={onRestoreSession}
+      />,
+    );
+
+    const doneButton = screen.getByRole("button", { name: "Mark api-a1 as done" });
+    fireEvent.click(doneButton);
+
+    expect(doneButton).toBeDisabled();
+    await waitFor(() => {
+      expect(onCompleteSession).toHaveBeenCalledWith(expect.objectContaining({ id: "api-a1" }));
+      expect(doneButton).not.toBeDisabled();
+    });
   });
 });

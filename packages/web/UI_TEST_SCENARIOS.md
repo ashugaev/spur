@@ -78,9 +78,9 @@ Language is configured in `~/.spur/config.yaml` under `voice.language` (default:
 - Sessions with merged PR + completable status: checkmark icon button replaces terminal button
 - Checkmark button same size (h-6 w-6) as terminal button
 - Hover: green border + text (`--color-status-ready`)
-- Click: calls complete API, button disables immediately (no double-click)
+- Click: row moves to Completed/hidden immediately through dashboard cache, complete API runs, sessions refetch in background
 - On error: button re-enables
-- On success: button stays disabled until dashboard poll refreshes session to done zone
+- On success: completed filter shows the row immediately from optimistic cache
 
 ### D5: Tracker and PR links
 

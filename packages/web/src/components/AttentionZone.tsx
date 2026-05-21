@@ -10,6 +10,7 @@ interface AttentionZoneProps {
   collapsed?: boolean;
   onToggle?: (level: AttentionLevel) => void;
   onOpenTerminal?: (session: DashboardSession) => void;
+  onCompleteSession: (session: DashboardSession) => Promise<void>;
   onRestoreSession: (session: DashboardSession) => Promise<void>;
 }
 
@@ -33,6 +34,7 @@ export function AttentionZone({
   collapsed,
   onToggle,
   onOpenTerminal,
+  onCompleteSession,
   onRestoreSession,
 }: AttentionZoneProps) {
   const config = zoneConfig[level];
@@ -61,6 +63,7 @@ export function AttentionZone({
       projectFilterId={projectFilterId}
       session={session}
       onOpenTerminal={onOpenTerminal}
+      onCompleteSession={onCompleteSession}
       onRestoreSession={onRestoreSession}
     />
   ));
