@@ -13,7 +13,7 @@ For remote access via Tailscale:
 # One-time: enable HTTPS proxy via tailscale serve
 sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
 
-# Access at: https://<hostname>.tail90e846.ts.net/
+# Access at: https://<hostname>.<your-tailnet>.ts.net/
 # Only reachable within the tailnet (not publicly exposed).
 
 # To disable:
