@@ -47,7 +47,7 @@ Use [spur.yaml.example](./spur.yaml.example) as the copyable baseline. Add `syml
 
 ## Commands
 
-`spawn`, `list`, `send`, `pause`, `complete`, `kill`, `service`. `daemon start`, `daemon stop`, `daemon restart`, and `slots` are internal and hidden from `--help`.
+`doctor`, `spawn`, `list`, `connect`, `disconnect`, `send`, `pause`, `complete`, `kill`, `respawn`, `service`. `daemon start`, `daemon stop`, `daemon restart`, `slots`, and `sidecar` are internal and hidden from `--help`.
 
 ```bash
 spur spawn <project> [prompt...] [--agent claude|codex|cursor] [--plan] [--branch <name>] [--step <label> ...] [--worktree [defaultBranch] | --shared]
@@ -226,11 +226,11 @@ Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and us
 
 ### HTTPS requirement
 
-Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale:
+Browsers require HTTPS for microphone access (`getUserMedia`). On `localhost` it works over plain HTTP. For remote access via Tailscale (substitute your own tailnet, e.g. `tail1234.ts.net`):
 
 ```bash
 sudo tailscale serve --bg --https 443 http://127.0.0.1:5555
-# Access at: https://<hostname>.tail90e846.ts.net/
+# Access at: https://<hostname>.<your-tailnet>.ts.net/
 # Only reachable within the tailnet.
 # To disable: tailscale serve --https=443 off
 ```
