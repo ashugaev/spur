@@ -54,7 +54,7 @@ interface ConfigDefaults {
   defaultAgent: AgentName;
   tmuxSocketName: string;
   uiPort: number;
-  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+  voiceProvider: "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
   voiceModelPath?: string;
   voiceLanguage: string;
   voiceModel: string;
@@ -325,12 +325,19 @@ export function writeProjectConfigScaffold(scaffold: ProjectConfigScaffold): voi
 function asOptionalVoiceProvider(
   value: unknown,
   label: string,
-): "whisper_cpp" | "faster_whisper" | "azure_openai" | undefined {
+): "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible" | undefined {
   if (value === undefined) return undefined;
-  if (value === "whisper_cpp" || value === "faster_whisper" || value === "azure_openai") {
+  if (
+    value === "whisper_cpp" ||
+    value === "faster_whisper" ||
+    value === "azure_openai" ||
+    value === "openai_compatible"
+  ) {
     return value;
   }
-  throw new Error(`${label} must be "whisper_cpp", "faster_whisper", or "azure_openai"`);
+  throw new Error(
+    `${label} must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"`,
+  );
 }
 
 function expectedEventsForSource(source: SourceConfig): string[] {
