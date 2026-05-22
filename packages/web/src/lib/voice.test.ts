@@ -951,6 +951,33 @@ voice:
     }
   });
 
+  it("redacts any echoed Bearer token in openai_compatible non-retryable 400 errors", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        mockAzureResponse({ error: { message: "Bearer test-key is invalid" } }, { status: 400 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      let caught: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).not.toContain("Bearer test-key");
+      expect(message).toContain("Bearer [redacted]");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("redacts any echoed Bearer token in openai_compatible retry-exhaustion errors", async () => {
     const fetchMock = vi
       .fn()

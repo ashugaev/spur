@@ -1067,7 +1067,7 @@ async function runOpenAITranscriptionAttempts<
 
       const message = extractOpenAIError(payload, `${errorLabel} failed`);
       if (!isRetryableOpenAIStatus(response.status)) {
-        throw new Error(message);
+        throw new Error(redactBearerTokens(message));
       }
       lastRetryableError = message;
       if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
