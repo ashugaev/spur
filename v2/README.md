@@ -204,7 +204,21 @@ AZURE_OPENAI_API_KEY=<key>
 AZURE_OPENAI_API_VERSION=2024-10-21
 EOF
 chmod 600 ~/.spur/.env
+
+# openai_compatible provider credentials (Groq example)
+cat >> ~/.spur/.env <<'EOF'
+GROQ_API_KEY=<key>
+EOF
+chmod 600 ~/.spur/.env
 ```
+
+The `openai_compatible` provider talks to any vendor that exposes the OpenAI `POST /audio/transcriptions` shape. Pick a vendor, set `voice.baseUrl` and `voice.keyEnv`, and put the matching key in `~/.spur/.env`:
+
+| Vendor     | `voice.baseUrl`                  | `voice.keyEnv`       | Example `voice.model`    |
+| ---------- | -------------------------------- | -------------------- | ------------------------ |
+| Groq       | `https://api.groq.com/openai/v1` | `GROQ_API_KEY`       | `whisper-large-v3-turbo` |
+| OpenAI     | `https://api.openai.com/v1`      | `OPENAI_API_KEY`     | `whisper-1`              |
+| OpenRouter | `https://openrouter.ai/api/v1`   | `OPENROUTER_API_KEY` | vendor-specific model id |
 
 ### Config
 
@@ -222,6 +236,7 @@ voice:
 For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
 For `faster_whisper`, `voice.language` is used as the transcription language hint.
 For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
+For `openai_compatible`, `voice.baseUrl` and `voice.keyEnv` are required; `voice.model` is the vendor's model id; the key is read from `~/.spur/.env` (or the environment) and never logged.
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
 
 ### HTTPS requirement
@@ -276,7 +291,7 @@ Spur now has two config layers:
 - local project config: nearest `spur.yaml` / `spur.yml`. This owns only `projects:`.
 
 `spur list` and `spur spawn` auto-initialize the global instance config when missing and auto-connect the nearest local project config when present.
-Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, or Azure credentials in `~/.spur/.env` for `azure_openai`). See [Voice Input](#voice-input) for setup.
+Voice input in `packages/web` is disabled until provider-specific voice dependencies are installed (`whisper-cli` + `ffmpeg` for `whisper_cpp`, Python + `faster-whisper` for `faster_whisper`, Azure credentials in `~/.spur/.env` for `azure_openai`, or `baseUrl`/`keyEnv` plus a matching key in `~/.spur/.env` for `openai_compatible`). See [Voice Input](#voice-input) for setup.
 
 ```yaml
 server:
@@ -390,10 +405,12 @@ Field reference:
 - `dataDir`: optional, default `~/.spur`.
 - `worktreeDir`: optional, default `~/.spur/worktrees`.
 - `defaultAgent`: optional, `claude|codex|cursor`, default `claude`.
-- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai`, default `whisper_cpp`.
+- `voice.provider`: optional, `whisper_cpp|faster_whisper|azure_openai|openai_compatible`, default `whisper_cpp`.
 - `voice.language`: optional transcription language code, default `auto`.
 - `voice.model`: optional model name, default `base`.
 - `voice.modelPath`: optional local model path override. If set, it overrides `voice.model`.
+- `voice.baseUrl`: required for `openai_compatible`; the vendor's OpenAI-compatible base URL (e.g. `https://api.groq.com/openai/v1`).
+- `voice.keyEnv`: required for `openai_compatible`; name of the env var holding the API key. Must match `^[A-Z][A-Z0-9_]*$`. Resolved from `~/.spur/.env` first, then `process.env`.
 - `projects.<id>.path`: required repo path.
 - `projects.<id>.defaultBranch`: optional, default `main`.
 - `projects.<id>.sessionPrefix`: optional, defaults to a sanitized `<id>`.

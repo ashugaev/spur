@@ -922,14 +922,16 @@ voice:
   });
 
   it("exhausts openai_compatible retries on persistent 503 with explicit message", async () => {
-    const fetchMock = vi.fn().mockImplementation(() =>
-      Promise.resolve(
-        mockAzureResponse(
-          { error: { message: "service unavailable" } },
-          { status: 503, headers: { "retry-after": "0" } },
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          mockAzureResponse(
+            { error: { message: "service unavailable" } },
+            { status: 503, headers: { "retry-after": "0" } },
+          ),
         ),
-      ),
-    );
+      );
     vi.stubGlobal("fetch", fetchMock);
     configureOpenAICompatibleConfig("uk");
 
@@ -964,14 +966,16 @@ voice:
   });
 
   it("redacts any echoed Bearer token in openai_compatible retry-exhaustion errors", async () => {
-    const fetchMock = vi.fn().mockImplementation(() =>
-      Promise.resolve(
-        mockAzureResponse(
-          { error: { message: "auth replay seen Bearer test-key in upstream" } },
-          { status: 503, headers: { "retry-after": "0" } },
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          mockAzureResponse(
+            { error: { message: "auth replay seen Bearer test-key in upstream" } },
+            { status: 503, headers: { "retry-after": "0" } },
+          ),
         ),
-      ),
-    );
+      );
     vi.stubGlobal("fetch", fetchMock);
     configureOpenAICompatibleConfig("uk");
 

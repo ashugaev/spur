@@ -34,7 +34,7 @@ Keep daemon, web, and terminal sockets on loopback. The reverse proxy is the onl
 | GitHub auth                     | `~/.config/gh/`                                             | local                       | `gh auth login`                                                          |
 | Codex auth                      | `~/.codex/`                                                 | local                       | `codex login`                                                            |
 | Claude auth                     | `~/.claude/`                                                | local                       | `claude login`                                                           |
-| Voice secrets                   | `~/.spur/.env`                                              | local                       | Mode 0600; Azure keys for voice providers                                |
+| Voice secrets                   | `~/.spur/.env`                                              | local                       | Mode 0600; Azure or OpenAI-compatible keys for voice providers           |
 | Voice models                    | `~/.cache/whisper.cpp/`, `~/.spur/venvs/faster-whisper/`    | local                       | Per voice provider                                                       |
 | Built daemon                    | `~/projects/spur/v2/dist/`                                  | local (gitignored)          | Produced by `pnpm build`                                                 |
 | Web build                       | `~/projects/spur/packages/web/.next/`                       | local (gitignored)          | Produced by `pnpm build`                                                 |
@@ -190,6 +190,8 @@ Reload: Quick Start step 9. Set `DIRECT_TERMINAL_PUBLIC_PORT` in `deploy/spur-we
 ## Voice Input (Optional)
 
 Optional. Requires extra host dependencies, `~/.spur/.env` credentials for some providers, and HTTPS (or localhost) for microphone access. Full setup: [v2/README.md — Voice Input](../v2/README.md#voice-input).
+
+`openai_compatible` is the no-installation path: no whisper.cpp build, no faster-whisper venv, no Azure deployment. Configure `voice.baseUrl` and `voice.keyEnv` and set the key in `~/.spur/.env`.
 
 ## Sidecars (Optional)
 

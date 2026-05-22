@@ -201,14 +201,10 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
     const baseUrlRaw = parsed?.voice?.baseUrl?.trim();
     const keyEnv = parsed?.voice?.keyEnv?.trim();
     if (!baseUrlRaw || !keyEnv) {
-      throw new Error(
-        'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
-      );
+      throw new Error('voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv');
     }
     if (!/^[A-Z][A-Z0-9_]*$/.test(keyEnv)) {
-      throw new Error(
-        `voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`,
-      );
+      throw new Error(`voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`);
     }
     const baseUrl = baseUrlRaw.replace(/\/+$/, "");
     return { provider: "openai_compatible", model, language, baseUrl, keyEnv };
@@ -1240,14 +1236,9 @@ async function transcribeWithOpenAICompatible(
           throw error;
         }
         lastRetryableError =
-          error instanceof Error
-            ? error.message
-            : "OpenAI-compatible transcription request failed";
+          error instanceof Error ? error.message : "OpenAI-compatible transcription request failed";
         if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
-          const safeMessage = lastRetryableError.replace(
-            /Bearer\s+[\w.-]+/i,
-            "Bearer [redacted]",
-          );
+          const safeMessage = lastRetryableError.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
           throw new Error(
             `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
             error instanceof Error ? { cause: error } : undefined,
