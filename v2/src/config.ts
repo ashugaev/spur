@@ -912,21 +912,34 @@ function parseConfigFile(
         mode === "instance"
           ? (asOptionalString(voice["model"], "voice.model") ?? resolvedDefaults.voiceModel)
           : resolvedDefaults.voiceModel;
-      const configuredModelPath =
+      const language =
         mode === "instance"
-          ? asOptionalString(voice["modelPath"], "voice.modelPath")
-          : asOptionalString(voice["modelPath"], "voice.modelPath");
+          ? (asOptionalString(voice["language"], "voice.language") ??
+            resolvedDefaults.voiceLanguage)
+          : resolvedDefaults.voiceLanguage;
+
+      if (provider === "openai_compatible") {
+        const baseUrlRaw = asOptionalString(voice["baseUrl"], "voice.baseUrl");
+        const keyEnv = asOptionalString(voice["keyEnv"], "voice.keyEnv");
+        if (!baseUrlRaw || !keyEnv) {
+          throw new Error(
+            'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+          );
+        }
+        if (!/^[A-Z][A-Z0-9_]*$/.test(keyEnv)) {
+          throw new Error(`voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`);
+        }
+        const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+        return { provider, language, model, baseUrl, keyEnv };
+      }
+
+      const configuredModelPath = asOptionalString(voice["modelPath"], "voice.modelPath");
       const modelPath = configuredModelPath
         ? resolveFrom(configDir, configuredModelPath)
         : undefined;
-
       return {
         provider,
-        language:
-          mode === "instance"
-            ? (asOptionalString(voice["language"], "voice.language") ??
-              resolvedDefaults.voiceLanguage)
-            : resolvedDefaults.voiceLanguage,
+        language,
         model,
         ...(modelPath !== undefined ? { modelPath } : {}),
       };
@@ -1022,7 +1035,8 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           voiceProvider: defaults.voice.provider,
           voiceLanguage: defaults.voice.language,
           voiceModel: defaults.voice.model,
-          ...(defaults.voice.modelPath !== undefined
+          ...(defaults.voice.provider !== "openai_compatible" &&
+          defaults.voice.modelPath !== undefined
             ? { voiceModelPath: defaults.voice.modelPath }
             : {}),
         }

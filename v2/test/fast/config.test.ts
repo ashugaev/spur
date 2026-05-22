@@ -71,6 +71,7 @@ projects:
     expect(config.worktreeDir).toContain(".spur/worktrees");
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider === "openai_compatible") throw new Error("unexpected provider");
     expect(config.voice.modelPath).toBeUndefined();
     expect(config.voice.language).toBe("auto");
     expect(config.projects["backend"]?.defaultBranch).toBe("main");
@@ -363,6 +364,7 @@ projects:
 
     const config = loadConfig(configPath);
 
+    if (config.voice.provider === "openai_compatible") throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-small.bin");
   });
 
@@ -422,8 +424,80 @@ projects:
 
     expect(config.voice.provider).toBe("whisper_cpp");
     expect(config.voice.model).toBe("base");
+    if (config.voice.provider === "openai_compatible") throw new Error("unexpected provider");
     expect(config.voice.modelPath).toContain("/models/ggml-base.bin");
     expect(config.voice.language).toBe("ru");
+  });
+
+  it("parses openai_compatible voice provider with baseUrl and keyEnv", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  model: whisper-large-v3-turbo
+  baseUrl: https://api.groq.com/openai/v1/
+  keyEnv: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    const config = loadConfig(configPath);
+
+    expect(config.voice).toEqual({
+      provider: "openai_compatible",
+      language: "auto",
+      model: "whisper-large-v3-turbo",
+      baseUrl: "https://api.groq.com/openai/v1",
+      keyEnv: "GROQ_API_KEY",
+    });
+  });
+
+  it("rejects openai_compatible without baseUrl", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  keyEnv: GROQ_API_KEY
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+    );
+  });
+
+  it("rejects openai_compatible without keyEnv", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+    );
+  });
+
+  it("rejects openai_compatible with shell-unsafe keyEnv", async () => {
+    const configPath = await writeConfig(`
+voice:
+  provider: openai_compatible
+  baseUrl: https://api.groq.com/openai/v1
+  keyEnv: "foo; cat /etc/shadow"
+
+projects:
+  backend:
+    path: $REPO_PATH
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(/voice\.keyEnv must match/);
   });
 
   it("rejects unsupported voice providers", async () => {
