@@ -87,6 +87,7 @@ const runSpawnPreflightMock = vi.fn();
 const logSpurEventMock = vi.fn();
 const readClaudeJsonlStateMock = vi.fn();
 const readClaudeConversationMock = vi.fn();
+const readCursorJsonlStateMock = vi.fn();
 const sendDesktopNotificationMock = vi.fn();
 const findLatestClaudeSessionFileMock = vi.fn();
 const codexHookHomePathMock = vi.fn((sessionToolDir: string) => `${sessionToolDir}/codex-home`);
@@ -110,6 +111,10 @@ vi.mock("../../src/registry.js", async (importOriginal) => {
 vi.mock("../../src/claude-jsonl-state.js", () => ({
   readClaudeJsonlState: readClaudeJsonlStateMock,
   readClaudeConversation: readClaudeConversationMock,
+}));
+
+vi.mock("../../src/cursor-jsonl-state.js", () => ({
+  readCursorJsonlState: readCursorJsonlStateMock,
 }));
 
 vi.mock("../../src/agents/claude.js", () => ({
@@ -357,6 +362,18 @@ function mockClaudeJsonlState(state: string) {
   });
 }
 
+function mockCursorJsonlState(state: string) {
+  readCursorJsonlStateMock.mockResolvedValue({
+    state,
+    reader: {
+      filePath: "/tmp/.cursor/projects/test/agent-transcripts/chat-api-1/chat-api-1.jsonl",
+      lastOffset: 0,
+      lastMtimeMs: 0,
+      tailRecords: [],
+    },
+  });
+}
+
 type SessionServiceInternals = {
   waitForSubmitAck(
     binding: { scan(text: string): Promise<{ found: boolean; lastScannedFile: string | null }> },
@@ -465,7 +482,7 @@ describe("SessionService", () => {
     agentStateStrategyMock
       .mockReset()
       .mockImplementation((agent: string) =>
-        agent === "codex" ? "hook" : agent === "cursor" ? "cursor_pane" : "claude_jsonl",
+        agent === "codex" ? "hook" : agent === "cursor" ? "cursor_jsonl" : "claude_jsonl",
       );
     agentWaitsForSubmitAckMock
       .mockReset()
@@ -496,6 +513,7 @@ describe("SessionService", () => {
     findLatestClaudeSessionFileMock.mockReset().mockResolvedValue(null);
     readClaudeJsonlStateMock.mockReset().mockResolvedValue(null);
     readClaudeConversationMock.mockReset().mockResolvedValue(null);
+    readCursorJsonlStateMock.mockReset().mockResolvedValue(null);
     loadConfigMock.mockReset().mockReturnValue(baseConfig());
     loadProjectConfigMock.mockReset();
     findProjectConfigPathMock.mockReset().mockReturnValue(undefined);
@@ -1794,8 +1812,7 @@ describe("SessionService", () => {
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
     listSessionsMock.mockReturnValue([]);
-    captureTmuxPaneMock.mockResolvedValue("Cursor Agent\nComposer 2 Fast");
-    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:04:55.000Z"));
+    mockCursorJsonlState("working");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2555,7 +2572,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("working");
   });
 
-  it("detects needs_input for Cursor from pane markers", async () => {
+  it("detects needs_input for Cursor from AskUserQuestion JSONL", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2570,9 +2587,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue(
-      "Workspace Trust Required\nDo you trust the contents of this directory?",
-    );
+    mockCursorJsonlState("needs_input");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
@@ -2582,7 +2597,7 @@ describe("SessionService", () => {
     expect(result.state).toBe("needs_input");
   });
 
-  it("classifies idle Cursor sessions as waiting from pane state", async () => {
+  it("classifies idle Cursor sessions as waiting from transcript JSONL", async () => {
     readSessionMock.mockReturnValue({
       id: "api-1",
       project: "api",
@@ -2597,8 +2612,7 @@ describe("SessionService", () => {
       createdAt: "2026-03-18T10:00:00.000Z",
       updatedAt: "2026-03-18T10:01:00.000Z",
     });
-    captureTmuxPaneMock.mockResolvedValue("Cursor Agent\nComposer 2 Fast");
-    getTmuxSessionActivityMock.mockResolvedValue(new Date("2026-03-18T10:00:00.000Z"));
+    mockCursorJsonlState("waiting");
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
