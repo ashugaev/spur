@@ -29,11 +29,13 @@ import {
   PRIMARY_SUBMIT_HINT,
 } from "@/lib/submit-hotkeys";
 import {
-  getAttentionLevel,
+  ATTENTION_ZONE_ORDER,
+  collapseDeskRows,
   isTerminalSession,
   toDashboardSession,
   type AttentionLevel,
   type DashboardSession,
+  type DeskCollapsedRow,
   type ProjectInfo,
   type SpurSessionView,
   type SpawnOverrides,
@@ -41,8 +43,7 @@ import {
 } from "@/lib/types";
 
 const SESSIONS_POLL_INTERVAL_MS = 5_000;
-const LANE_ORDER: AttentionLevel[] = ["respond", "working", "pending", "stopped", "done"];
-const LANE_ORDER_SET: ReadonlySet<string> = new Set(LANE_ORDER);
+const LANE_ORDER_SET: ReadonlySet<string> = new Set(ATTENTION_ZONE_ORDER);
 const DEFAULT_COLLAPSED_MOBILE_CATEGORIES: AttentionLevel[] = ["stopped"];
 const LAST_SPAWN_PROJECT_STORAGE_KEY = "spur:last-spawn-project";
 const COLLAPSED_CATEGORIES_STORAGE_KEY = "spur:mobile-collapsed-categories";
@@ -312,7 +313,7 @@ export function Dashboard() {
   const sessions = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return projectSessions;
-    return projectSessions.filter(
+    const narrowed = projectSessions.filter(
       (s) =>
         s.id.toLowerCase().includes(q) ||
         (s.title ?? "").toLowerCase().includes(q) ||
@@ -320,10 +321,14 @@ export function Dashboard() {
         s.projectName.toLowerCase().includes(q) ||
         (s.branch ?? "").toLowerCase().includes(q),
     );
+    const keys = new Set(narrowed.map((s) => s.deskKey));
+    return projectSessions.filter((s) => keys.has(s.deskKey));
   }, [projectSessions, searchQuery]);
 
+  const deskCollapsedRows = useMemo(() => collapseDeskRows(sessions), [sessions]);
+
   const grouped = useMemo(() => {
-    const lanes: Record<AttentionLevel, DashboardSession[]> = {
+    const lanes: Record<AttentionLevel, DeskCollapsedRow[]> = {
       respond: [],
       working: [],
       pending: [],
@@ -331,12 +336,22 @@ export function Dashboard() {
       done: [],
     };
 
-    for (const session of sessions) {
-      lanes[getAttentionLevel(session)].push(session);
+    for (const row of deskCollapsedRows) {
+      lanes[row.lane].push(row);
+    }
+
+    for (const level of ATTENTION_ZONE_ORDER) {
+      lanes[level].sort((a, b) => {
+        const byDesk = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
+          sensitivity: "base",
+        });
+        if (byDesk !== 0) return byDesk;
+        return a.session.id.localeCompare(b.session.id);
+      });
     }
 
     return lanes;
-  }, [sessions]);
+  }, [deskCollapsedRows]);
 
   const stats = useMemo(
     () => ({
@@ -351,7 +366,7 @@ export function Dashboard() {
 
   const visibleLevels = useMemo(
     () =>
-      LANE_ORDER.filter(
+      ATTENTION_ZONE_ORDER.filter(
         (level) =>
           grouped[level].length > 0 &&
           (activeStatFilter === null ? level !== "done" : level === activeStatFilter),
@@ -991,7 +1006,7 @@ export function Dashboard() {
                 onRestoreSession={handleRestoreSession}
                 projectFilterId={projectId || undefined}
                 onToggle={isMobile ? toggleCollapsed : undefined}
-                sessions={grouped[level]}
+                rows={grouped[level]}
               />
             ))}
           </section>

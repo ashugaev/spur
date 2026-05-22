@@ -46,6 +46,7 @@ function IconButton({
 
 interface SessionRowProps {
   projectFilterId?: string;
+  deskMemberCount?: number;
   session: DashboardSession;
   onOpenTerminal?: (session: DashboardSession) => void;
   onCompleteSession: (session: DashboardSession) => Promise<void>;
@@ -54,6 +55,7 @@ interface SessionRowProps {
 
 export function SessionRow({
   projectFilterId,
+  deskMemberCount,
   session,
   onOpenTerminal,
   onCompleteSession,
@@ -85,6 +87,26 @@ export function SessionRow({
       <span className="hidden w-[3.5rem] shrink-0 text-[var(--color-text-tertiary)] md:inline">
         {session.agent}
       </span>
+
+      {deskMemberCount !== undefined && deskMemberCount > 1 ? (
+        <span
+          className="hidden shrink-0 items-center gap-0.5 rounded border border-[var(--color-border-subtle)] px-1 py-0.5 font-mono text-[10px] tabular-nums leading-none text-[var(--color-text-tertiary)] sm:inline-flex"
+          title={`${deskMemberCount} agents on this checkout`}
+        >
+          <svg
+            aria-hidden="true"
+            className="h-3 w-3 shrink-0 text-[var(--color-text-tertiary)]"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            viewBox="0 0 24 24"
+          >
+            <rect height="14" rx="1" width="14" x="8" y="8" />
+            <rect height="14" opacity="0.55" rx="1" width="14" x="3" y="3" />
+          </svg>
+          {deskMemberCount}
+        </span>
+      ) : null}
 
       <Link
         className="min-w-0 flex-1 truncate text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:no-underline"

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AGENT_OPTIONS, getAgentDisplayName, type AgentName } from "@/lib/agents";
 import { AgentSelect } from "@/components/AgentSelect";
 import { ImageAttachmentTextarea } from "@/components/ImageAttachmentTextarea";
 import { InputHistoryButton } from "@/components/InputHistory";
@@ -27,7 +28,6 @@ import {
   getTerminalQuerySessionId,
   withTerminalQuery,
 } from "@/lib/project-routes";
-import { type AgentName } from "@/lib/agents";
 import {
   encodeImageAttachments,
   imageAttachmentsFromFiles,
@@ -751,6 +751,10 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   const [respawnAgent, setRespawnAgent] = useState<AgentName | null>(null);
   const [respawnAttachments, setRespawnAttachments] = useState<ImageAttachment[]>([]);
   const [respawnStartupAttachmentIds, setRespawnStartupAttachmentIds] = useState<string[]>([]);
+  const [deskSpawnOpen, setDeskSpawnOpen] = useState(false);
+  const [deskSpawnPrompt, setDeskSpawnPrompt] = useState("");
+  const [deskSpawnAgent, setDeskSpawnAgent] = useState<AgentName>("claude");
+  const [deskSpawning, setDeskSpawning] = useState(false);
   const respawnPromptRef = useRef<HTMLTextAreaElement>(null);
   const respawnVoice = useVoiceInput({
     onTranscribed: (text) =>
@@ -963,6 +967,44 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
     }
   };
 
+  const openDeskSpawn = () => {
+    if (!session) return;
+    setDeskSpawnAgent(session.agent);
+    setDeskSpawnPrompt("");
+    setDeskSpawnOpen(true);
+  };
+
+  const handleDeskSpawn = async () => {
+    if (!session || deskSpawning) return;
+    const nextPrompt = deskSpawnPrompt.trim();
+    if (!nextPrompt) return;
+    setDeskSpawning(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/spawn", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          projectId: session.projectId,
+          prompt: nextPrompt,
+          agent: deskSpawnAgent,
+          reuseWorkspaceSessionId: session.id,
+          overrides: { worktree: session.worktree },
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Failed to spawn desk agent"));
+      }
+      const created = (await response.json()) as SpurSessionView;
+      setDeskSpawnOpen(false);
+      router.push(buildSessionPath(created.id, projectId));
+    } catch (deskError) {
+      setError(deskError instanceof Error ? deskError.message : "Failed to spawn desk agent");
+    } finally {
+      setDeskSpawning(false);
+    }
+  };
+
   const handleSidecarAction = async (sidecarName: string, action: "start" | "stop") => {
     setBusyAction(`sidecar:${action}:${sidecarName}`);
     try {
@@ -1142,6 +1184,8 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
   );
   const terminalOpen = Boolean(canAttach && isSessionTerminal);
 
+  const canDeskSpawn = Boolean(session && session.workspaceExists && !isTerminalSession(session));
+
   const openRespawnEditor = useCallback(() => {
     if (!session) return;
     setRespawnPrompt(session.prompt);
@@ -1242,6 +1286,31 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
               <p className="mt-1 max-w-3xl text-[var(--color-text-secondary)]">{subtitle}</p>
             ) : null}
 
+            {session.deskGroupMembers && session.deskGroupMembers.length > 1 ? (
+              <nav
+                aria-label="Checkout group"
+                className="mt-3 flex flex-wrap gap-1 border-b border-[var(--color-border-subtle)] pb-2"
+              >
+                {session.deskGroupMembers.map((m) => {
+                  const selected = m.id === session.id;
+                  return (
+                    <Link
+                      key={m.id}
+                      aria-current={selected ? "page" : undefined}
+                      className={`border-b-2 px-1.5 pb-0.5 text-[10px] font-bold uppercase tracking-[0.1em] transition ${
+                        selected
+                          ? "border-[var(--color-accent)] text-[var(--color-text-primary)]"
+                          : "border-transparent text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                      }`}
+                      href={buildSessionPath(m.id, projectId)}
+                    >
+                      {m.agent} · {truncateMiddle(m.id, 18)}
+                    </Link>
+                  );
+                })}
+              </nav>
+            ) : null}
+
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {displayState ? <ActivityDot activity={displayState} /> : null}
               {session.branch ? (
@@ -1274,6 +1343,17 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                 onClick={() => syncTerminalFilter(session.id)}
               >
                 Terminal
+              </button>
+            ) : null}
+            {canDeskSpawn ? (
+              <button
+                type="button"
+                disabled={busyAction !== null || deskSpawning}
+                className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)] disabled:opacity-50"
+                onClick={openDeskSpawn}
+                title="Opens a second agent in this checkout directory with the same branch"
+              >
+                Desk agent
               </button>
             ) : null}
             {canPause(session) ? (
@@ -1995,6 +2075,75 @@ export function SessionDetail({ sessionId, projectId }: SessionDetailProps) {
                         {busyAction === "respawn" ? "Respawning..." : "Respawn"}
                       </button>
                     </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {deskSpawnOpen && session ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--color-modal-backdrop)]"
+              onClick={(event) => {
+                if (event.target === event.currentTarget && !deskSpawning) setDeskSpawnOpen(false);
+              }}
+            >
+              <div className="flex w-full max-h-[calc(100vh-1rem)] flex-col overflow-hidden border border-[var(--color-border-default)] bg-[var(--color-bg-base)] p-4 shadow-[0_20px_60px_var(--color-shadow-modal-lg)] sm:max-h-[calc(100vh-2rem)] sm:w-full sm:max-w-lg sm:p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-sm font-bold uppercase tracking-[0.1em] text-[var(--color-text-primary)]">
+                    Desk agent
+                  </h2>
+                  <button
+                    className="text-[var(--color-text-tertiary)] transition hover:text-[var(--color-text-primary)]"
+                    disabled={deskSpawning}
+                    onClick={() => setDeskSpawnOpen(false)}
+                    type="button"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+                  <label className="text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
+                    Agent
+                    <select
+                      aria-label="Desk spawn agent"
+                      className="mt-1 block w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 text-[var(--color-text-primary)]"
+                      disabled={deskSpawning}
+                      onChange={(event) => setDeskSpawnAgent(event.target.value as AgentName)}
+                      value={deskSpawnAgent}
+                    >
+                      {AGENT_OPTIONS.map((agent) => (
+                        <option key={agent} value={agent}>
+                          {getAgentDisplayName(agent)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <textarea
+                    aria-label="Desk agent prompt"
+                    className="min-h-[10rem] w-full border border-[var(--color-border-default)] bg-[var(--color-bg-surface)] px-2.5 py-2 font-mono text-sm text-[var(--color-text-primary)]"
+                    disabled={deskSpawning}
+                    onChange={(event) => setDeskSpawnPrompt(event.target.value)}
+                    placeholder="First message"
+                    rows={10}
+                    value={deskSpawnPrompt}
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      className="border border-[var(--color-border-strong)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-primary)] transition hover:bg-[var(--color-hover-overlay)]"
+                      disabled={deskSpawning}
+                      onClick={() => setDeskSpawnOpen(false)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 font-bold uppercase text-[var(--color-text-inverse)] transition hover:bg-[var(--color-accent-hover)] disabled:opacity-50"
+                      disabled={deskSpawning || !deskSpawnPrompt.trim()}
+                      onClick={() => void handleDeskSpawn()}
+                      type="button"
+                    >
+                      {deskSpawning ? "Spawning..." : "Spawn"}
+                    </button>
                   </div>
                 </div>
               </div>

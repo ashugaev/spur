@@ -282,6 +282,7 @@ export interface SessionQueuedMessagesState {
 export interface SessionRecord {
   id: string;
   project: string;
+  deskId?: string;
   agent: AgentName;
   planMode?: boolean;
   agentSessionId?: string;
@@ -321,6 +322,11 @@ export interface ServiceInstanceRecord {
   error?: string;
 }
 
+export interface SessionDeskMember {
+  id: string;
+  agent: AgentName;
+}
+
 export interface SessionView extends SessionRecord {
   runtimeAlive: boolean;
   workspaceExists: boolean;
@@ -331,6 +337,7 @@ export interface SessionView extends SessionRecord {
   services: ServiceInstanceView[];
   sidecars: { name: string; alive: boolean }[];
   workspaceAccess?: SessionWorkspaceAccess;
+  deskGroupMembers?: SessionDeskMember[];
 }
 
 export interface DashboardSessionView extends SessionRecord {
@@ -381,6 +388,7 @@ export interface SpawnSessionRequest {
   planMode?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
+  reuseWorkspaceSessionId?: string;
   configPath?: string;
   slots?: { links?: SessionLink[] };
 }
