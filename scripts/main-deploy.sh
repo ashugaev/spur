@@ -30,8 +30,11 @@ systemctl_cmd() {
 kill_rogue_daemon_on_port() {
   local port=4310
   local pid
+  # `|| true` keeps a clean box (nothing on :4310) from tripping `set -o
+  # pipefail`: `grep` returns 1 when there is no match, which propagates
+  # through the pipeline and would otherwise abort the script.
   pid=$(sudo ss -tlnpH "sport = :$port" 2>/dev/null \
-    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2)
+    | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2) || true
   [[ -z "$pid" ]] && return 0
 
   local cg
