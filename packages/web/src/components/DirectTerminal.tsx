@@ -17,7 +17,7 @@ import type { Terminal as TerminalType } from "xterm";
 import { TERMINAL_THEME } from "@/design/colors";
 import { cn } from "@/lib/cn";
 import { getAgentHotkeys } from "@/lib/agent-hotkeys";
-import { agentUsesBracketedPaste, getAgentDisplayName, type AgentName } from "@/lib/agents";
+import { getAgentDisplayName, type AgentName } from "@/lib/agents";
 import {
   encodeImageAttachments,
   imageFilesFromDataTransfer,
@@ -95,10 +95,7 @@ function PencilIcon() {
   );
 }
 
-function buildSubmittedTextPayloads(agent: AgentName, text: string): string[] {
-  if (!agentUsesBracketedPaste(agent)) {
-    return [`${text}\r`];
-  }
+function buildSubmittedTextPayloads(text: string): string[] {
   return [`${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}`, "\r"];
 }
 
@@ -345,12 +342,12 @@ export function DirectTerminal({
       }
       setError(null);
       setSubmitError(null);
-      for (const payload of buildSubmittedTextPayloads(agent, text)) {
+      for (const payload of buildSubmittedTextPayloads(text)) {
         await sendWithAck(payload);
       }
       draftHistory.saveEntry(text);
     },
-    [agent, draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
+    [draftHistory, sendSessionMessage, sendWithAck, voiceAttachments],
   );
 
   const sendHotkey = useCallback(
@@ -358,7 +355,7 @@ export function DirectTerminal({
       try {
         if (hotkey.submit) {
           setSubmitError(null);
-          for (const payload of buildSubmittedTextPayloads(agent, hotkey.sequence)) {
+          for (const payload of buildSubmittedTextPayloads(hotkey.sequence)) {
             await sendWithAck(payload);
           }
           return;
@@ -370,14 +367,14 @@ export function DirectTerminal({
         );
       }
     },
-    [agent, sendTerminalInput, sendWithAck],
+    [sendTerminalInput, sendWithAck],
   );
 
   const submitSlash = useCallback(
     async (text: string) => {
       try {
         setSubmitError(null);
-        for (const payload of buildSubmittedTextPayloads(agent, text)) {
+        for (const payload of buildSubmittedTextPayloads(text)) {
           await sendWithAck(payload);
         }
       } catch (slashError) {
@@ -386,7 +383,7 @@ export function DirectTerminal({
         );
       }
     },
-    [agent, sendWithAck],
+    [sendWithAck],
   );
 
   useEffect(() => {

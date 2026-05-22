@@ -188,6 +188,26 @@ describe("DirectTerminal voice confirm", () => {
     });
   });
 
+  it("submits confirmed voice input as bracketed paste plus enter for cursor", async () => {
+    const { DirectTerminal } = await import("@/components/DirectTerminal");
+
+    await act(async () => {
+      render(<DirectTerminal agent="cursor" sessionId="voice-session" />);
+    });
+
+    await waitFor(() => {
+      expect(MockWebSocket).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm voice input" }));
+
+    expect(mockVoiceState.confirmDraft).toHaveBeenCalledOnce();
+    await waitFor(() => {
+      expect(sentInputPayloads()).toEqual(["\u001b[200~git status\u001b[201~", "\r"]);
+      expect(sentInputPayloads()).not.toContain("git status\r");
+    });
+  });
+
   it("renders pencil and stop buttons while recording with stop on the right", async () => {
     mockVoiceState.recording = true;
     mockVoiceState.voiceModalOpen = false;
