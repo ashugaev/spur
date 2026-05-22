@@ -167,7 +167,7 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai"',
+      'voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible"',
     );
   });
 

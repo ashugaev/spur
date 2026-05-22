@@ -17,11 +17,11 @@ const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-
 const DEFAULT_VOICE_MODEL = "base";
 const DEFAULT_VOICE_LANGUAGE = "auto";
 const DEFAULT_AZURE_OPENAI_API_VERSION = "2024-10-21";
-const AZURE_TRANSCRIBE_MAX_ATTEMPTS = 5;
-const AZURE_TRANSCRIBE_BASE_DELAY_MS = 250;
-const AZURE_TRANSCRIBE_MAX_DELAY_MS = 5_000;
-const AZURE_TRANSCRIBE_JITTER_MS = 200;
-const AZURE_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const OPENAI_TRANSCRIBE_MAX_ATTEMPTS = 5;
+const OPENAI_TRANSCRIBE_BASE_DELAY_MS = 250;
+const OPENAI_TRANSCRIBE_MAX_DELAY_MS = 5_000;
+const OPENAI_TRANSCRIBE_JITTER_MS = 200;
+const OPENAI_RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 const LOCAL_WHISPER_CPP_ROOT = join(homedir(), "whisper.cpp");
 const LOCAL_WHISPER_CPP_CLI = join(LOCAL_WHISPER_CPP_ROOT, "build", "bin", "whisper-cli");
 const LOCAL_WHISPER_CPP_LIBRARY_DIRS = [
@@ -45,7 +45,7 @@ const FASTER_WHISPER_WORKER_PATH = resolve(
 );
 const VOICE_BENCHMARK_ENV = "SPUR_VOICE_BENCHMARK";
 
-type VoiceProvider = "whisper_cpp" | "faster_whisper" | "azure_openai";
+type VoiceProvider = "whisper_cpp" | "faster_whisper" | "azure_openai" | "openai_compatible";
 type VoiceFailureReason =
   | "missing_model"
   | "missing_whisper_cli"
@@ -59,15 +59,33 @@ interface VoiceConfigShape {
     modelPath?: string;
     model?: string;
     language?: string;
+    baseUrl?: string;
+    keyEnv?: string;
   };
 }
 
-interface ResolvedVoiceConfig {
-  provider: VoiceProvider;
-  modelPath?: string;
-  model: string;
-  language: string;
-}
+type ResolvedVoiceConfig =
+  | {
+      provider: "whisper_cpp" | "faster_whisper";
+      model: string;
+      language: string;
+      modelPath?: string;
+    }
+  | { provider: "azure_openai"; model: string; language: string }
+  | {
+      provider: "openai_compatible";
+      model: string;
+      language: string;
+      baseUrl: string;
+      keyEnv: string;
+    };
+
+type WhisperFamilyConfig = Extract<
+  ResolvedVoiceConfig,
+  { provider: "whisper_cpp" | "faster_whisper" }
+>;
+type AzureOpenAIConfig = Extract<ResolvedVoiceConfig, { provider: "azure_openai" }>;
+type OpenAICompatibleConfig = Extract<ResolvedVoiceConfig, { provider: "openai_compatible" }>;
 
 interface VoiceTranscription {
   text: string;
@@ -127,7 +145,7 @@ export interface VoiceStatus {
 
 function invalidProviderError(value: string): Error {
   return new Error(
-    `voice.provider must be "whisper_cpp", "faster_whisper", or "azure_openai" (received "${value}")`,
+    `voice.provider must be "whisper_cpp", "faster_whisper", "azure_openai", or "openai_compatible" (received "${value}")`,
   );
 }
 
@@ -149,7 +167,7 @@ function resolvePathFromConfig(configDir: string, value: string): string {
   return value.startsWith("/") ? value : resolve(configDir, value);
 }
 
-function resolveWhisperCppModelPath(config: ResolvedVoiceConfig): string {
+function resolveWhisperCppModelPath(config: WhisperFamilyConfig): string {
   return config.modelPath ?? join(DEFAULT_WHISPER_CPP_MODEL_DIR, `ggml-${config.model}.bin`);
 }
 
@@ -171,21 +189,44 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
     rawProvider &&
     rawProvider !== "whisper_cpp" &&
     rawProvider !== "faster_whisper" &&
-    rawProvider !== "azure_openai"
+    rawProvider !== "azure_openai" &&
+    rawProvider !== "openai_compatible"
   ) {
     throw invalidProviderError(rawProvider);
   }
-  const provider: VoiceProvider =
-    rawProvider === "faster_whisper" || rawProvider === "azure_openai"
-      ? rawProvider
-      : DEFAULT_VOICE_PROVIDER;
+  const model = parsed?.voice?.model?.trim() || DEFAULT_VOICE_MODEL;
+  const language = parsed?.voice?.language?.trim() || DEFAULT_VOICE_LANGUAGE;
+
+  if (rawProvider === "openai_compatible") {
+    const baseUrlRaw = parsed?.voice?.baseUrl?.trim();
+    const keyEnv = parsed?.voice?.keyEnv?.trim();
+    if (!baseUrlRaw || !keyEnv) {
+      throw new Error(
+        'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+      );
+    }
+    if (!/^[A-Z][A-Z0-9_]*$/.test(keyEnv)) {
+      throw new Error(
+        `voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`,
+      );
+    }
+    const baseUrl = baseUrlRaw.replace(/\/+$/, "");
+    return { provider: "openai_compatible", model, language, baseUrl, keyEnv };
+  }
+
+  if (rawProvider === "azure_openai") {
+    return { provider: "azure_openai", model, language };
+  }
+
+  const provider: "whisper_cpp" | "faster_whisper" =
+    rawProvider === "faster_whisper" ? "faster_whisper" : DEFAULT_VOICE_PROVIDER;
   const configuredModelPath = parsed?.voice?.modelPath?.trim();
   const modelPath = configuredModelPath
     ? resolvePathFromConfig(configDir, configuredModelPath)
     : undefined;
-  const model = parsed?.voice?.model?.trim() || DEFAULT_VOICE_MODEL;
-  const language = parsed?.voice?.language?.trim() || DEFAULT_VOICE_LANGUAGE;
-  return { provider, modelPath, model, language };
+  return modelPath !== undefined
+    ? { provider, modelPath, model, language }
+    : { provider, model, language };
 }
 
 function commandExists(command: string): boolean {
@@ -383,7 +424,7 @@ class FasterWhisperWorker {
   }
 
   async transcribe(
-    config: ResolvedVoiceConfig,
+    config: WhisperFamilyConfig,
     audioPath: string,
   ): Promise<{ transcription: VoiceTranscription; metrics: FasterWorkerMetrics }> {
     const run = async (): Promise<{
@@ -422,11 +463,11 @@ class FasterWhisperWorker {
     return next;
   }
 
-  private createWorkerKey(config: ResolvedVoiceConfig): string {
+  private createWorkerKey(config: WhisperFamilyConfig): string {
     return `${config.modelPath ?? ""}|${config.model}`;
   }
 
-  private async ensureStarted(config: ResolvedVoiceConfig): Promise<{
+  private async ensureStarted(config: WhisperFamilyConfig): Promise<{
     coldStart: boolean;
     startupMs: number;
   }> {
@@ -602,7 +643,7 @@ function getFasterWhisperWorker(): FasterWhisperWorker {
   return fasterWhisperWorker;
 }
 
-async function readWhisperCppStatus(config: ResolvedVoiceConfig): Promise<VoiceStatus> {
+async function readWhisperCppStatus(config: WhisperFamilyConfig): Promise<VoiceStatus> {
   const modelPath = resolveWhisperCppModelPath(config);
   if (!existsSync(modelPath)) {
     return {
@@ -643,7 +684,7 @@ async function readWhisperCppStatus(config: ResolvedVoiceConfig): Promise<VoiceS
   };
 }
 
-async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<VoiceStatus> {
+async function readFasterWhisperStatus(config: WhisperFamilyConfig): Promise<VoiceStatus> {
   if (config.modelPath && !existsSync(config.modelPath)) {
     return {
       available: false,
@@ -701,7 +742,7 @@ async function readFasterWhisperStatus(config: ResolvedVoiceConfig): Promise<Voi
   };
 }
 
-async function readAzureOpenAIStatus(config: ResolvedVoiceConfig): Promise<VoiceStatus> {
+async function readAzureOpenAIStatus(config: AzureOpenAIConfig): Promise<VoiceStatus> {
   const credentials = resolveAzureOpenAICredentials();
   if (!credentials) {
     return {
@@ -722,6 +763,26 @@ async function readAzureOpenAIStatus(config: ResolvedVoiceConfig): Promise<Voice
   };
 }
 
+async function readOpenAICompatibleStatus(config: OpenAICompatibleConfig): Promise<VoiceStatus> {
+  const key = resolveVoiceSecret(readVoiceSecrets(), config.keyEnv);
+  if (!key) {
+    return {
+      available: false,
+      provider: "openai_compatible",
+      model: config.model,
+      language: config.language,
+      reason: "missing_runtime",
+      detail: `${config.keyEnv} is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
+    };
+  }
+  return {
+    available: true,
+    provider: "openai_compatible",
+    model: config.model,
+    language: config.language,
+  };
+}
+
 export async function readVoiceStatus(): Promise<VoiceStatus> {
   try {
     const config = resolveVoiceConfig();
@@ -730,6 +791,9 @@ export async function readVoiceStatus(): Promise<VoiceStatus> {
     }
     if (config.provider === "azure_openai") {
       return readAzureOpenAIStatus(config);
+    }
+    if (config.provider === "openai_compatible") {
+      return readOpenAICompatibleStatus(config);
     }
     return readWhisperCppStatus(config);
   } catch (error) {
@@ -745,7 +809,7 @@ export async function readVoiceStatus(): Promise<VoiceStatus> {
   }
 }
 
-function extractAzureOpenAIError(body: unknown, fallback: string): string {
+function extractOpenAIError(body: unknown, fallback: string): string {
   if (
     body &&
     typeof body === "object" &&
@@ -760,8 +824,8 @@ function extractAzureOpenAIError(body: unknown, fallback: string): string {
   return fallback;
 }
 
-function isRetryableAzureStatus(status: number): boolean {
-  return AZURE_RETRYABLE_STATUS_CODES.has(status);
+function isRetryableOpenAIStatus(status: number): boolean {
+  return OPENAI_RETRYABLE_STATUS_CODES.has(status);
 }
 
 function parseRetryAfterMs(headers: Headers): number | null {
@@ -780,7 +844,7 @@ function parseRetryAfterMs(headers: Headers): number | null {
   return Math.max(0, resetAt - Date.now());
 }
 
-function isRetryableAzureError(error: unknown): boolean {
+function isRetryableOpenAIError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
@@ -797,13 +861,13 @@ function isRetryableAzureError(error: unknown): boolean {
   );
 }
 
-function resolveAzureRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
+function resolveOpenAIRetryDelayMs(attempt: number, retryAfterMs: number | null): number {
   if (retryAfterMs !== null) {
     return Math.max(0, retryAfterMs);
   }
-  const exponential = AZURE_TRANSCRIBE_BASE_DELAY_MS * 2 ** (attempt - 1);
-  const jitter = Math.floor(Math.random() * AZURE_TRANSCRIBE_JITTER_MS);
-  return Math.min(exponential + jitter, AZURE_TRANSCRIBE_MAX_DELAY_MS);
+  const exponential = OPENAI_TRANSCRIBE_BASE_DELAY_MS * 2 ** (attempt - 1);
+  const jitter = Math.floor(Math.random() * OPENAI_TRANSCRIBE_JITTER_MS);
+  return Math.min(exponential + jitter, OPENAI_TRANSCRIBE_MAX_DELAY_MS);
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -816,7 +880,7 @@ async function sleep(ms: number): Promise<void> {
   });
 }
 
-async function parseAzureTranscriptionPayload(
+async function parseTranscriptionPayload(
   response: Response,
 ): Promise<{ text?: string; error?: { message?: string } }> {
   try {
@@ -827,7 +891,7 @@ async function parseAzureTranscriptionPayload(
 }
 
 async function transcribeWithWhisperCpp(
-  config: ResolvedVoiceConfig,
+  config: WhisperFamilyConfig,
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
@@ -915,7 +979,7 @@ async function transcribeWithWhisperCpp(
 }
 
 async function transcribeWithFasterWhisper(
-  config: ResolvedVoiceConfig,
+  config: WhisperFamilyConfig,
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
@@ -969,7 +1033,7 @@ async function transcribeWithFasterWhisper(
 }
 
 async function transcribeWithAzureOpenAI(
-  config: ResolvedVoiceConfig,
+  config: AzureOpenAIConfig,
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
@@ -995,7 +1059,7 @@ async function transcribeWithAzureOpenAI(
     pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
 
     let lastRetryableError: string | null = null;
-    for (let attempt = 1; attempt <= AZURE_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
       const requestStartedAt = process.hrtime.bigint();
       const attemptMetricKey = `requestAttempt${attempt}Ms`;
       try {
@@ -1020,7 +1084,7 @@ async function transcribeWithAzureOpenAI(
           pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
         }
 
-        const payload = await parseAzureTranscriptionPayload(response);
+        const payload = await parseTranscriptionPayload(response);
         if (response.ok) {
           if (!payload.text?.trim()) {
             throw new Error("transcription returned empty text");
@@ -1033,38 +1097,38 @@ async function transcribeWithAzureOpenAI(
           };
         }
 
-        const message = extractAzureOpenAIError(payload, "Azure OpenAI transcription failed");
-        if (!isRetryableAzureStatus(response.status)) {
+        const message = extractOpenAIError(payload, "Azure OpenAI transcription failed");
+        if (!isRetryableOpenAIStatus(response.status)) {
           throw new Error(message);
         }
         lastRetryableError = message;
-        if (attempt >= AZURE_TRANSCRIBE_MAX_ATTEMPTS) {
+        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
           throw new Error(
-            `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`,
+            `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`,
           );
         }
-        await sleep(resolveAzureRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
+        await sleep(resolveOpenAIRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
       } catch (error) {
         pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
         if (attempt === 1) {
           pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
         }
-        if (!isRetryableAzureError(error)) {
+        if (!isRetryableOpenAIError(error)) {
           throw error;
         }
         lastRetryableError =
           error instanceof Error ? error.message : "Azure OpenAI transcription request failed";
-        if (attempt >= AZURE_TRANSCRIBE_MAX_ATTEMPTS) {
+        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
           throw new Error(
-            `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError}`,
+            `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError}`,
             error instanceof Error ? { cause: error } : undefined,
           );
         }
-        await sleep(resolveAzureRetryDelayMs(attempt, null));
+        await sleep(resolveOpenAIRetryDelayMs(attempt, null));
       }
     }
     throw new Error(
-      `Azure OpenAI transcription failed after ${AZURE_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError ?? "unknown error"}`,
+      `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError ?? "unknown error"}`,
     );
   } catch (error) {
     failure = error instanceof Error ? error : new Error("startup_failed");
@@ -1091,6 +1155,139 @@ async function transcribeWithAzureOpenAI(
   }
 }
 
+async function transcribeWithOpenAICompatible(
+  config: OpenAICompatibleConfig,
+  audio: Buffer,
+  originalFilename: string,
+): Promise<VoiceTranscription> {
+  const startedAt = process.hrtime.bigint();
+  const steps: Record<string, number> = {};
+  let audioSeconds: number | undefined;
+  let failure: Error | undefined;
+  const key = resolveVoiceSecret(readVoiceSecrets(), config.keyEnv);
+  if (!key) {
+    throw new Error("missing_runtime");
+  }
+
+  const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
+  const inputExt = extname(originalFilename) || ".webm";
+  const inputPath = join(tempDir, `input${inputExt}`);
+  try {
+    const writeStartedAt = process.hrtime.bigint();
+    await writeFile(inputPath, audio);
+    pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
+
+    const probeStartedAt = process.hrtime.bigint();
+    audioSeconds = await readAudioDurationSeconds(inputPath);
+    pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
+
+    let lastRetryableError: string | null = null;
+    for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
+      const requestStartedAt = process.hrtime.bigint();
+      const attemptMetricKey = `requestAttempt${attempt}Ms`;
+      try {
+        const formData = new FormData();
+        formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
+        formData.append("model", config.model);
+        if (config.language !== "auto") {
+          formData.append("language", config.language);
+        }
+
+        const response = await fetch(`${config.baseUrl}/audio/transcriptions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${key}`,
+          },
+          body: formData,
+        });
+        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+        if (attempt === 1) {
+          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+        }
+
+        const payload = await parseTranscriptionPayload(response);
+        if (response.ok) {
+          if (!payload.text?.trim()) {
+            throw new Error("transcription returned empty text");
+          }
+          return {
+            text: payload.text.trim(),
+            provider: "openai_compatible",
+            model: config.model,
+            language: config.language,
+          };
+        }
+
+        const message = extractOpenAIError(payload, "OpenAI-compatible transcription failed");
+        if (!isRetryableOpenAIStatus(response.status)) {
+          throw new Error(message);
+        }
+        lastRetryableError = message;
+        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
+          // Defense-in-depth: strip any echoed Bearer token before surfacing the message.
+          const safeMessage = message.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
+          throw new Error(
+            `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
+          );
+        }
+        await sleep(resolveOpenAIRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
+      } catch (error) {
+        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+        if (attempt === 1) {
+          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+        }
+        if (!isRetryableOpenAIError(error)) {
+          throw error;
+        }
+        lastRetryableError =
+          error instanceof Error
+            ? error.message
+            : "OpenAI-compatible transcription request failed";
+        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
+          const safeMessage = lastRetryableError.replace(
+            /Bearer\s+[\w.-]+/i,
+            "Bearer [redacted]",
+          );
+          throw new Error(
+            `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
+            error instanceof Error ? { cause: error } : undefined,
+          );
+        }
+        await sleep(resolveOpenAIRetryDelayMs(attempt, null));
+      }
+    }
+    const safeMessage = (lastRetryableError ?? "unknown error").replace(
+      /Bearer\s+[\w.-]+/i,
+      "Bearer [redacted]",
+    );
+    throw new Error(
+      `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
+    );
+  } catch (error) {
+    failure = error instanceof Error ? error : new Error("startup_failed");
+    throw failure;
+  } finally {
+    const cleanupStartedAt = process.hrtime.bigint();
+    await rm(tempDir, { recursive: true, force: true });
+    pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
+    const totalMs = roundMetric(elapsedMs(startedAt));
+    emitVoiceBenchmark({
+      provider: "openai_compatible",
+      model: config.model,
+      language: config.language,
+      audioBytes: audio.byteLength,
+      ...(audioSeconds !== undefined ? { audioSeconds } : {}),
+      ...(audioSeconds && audioSeconds > 0
+        ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
+        : {}),
+      totalMs,
+      steps,
+      status: failure ? "error" : "ok",
+      ...(failure ? { error: failure.message } : {}),
+    });
+  }
+}
+
 export async function transcribeAudio(
   audio: Buffer,
   originalFilename: string,
@@ -1101,6 +1298,9 @@ export async function transcribeAudio(
   }
   if (config.provider === "azure_openai") {
     return transcribeWithAzureOpenAI(config, audio, originalFilename);
+  }
+  if (config.provider === "openai_compatible") {
+    return transcribeWithOpenAICompatible(config, audio, originalFilename);
   }
   return transcribeWithWhisperCpp(config, audio, originalFilename);
 }
