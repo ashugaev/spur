@@ -1029,7 +1029,7 @@ async function transcribeWithFasterWhisper(
 }
 
 function redactBearerTokens(message: string): string {
-  return message.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
+  return message.replace(/Bearer\s+[A-Za-z0-9._+/=-]+/gi, "Bearer [redacted]");
 }
 
 async function runOpenAITranscriptionAttempts<

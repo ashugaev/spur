@@ -978,6 +978,33 @@ voice:
     }
   });
 
+  it("redacts base64-style Bearer tokens with slashes, plus signs, and equals", async () => {
+    const token = "sk-test/with+slashes=";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        mockAzureResponse({ error: { message: `Bearer ${token} is invalid` } }, { status: 400 }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    configureOpenAICompatibleConfig("uk");
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      let caught: unknown;
+      try {
+        await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = caught instanceof Error ? caught.message : "";
+      expect(message).not.toContain(token);
+      expect(message).toContain("Bearer [redacted]");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("redacts any echoed Bearer token in openai_compatible retry-exhaustion errors", async () => {
     const fetchMock = vi
       .fn()
