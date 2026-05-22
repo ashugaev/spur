@@ -105,21 +105,10 @@ function mockAzureResponse(
 
 function configureOpenAICompatibleConfig(
   language = "auto",
-  options: {
-    baseUrl?: string;
-    keyEnv?: string;
-    apiKey?: string;
-    model?: string;
-    keySource?: "envFile" | "processEnv";
-    writeEnvFile?: boolean;
-  } = {},
+  options: { baseUrl?: string; writeEnvFile?: boolean } = {},
 ) {
   const baseUrl = options.baseUrl ?? "https://api.groq.com/openai/v1";
-  const keyEnv = options.keyEnv ?? "GROQ_API_KEY";
-  const apiKey = options.apiKey ?? "test-key";
-  const model = options.model ?? "whisper-large-v3-turbo";
-  const keySource = options.keySource ?? "envFile";
-  const writeEnvFile = options.writeEnvFile ?? keySource === "envFile";
+  const writeEnvFile = options.writeEnvFile ?? true;
   mockExistsSync.mockImplementation((path: string) => {
     if (path === "/tmp/config.yaml") return true;
     if (path === localSpurEnvPath) return writeEnvFile;
@@ -130,20 +119,17 @@ function configureOpenAICompatibleConfig(
       return `
 voice:
   provider: openai_compatible
-  model: ${model}
+  model: whisper-large-v3-turbo
   language: ${language}
   baseUrl: ${baseUrl}
-  keyEnv: ${keyEnv}
+  keyEnv: GROQ_API_KEY
 `;
     }
     if (path === localSpurEnvPath && writeEnvFile) {
-      return keySource === "envFile" ? `${keyEnv}=${apiKey}\n` : "";
+      return "GROQ_API_KEY=test-key\n";
     }
     return "";
   });
-  if (keySource === "processEnv") {
-    process.env[keyEnv] = apiKey;
-  }
   process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
 }
 

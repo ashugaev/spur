@@ -1028,104 +1028,100 @@ async function transcribeWithFasterWhisper(
   }
 }
 
-async function transcribeWithAzureOpenAI(
-  config: AzureOpenAIConfig,
-  audio: Buffer,
-  originalFilename: string,
-): Promise<VoiceTranscription> {
+function redactBearerTokens(message: string): string {
+  return message.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
+}
+
+async function runOpenAITranscriptionAttempts<
+  P extends "azure_openai" | "openai_compatible",
+>(opts: {
+  provider: P;
+  model: string;
+  language: string;
+  errorLabel: string;
+  steps: Record<string, number>;
+  audio: Buffer;
+  originalFilename: string;
+  doFetch: (audio: Buffer, originalFilename: string) => Promise<Response>;
+}): Promise<VoiceTranscription> {
+  const { provider, model, language, errorLabel, steps, audio, originalFilename, doFetch } = opts;
+  const exhausted = `${errorLabel} failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts`;
+  let lastRetryableError: string | null = null;
+  for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
+    const requestStartedAt = process.hrtime.bigint();
+    const attemptMetricKey = `requestAttempt${attempt}Ms`;
+    try {
+      const response = await doFetch(audio, originalFilename);
+      pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+      if (attempt === 1) {
+        pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+      }
+
+      const payload = await parseTranscriptionPayload(response);
+      if (response.ok) {
+        if (!payload.text?.trim()) {
+          throw new Error("transcription returned empty text");
+        }
+        return { text: payload.text.trim(), provider, model, language };
+      }
+
+      const message = extractOpenAIError(payload, `${errorLabel} failed`);
+      if (!isRetryableOpenAIStatus(response.status)) {
+        throw new Error(message);
+      }
+      lastRetryableError = message;
+      if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
+        throw new Error(`${exhausted}: ${redactBearerTokens(message)}`);
+      }
+      await sleep(resolveOpenAIRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
+    } catch (error) {
+      pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
+      if (attempt === 1) {
+        pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
+      }
+      if (!isRetryableOpenAIError(error)) {
+        throw error;
+      }
+      lastRetryableError = error instanceof Error ? error.message : `${errorLabel} request failed`;
+      if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
+        throw new Error(
+          `${exhausted}: ${redactBearerTokens(lastRetryableError)}`,
+          error instanceof Error ? { cause: error } : undefined,
+        );
+      }
+      await sleep(resolveOpenAIRetryDelayMs(attempt, null));
+    }
+  }
+  throw new Error(`${exhausted}: ${redactBearerTokens(lastRetryableError ?? "unknown error")}`);
+}
+
+async function runOpenAITranscription<P extends "azure_openai" | "openai_compatible">(opts: {
+  provider: P;
+  model: string;
+  language: string;
+  errorLabel: string;
+  audio: Buffer;
+  originalFilename: string;
+  doFetch: (audio: Buffer, originalFilename: string) => Promise<Response>;
+}): Promise<VoiceTranscription> {
   const startedAt = process.hrtime.bigint();
   const steps: Record<string, number> = {};
   let audioSeconds: number | undefined;
   let failure: Error | undefined;
-  const credentials = resolveAzureOpenAICredentials();
-  if (!credentials) {
-    throw new Error("missing_runtime");
-  }
 
   const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
-  const inputExt = extname(originalFilename) || ".webm";
+  const inputExt = extname(opts.originalFilename) || ".webm";
   const inputPath = join(tempDir, `input${inputExt}`);
   try {
     const writeStartedAt = process.hrtime.bigint();
-    await writeFile(inputPath, audio);
+    await writeFile(inputPath, opts.audio);
     pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
 
     const probeStartedAt = process.hrtime.bigint();
     audioSeconds = await readAudioDurationSeconds(inputPath);
     pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
 
-    let lastRetryableError: string | null = null;
-    for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
-      const requestStartedAt = process.hrtime.bigint();
-      const attemptMetricKey = `requestAttempt${attempt}Ms`;
-      try {
-        const formData = new FormData();
-        formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
-        if (config.language !== "auto") {
-          formData.append("language", config.language);
-        }
-
-        const response = await fetch(
-          `${credentials.endpoint}/openai/deployments/${encodeURIComponent(config.model)}/audio/transcriptions?api-version=${encodeURIComponent(credentials.apiVersion)}`,
-          {
-            method: "POST",
-            headers: {
-              "api-key": credentials.apiKey,
-            },
-            body: formData,
-          },
-        );
-        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
-        if (attempt === 1) {
-          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
-        }
-
-        const payload = await parseTranscriptionPayload(response);
-        if (response.ok) {
-          if (!payload.text?.trim()) {
-            throw new Error("transcription returned empty text");
-          }
-          return {
-            text: payload.text.trim(),
-            provider: "azure_openai",
-            model: config.model,
-            language: config.language,
-          };
-        }
-
-        const message = extractOpenAIError(payload, "Azure OpenAI transcription failed");
-        if (!isRetryableOpenAIStatus(response.status)) {
-          throw new Error(message);
-        }
-        lastRetryableError = message;
-        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
-          throw new Error(
-            `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${message}`,
-          );
-        }
-        await sleep(resolveOpenAIRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
-      } catch (error) {
-        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
-        if (attempt === 1) {
-          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
-        }
-        if (!isRetryableOpenAIError(error)) {
-          throw error;
-        }
-        lastRetryableError =
-          error instanceof Error ? error.message : "Azure OpenAI transcription request failed";
-        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
-          throw new Error(
-            `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError}`,
-            error instanceof Error ? { cause: error } : undefined,
-          );
-        }
-        await sleep(resolveOpenAIRetryDelayMs(attempt, null));
-      }
-    }
-    throw new Error(
-      `Azure OpenAI transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${lastRetryableError ?? "unknown error"}`,
-    );
+    return await runOpenAITranscriptionAttempts({ ...opts, steps });
   } catch (error) {
     failure = error instanceof Error ? error : new Error("startup_failed");
     throw failure;
@@ -1135,10 +1131,10 @@ async function transcribeWithAzureOpenAI(
     pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
     const totalMs = roundMetric(elapsedMs(startedAt));
     emitVoiceBenchmark({
-      provider: "azure_openai",
-      model: config.model,
-      language: config.language,
-      audioBytes: audio.byteLength,
+      provider: opts.provider,
+      model: opts.model,
+      language: opts.language,
+      audioBytes: opts.audio.byteLength,
       ...(audioSeconds !== undefined ? { audioSeconds } : {}),
       ...(audioSeconds && audioSeconds > 0
         ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
@@ -1151,132 +1147,68 @@ async function transcribeWithAzureOpenAI(
   }
 }
 
+async function transcribeWithAzureOpenAI(
+  config: AzureOpenAIConfig,
+  audio: Buffer,
+  originalFilename: string,
+): Promise<VoiceTranscription> {
+  const credentials = resolveAzureOpenAICredentials();
+  if (!credentials) {
+    throw new Error("missing_runtime");
+  }
+  const url = `${credentials.endpoint}/openai/deployments/${encodeURIComponent(config.model)}/audio/transcriptions?api-version=${encodeURIComponent(credentials.apiVersion)}`;
+  return runOpenAITranscription({
+    provider: "azure_openai",
+    model: config.model,
+    language: config.language,
+    errorLabel: "Azure OpenAI transcription",
+    audio,
+    originalFilename,
+    doFetch: (audioBuf, filename) => {
+      const formData = new FormData();
+      formData.append("file", new Blob([new Uint8Array(audioBuf)]), filename);
+      if (config.language !== "auto") {
+        formData.append("language", config.language);
+      }
+      return fetch(url, {
+        method: "POST",
+        headers: { "api-key": credentials.apiKey },
+        body: formData,
+      });
+    },
+  });
+}
+
 async function transcribeWithOpenAICompatible(
   config: OpenAICompatibleConfig,
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
-  const startedAt = process.hrtime.bigint();
-  const steps: Record<string, number> = {};
-  let audioSeconds: number | undefined;
-  let failure: Error | undefined;
   const key = resolveVoiceSecret(readVoiceSecrets(), config.keyEnv);
   if (!key) {
     throw new Error("missing_runtime");
   }
-
-  const tempDir = await mkdtemp(join(process.env["TMPDIR"] ?? tmpdir(), "spur-voice-"));
-  const inputExt = extname(originalFilename) || ".webm";
-  const inputPath = join(tempDir, `input${inputExt}`);
-  try {
-    const writeStartedAt = process.hrtime.bigint();
-    await writeFile(inputPath, audio);
-    pushStep(steps, "writeInputMs", elapsedMs(writeStartedAt));
-
-    const probeStartedAt = process.hrtime.bigint();
-    audioSeconds = await readAudioDurationSeconds(inputPath);
-    pushStep(steps, "probeAudioMs", elapsedMs(probeStartedAt));
-
-    let lastRetryableError: string | null = null;
-    for (let attempt = 1; attempt <= OPENAI_TRANSCRIBE_MAX_ATTEMPTS; attempt += 1) {
-      const requestStartedAt = process.hrtime.bigint();
-      const attemptMetricKey = `requestAttempt${attempt}Ms`;
-      try {
-        const formData = new FormData();
-        formData.append("file", new Blob([new Uint8Array(audio)]), originalFilename);
-        formData.append("model", config.model);
-        if (config.language !== "auto") {
-          formData.append("language", config.language);
-        }
-
-        const response = await fetch(`${config.baseUrl}/audio/transcriptions`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${key}`,
-          },
-          body: formData,
-        });
-        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
-        if (attempt === 1) {
-          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
-        }
-
-        const payload = await parseTranscriptionPayload(response);
-        if (response.ok) {
-          if (!payload.text?.trim()) {
-            throw new Error("transcription returned empty text");
-          }
-          return {
-            text: payload.text.trim(),
-            provider: "openai_compatible",
-            model: config.model,
-            language: config.language,
-          };
-        }
-
-        const message = extractOpenAIError(payload, "OpenAI-compatible transcription failed");
-        if (!isRetryableOpenAIStatus(response.status)) {
-          throw new Error(message);
-        }
-        lastRetryableError = message;
-        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
-          // Defense-in-depth: strip any echoed Bearer token before surfacing the message.
-          const safeMessage = message.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
-          throw new Error(
-            `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
-          );
-        }
-        await sleep(resolveOpenAIRetryDelayMs(attempt, parseRetryAfterMs(response.headers)));
-      } catch (error) {
-        pushStep(steps, attemptMetricKey, elapsedMs(requestStartedAt));
-        if (attempt === 1) {
-          pushStep(steps, "requestMs", steps[attemptMetricKey] ?? 0);
-        }
-        if (!isRetryableOpenAIError(error)) {
-          throw error;
-        }
-        lastRetryableError =
-          error instanceof Error ? error.message : "OpenAI-compatible transcription request failed";
-        if (attempt >= OPENAI_TRANSCRIBE_MAX_ATTEMPTS) {
-          const safeMessage = lastRetryableError.replace(/Bearer\s+[\w.-]+/i, "Bearer [redacted]");
-          throw new Error(
-            `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
-            error instanceof Error ? { cause: error } : undefined,
-          );
-        }
-        await sleep(resolveOpenAIRetryDelayMs(attempt, null));
+  return runOpenAITranscription({
+    provider: "openai_compatible",
+    model: config.model,
+    language: config.language,
+    errorLabel: "OpenAI-compatible transcription",
+    audio,
+    originalFilename,
+    doFetch: (audioBuf, filename) => {
+      const formData = new FormData();
+      formData.append("file", new Blob([new Uint8Array(audioBuf)]), filename);
+      formData.append("model", config.model);
+      if (config.language !== "auto") {
+        formData.append("language", config.language);
       }
-    }
-    const safeMessage = (lastRetryableError ?? "unknown error").replace(
-      /Bearer\s+[\w.-]+/i,
-      "Bearer [redacted]",
-    );
-    throw new Error(
-      `OpenAI-compatible transcription failed after ${OPENAI_TRANSCRIBE_MAX_ATTEMPTS} attempts: ${safeMessage}`,
-    );
-  } catch (error) {
-    failure = error instanceof Error ? error : new Error("startup_failed");
-    throw failure;
-  } finally {
-    const cleanupStartedAt = process.hrtime.bigint();
-    await rm(tempDir, { recursive: true, force: true });
-    pushStep(steps, "cleanupMs", elapsedMs(cleanupStartedAt));
-    const totalMs = roundMetric(elapsedMs(startedAt));
-    emitVoiceBenchmark({
-      provider: "openai_compatible",
-      model: config.model,
-      language: config.language,
-      audioBytes: audio.byteLength,
-      ...(audioSeconds !== undefined ? { audioSeconds } : {}),
-      ...(audioSeconds && audioSeconds > 0
-        ? { secondsPerAudioSecond: roundMetric(totalMs / 1000 / audioSeconds) }
-        : {}),
-      totalMs,
-      steps,
-      status: failure ? "error" : "ok",
-      ...(failure ? { error: failure.message } : {}),
-    });
-  }
+      return fetch(`${config.baseUrl}/audio/transcriptions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}` },
+        body: formData,
+      });
+    },
+  });
 }
 
 export async function transcribeAudio(
