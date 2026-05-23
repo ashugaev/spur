@@ -223,7 +223,7 @@ For `whisper_cpp`, `voice.language` is passed as `-l <code>` to `whisper-cli`.
 For `faster_whisper`, `voice.language` is used as the transcription language hint.
 For `azure_openai`, `voice.model` is the Azure deployment name, and credentials are read from `~/.spur/.env`.
 Spur auto-detects `~/.spur/venvs/faster-whisper/bin/python` when present, and uses `int8` by default for the faster-whisper worker.
-Isolated daemons inherit the `voice:` block from `~/.spur/config.yaml` automatically; relative `voice.modelPath` resolves against the user config directory.
+Isolated daemons inherit `voice:` from `~/.spur/config.yaml`; relative `voice.modelPath` resolves against user config dir.
 
 ### HTTPS requirement
 
