@@ -29,6 +29,12 @@ const CURSOR_TRUST_CONFIRM_DELAY_MS = 1_000;
 const CURSOR_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
 const CURSOR_READY_SETTLE_DELAY_MS = 1_000;
 const CODEX_READY_SETTLE_DELAY_MS = 500;
+const CODEX_HOOK_TRUST_CONFIRM_DELAY_MS = 1_000;
+const CODEX_HOOK_TRUST_CONFIRM_MAX_ATTEMPTS = 3;
+
+export function codexShowsHookTrustPrompt(pane: string): boolean {
+  return pane.includes("Hooks need review") && pane.includes("Trust all and continue");
+}
 
 export function setTmuxSocketName(socketName: string | undefined): void {
   activeTmuxSocketName = socketName?.trim() || null;
@@ -320,6 +326,13 @@ export async function sendSubmitKeyToTmux(sessionName: string): Promise<void> {
   await tmux("send-keys", "-t", target, "Enter");
 }
 
+async function sendCodexHookTrustConfirm(sessionName: string): Promise<void> {
+  const target = exactPaneTarget(sessionName);
+  await tmux("send-keys", "-t", target, "2");
+  await sleep(100);
+  await tmux("send-keys", "-t", target, "Enter");
+}
+
 export async function waitForTmuxReady(
   sessionName: string,
   readyMarkers: string[],
@@ -335,6 +348,8 @@ export async function waitForTmuxReady(
   let lastCapture = "";
   let lastCursorTrustConfirmAt = 0;
   let cursorTrustConfirmAttempts = 0;
+  let lastCodexHookTrustConfirmAt = 0;
+  let codexHookTrustConfirmAttempts = 0;
   while (Date.now() < deadline) {
     const capture = await captureTmuxPane(sessionName);
     lastCapture = capture;
@@ -360,6 +375,18 @@ export async function waitForTmuxReady(
       cursorTrustConfirmAttempts += 1;
       lastCursorTrustConfirmAt = Date.now();
       await sendSubmitKeyToTmux(sessionName);
+      await sleep(500);
+      continue;
+    }
+    if (
+      options?.agent === "codex" &&
+      codexShowsHookTrustPrompt(capture) &&
+      codexHookTrustConfirmAttempts < CODEX_HOOK_TRUST_CONFIRM_MAX_ATTEMPTS &&
+      Date.now() - lastCodexHookTrustConfirmAt >= CODEX_HOOK_TRUST_CONFIRM_DELAY_MS
+    ) {
+      codexHookTrustConfirmAttempts += 1;
+      lastCodexHookTrustConfirmAt = Date.now();
+      await sendCodexHookTrustConfirm(sessionName);
       await sleep(500);
       continue;
     }
