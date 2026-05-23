@@ -123,7 +123,7 @@ cron source
 - Do not kill processes or ports you did not start. Your session tool dir is in `$SPUR_SESSION_TOOL_DIR`.
 - For `packages/web` work and local testing in this repo, use Sidecar only. Start it with `"$SPUR_SESSION_TOOL_DIR/spur-sidecar" --name <name>` and prefer the project `sidecars` config (for example `dev`). Do not rely on `spur-sidecar` being in `PATH`; use the helper from `$SPUR_SESSION_TOOL_DIR`.
 - Do not start app, dev server, or test helper processes directly with `pnpm`, `next`, or similar commands unless the user explicitly tells you to bypass Sidecar.
-- Isolated daemon configs inherit allowlisted user keys (currently `voice`); server, data, tmux stay isolated. Extend `INHERIT_KEYS` in `v2/src/isolated-instance-config.ts` to propagate more.
+- Isolated daemon configs inherit `voice` from user config; server, data, tmux stay isolated. Add new key branches in `v2/src/isolated-instance-config.ts` to propagate more.
 
 ## Deployment (generic Ubuntu VM)
 
