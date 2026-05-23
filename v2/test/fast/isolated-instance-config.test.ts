@@ -64,6 +64,7 @@ describe("isolated instance config", () => {
       baseYaml,
       userYaml,
       userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
     });
     const parsed = parsedMap(output);
     expect(parsed.voice).toEqual({
@@ -82,6 +83,7 @@ describe("isolated instance config", () => {
       baseYaml,
       userYaml,
       userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
     });
     const parsed = parsedMap(output);
     expect(parsed.voice).toEqual({ modelPath: "/home/user/.spur/models/ggml-base.bin" });
@@ -95,6 +97,7 @@ describe("isolated instance config", () => {
       baseYaml,
       userYaml,
       userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
     });
     const parsed = parsedMap(output);
     expect(parsed.voice).toEqual({ modelPath: "/opt/models/ggml-base.bin" });
@@ -114,6 +117,7 @@ voice:
       baseYaml,
       userYaml,
       userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
     });
     const parsed = parsedMap(output);
     expect(parsed.server).toEqual({ host: "127.0.0.1", port: 4321 });
@@ -134,6 +138,7 @@ voice:
       baseYaml,
       userYaml,
       userConfigDir: "/home/user/.spur",
+      userConfigPath: "/home/user/.spur/config.yaml",
     });
     const parsed = parsedMap(output);
     expect(parsed.ui).toBeUndefined();

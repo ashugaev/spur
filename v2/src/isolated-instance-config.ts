@@ -54,18 +54,11 @@ function resolveVoiceModelPath(
   return { ...voice, modelPath: resolve(userConfigDir, modelPath) };
 }
 
-function transformInheritedValue(value: unknown, userConfigDir: string): unknown {
-  if (isMapping(value)) {
-    return resolveVoiceModelPath(value, userConfigDir);
-  }
-  return value;
-}
-
 export function buildIsolatedInstanceConfig(args: {
   baseYaml: string;
   userYaml: string | null;
   userConfigDir: string;
-  userConfigPath?: string;
+  userConfigPath: string;
 }): string {
   const baseParsed = parseYaml(args.baseYaml) as unknown;
   const baseDoc: Record<string, unknown> = isMapping(baseParsed) ? baseParsed : {};
@@ -74,14 +67,12 @@ export function buildIsolatedInstanceConfig(args: {
     return stringifyYaml(baseDoc);
   }
 
-  const errorPath = args.userConfigPath ?? `${args.userConfigDir}/config.yaml`;
-  const userDoc = parseUserDocument(args.userYaml, errorPath);
+  const userDoc = parseUserDocument(args.userYaml, args.userConfigPath);
 
   const merged: Record<string, unknown> = { ...baseDoc };
-  for (const key of INHERIT_KEYS) {
-    if (key in userDoc) {
-      merged[key] = transformInheritedValue(userDoc[key], args.userConfigDir);
-    }
+  const voice = userDoc.voice;
+  if (voice !== undefined) {
+    merged.voice = isMapping(voice) ? resolveVoiceModelPath(voice, args.userConfigDir) : voice;
   }
   return stringifyYaml(merged);
 }
