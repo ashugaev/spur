@@ -461,9 +461,7 @@ describe("parseCodexHooksDocument (via ensureCodexHooksConfig)", () => {
         PreToolUse: Array<{ matcher?: string; hooks: Array<{ command: string }> }>;
       };
     };
-    const denyGroup = content.hooks.PreToolUse.find(
-      (group) => group.matcher === "apply_patch",
-    );
+    const denyGroup = content.hooks.PreToolUse.find((group) => group.matcher === "apply_patch");
     expect(denyGroup?.hooks.some((hook) => hook.command.includes("exit 2"))).toBe(true);
   });
 

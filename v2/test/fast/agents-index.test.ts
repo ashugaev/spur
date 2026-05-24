@@ -41,7 +41,11 @@ vi.mock("../../src/agents/claude-submit-ack.js", () => ({
   scanClaudeJsonlForMessage: scanClaudeJsonlForMessageMock,
 }));
 
-import { createAgentSubmitAckBinding, setupAgentHooks, buildAgentLaunchPlan } from "../../src/agents/index.js";
+import {
+  createAgentSubmitAckBinding,
+  setupAgentHooks,
+  buildAgentLaunchPlan,
+} from "../../src/agents/index.js";
 
 beforeEach(() => {
   ensureCodexHooksConfigMock.mockReset();

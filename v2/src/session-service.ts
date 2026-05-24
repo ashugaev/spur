@@ -329,11 +329,7 @@ function resolveRestrictWrites(session: Pick<SessionRecord, "restrictWrites">): 
   return session.restrictWrites === true;
 }
 
-function buildSessionPrompt(
-  prompt: string,
-  planMode: boolean,
-  restrictWrites = false,
-): string {
+function buildSessionPrompt(prompt: string, planMode: boolean, restrictWrites = false): string {
   if (!prompt.trim()) {
     return prompt;
   }
