@@ -12,7 +12,6 @@ const allowedTierJobs = new Map([
   ["v2-fast", "quality"],
   ["v2-runtime", "runtime-integration"],
   ["v2-smoke", "real-agent-smoke"],
-  ["onboarding", "onboarding-test"],
 ]);
 
 interface ScenarioBullet {
