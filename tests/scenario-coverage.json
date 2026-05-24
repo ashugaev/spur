@@ -1474,22 +1474,6 @@
   {
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Real-Agent Smoke",
-    "scenario": "Real `codex` startup image attachments use the native `--image` launch path, while real `claude` startup image attachments arrive through artifact-path references in the first prompt.",
-    "tier": "v2-smoke",
-    "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
-    "ciJob": "real-agent-smoke"
-  },
-  {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Real-Agent Smoke",
-    "scenario": "Real `claude` and `codex` can also complete a staged task session in one worktree after returning to a prompt between phases.",
-    "tier": "v2-smoke",
-    "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
-    "ciJob": "real-agent-smoke"
-  },
-  {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Real-Agent Smoke",
     "scenario": "Real `claude`, `codex`, and `cursor` can also satisfy an opt-in spawn preflight before the normal worktree session launch, and Spur uses the returned branch.",
     "tier": "v2-smoke",
     "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
@@ -1499,22 +1483,6 @@
     "source": "v2/TEST_SCENARIOS.md",
     "section": "Real-Agent Smoke",
     "scenario": "Real `claude`, `codex`, and `cursor` sessions can set `title` and named `links` through injected `spur-slots` instructions; those slots survive `restore` in session metadata, and the title reaches tmux status.",
-    "tier": "v2-smoke",
-    "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
-    "ciJob": "real-agent-smoke"
-  },
-  {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Real-Agent Smoke",
-    "scenario": "A real agent can open a disposable PR from its Spur worktree, then the same live session receives `github:comment` and `github:ci_failed`, and cleanup closes the PR, clears the temporary status/comment noise, and tears the session down cleanly.",
-    "tier": "v2-smoke",
-    "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
-    "ciJob": "real-agent-smoke"
-  },
-  {
-    "source": "v2/TEST_SCENARIOS.md",
-    "section": "Real-Agent Smoke",
-    "scenario": "When a reviewer-capable second GitHub identity is available for the target repo, the same disposable-PR flow also receives `github:changes_requested` in the live session.",
     "tier": "v2-smoke",
     "testFiles": ["v2/test/smoke/real-agents.smoke.test.ts"],
     "ciJob": "real-agent-smoke"

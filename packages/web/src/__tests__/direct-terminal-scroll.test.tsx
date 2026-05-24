@@ -392,12 +392,6 @@ describe("DirectTerminal scroll integration", () => {
     });
   });
 
-  it("does not render a standalone esc button in the control bar", async () => {
-    await mountTerminal({ sessionId: "test-no-esc", agent: "claude" });
-
-    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
-  });
-
   it("renders terminal toolbar controls without a standalone esc button", async () => {
     await mountTerminal({ sessionId: "test-toolbar", agent: "claude" });
 

@@ -1,23 +1,6 @@
 import { test, expect } from "playwright/test";
 import { mockSessions } from "./fixtures.js";
 
-interface InstallabilityResult {
-  installabilityErrors?: Array<{
-    errorId?: string;
-  }>;
-}
-
-function readInstallabilityErrors(result: unknown): string[] {
-  if (typeof result !== "object" || result === null || !("installabilityErrors" in result)) {
-    return [];
-  }
-
-  const installabilityResult = result as InstallabilityResult;
-  return (installabilityResult.installabilityErrors ?? []).flatMap((error) =>
-    typeof error.errorId === "string" ? [error.errorId] : [],
-  );
-}
-
 // P1: PWA manifest
 test.describe("P1: PWA manifest", () => {
   test("GET /manifest.webmanifest returns 200", async ({ request }) => {
@@ -77,7 +60,7 @@ test.describe("P1: PWA manifest", () => {
 
     const cdp = await context.newCDPSession(page);
     const result = await cdp.send("Page.getInstallabilityErrors");
-    expect(readInstallabilityErrors(result)).toEqual([]);
+    expect(result.installabilityErrors.map((error) => error.errorId)).toEqual([]);
   });
 
   test("GET /apple-icon returns a PNG", async ({ request }) => {
