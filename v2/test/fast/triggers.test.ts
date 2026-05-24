@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
+import type { WorkItemLifecycleRecord } from "../../src/types.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
 const readReviewSourceSnapshotMock = vi.fn();
@@ -291,6 +292,47 @@ function workItemEvent() {
       repo: "acme/api",
     },
   };
+}
+
+function runningWorkItemLifecycle(
+  options?: Partial<Extract<WorkItemLifecycleRecord, { state: "running" }>>,
+): Extract<WorkItemLifecycleRecord, { state: "running" }> {
+  return {
+    externalId: "acme/api#42",
+    sessionId: "api-9",
+    url: "https://github.com/acme/api/pull/42",
+    number: 42,
+    title: "Fix the bug",
+    repo: "acme/api",
+    createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    autoComplete: true,
+    state: "running",
+    ...options,
+  };
+}
+
+function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
+  const records = new Map<string, WorkItemLifecycleRecord>();
+  for (const record of initial ?? []) {
+    records.set(record.externalId, record);
+  }
+  readWorkItemLifecyclesMock.mockImplementation(() => new Map(records));
+  recordWorkItemLifecycleMock.mockImplementation(
+    (
+      _dataDir: string,
+      _projectId: string,
+      _sourceId: string,
+      record: WorkItemLifecycleRecord,
+    ) => {
+      records.set(record.externalId, record);
+    },
+  );
+  deleteWorkItemLifecycleMock.mockImplementation(
+    (_dataDir: string, _projectId: string, _sourceId: string, externalId: string) => {
+      records.delete(externalId);
+    },
+  );
+  return records;
 }
 
 async function loadTriggersModule() {
@@ -1004,6 +1046,7 @@ describe("startConfiguredTriggers", () => {
 
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    useWorkItemLifecycleStore();
     const { startConfiguredTriggers } = await loadTriggersModule();
     const bus = new EventBus();
     const controller = startConfiguredTriggers({
@@ -1029,11 +1072,174 @@ describe("startConfiguredTriggers", () => {
         "pr-watch",
         expect.objectContaining({
           externalId: "acme/api#42",
+          state: "running",
           sessionId: "api-9",
           url: "https://github.com/acme/api/pull/42",
           number: 42,
           title: "Fix the bug",
           repo: "acme/api",
+          autoComplete: true,
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("suppresses duplicate work-item events once a pending claim exists", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
+    const records = useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(records.get("acme/api#42")).toEqual(
+        expect.objectContaining({
+          state: "running",
+          sessionId: "api-9",
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("leaves a failed work-item claim and retries on the next event", async () => {
+    const spawnMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("spawn failed"))
+      .mockResolvedValueOnce({ id: "api-10" });
+    const records = useWorkItemLifecycleStore();
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(records.get("acme/api#42")).toEqual(
+          expect.objectContaining({
+            state: "failed",
+            error: "spawn failed",
+          }),
+        );
+      });
+
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(2);
+      });
+      expect(records.get("acme/api#42")).toEqual(
+        expect.objectContaining({
+          state: "running",
+          sessionId: "api-10",
+        }),
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("suppresses active and completed work-item owners", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-9",
+      status: "running",
+      state: "needs_input",
+      workspaceExists: true,
+    });
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(getMock).toHaveBeenCalledWith("api-9");
+      });
+      expect(spawnMock).not.toHaveBeenCalled();
+
+      readWorkItemLifecyclesMock.mockReturnValue(
+        new Map([
+          [
+            "acme/api#42",
+            {
+              ...runningWorkItemLifecycle(),
+              state: "completed",
+              completedAt: new Date().toISOString(),
+            },
+          ],
+        ]),
+      );
+      bus.emit(workItemEvent());
+      await vi.advanceTimersByTimeAsync(1);
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("replaces a stopped work-item owner once and suppresses later duplicates", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-10" });
+    const getMock = vi.fn().mockImplementation((sessionId: string) =>
+      Promise.resolve(
+        sessionId === "api-9"
+          ? {
+              id: "api-9",
+              status: "stopped",
+              state: "stopped",
+              workspaceExists: true,
+            }
+          : {
+              id: sessionId,
+              status: "running",
+              state: "working",
+              workspaceExists: true,
+            },
+      ),
+    );
+    useWorkItemLifecycleStore([runningWorkItemLifecycle()]);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: workItemSpawnConfig() as never,
+      bus,
+      sessionService: { get: getMock, spawn: spawnMock } as never,
+      logger: { warn: vi.fn() },
+    });
+
+    try {
+      bus.emit(workItemEvent());
+      bus.emit(workItemEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledTimes(1);
+      });
+      expect(spawnMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          project: "api",
+          prompt: "Take https://github.com/acme/api/pull/42 from acme/api.",
         }),
       );
     } finally {
@@ -1061,6 +1267,8 @@ describe("startConfiguredTriggers", () => {
             title: "Fix the bug",
             repo: "acme/api",
             createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+            autoComplete: true,
+            state: "running",
           },
         ],
       ]),
@@ -1078,11 +1286,15 @@ describe("startConfiguredTriggers", () => {
       await vi.waitFor(() => {
         expect(completeMock).toHaveBeenCalledWith("api-9");
       });
-      expect(deleteWorkItemLifecycleMock).toHaveBeenCalledWith(
+      expect(recordWorkItemLifecycleMock).toHaveBeenCalledWith(
         "/tmp/spur-data",
         "api",
         "pr-watch",
-        "acme/api#42",
+        expect.objectContaining({
+          externalId: "acme/api#42",
+          state: "completed",
+          sessionId: "api-9",
+        }),
       );
     } finally {
       await controller.stop();
@@ -1109,6 +1321,8 @@ describe("startConfiguredTriggers", () => {
             title: "Fix the bug",
             repo: "acme/api",
             createdAt: new Date(Date.now() - 10_000).toISOString(),
+            autoComplete: true,
+            state: "running",
           },
         ],
       ]),
@@ -1138,6 +1352,8 @@ describe("startConfiguredTriggers", () => {
               title: "Fix the bug",
               repo: "acme/api",
               createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+              autoComplete: true,
+              state: "running",
             },
           ],
         ]),
