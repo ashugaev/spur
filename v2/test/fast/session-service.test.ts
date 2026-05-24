@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { formatPipelineStepMessage } from "../../src/pipeline.js";
+import type * as registryModule from "../../src/registry.js";
 import type {
   AgentName,
   ServiceInstanceRecord,
@@ -99,8 +100,7 @@ const TEST_ARTIFACTS_ROOT = resolve(`/tmp/spur-session-artifacts-test-${process.
 const artifactDirForSession = (sessionId: string) => resolve(TEST_ARTIFACTS_ROOT, sessionId);
 
 vi.mock("../../src/registry.js", async (importOriginal) => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const actual = await importOriginal<any>();
+  const actual = await importOriginal<typeof registryModule>();
   return {
     ...actual,
     upsertConfigRegistryPath: upsertConfigRegistryPathMock,

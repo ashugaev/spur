@@ -129,15 +129,31 @@ const MockWebSocket = vi.fn(() => {
 
 vi.stubGlobal("WebSocket", MockWebSocket);
 
+function parsePayload(payload: string): unknown {
+  try {
+    return JSON.parse(payload) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function isInputPayload(value: unknown): value is { type: "input"; data: string } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    "data" in value &&
+    value.type === "input" &&
+    typeof value.data === "string"
+  );
+}
+
 function sentInputPayloads(): string[] {
   return wsSend.mock.calls
     .map(([payload]) => payload)
     .filter((payload): payload is string => typeof payload === "string" && payload.startsWith("{"))
-    .map((payload) => JSON.parse(payload) as { type?: string; data?: string })
-    .filter(
-      (payload): payload is { type: "input"; data: string } =>
-        payload.type === "input" && typeof payload.data === "string",
-    )
+    .map(parsePayload)
+    .filter(isInputPayload)
     .map((payload) => payload.data);
 }
 
