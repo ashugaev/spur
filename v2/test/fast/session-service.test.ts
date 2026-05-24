@@ -139,7 +139,9 @@ vi.mock("../../src/agents/index.js", () => ({
 
 vi.mock("../../src/config.js", () => ({
   buildSidecarLinkUrl: (template: string, reservedPort: number) =>
-    template.includes("{port}") ? template.replaceAll("{port}", String(reservedPort)) : `${template}:${reservedPort}`,
+    template.includes("{port}")
+      ? template.replaceAll("{port}", String(reservedPort))
+      : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
   findProjectConfigPath: findProjectConfigPathMock,
@@ -6253,7 +6255,10 @@ describe("SessionService", () => {
         },
       },
     });
-    sidecarTmuxAliveMock.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    sidecarTmuxAliveMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
 
     const { SessionService } = await loadSessionServiceModule();
@@ -6325,7 +6330,10 @@ describe("SessionService", () => {
         }
       });
     });
-    sidecarTmuxAliveMock.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    sidecarTmuxAliveMock
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
 
     const { SessionService } = await loadSessionServiceModule();
     const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");

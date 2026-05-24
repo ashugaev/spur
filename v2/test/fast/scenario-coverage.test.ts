@@ -117,7 +117,10 @@ describe("scenario coverage trace", () => {
   it("maps every documented business/system scenario to exactly one CI test tier", () => {
     const scenarios = [
       ...parseScenarioBullets("v2/TEST_SCENARIOS.md", new Set(["Tier Rules", "Regression Rule"])),
-      ...parseScenarioBullets("packages/web/UI_TEST_SCENARIOS.md", new Set(["Voice Input Prerequisites"])),
+      ...parseScenarioBullets(
+        "packages/web/UI_TEST_SCENARIOS.md",
+        new Set(["Voice Input Prerequisites"]),
+      ),
     ];
     const traces = parseTrace(readJson(tracePath));
 
@@ -134,7 +137,9 @@ describe("scenario coverage trace", () => {
     expect(stale, "stale trace entries").toEqual([]);
     expect(duplicates, "duplicate trace entries").toEqual([]);
 
-    const invalidTierJobs = traces.filter((trace) => allowedTierJobs.get(trace.tier) !== trace.ciJob);
+    const invalidTierJobs = traces.filter(
+      (trace) => allowedTierJobs.get(trace.tier) !== trace.ciJob,
+    );
     expect(invalidTierJobs, "invalid tier/job pairs").toEqual([]);
 
     const missingFiles = traces.flatMap((trace) =>

@@ -4378,7 +4378,14 @@ projects:
       SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
       SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
     });
-    const isolatedDaemonPath = join(CLI_PATH, "..", "..", "..", "scripts", "spur-isolated-daemon.sh");
+    const isolatedDaemonPath = join(
+      CLI_PATH,
+      "..",
+      "..",
+      "..",
+      "scripts",
+      "spur-isolated-daemon.sh",
+    );
     const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
     const projectConfigPath = join(context.rootDir, "isolated-source-project.yaml");
     await writeFile(
