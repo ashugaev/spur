@@ -48,18 +48,22 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+function errorOutput(error: unknown): { stdout: string; stderr: string } {
+  if (!error || typeof error !== "object") {
+    return { stdout: "", stderr: "" };
+  }
+  const output = error as { stdout?: unknown; stderr?: unknown };
+  return {
+    stdout: typeof output.stdout === "string" ? output.stdout : "",
+    stderr: typeof output.stderr === "string" ? output.stderr : "",
+  };
+}
+
 function errorText(error: unknown): string {
   if (!error || typeof error !== "object") {
     return String(error);
   }
-  const stdout =
-    typeof (error as { stdout?: unknown }).stdout === "string"
-      ? (error as { stdout: string }).stdout
-      : "";
-  const stderr =
-    typeof (error as { stderr?: unknown }).stderr === "string"
-      ? (error as { stderr: string }).stderr
-      : "";
+  const { stdout, stderr } = errorOutput(error);
   const message =
     error instanceof Error
       ? error.message
@@ -67,22 +71,6 @@ function errorText(error: unknown): string {
         ? (error as { message: string }).message
         : "";
   return [stdout, stderr, message].filter(Boolean).join("\n").trim();
-}
-
-function errorOutput(error: unknown): { stdout: string; stderr: string } {
-  if (!error || typeof error !== "object") {
-    return { stdout: "", stderr: "" };
-  }
-  return {
-    stdout:
-      typeof (error as { stdout?: unknown }).stdout === "string"
-        ? (error as { stdout: string }).stdout
-        : "",
-    stderr:
-      typeof (error as { stderr?: unknown }).stderr === "string"
-        ? (error as { stderr: string }).stderr
-        : "",
-  };
 }
 
 function parseClaudeAuthStatus(text: string): AuthStatus | null {
