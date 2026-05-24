@@ -1,6 +1,7 @@
 # Spur Test Scenarios
 
 Keep this file lean. Every new Spur scenario must live in exactly one tier.
+Coverage means scenario coverage, not numeric line coverage. `tests/scenario-coverage.json` maps each scenario bullet here to the executable CI test tier that owns it.
 
 ## Tier Rules
 
