@@ -138,6 +138,8 @@ vi.mock("../../src/agents/index.js", () => ({
 }));
 
 vi.mock("../../src/config.js", () => ({
+  buildSidecarLinkUrl: (template: string, reservedPort: number) =>
+    template.includes("{port}") ? template.replaceAll("{port}", String(reservedPort)) : `${template}:${reservedPort}`,
   loadConfig: loadConfigMock,
   loadProjectConfig: loadProjectConfigMock,
   findProjectConfigPath: findProjectConfigPathMock,
@@ -6210,6 +6212,130 @@ describe("SessionService", () => {
     await service.kill("api-1", { force: true });
 
     expect(killSidecarTmuxMock).toHaveBeenCalledWith("api-1", "dev");
+  });
+
+  it("sidecar URL probe publishes a slot link after the HTTP endpoint responds", async () => {
+    vi.useRealTimers();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: 3000,
+                  end: 3000,
+                  url: "https://preview.example.com/{port}",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    sidecarTmuxAliveMock.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+
+    await vi.waitFor(() => {
+      expect(sessions.get("api-1")?.slots?.links).toEqual([
+        { label: "dev", url: "https://preview.example.com/3000" },
+      ]);
+    });
+    expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
+      "session.sidecar.link.published",
+    );
+  });
+
+  it("sidecar cleanup aborts the URL probe and unlinks the published sidecar slot", async () => {
+    vi.useRealTimers();
+    const sessions = createSessionStore();
+    sessions.set("api-1", {
+      id: "api-1",
+      project: "api",
+      agent: "claude",
+      prompt: "hello",
+      branch: "api-1",
+      worktree: true,
+      worktreePath: "/tmp/spur-worktrees/api/api-1",
+      tmuxSession: "api-1",
+      launchCommand: "claude --dangerously-skip-permissions",
+      status: "running",
+      createdAt: "2026-03-18T10:00:00.000Z",
+      updatedAt: "2026-03-18T10:01:00.000Z",
+      slots: {
+        links: [{ label: "dev", url: "https://preview.example.com/3000" }],
+      },
+    });
+    loadConfigMock.mockReturnValue({
+      ...baseConfig(),
+      projects: {
+        api: {
+          ...baseConfig().projects.api,
+          sidecars: {
+            dev: {
+              command: "pnpm dev",
+              autoStart: false,
+              ports: {
+                http: {
+                  env: "SPUR_RESERVED_PORT_DEV",
+                  start: 3000,
+                  end: 3000,
+                  url: "https://preview.example.com/{port}",
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    let aborted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      const signal = init?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        if (signal instanceof AbortSignal) {
+          signal.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }
+      });
+    });
+    sidecarTmuxAliveMock.mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValue(true);
+
+    const { SessionService } = await loadSessionServiceModule();
+    const service = new SessionService("/tmp/spur.yaml", "2026-03-18T10:00:00.000Z");
+
+    await service.startSidecar("api-1", "dev");
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+    await service.kill("api-1", { force: true });
+
+    expect(aborted).toBe(true);
+    expect(sessions.get("api-1")?.slots?.links ?? []).toEqual([]);
   });
 
   it("complete calls killSidecarTmux to clean up sidecar sessions", async () => {

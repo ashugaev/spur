@@ -3613,8 +3613,9 @@ export class SessionService {
     }
 
     this.stateCache.delete(sessionId);
+    const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
     const record: SessionRecord = {
-      ...copySessionWithoutSidecarPorts(session),
+      ...copySessionWithoutSidecarPorts(cleanedSession),
       status: targetStatus,
       ...(targetStatus === "stopped" ? { stopReason: "manual_pause" as const } : {}),
       updatedAt: nowIso(),
@@ -3703,8 +3704,9 @@ export class SessionService {
       return this.enrich(session);
     }
 
+    const cleanedSession = readSession(this.config.dataDir, sessionId) ?? session;
     const record: SessionRecord = {
-      ...copySessionWithoutSidecarPorts(session),
+      ...copySessionWithoutSidecarPorts(cleanedSession),
       status: "killed",
       updatedAt: nowIso(),
     };

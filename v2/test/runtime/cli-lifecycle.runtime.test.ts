@@ -130,6 +130,69 @@ tail -f /dev/null
   return scriptPath;
 }
 
+async function writeSidecarHttpServer(
+  context: RuntimeTestContext,
+  scriptName = "sidecar-http-server.mjs",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `import { createServer } from "node:http";
+
+const port = Number.parseInt(process.env.SPUR_RESERVED_PORT_DEV ?? "", 10);
+if (!Number.isInteger(port)) {
+  process.exit(1);
+}
+
+const server = createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("ready");
+});
+
+const shutdown = () => {
+  server.close(() => process.exit(0));
+};
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
+server.listen(port, "127.0.0.1");
+`,
+    "utf8",
+  );
+  return scriptPath;
+}
+
+async function writeIsolatedDaemonSiblingProbe(
+  context: RuntimeTestContext,
+  scriptName = "isolated-daemon-sibling-probe.sh",
+): Promise<string> {
+  const scriptPath = join(context.repoDir, scriptName);
+  await writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+runtime_file="\${SPUR_SESSION_TOOL_DIR:?}/isolated-env.sh"
+for _ in $(seq 1 30); do
+  if [[ -f "$runtime_file" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ ! -f "$runtime_file" ]]; then
+  exit 1
+fi
+"$SPUR_SESSION_TOOL_DIR/spur" list --json > ".sibling-isolated-list-\${SPUR_SESSION:?}"
+printf '%s\n' "$runtime_file" > ".sibling-isolated-env-\${SPUR_SESSION:?}"
+trap 'exit 0' TERM INT HUP
+while true; do
+  sleep 1
+done
+`,
+    "utf8",
+  );
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 async function writeReservedPortSidecarConfig(
   context: RuntimeTestContext,
   options: {
@@ -4223,6 +4286,177 @@ projects:
       { timeoutMs: 15_000, accept: (value) => value.trim().length > 0 },
     );
     expect(thirdPort.trim()).toBe("4600");
+  });
+
+  it("real sidecar HTTP probe publishes a link and complete or kill removes it", async () => {
+    const port = await findFreePort();
+    const reservedRange = await findConsecutiveFreePorts();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-sidecar-link-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const sidecarPath = await writeSidecarHttpServer(context);
+    const configPath = await context.writeConfig(
+      "sidecar-link-publish.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    worktree: false
+    symlinks:
+      - .env
+    sidecars:
+      dev:
+        command: "node ${sidecarPath}"
+        autoStart: true
+        ports:
+          http:
+            env: SPUR_RESERVED_PORT_DEV
+            start: ${reservedRange.start}
+            end: ${reservedRange.end}
+            url: "http://127.0.0.1"
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    for (const action of ["complete", "kill"] as const) {
+      const spawned = await context.fetchJson<SessionView>("/sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          project: "api",
+          prompt: `sidecar link ${action}`,
+        }),
+      });
+
+      const withLink = await pollUntil(
+        () => context.fetchJson<SessionView>(`/sessions/${spawned.id}`),
+        {
+          timeoutMs: 15_000,
+          accept: (session) =>
+            session.slots?.links.some(
+              (link) => link.label === "dev" && link.url.startsWith("http://127.0.0.1:"),
+            ) === true,
+        },
+      );
+      expect(withLink.slots?.links.some((link) => link.label === "dev")).toBe(true);
+
+      const closed =
+        action === "complete"
+          ? await context.fetchJson<SessionView>(`/sessions/${spawned.id}/complete`, {
+              method: "POST",
+            })
+          : await context.fetchJson<SessionView>(`/sessions/${spawned.id}/kill`, {
+              method: "POST",
+              body: JSON.stringify({ force: true }),
+            });
+
+      expect(closed.slots?.links.some((link) => link.label === "dev") ?? false).toBe(false);
+    }
+  });
+
+  it("isolated-daemon sidecar writes isolated artifacts and sibling sidecar uses its wrapper", async () => {
+    const port = await findFreePort();
+    const context = await createRuntimeTestContext(port);
+    const sessionPrefix = `rt-isolated-daemon-${port}`;
+    activeContexts.push({ context, sessionPrefix });
+    await syncTmuxEnvironment({
+      HOME: context.env.HOME,
+      PATH: context.env.PATH,
+      SPUR_FAKE_AGENT_LOG_DIR: context.agentLogDir,
+      SPUR_FAKE_GH_STATE_FILE: context.ghStateFile,
+    });
+    const isolatedDaemonPath = join(CLI_PATH, "..", "..", "..", "scripts", "spur-isolated-daemon.sh");
+    const siblingProbePath = await writeIsolatedDaemonSiblingProbe(context);
+    const projectConfigPath = join(context.rootDir, "isolated-source-project.yaml");
+    await writeFile(
+      projectConfigPath,
+      `projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+`,
+      "utf8",
+    );
+    const configPath = await context.writeConfig(
+      "isolated-daemon-sidecar.yaml",
+      `server:
+  host: 127.0.0.1
+  port: ${port}
+dataDir: ${context.dataDir}
+worktreeDir: ${context.worktreeDir}
+defaultAgent: claude
+projects:
+  api:
+    path: ${context.repoDir}
+    defaultBranch: main
+    sessionPrefix: ${sessionPrefix}
+    symlinks:
+      - .env
+    sidecars:
+      isolated-daemon:
+        command: "bash ${isolatedDaemonPath}"
+        autoStart: true
+        env:
+          SPUR_PROJECT_CONFIG_PATH: ${projectConfigPath}
+        ports:
+          daemon:
+            env: SPUR_RESERVED_PORT_DAEMON
+            start: 4320
+            end: 4399
+      sibling:
+        command: "${siblingProbePath}"
+        autoStart: true
+`,
+    );
+    const daemon = await context.startDaemon(configPath);
+    currentActiveContext().daemonPid = daemon.info.pid;
+
+    const spawned = await context.fetchJson<SessionView>("/sessions", {
+      method: "POST",
+      body: JSON.stringify({
+        project: "api",
+        prompt: "isolated daemon sidecar test",
+      }),
+    });
+    const toolDir = join(context.dataDir, "session-tools", spawned.id);
+    const siblingListPath = join(spawned.worktreePath, `.sibling-isolated-list-${spawned.id}`);
+    const siblingEnvPath = join(spawned.worktreePath, `.sibling-isolated-env-${spawned.id}`);
+
+    await pollUntil(async () => existsSync(join(toolDir, "isolated-env.sh")), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    await pollUntil(async () => existsSync(join(toolDir, "spur")), {
+      timeoutMs: 15_000,
+      accept: (value) => value === true,
+    });
+    const siblingList = await pollUntil(
+      async () => readFile(siblingListPath, "utf8").catch(() => ""),
+      { timeoutMs: 20_000, accept: (value) => value.trim().startsWith("[") },
+    );
+    const siblingEnv = await readFile(siblingEnvPath, "utf8");
+    const isolatedEnv = await readFile(join(toolDir, "isolated-env.sh"), "utf8");
+
+    expect(siblingList).toContain(`"id": "${spawned.id}"`);
+    expect(siblingEnv).toContain("isolated-env.sh");
+    expect(isolatedEnv).toContain("SPUR_ISOLATED_CONFIG=");
+    expect(isolatedEnv).toContain("SPUR_ISOLATED_DAEMON_URL=");
   });
 
   it("skips an OS-bound reserved sidecar port and still fails when metadata plus the bound port exhaust the range", async () => {

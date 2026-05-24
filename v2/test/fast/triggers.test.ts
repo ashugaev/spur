@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../src/event-bus.js";
 
 const readGitHubSourceSnapshotMock = vi.fn();
+const readReviewSourceSnapshotMock = vi.fn();
 const readWorkItemLifecyclesMock = vi.fn();
 const recordWorkItemLifecycleMock = vi.fn();
 const deleteWorkItemLifecycleMock = vi.fn();
@@ -14,6 +15,7 @@ vi.mock("../../src/event-log.js", () => ({
 vi.mock("../../src/metadata.js", () => ({
   deleteWorkItemLifecycle: deleteWorkItemLifecycleMock,
   readGitHubSourceSnapshot: readGitHubSourceSnapshotMock,
+  readReviewSourceSnapshot: readReviewSourceSnapshotMock,
   readWorkItemLifecycles: readWorkItemLifecyclesMock,
   recordWorkItemLifecycle: recordWorkItemLifecycleMock,
 }));
@@ -38,6 +40,30 @@ function config(options?: { event?: string; interrupt?: boolean; prompt?: string
             send: {
               interrupt,
               ...(prompt !== undefined ? { prompt } : {}),
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function gitlabConfig() {
+  return {
+    dataDir: "/tmp/spur-data",
+    projects: {
+      api: {
+        sources: {
+          "mr-watch": {
+            type: "gitlab",
+          },
+        },
+        triggers: {
+          send: {
+            source: "mr-watch",
+            event: "gitlab:comment",
+            send: {
+              interrupt: false,
             },
           },
         },
@@ -140,6 +166,27 @@ function githubEvent(signalKey = "comment:1") {
           key: signalKey,
           kind: "comment",
           text: "A new comment arrived.",
+        },
+      ],
+    },
+  };
+}
+
+function gitlabEvent(signalKey = "comment:1") {
+  return {
+    name: "gitlab:comment",
+    projectId: "api",
+    sourceId: "mr-watch",
+    data: {
+      sessionId: "api-1",
+      repo: "acme/api",
+      prNumber: 42,
+      prTitle: "Tighten coverage",
+      signals: [
+        {
+          key: signalKey,
+          kind: "comment",
+          text: "A new GitLab comment arrived.",
         },
       ],
     },
@@ -255,6 +302,7 @@ describe("startConfiguredTriggers", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     readGitHubSourceSnapshotMock.mockReset().mockReturnValue(null);
+    readReviewSourceSnapshotMock.mockReset().mockReturnValue(null);
     readWorkItemLifecyclesMock.mockReset().mockReturnValue(new Map());
     recordWorkItemLifecycleMock.mockReset();
     deleteWorkItemLifecycleMock.mockReset();
@@ -310,6 +358,48 @@ describe("startConfiguredTriggers", () => {
       );
       expect(logSpurEventMock.mock.calls.map(([, entry]) => entry.event)).toContain(
         "trigger.send.delivered",
+      );
+    } finally {
+      await controller.stop();
+    }
+  });
+
+  it("delivers GitLab updates immediately when the target session is waiting", async () => {
+    const getMock = vi.fn().mockResolvedValue({
+      id: "api-1",
+      status: "running",
+      state: "waiting",
+      lastActivityAt: staleActivity(),
+      workspaceExists: true,
+    });
+    const deliverMock = vi.fn().mockResolvedValue(undefined);
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: gitlabConfig() as never,
+      bus,
+      sessionService: {
+        get: getMock,
+        deliver: deliverMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(gitlabEvent());
+      await vi.waitFor(() => {
+        expect(deliverMock).toHaveBeenCalledWith(
+          "api-1",
+          expect.stringContaining('GitLab updates on merge request #42 "Tighten coverage":'),
+          { interrupt: false },
+        );
+      });
+      expect(deliverMock).toHaveBeenCalledWith(
+        "api-1",
+        expect.stringContaining("Review the latest GitLab updates on the active merge request"),
+        { interrupt: false },
       );
     } finally {
       await controller.stop();
