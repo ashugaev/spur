@@ -507,6 +507,60 @@ projects:
     });
   });
 
+  it("parses spawn.restrictWrites on trigger spawn configs", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          restrictWrites: true
+          autoComplete: true
+`);
+
+    const config = loadConfig(configPath);
+    expect(config.projects["backend"]?.triggers["review"]).toEqual({
+      source: "pr-watch",
+      event: "github:work_item.new",
+      spawn: {
+        prompt: "Review only.",
+        restrictWrites: true,
+        autoComplete: true,
+      },
+    });
+  });
+
+  it("rejects non-boolean spawn.restrictWrites", async () => {
+    const configPath = await writeConfig(`
+projects:
+  backend:
+    path: $REPO_PATH
+    sources:
+      pr-watch:
+        type: github
+        query: "is:pr is:open"
+    triggers:
+      review:
+        source: pr-watch
+        event: github:work_item.new
+        spawn:
+          prompt: "Review only."
+          restrictWrites: yes
+`);
+
+    expect(() => loadConfig(configPath)).toThrow(
+      "projects.backend.triggers.review.spawn.restrictWrites must be a boolean",
+    );
+  });
+
   it("rejects autoComplete on non-work-item spawn triggers", async () => {
     const configPath = await writeConfig(`
 projects:

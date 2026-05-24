@@ -1002,6 +1002,54 @@ describe("startConfiguredTriggers", () => {
     }
   });
 
+  it("passes restrictWrites through to the session service", async () => {
+    const spawnMock = vi.fn().mockResolvedValue({ id: "api-8" });
+    const { startConfiguredTriggers } = await loadTriggersModule();
+    const bus = new EventBus();
+    const controller = startConfiguredTriggers({
+      config: {
+        dataDir: "/tmp/spur-data",
+        projects: {
+          api: {
+            sources: {
+              morning: { type: "cron" },
+            },
+            triggers: {
+              kickoff: {
+                source: "morning",
+                event: "cron:tick",
+                spawn: {
+                  prompt: "review only",
+                  restrictWrites: true,
+                },
+              },
+            },
+          },
+        },
+      } as never,
+      bus,
+      sessionService: {
+        spawn: spawnMock,
+      } as never,
+      logger: {
+        warn: vi.fn(),
+      },
+    });
+
+    try {
+      bus.emit(cronEvent());
+      await vi.waitFor(() => {
+        expect(spawnMock).toHaveBeenCalledWith({
+          project: "api",
+          prompt: "review only",
+          restrictWrites: true,
+        });
+      });
+    } finally {
+      await controller.stop();
+    }
+  });
+
   it("seeds the pr slot link when a work-item event spawns a session", async () => {
     const spawnMock = vi.fn().mockResolvedValue({ id: "api-9" });
     const { startConfiguredTriggers } = await loadTriggersModule();

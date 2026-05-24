@@ -4,6 +4,8 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
   stat: vi.fn(),
   realpath: vi.fn(),
+  mkdir: vi.fn(),
+  writeFile: vi.fn(),
 }));
 
 vi.mock("../../src/agents/worktree-path.js", () => ({
@@ -14,19 +16,22 @@ vi.mock("node:os", () => ({
   homedir: vi.fn(() => "/home/testuser"),
 }));
 
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
 import { resolveWorktreePathCandidates } from "../../src/agents/worktree-path.js";
 import {
   buildClaudePlan,
   buildClaudeResumePlan,
   buildClaudeRestorePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findLatestSessionFile,
   findClaudeSessionId,
 } from "../../src/agents/claude.js";
 
 const mockReaddir = readdir as ReturnType<typeof vi.fn>;
 const mockStat = stat as ReturnType<typeof vi.fn>;
+const mockMkdir = mkdir as ReturnType<typeof vi.fn>;
+const mockWriteFile = writeFile as ReturnType<typeof vi.fn>;
 const mockResolveWorktreePathCandidates = resolveWorktreePathCandidates as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -89,6 +94,24 @@ describe("buildClaudePlan", () => {
   it("shell-escapes settingsPath with single quotes in the path", () => {
     const plan = buildClaudePlan("prompt", { settingsPath: "/path/with'quote/settings.json" });
     expect(plan.launchCommand).toContain("--settings '/path/with'\\''quote/settings.json'");
+  });
+});
+
+describe("ensureClaudeRestrictWritesSettings", () => {
+  beforeEach(() => {
+    mockMkdir.mockResolvedValue(undefined);
+    mockWriteFile.mockResolvedValue(undefined);
+  });
+
+  it("writes a PreToolUse deny hook for write tools", async () => {
+    const settingsPath = await ensureClaudeRestrictWritesSettings("/session/tool");
+
+    expect(settingsPath).toBe("/session/tool/claude/settings.json");
+    const content = JSON.parse(mockWriteFile.mock.calls[0]?.[1] as string) as {
+      hooks: { PreToolUse: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
+    };
+    expect(content.hooks.PreToolUse[0]?.matcher).toBe("Write|Edit|MultiEdit|NotebookEdit");
+    expect(content.hooks.PreToolUse[0]?.hooks[0]?.command).toContain("exit 2");
   });
 });
 

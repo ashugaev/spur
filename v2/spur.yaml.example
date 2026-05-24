@@ -3,3 +3,16 @@ projects:
     path: .
     defaultBranch: main
     sessionPrefix: my-project
+    sources:
+      open-prs:
+        type: github
+        intervalMs: 600000
+        query: "is:open is:pr"
+    triggers:
+      pr-review-spawn:
+        source: open-prs
+        event: github:work_item.new
+        spawn:
+          prompt: "/code-review {{url}}"
+          restrictWrites: true
+          autoComplete: true

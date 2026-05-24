@@ -86,4 +86,5 @@ projects:
         spawn:
           agent: claude
           prompt: "/code-review {{url}}"
+          restrictWrites: true
           autoComplete: true

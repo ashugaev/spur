@@ -4,6 +4,7 @@ import {
   buildClaudeRestorePlan,
   buildClaudeResumePlan,
   claudeCommand,
+  ensureClaudeRestrictWritesSettings,
   findClaudeSessionId,
 } from "./claude.js";
 import { captureClaudeSubmitBaseline, scanClaudeJsonlForMessage } from "./claude-submit-ack.js";
@@ -37,6 +38,7 @@ interface AgentPlanOptions {
   codexArgs?: string[];
   cursorConfigDir?: string;
   planMode?: boolean;
+  restrictWrites?: boolean;
   startupImagePaths?: string[];
 }
 
@@ -84,6 +86,7 @@ interface AgentAdapter {
   setup(args: {
     worktreePath: string;
     sessionToolDir: string;
+    restrictWrites?: boolean;
   }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }>;
   sessionConfig?(args: { dataDir: string; sessionId: string }): AgentSessionConfig;
   processMatchers(launchCommand: string): string[];
@@ -127,9 +130,10 @@ function cursorPlanOptions(options?: AgentPlanOptions): {
   cursorConfigDir?: string;
   planMode?: boolean;
 } {
+  const usePlan = options?.planMode === true || options?.restrictWrites === true;
   return {
     ...(options?.cursorConfigDir ? { cursorConfigDir: options.cursorConfigDir } : {}),
-    ...(options?.planMode ? { planMode: true } : {}),
+    ...(usePlan ? { planMode: true } : {}),
   };
 }
 
@@ -147,7 +151,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
     buildResumePlan: (agentSessionId, binary, options) =>
       buildClaudeResumePlan(agentSessionId, binary, claudePlanOptions(options)),
     findSessionId: (worktreePath) => findClaudeSessionId(worktreePath),
-    setup: async () => ({}),
+    setup: async ({ sessionToolDir, restrictWrites }) =>
+      restrictWrites
+        ? { claudeSettingsPath: await ensureClaudeRestrictWritesSettings(sessionToolDir) }
+        : {},
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, claudeCommand()),
     stateStrategy: "claude_jsonl",
     sendMode: "default",
@@ -178,8 +185,10 @@ const AGENT_ADAPTERS: Record<AgentName, AgentAdapter> = {
       findCodexSessionId(worktreePath, {
         ...(options?.codexSessionRootDir ? { sessionRootDir: options.codexSessionRootDir } : {}),
       }),
-    setup: async ({ sessionToolDir, worktreePath }) => ({
-      codexHomePath: await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
+    setup: async ({ sessionToolDir, worktreePath, restrictWrites }) => ({
+      codexHomePath: restrictWrites
+        ? await ensureCodexHooksConfig(sessionToolDir, [worktreePath], { restrictWrites: true })
+        : await ensureCodexHooksConfig(sessionToolDir, [worktreePath]),
     }),
     processMatchers: (launchCommand) => defaultProcessMatchers(launchCommand, codexCommand()),
     stateStrategy: "hook",
@@ -309,6 +318,7 @@ export async function setupAgentHooks(args: {
   agent: AgentName;
   worktreePath: string;
   sessionToolDir: string;
+  restrictWrites?: boolean;
 }): Promise<{ claudeSettingsPath?: string; codexHomePath?: string }> {
   return agentAdapter(args.agent).setup(args);
 }

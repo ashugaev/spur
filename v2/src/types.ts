@@ -161,6 +161,7 @@ export interface TriggerSpawnConfig {
   branch?: string;
   overrides?: SpawnOverrides;
   autoComplete?: boolean;
+  restrictWrites?: boolean;
 }
 
 export interface TriggerSendConfig {
@@ -285,6 +286,7 @@ export interface SessionRecord {
   deskId?: string;
   agent: AgentName;
   planMode?: boolean;
+  restrictWrites?: boolean;
   agentSessionId?: string;
   prompt: string;
   startupAttachmentIds?: string[];
@@ -386,6 +388,7 @@ export interface SpawnSessionRequest {
   steps?: string[];
   agent?: AgentName;
   planMode?: boolean;
+  restrictWrites?: boolean;
   branch?: string;
   overrides?: SpawnOverrides;
   reuseWorkspaceSessionId?: string;

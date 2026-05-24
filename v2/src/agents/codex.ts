@@ -13,6 +13,9 @@ const SESSION_INDEX_TTL_MS = 30_000;
 const CODEX_HOOKS_FILE = "hooks.json";
 const CODEX_HOOK_COMMAND = "$SPUR_AGENT_STATE_COMMAND";
 const CODEX_HOME_DIR = "codex-home";
+const CODEX_RESTRICT_WRITES_MATCHER = "apply_patch";
+const CODEX_RESTRICT_WRITES_DENY_COMMAND =
+  "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
 
 interface IndexedSessionFile {
   path: string;
@@ -114,21 +117,51 @@ function parseHookGroups(value: unknown): HookMatcherGroup[] {
     .filter((entry): entry is HookMatcherGroup => Boolean(entry));
 }
 
-function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
-  const updated = groups.map((group) => ({
+function cloneHookGroups(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return groups.map((group) => ({
     ...(group.matcher ? { matcher: group.matcher } : {}),
     hooks: [...group.hooks],
   }));
-  const hasCommand = updated.some((group) =>
-    group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
-  );
-  if (hasCommand) {
+}
+
+function ensureHookMatcherGroup(
+  groups: HookMatcherGroup[],
+  hasGroup: (group: HookMatcherGroup) => boolean,
+  insert: HookMatcherGroup,
+  position: "start" | "end" = "end",
+): HookMatcherGroup[] {
+  const updated = cloneHookGroups(groups);
+  if (updated.some(hasGroup)) {
     return updated;
   }
-  updated.push({
-    hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }],
-  });
+  if (position === "start") {
+    updated.unshift(insert);
+  } else {
+    updated.push(insert);
+  }
   return updated;
+}
+
+function ensureHookEventGroup(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) => group.hooks.some((hook) => hook.command === CODEX_HOOK_COMMAND),
+    { hooks: [{ type: "command", command: CODEX_HOOK_COMMAND }] },
+  );
+}
+
+function ensureRestrictWritesPreToolUse(groups: HookMatcherGroup[]): HookMatcherGroup[] {
+  return ensureHookMatcherGroup(
+    groups,
+    (group) =>
+      group.matcher === CODEX_RESTRICT_WRITES_MATCHER &&
+      group.hooks.some((hook) => hook.command === CODEX_RESTRICT_WRITES_DENY_COMMAND),
+    {
+      matcher: CODEX_RESTRICT_WRITES_MATCHER,
+      hooks: [{ type: "command", command: CODEX_RESTRICT_WRITES_DENY_COMMAND }],
+    },
+    "start",
+  );
 }
 
 function parseCodexHooksDocument(content: string): CodexHooksDocument {
@@ -480,12 +513,16 @@ export async function buildEphemeralCodexConfig(
 export async function ensureCodexHooksConfig(
   sessionToolDir: string,
   trustedProjects: readonly string[] = [],
+  options?: { restrictWrites?: boolean },
 ): Promise<string> {
   const codexDir = codexHookHomePath(sessionToolDir);
   const hooksPath = join(codexDir, CODEX_HOOKS_FILE);
   await mkdir(codexDir, { recursive: true });
   const existingContent = await readFile(hooksPath, "utf8").catch(() => "");
   const next = parseCodexHooksDocument(existingContent);
+  if (options?.restrictWrites) {
+    next.hooks.PreToolUse = ensureRestrictWritesPreToolUse(next.hooks.PreToolUse);
+  }
   const sessionConfigPath = join(codexDir, "config.toml");
   const baseConfig = await buildEphemeralCodexConfig(trustedProjects);
   const trimmed = baseConfig.trimEnd();

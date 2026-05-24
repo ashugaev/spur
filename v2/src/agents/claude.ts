@@ -1,4 +1,4 @@
-import { readdir, stat } from "node:fs/promises";
+import { readdir, stat, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { shellEscape } from "./shell-escape.js";
@@ -7,6 +7,34 @@ import type { AgentLaunchPlan, AgentResumePlan } from "./types.js";
 
 export function claudeCommand(): string {
   return process.env["SPUR_CLAUDE_BIN"] || "claude";
+}
+
+const RESTRICT_WRITES_DENY_COMMAND =
+  "echo 'restrictWrites: file edits are disabled for this session' >&2; exit 2";
+
+export async function ensureClaudeRestrictWritesSettings(sessionToolDir: string): Promise<string> {
+  const settingsDir = join(sessionToolDir, "claude");
+  const settingsPath = join(settingsDir, "settings.json");
+  await mkdir(settingsDir, { recursive: true });
+  await writeFile(
+    settingsPath,
+    JSON.stringify(
+      {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Write|Edit|MultiEdit|NotebookEdit",
+              hooks: [{ type: "command", command: RESTRICT_WRITES_DENY_COMMAND }],
+            },
+          ],
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+  return settingsPath;
 }
 
 function toClaudeProjectPath(worktreePath: string): string {

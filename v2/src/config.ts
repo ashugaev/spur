@@ -722,6 +722,10 @@ function parseTrigger(
       `${label}.spawn.autoComplete is only supported for ${GITHUB_WORK_ITEM_NEW_EVENT}`,
     );
   }
+  const restrictWrites = asOptionalBoolean(
+    spawnRaw["restrictWrites"],
+    `${label}.spawn.restrictWrites`,
+  );
 
   return {
     source,
@@ -733,6 +737,7 @@ function parseTrigger(
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
       ...(autoComplete !== undefined ? { autoComplete } : {}),
+      ...(restrictWrites !== undefined ? { restrictWrites } : {}),
     },
   };
 }

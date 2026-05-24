@@ -98,6 +98,7 @@ async function runSpawnTrigger(
   branch: string | undefined,
   overrides: SpawnTriggerConfig["spawn"]["overrides"],
   autoComplete: boolean | undefined,
+  restrictWrites: boolean | undefined,
   eventData: unknown,
   logger: TriggerLogger,
 ): Promise<void> {
@@ -133,6 +134,7 @@ async function runSpawnTrigger(
       ...(agent !== undefined ? { agent } : {}),
       ...(branch !== undefined ? { branch } : {}),
       ...(overrides !== undefined ? { overrides } : {}),
+      ...(restrictWrites === true ? { restrictWrites: true } : {}),
       ...(workItemData ? { slots: { links: [{ label: "pr", url: workItemData.url }] } } : {}),
     });
     if (autoComplete && workItemData) {
@@ -717,6 +719,7 @@ export function startConfiguredTriggers(deps: StartConfiguredTriggersDeps): Trig
           trigger.spawn.branch,
           trigger.spawn.overrides,
           trigger.spawn.autoComplete,
+          trigger.spawn.restrictWrites,
           event.data,
           logger,
         );
