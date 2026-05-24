@@ -611,12 +611,7 @@ export function clearGitHubMergeConflictRestoreReplay(
   });
 }
 
-export function readWorkItemRegistry(
-  dataDir: string,
-  projectId: string,
-  sourceId: string,
-): Set<string> {
-  const path = workItemRegistryFilePath(dataDir, projectId, sourceId);
+function readIdRegistry(path: string): Set<string> {
   if (!existsSync(path)) return new Set();
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
@@ -627,6 +622,14 @@ export function readWorkItemRegistry(
   } catch {
     return new Set();
   }
+}
+
+export function readWorkItemRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  return readIdRegistry(workItemRegistryFilePath(dataDir, projectId, sourceId));
 }
 
 export function recordWorkItem(
@@ -648,17 +651,7 @@ export function readCommentSeenRegistry(
   projectId: string,
   sourceId: string,
 ): Set<string> {
-  const path = commentSeenRegistryFilePath(dataDir, projectId, sourceId);
-  if (!existsSync(path)) return new Set();
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
-    if (!parsed || typeof parsed !== "object") return new Set();
-    const ids = (parsed as { ids?: unknown }).ids;
-    if (!Array.isArray(ids)) return new Set();
-    return new Set(ids.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
+  return readIdRegistry(commentSeenRegistryFilePath(dataDir, projectId, sourceId));
 }
 
 export function recordCommentSeen(
@@ -668,13 +661,9 @@ export function recordCommentSeen(
   ids: readonly string[],
 ): void {
   const known = readCommentSeenRegistry(dataDir, projectId, sourceId);
-  let changed = false;
-  for (const id of ids) {
-    if (known.has(id)) continue;
-    known.add(id);
-    changed = true;
-  }
-  if (!changed) return;
+  const before = known.size;
+  for (const id of ids) known.add(id);
+  if (known.size === before) return;
   writeJsonFile(commentSeenRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...known].sort(),
   });

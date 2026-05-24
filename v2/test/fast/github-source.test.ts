@@ -60,6 +60,17 @@ function makeSession(overrides: Partial<SessionRecord> = {}): SessionRecord {
   };
 }
 
+function trackSeenComments(initial: readonly string[] = []): Set<string> {
+  const seen = new Set<string>(initial);
+  readCommentSeenRegistryMock.mockImplementation(() => new Set(seen));
+  recordCommentSeenMock.mockImplementation(
+    (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
+      for (const id of ids) seen.add(id);
+    },
+  );
+  return seen;
+}
+
 describe("github source", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -159,13 +170,7 @@ describe("github source", () => {
   it("records and suppresses already-seen issue comment ids", async () => {
     readReviewSourceSnapshotsMock.mockReturnValue(new Map());
     listSessionsMock.mockReturnValue([makeSession()]);
-    const seenIds = new Set<string>();
-    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
-    recordCommentSeenMock.mockImplementation(
-      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
-        for (const id of ids) seenIds.add(id);
-      },
-    );
+    const seenIds = trackSeenComments();
     ghMock.mockResolvedValueOnce(
       JSON.stringify({
         number: 42,
@@ -202,13 +207,7 @@ describe("github source", () => {
   });
 
   it("does not re-emit issue comments observed on a previous poll", async () => {
-    const seenIds = new Set<string>(["9001"]);
-    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
-    recordCommentSeenMock.mockImplementation(
-      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
-        for (const id of ids) seenIds.add(id);
-      },
-    );
+    trackSeenComments(["9001"]);
     readReviewSourceSnapshotsMock.mockReturnValue(
       new Map([
         [
@@ -261,13 +260,7 @@ describe("github source", () => {
   });
 
   it("emits only the newly observed issue comment when one of two is already seen", async () => {
-    const seenIds = new Set<string>(["9001"]);
-    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
-    recordCommentSeenMock.mockImplementation(
-      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
-        for (const id of ids) seenIds.add(id);
-      },
-    );
+    trackSeenComments(["9001"]);
     readReviewSourceSnapshotsMock.mockReturnValue(
       new Map([
         [
