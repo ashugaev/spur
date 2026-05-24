@@ -69,6 +69,47 @@ function errorText(error: unknown): string {
   return [stdout, stderr, message].filter(Boolean).join("\n").trim();
 }
 
+function errorOutput(error: unknown): { stdout: string; stderr: string } {
+  if (!error || typeof error !== "object") {
+    return { stdout: "", stderr: "" };
+  }
+  return {
+    stdout:
+      typeof (error as { stdout?: unknown }).stdout === "string"
+        ? (error as { stdout: string }).stdout
+        : "",
+    stderr:
+      typeof (error as { stderr?: unknown }).stderr === "string"
+        ? (error as { stderr: string }).stderr
+        : "",
+  };
+}
+
+function parseClaudeAuthStatus(text: string): AuthStatus | null {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  if (typeof (parsed as { loggedIn?: unknown }).loggedIn !== "boolean") {
+    return null;
+  }
+  if ((parsed as { loggedIn: boolean }).loggedIn) {
+    return { available: true };
+  }
+  return { available: false, skipReason: "claude not authenticated" };
+}
+
 async function claudeStatus(): Promise<AuthStatus> {
   if (!tmuxOk) {
     return { available: false, skipReason: "tmux unavailable" };
@@ -79,15 +120,17 @@ async function claudeStatus(): Promise<AuthStatus> {
 
   try {
     const { stdout } = await execFileAsync(CLAUDE_BIN, ["auth", "status"], { timeout: 10_000 });
-    const parsed = JSON.parse(stdout) as { loggedIn?: boolean };
-    if (parsed.loggedIn === true) {
-      return { available: true };
-    }
-    if (parsed.loggedIn === false) {
-      return { available: false, skipReason: "claude not authenticated" };
+    const parsed = parseClaudeAuthStatus(stdout);
+    if (parsed) {
+      return parsed;
     }
     return { available: false, error: `Unexpected claude auth status output: ${stdout.trim()}` };
   } catch (error) {
+    const { stdout, stderr } = errorOutput(error);
+    const parsed = parseClaudeAuthStatus(stdout) ?? parseClaudeAuthStatus(stderr);
+    if (parsed) {
+      return parsed;
+    }
     return { available: false, error: `Failed to read claude auth status: ${errorText(error)}` };
   }
 }
