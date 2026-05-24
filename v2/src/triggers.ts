@@ -131,7 +131,9 @@ async function shouldClaimWorkItemSpawn(
   autoComplete: boolean,
   logger: TriggerLogger,
 ): Promise<boolean> {
-  const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(workItemData.externalId);
+  const existing = readWorkItemLifecycles(dataDir, projectId, sourceId).get(
+    workItemData.externalId,
+  );
   if (existing?.state === "pending" || existing?.state === "completed") {
     return false;
   }
@@ -215,27 +217,26 @@ async function runSpawnTrigger(
     `[trigger:${projectId}/${triggerId}] matched ${eventName} from ${projectId}/${sourceId}`,
   );
 
+  const workItemData =
+    eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
+
   try {
-    const workItemData =
-      eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
     if (autoComplete && !workItemData) {
       throw new Error(`Cannot auto-complete ${eventName}: incompatible work-item payload`);
     }
-    const shouldClaim =
-      workItemData === null
-        ? true
-        : await shouldClaimWorkItemSpawn(
-            dataDir,
-            service,
-            projectId,
-            triggerId,
-            sourceId,
-            workItemData,
-            autoComplete === true,
-            logger,
-          );
-    if (!shouldClaim) {
-      if (workItemData === null) return;
+    if (
+      workItemData &&
+      !(await shouldClaimWorkItemSpawn(
+        dataDir,
+        service,
+        projectId,
+        triggerId,
+        sourceId,
+        workItemData,
+        autoComplete === true,
+        logger,
+      ))
+    ) {
       logTriggerEvent(dataDir, "trigger.spawn.suppressed", {
         level: "info",
         projectId,
@@ -280,8 +281,6 @@ async function runSpawnTrigger(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const workItemData =
-      eventName === GITHUB_WORK_ITEM_NEW_EVENT && isWorkItemEventData(eventData) ? eventData : null;
     if (workItemData) {
       recordWorkItemLifecycle(dataDir, projectId, sourceId, {
         ...createWorkItemLifecycleBase(workItemData, autoComplete === true),

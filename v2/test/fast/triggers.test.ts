@@ -318,12 +318,7 @@ function useWorkItemLifecycleStore(initial?: WorkItemLifecycleRecord[]) {
   }
   readWorkItemLifecyclesMock.mockImplementation(() => new Map(records));
   recordWorkItemLifecycleMock.mockImplementation(
-    (
-      _dataDir: string,
-      _projectId: string,
-      _sourceId: string,
-      record: WorkItemLifecycleRecord,
-    ) => {
+    (_dataDir: string, _projectId: string, _sourceId: string, record: WorkItemLifecycleRecord) => {
       records.set(record.externalId, record);
     },
   );
@@ -1259,17 +1254,9 @@ describe("startConfiguredTriggers", () => {
       new Map([
         [
           "acme/api#42",
-          {
-            externalId: "acme/api#42",
-            sessionId: "api-9",
-            url: "https://github.com/acme/api/pull/42",
-            number: 42,
-            title: "Fix the bug",
-            repo: "acme/api",
+          runningWorkItemLifecycle({
             createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-            autoComplete: true,
-            state: "running",
-          },
+          }),
         ],
       ]),
     );
@@ -1313,17 +1300,9 @@ describe("startConfiguredTriggers", () => {
       new Map([
         [
           "acme/api#42",
-          {
-            externalId: "acme/api#42",
-            sessionId: "api-9",
-            url: "https://github.com/acme/api/pull/42",
-            number: 42,
-            title: "Fix the bug",
-            repo: "acme/api",
+          runningWorkItemLifecycle({
             createdAt: new Date(Date.now() - 10_000).toISOString(),
-            autoComplete: true,
-            state: "running",
-          },
+          }),
         ],
       ]),
     );
@@ -1344,17 +1323,9 @@ describe("startConfiguredTriggers", () => {
         new Map([
           [
             "acme/api#42",
-            {
-              externalId: "acme/api#42",
-              sessionId: "api-9",
-              url: "https://github.com/acme/api/pull/42",
-              number: 42,
-              title: "Fix the bug",
-              repo: "acme/api",
+            runningWorkItemLifecycle({
               createdAt: new Date(Date.now() - 5 * 60_000).toISOString(),
-              autoComplete: true,
-              state: "running",
-            },
+            }),
           ],
         ]),
       );

@@ -78,29 +78,29 @@ export interface GitHubWorkItemEventData {
 export type WorkItemLifecycleState = "pending" | "running" | "failed" | "completed";
 
 interface WorkItemLifecycleBase extends GitHubWorkItemEventData {
-  state: WorkItemLifecycleState;
   autoComplete: boolean;
   createdAt: string;
 }
 
-export type WorkItemLifecycleRecord = WorkItemLifecycleBase & (
-  | {
-      state: "pending";
-    }
-  | {
-      state: "running";
-      sessionId: string;
-    }
-  | {
-      state: "failed";
-      error: string;
-    }
-  | {
-      state: "completed";
-      sessionId: string;
-      completedAt: string;
-    }
-);
+export type WorkItemLifecycleRecord = WorkItemLifecycleBase &
+  (
+    | {
+        state: "pending";
+      }
+    | {
+        state: "running";
+        sessionId: string;
+      }
+    | {
+        state: "failed";
+        error: string;
+      }
+    | {
+        state: "completed";
+        sessionId: string;
+        completedAt: string;
+      }
+  );
 
 interface BaseSourceConfig {
   runOnStart: boolean;
