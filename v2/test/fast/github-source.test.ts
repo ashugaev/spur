@@ -10,6 +10,8 @@ const hasGitHubMergeConflictRestoreReplayMock = vi.fn();
 const clearGitHubMergeConflictRestoreReplayMock = vi.fn();
 const readWorkItemRegistryMock = vi.fn();
 const recordWorkItemMock = vi.fn();
+const readCommentSeenRegistryMock = vi.fn();
+const recordCommentSeenMock = vi.fn();
 
 vi.mock("../../src/gh.js", () => ({
   gh: ghMock,
@@ -19,8 +21,10 @@ vi.mock("../../src/metadata.js", () => ({
   deleteReviewSourceSnapshot: deleteReviewSourceSnapshotMock,
   hasGitHubMergeConflictRestoreReplay: hasGitHubMergeConflictRestoreReplayMock,
   listSessions: listSessionsMock,
+  readCommentSeenRegistry: readCommentSeenRegistryMock,
   readReviewSourceSnapshots: readReviewSourceSnapshotsMock,
   readWorkItemRegistry: readWorkItemRegistryMock,
+  recordCommentSeen: recordCommentSeenMock,
   recordWorkItem: recordWorkItemMock,
   writeReviewSourceSnapshot: writeReviewSourceSnapshotMock,
 }));
@@ -61,6 +65,7 @@ describe("github source", () => {
     vi.clearAllMocks();
     hasGitHubMergeConflictRestoreReplayMock.mockReturnValue(false);
     readWorkItemRegistryMock.mockReturnValue(new Set());
+    readCommentSeenRegistryMock.mockReturnValue(new Set());
   });
 
   afterEach(() => {
@@ -148,6 +153,179 @@ describe("github source", () => {
       expect(snapshot.has("ci_failed")).toBe(false);
     }
 
+    handle.stop();
+  });
+
+  it("records and suppresses already-seen issue comment ids", async () => {
+    readReviewSourceSnapshotsMock.mockReturnValue(new Map());
+    listSessionsMock.mockReturnValue([makeSession()]);
+    const seenIds = new Set<string>();
+    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
+    recordCommentSeenMock.mockImplementation(
+      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
+        for (const id of ids) seenIds.add(id);
+      },
+    );
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 42,
+        title: "Fix CI alert",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      }),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
+    );
+
+    const emit = vi.fn();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordCommentSeenMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", [
+      "9001",
+    ]);
+    expect(seenIds.has("9001")).toBe(true);
+    handle.stop();
+  });
+
+  it("does not re-emit issue comments observed on a previous poll", async () => {
+    const seenIds = new Set<string>(["9001"]);
+    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
+    recordCommentSeenMock.mockImplementation(
+      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
+        for (const id of ids) seenIds.add(id);
+      },
+    );
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            [
+              "comment:9001",
+              {
+                key: "comment:9001",
+                kind: "comment" as const,
+                text: 'New PR comment from alice: "first pass please"',
+              },
+            ],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 42,
+        title: "Fix CI alert",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      }),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([{ id: 9001, body: "first pass please", user: { login: "alice" } }]),
+    );
+
+    const emit = vi.fn();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordCommentSeenMock).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalledWith("github:comment", expect.anything());
+    handle.stop();
+  });
+
+  it("emits only the newly observed issue comment when one of two is already seen", async () => {
+    const seenIds = new Set<string>(["9001"]);
+    readCommentSeenRegistryMock.mockImplementation(() => new Set(seenIds));
+    recordCommentSeenMock.mockImplementation(
+      (_dataDir: string, _projectId: string, _sourceId: string, ids: readonly string[]) => {
+        for (const id of ids) seenIds.add(id);
+      },
+    );
+    readReviewSourceSnapshotsMock.mockReturnValue(
+      new Map([
+        [
+          "api-a1b2",
+          new Map([
+            [
+              "comment:9001",
+              {
+                key: "comment:9001",
+                kind: "comment" as const,
+                text: 'New PR comment from alice: "first pass please"',
+              },
+            ],
+          ]),
+        ],
+      ]),
+    );
+    listSessionsMock.mockReturnValue([makeSession()]);
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify({
+        number: 42,
+        title: "Fix CI alert",
+        url: "https://github.com/acme/api/pull/42",
+        reviewDecision: null,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        statusCheckRollup: [{ name: "workflow", conclusion: "SUCCESS" }],
+      }),
+    );
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce("[]");
+    ghMock.mockResolvedValueOnce(
+      JSON.stringify([
+        { id: 9001, body: "first pass please", user: { login: "alice" } },
+        { id: 9002, body: "second look", user: { login: "bob" } },
+      ]),
+    );
+
+    const emit = vi.fn();
+    const handle = await githubSourceModule.start({
+      sourceId: "pr-watch",
+      projectId: "api",
+      dataDir: "/tmp/spur-data",
+      config: { type: "github", intervalMs: 60_000, runOnStart: false },
+      emit,
+      signal: new AbortController().signal,
+      logger: { info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(recordCommentSeenMock).toHaveBeenCalledWith("/tmp/spur-data", "api", "pr-watch", [
+      "9002",
+    ]);
+    expect(emit).toHaveBeenCalledWith(
+      "github:comment",
+      expect.objectContaining({
+        signals: [expect.objectContaining({ key: "comment:9002" })],
+      }),
+    );
     handle.stop();
   });
 
