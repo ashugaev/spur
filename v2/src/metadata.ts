@@ -42,6 +42,10 @@ function workItemRegistryFilePath(dataDir: string, projectId: string, sourceId: 
   return join(dataDir, "source-state", "github-work-items", projectId, `${sourceId}.json`);
 }
 
+function commentSeenRegistryFilePath(dataDir: string, projectId: string, sourceId: string): string {
+  return join(dataDir, "source-state", "github-comment-seen", projectId, `${sourceId}.json`);
+}
+
 function workItemLifecycleFilePath(dataDir: string, projectId: string, sourceId: string): string {
   return join(dataDir, "source-state", "work-item-lifecycle", projectId, `${sourceId}.json`);
 }
@@ -636,6 +640,43 @@ export function recordWorkItem(
   ids.add(externalId);
   writeJsonFile(workItemRegistryFilePath(dataDir, projectId, sourceId), {
     ids: [...ids].sort(),
+  });
+}
+
+export function readCommentSeenRegistry(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+): Set<string> {
+  const path = commentSeenRegistryFilePath(dataDir, projectId, sourceId);
+  if (!existsSync(path)) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as unknown;
+    if (!parsed || typeof parsed !== "object") return new Set();
+    const ids = (parsed as { ids?: unknown }).ids;
+    if (!Array.isArray(ids)) return new Set();
+    return new Set(ids.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+export function recordCommentSeen(
+  dataDir: string,
+  projectId: string,
+  sourceId: string,
+  ids: readonly string[],
+): void {
+  const known = readCommentSeenRegistry(dataDir, projectId, sourceId);
+  let changed = false;
+  for (const id of ids) {
+    if (known.has(id)) continue;
+    known.add(id);
+    changed = true;
+  }
+  if (!changed) return;
+  writeJsonFile(commentSeenRegistryFilePath(dataDir, projectId, sourceId), {
+    ids: [...known].sort(),
   });
 }
 
