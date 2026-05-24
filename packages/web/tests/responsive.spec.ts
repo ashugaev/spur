@@ -137,6 +137,42 @@ test.describe("R1: Mobile viewport", () => {
     expect(bounds.x).toBeGreaterThanOrEqual(0);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   });
+
+  test("low-height mobile landscape spawn modal stays in viewport and scrolls to Spawn", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 667, height: 375 });
+    await mockSessions(page, [], [{ id: "my-project", name: "my-project" }]);
+    await page.goto("/");
+
+    await page.getByRole("button", { name: /spawn session/i }).click();
+    await page.getByRole("combobox", { name: "Spawn project" }).selectOption("my-project");
+
+    const modal = page
+      .getByRole("heading", { name: "Spawn Session" })
+      .locator("xpath=ancestor::div[contains(@class, 'max-h')][1]");
+    await expect(modal).toBeVisible();
+
+    const before = await modal.boundingBox();
+    expect(before).not.toBeNull();
+    if (!before) {
+      throw new Error("Expected spawn modal bounds before scrolling");
+    }
+    expect(before.y).toBeGreaterThanOrEqual(0);
+    expect(before.y + before.height).toBeLessThanOrEqual(375);
+
+    const submitButton = page.getByRole("button", { name: "Spawn", exact: true });
+    await submitButton.scrollIntoViewIfNeeded();
+    await expect(submitButton).toBeVisible();
+
+    const after = await modal.boundingBox();
+    expect(after).not.toBeNull();
+    if (!after) {
+      throw new Error("Expected spawn modal bounds after scrolling");
+    }
+    expect(after.y).toBeGreaterThanOrEqual(0);
+    expect(after.y + after.height).toBeLessThanOrEqual(375);
+  });
 });
 
 // R2: Tablet

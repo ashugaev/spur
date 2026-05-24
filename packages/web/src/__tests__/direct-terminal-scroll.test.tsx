@@ -382,6 +382,19 @@ describe("DirectTerminal scroll integration", () => {
     expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
   });
 
+  it("renders terminal toolbar controls without a standalone esc button", async () => {
+    await mountTerminal({ sessionId: "test-toolbar", agent: "claude" });
+
+    expect(screen.getByRole("button", { name: "Open claude shortcuts" })).toHaveTextContent("...");
+    expect(screen.getByRole("button", { name: "Slash" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Enter$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Arrow Left" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Arrow Up" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Arrow Down" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Arrow Right" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Esc" })).not.toBeInTheDocument();
+  });
+
   it("reconnects after an unexpected websocket close", async () => {
     await mountTerminal({ sessionId: "test-reconnect" });
 
