@@ -2041,6 +2041,7 @@ export class SessionService {
       displayName: entry.displayName ?? entry.id,
       prefix: entry.prefix,
       path: entry.path,
+      port: this.config.server.port,
     });
     return { project, ...normalizeSpawnRequest({ ...request, prompt: bootstrapPrompt }) };
   }

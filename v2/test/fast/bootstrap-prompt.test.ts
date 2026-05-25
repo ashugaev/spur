@@ -8,6 +8,7 @@ describe("renderBootstrapPrompt", () => {
       displayName: "Demo App",
       prefix: "demo",
       path: "/repo/demo",
+      port: 4310,
     });
     expect(prompt).toMatchInlineSnapshot(`
       "You are configuring a new Spur project named "Demo App".
@@ -48,5 +49,17 @@ describe("renderBootstrapPrompt", () => {
       - Keep total output under 40 lines.
       "
     `);
+  });
+
+  it("interpolates a non-default daemon port into the curl example", () => {
+    const prompt = renderBootstrapPrompt({
+      id: "demo-app",
+      displayName: "Demo App",
+      prefix: "demo",
+      path: "/repo/demo",
+      port: 5511,
+    });
+    expect(prompt).toContain("http://127.0.0.1:5511/projects/connect");
+    expect(prompt).not.toContain("127.0.0.1:4310");
   });
 });
