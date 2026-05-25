@@ -258,17 +258,25 @@ export interface AppConfig {
   };
   voice:
     | {
-        provider: "whisper_cpp" | "faster_whisper" | "azure_openai";
+        provider: "whisper_cpp" | "faster_whisper";
         language: string;
         model: string;
         modelPath?: string;
+      }
+    | {
+        provider: "azure_openai";
+        language: string;
+        model: string;
+        endpoint?: string;
+        apiKey?: string;
+        apiVersion?: string;
       }
     | {
         provider: "openai_compatible";
         language: string;
         model: string;
         baseUrl: string;
-        keyEnv: string;
+        apiKey: string;
       };
   projects: Record<string, ProjectConfig>;
 }

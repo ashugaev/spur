@@ -191,7 +191,7 @@ Reload: Quick Start step 9. Set `DIRECT_TERMINAL_PUBLIC_PORT` in `deploy/spur-we
 
 Optional. Requires extra host dependencies, `~/.spur/.env` credentials for some providers, and HTTPS (or localhost) for microphone access. Full setup: [v2/README.md — Voice Input](../v2/README.md#voice-input).
 
-`openai_compatible` is the no-installation path: no whisper.cpp build, no faster-whisper venv, no Azure deployment. Configure `voice.baseUrl` and `voice.keyEnv` and set the key in `~/.spur/.env`.
+`openai_compatible` is the no-installation path: no whisper.cpp build, no faster-whisper venv, no Azure deployment. Configure `voice.baseUrl` and `voice.apiKey` and set the key in `~/.spur/.env`.
 
 ## Sidecars (Optional)
 

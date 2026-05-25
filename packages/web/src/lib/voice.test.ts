@@ -122,7 +122,7 @@ voice:
   model: whisper-large-v3-turbo
   language: ${language}
   baseUrl: ${baseUrl}
-  keyEnv: GROQ_API_KEY
+  apiKey: GROQ_API_KEY
 `;
     }
     if (path === localSpurEnvPath && writeEnvFile) {
@@ -412,6 +412,105 @@ AZURE_OPENAI_API_VERSION=2024-10-21
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("azure_openai voice.endpoint in config overrides AZURE_OPENAI_ENDPOINT env", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: azure_openai
+  model: whisper
+  endpoint: https://config-overridden.example.com/
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return `
+AZURE_OPENAI_ENDPOINT=https://env-endpoint.example.com
+AZURE_OPENAI_API_KEY=test-key
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url.startsWith("https://config-overridden.example.com/")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("azure_openai voice.apiKey in config picks a custom env var name for the key", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ text: "ok" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    mockExistsSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") return true;
+      if (path === localSpurEnvPath) return true;
+      return false;
+    });
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === "/tmp/config.yaml") {
+        return `
+voice:
+  provider: azure_openai
+  model: whisper
+  apiKey: CUSTOM_AZURE_KEY
+`;
+      }
+      if (path === localSpurEnvPath) {
+        return `
+AZURE_OPENAI_ENDPOINT=https://example.com
+CUSTOM_AZURE_KEY=custom-key-value
+AZURE_OPENAI_API_KEY=should-not-be-used
+`;
+      }
+      return "";
+    });
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    try {
+      const { transcribeAudio } = await import("./voice");
+      await transcribeAudio(Buffer.from("audio"), "clip.webm");
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.headers).toEqual({ "api-key": "custom-key-value" });
+    } finally {
+      vi.unstubAllGlobals();
+      delete process.env["CUSTOM_AZURE_KEY"];
+    }
+  });
+
+  it("rejects azure_openai apiKey with shell-unsafe characters", async () => {
+    mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
+    mockReadFileSync.mockReturnValue(`
+voice:
+  provider: azure_openai
+  model: whisper
+  apiKey: "foo; cat /etc/shadow"
+`);
+    process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
+
+    const { readVoiceStatus } = await import("./voice");
+    const status = await readVoiceStatus();
+    expect(status.available).toBe(false);
+    expect(status.reason).toBe("startup_failed");
+    expect(status.detail).toContain("voice.apiKey must match /^[A-Z][A-Z0-9_]*$/");
   });
 
   it("retries retryable azure errors and succeeds before exhaustion", async () => {
@@ -728,7 +827,7 @@ voice:
 voice:
   provider: openai_compatible
   model: whisper-large-v3-turbo
-  keyEnv: GROQ_API_KEY
+  apiKey: GROQ_API_KEY
 `);
     process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
 
@@ -737,11 +836,11 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
     );
   });
 
-  it("rejects openai_compatible config without voice.keyEnv", async () => {
+  it("rejects openai_compatible config without voice.apiKey", async () => {
     mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
     mockReadFileSync.mockReturnValue(`
 voice:
@@ -756,18 +855,18 @@ voice:
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
     expect(status.detail).toContain(
-      'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+      'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
     );
   });
 
-  it("rejects openai_compatible keyEnv with shell-unsafe characters", async () => {
+  it("rejects openai_compatible apiKey with shell-unsafe characters", async () => {
     mockExistsSync.mockImplementation((path: string) => path === "/tmp/config.yaml");
     mockReadFileSync.mockReturnValue(`
 voice:
   provider: openai_compatible
   model: whisper-large-v3-turbo
   baseUrl: https://api.groq.com/openai/v1
-  keyEnv: "foo; cat /etc/shadow"
+  apiKey: "foo; cat /etc/shadow"
 `);
     process.env["SPUR_CONFIG"] = "/tmp/config.yaml";
 
@@ -775,7 +874,7 @@ voice:
     const status = await readVoiceStatus();
     expect(status.available).toBe(false);
     expect(status.reason).toBe("startup_failed");
-    expect(status.detail).toContain("voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/");
+    expect(status.detail).toContain("voice.apiKey must match /^[A-Z][A-Z0-9_]*$/");
   });
 
   it("normalizes trailing slashes on openai_compatible voice.baseUrl", async () => {

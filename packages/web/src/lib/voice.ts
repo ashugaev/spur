@@ -8,9 +8,15 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import YAML from "yaml";
 
+import {
+  DEFAULT_SPUR_ENV_PATH,
+  assertValidEnvVarName,
+  readSpurEnv,
+  resolveEnvSecret,
+} from "./env-secret";
+
 const execFileAsync = promisify(execFile);
 const DEFAULT_CONFIG_PATH = join(homedir(), ".spur", "config.yaml");
-const DEFAULT_SPUR_ENV_PATH = join(homedir(), ".spur", ".env");
 const DEFAULT_VOICE_PROVIDER = "whisper_cpp";
 const DEFAULT_WHISPER_CPP_MODEL_DIR = join(homedir(), ".cache", "whisper.cpp");
 const DEFAULT_VOICE_MODEL_PATH = join(homedir(), ".cache", "whisper.cpp", "ggml-base.bin");
@@ -60,7 +66,9 @@ interface VoiceConfigShape {
     model?: string;
     language?: string;
     baseUrl?: string;
-    keyEnv?: string;
+    apiKey?: string;
+    endpoint?: string;
+    apiVersion?: string;
   };
 }
 
@@ -71,13 +79,20 @@ type ResolvedVoiceConfig =
       language: string;
       modelPath?: string;
     }
-  | { provider: "azure_openai"; model: string; language: string }
+  | {
+      provider: "azure_openai";
+      model: string;
+      language: string;
+      endpoint?: string;
+      apiKey?: string;
+      apiVersion?: string;
+    }
   | {
       provider: "openai_compatible";
       model: string;
       language: string;
       baseUrl: string;
-      keyEnv: string;
+      apiKey: string;
     };
 
 type WhisperFamilyConfig = Extract<
@@ -199,19 +214,30 @@ function resolveVoiceConfig(): ResolvedVoiceConfig {
 
   if (rawProvider === "openai_compatible") {
     const baseUrlRaw = parsed?.voice?.baseUrl?.trim();
-    const keyEnv = parsed?.voice?.keyEnv?.trim();
-    if (!baseUrlRaw || !keyEnv) {
-      throw new Error('voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv');
+    const apiKey = parsed?.voice?.apiKey?.trim();
+    if (!baseUrlRaw || !apiKey) {
+      throw new Error('voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey');
     }
-    if (!/^[A-Z][A-Z0-9_]*$/.test(keyEnv)) {
-      throw new Error(`voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`);
-    }
+    assertValidEnvVarName(apiKey, "voice.apiKey");
     const baseUrl = baseUrlRaw.replace(/\/+$/, "");
-    return { provider: "openai_compatible", model, language, baseUrl, keyEnv };
+    return { provider: "openai_compatible", model, language, baseUrl, apiKey };
   }
 
   if (rawProvider === "azure_openai") {
-    return { provider: "azure_openai", model, language };
+    const endpoint = parsed?.voice?.endpoint?.trim();
+    const apiKey = parsed?.voice?.apiKey?.trim();
+    const apiVersion = parsed?.voice?.apiVersion?.trim();
+    if (apiKey) {
+      assertValidEnvVarName(apiKey, "voice.apiKey");
+    }
+    return {
+      provider: "azure_openai",
+      model,
+      language,
+      ...(endpoint ? { endpoint: endpoint.replace(/\/+$/, "") } : {}),
+      ...(apiKey ? { apiKey } : {}),
+      ...(apiVersion ? { apiVersion } : {}),
+    };
   }
 
   const provider: "whisper_cpp" | "faster_whisper" =
@@ -233,66 +259,18 @@ function commandExists(command: string): boolean {
   }
 }
 
-function parseEnvFile(content: string): Record<string, string> {
-  const entries: Record<string, string> = {};
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-    const separator = line.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-    const key = line.slice(0, separator).trim();
-    const value = line
-      .slice(separator + 1)
-      .trim()
-      .replace(/^['"]|['"]$/g, "");
-    if (key) {
-      entries[key] = value;
-    }
-  }
-  return entries;
-}
-
-function readVoiceSecrets(): Record<string, string> {
-  if (!existsSync(DEFAULT_SPUR_ENV_PATH)) {
-    return {};
-  }
-  try {
-    return parseEnvFile(readFileSync(DEFAULT_SPUR_ENV_PATH, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function resolveVoiceSecret(
-  fileSecrets: Record<string, string>,
-  ...keys: string[]
-): string | undefined {
-  for (const key of keys) {
-    const fileValue = fileSecrets[key]?.trim();
-    if (fileValue) {
-      return fileValue;
-    }
-    const envValue = process.env[key]?.trim();
-    if (envValue) {
-      return envValue;
-    }
-  }
-  return undefined;
-}
-
-function resolveAzureOpenAICredentials(): AzureOpenAICredentials | null {
-  const fileSecrets = readVoiceSecrets();
-  const endpoint = resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_ENDPOINT");
-  const apiKey = resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_API_KEY");
+function resolveAzureOpenAICredentials(config: AzureOpenAIConfig): AzureOpenAICredentials | null {
+  const fileSecrets = readSpurEnv();
+  const endpoint = config.endpoint ?? resolveEnvSecret("AZURE_OPENAI_ENDPOINT", fileSecrets);
+  const apiKeyEnvName = config.apiKey ?? "AZURE_OPENAI_API_KEY";
+  const apiKey = resolveEnvSecret(apiKeyEnvName, fileSecrets);
   if (!endpoint || !apiKey) {
     return null;
   }
   const apiVersion =
-    resolveVoiceSecret(fileSecrets, "AZURE_OPENAI_API_VERSION") ?? DEFAULT_AZURE_OPENAI_API_VERSION;
+    config.apiVersion ??
+    resolveEnvSecret("AZURE_OPENAI_API_VERSION", fileSecrets) ??
+    DEFAULT_AZURE_OPENAI_API_VERSION;
   return {
     endpoint: endpoint.replace(/\/+$/, ""),
     apiKey,
@@ -739,15 +717,17 @@ async function readFasterWhisperStatus(config: WhisperFamilyConfig): Promise<Voi
 }
 
 async function readAzureOpenAIStatus(config: AzureOpenAIConfig): Promise<VoiceStatus> {
-  const credentials = resolveAzureOpenAICredentials();
+  const credentials = resolveAzureOpenAICredentials(config);
   if (!credentials) {
+    const endpointHint = config.endpoint ? "voice.endpoint" : "AZURE_OPENAI_ENDPOINT";
+    const apiKeyEnvName = config.apiKey ?? "AZURE_OPENAI_API_KEY";
     return {
       available: false,
       provider: "azure_openai",
       model: config.model,
       language: config.language,
       reason: "missing_runtime",
-      detail: `Azure OpenAI credentials are missing; set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY in ${DEFAULT_SPUR_ENV_PATH}`,
+      detail: `Azure OpenAI credentials are missing; set ${endpointHint} and ${apiKeyEnvName} in ${DEFAULT_SPUR_ENV_PATH} (or the environment)`,
     };
   }
 
@@ -760,7 +740,7 @@ async function readAzureOpenAIStatus(config: AzureOpenAIConfig): Promise<VoiceSt
 }
 
 async function readOpenAICompatibleStatus(config: OpenAICompatibleConfig): Promise<VoiceStatus> {
-  const key = resolveVoiceSecret(readVoiceSecrets(), config.keyEnv);
+  const key = resolveEnvSecret(config.apiKey);
   if (!key) {
     return {
       available: false,
@@ -768,7 +748,7 @@ async function readOpenAICompatibleStatus(config: OpenAICompatibleConfig): Promi
       model: config.model,
       language: config.language,
       reason: "missing_runtime",
-      detail: `${config.keyEnv} is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
+      detail: `${config.apiKey} is not set in ${DEFAULT_SPUR_ENV_PATH} or the environment`,
     };
   }
   return {
@@ -1151,7 +1131,7 @@ async function transcribeWithAzureOpenAI(
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
-  const credentials = resolveAzureOpenAICredentials();
+  const credentials = resolveAzureOpenAICredentials(config);
   if (!credentials) {
     throw new Error("missing_runtime");
   }
@@ -1183,7 +1163,7 @@ async function transcribeWithOpenAICompatible(
   audio: Buffer,
   originalFilename: string,
 ): Promise<VoiceTranscription> {
-  const key = resolveVoiceSecret(readVoiceSecrets(), config.keyEnv);
+  const key = resolveEnvSecret(config.apiKey);
   if (!key) {
     throw new Error("missing_runtime");
   }

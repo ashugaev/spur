@@ -59,7 +59,9 @@ interface ConfigDefaults {
   voiceLanguage: string;
   voiceModel: string;
   voiceBaseUrl?: string;
-  voiceKeyEnv?: string;
+  voiceApiKey?: string;
+  voiceEndpoint?: string;
+  voiceApiVersion?: string;
 }
 
 export interface ProjectConfigScaffold {
@@ -912,7 +914,23 @@ function parseConfigFile(
             language: resolvedDefaults.voiceLanguage,
             model: resolvedDefaults.voiceModel,
             baseUrl: resolvedDefaults.voiceBaseUrl ?? "",
-            keyEnv: resolvedDefaults.voiceKeyEnv ?? "",
+            apiKey: resolvedDefaults.voiceApiKey ?? "",
+          };
+        }
+        if (resolvedDefaults.voiceProvider === "azure_openai") {
+          return {
+            provider: "azure_openai" as const,
+            language: resolvedDefaults.voiceLanguage,
+            model: resolvedDefaults.voiceModel,
+            ...(resolvedDefaults.voiceEndpoint !== undefined
+              ? { endpoint: resolvedDefaults.voiceEndpoint }
+              : {}),
+            ...(resolvedDefaults.voiceApiKey !== undefined
+              ? { apiKey: resolvedDefaults.voiceApiKey }
+              : {}),
+            ...(resolvedDefaults.voiceApiVersion !== undefined
+              ? { apiVersion: resolvedDefaults.voiceApiVersion }
+              : {}),
           };
         }
         return {
@@ -934,17 +952,34 @@ function parseConfigFile(
 
       if (provider === "openai_compatible") {
         const baseUrlRaw = asOptionalString(voice["baseUrl"], "voice.baseUrl");
-        const keyEnv = asOptionalString(voice["keyEnv"], "voice.keyEnv");
-        if (!baseUrlRaw || !keyEnv) {
+        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
+        if (!baseUrlRaw || !apiKey) {
           throw new Error(
-            'voice.provider="openai_compatible" requires voice.baseUrl and voice.keyEnv',
+            'voice.provider="openai_compatible" requires voice.baseUrl and voice.apiKey',
           );
         }
-        if (!/^[A-Z][A-Z0-9_]*$/.test(keyEnv)) {
-          throw new Error(`voice.keyEnv must match /^[A-Z][A-Z0-9_]*$/ (received "${keyEnv}")`);
+        if (!/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
+          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
         }
         const baseUrl = baseUrlRaw.replace(/\/+$/, "");
-        return { provider, language, model, baseUrl, keyEnv };
+        return { provider, language, model, baseUrl, apiKey };
+      }
+
+      if (provider === "azure_openai") {
+        const endpointRaw = asOptionalString(voice["endpoint"], "voice.endpoint");
+        const apiKey = asOptionalString(voice["apiKey"], "voice.apiKey");
+        const apiVersion = asOptionalString(voice["apiVersion"], "voice.apiVersion");
+        if (apiKey && !/^[A-Z][A-Z0-9_]*$/.test(apiKey)) {
+          throw new Error(`voice.apiKey must match /^[A-Z][A-Z0-9_]*$/ (received "${apiKey}")`);
+        }
+        return {
+          provider,
+          language,
+          model,
+          ...(endpointRaw ? { endpoint: endpointRaw.replace(/\/+$/, "") } : {}),
+          ...(apiKey ? { apiKey } : {}),
+          ...(apiVersion ? { apiVersion } : {}),
+        };
       }
 
       const configuredModelPath = asOptionalString(voice["modelPath"], "voice.modelPath");
@@ -1052,11 +1087,23 @@ export function loadProjectConfig(input?: string, defaults?: AppConfig): AppConf
           ...(defaults.voice.provider === "openai_compatible"
             ? {
                 voiceBaseUrl: defaults.voice.baseUrl,
-                voiceKeyEnv: defaults.voice.keyEnv,
+                voiceApiKey: defaults.voice.apiKey,
               }
-            : defaults.voice.modelPath !== undefined
-              ? { voiceModelPath: defaults.voice.modelPath }
-              : {}),
+            : defaults.voice.provider === "azure_openai"
+              ? {
+                  ...(defaults.voice.endpoint !== undefined
+                    ? { voiceEndpoint: defaults.voice.endpoint }
+                    : {}),
+                  ...(defaults.voice.apiKey !== undefined
+                    ? { voiceApiKey: defaults.voice.apiKey }
+                    : {}),
+                  ...(defaults.voice.apiVersion !== undefined
+                    ? { voiceApiVersion: defaults.voice.apiVersion }
+                    : {}),
+                }
+              : defaults.voice.modelPath !== undefined
+                ? { voiceModelPath: defaults.voice.modelPath }
+                : {}),
         }
       : undefined,
   );
