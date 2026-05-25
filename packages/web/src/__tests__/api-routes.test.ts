@@ -43,6 +43,7 @@ vi.mock("node:child_process", () => ({
 import { spurRequest, spurRequestJson } from "@/lib/spur-daemon";
 import { readVoiceStatus, transcribeAudio } from "@/lib/voice";
 import { readFile, statfs } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { resetGitHubApiStateForTests } from "@/lib/github-api";
 import { resetGitHubStatusForTests } from "@/lib/github-status";
 import { resetGitLabApiStateForTests } from "@/lib/gitlab-api";
@@ -1404,6 +1405,47 @@ describe("Spur web API routes", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(payload.ok).toBe(true);
+    });
+
+    it("uses glab config get fallback when env tokens are unset", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+      resetGitLabApiStateForTests();
+      vi.mocked(execFileSync).mockImplementationOnce(((cmd: string, args: readonly string[]) => {
+        expect(cmd).toBe("glab");
+        expect(args).toEqual(["config", "get", "--host", "gitlab.com", "token"]);
+        return "glpat-test\n";
+      }) as unknown as typeof execFileSync);
+      fetchMock.mockResolvedValue(ghOk());
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean };
+
+      expect(payload.ok).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, { headers: Record<string, string> }];
+      expect(init.headers["private-token"]).toBe("glpat-test");
+    });
+
+    it("treats empty glab output as missing token", async () => {
+      delete process.env["GITLAB_TOKEN"];
+      delete process.env["GLAB_TOKEN"];
+      resetGitLabApiStateForTests();
+      vi.mocked(execFileSync).mockImplementationOnce(
+        (() => "") as unknown as typeof execFileSync,
+      );
+
+      const response = await getGitLabStatus(
+        new NextRequest("http://localhost:3000/api/gitlab-status"),
+      );
+      const payload = (await response.json()) as { ok: boolean; error: string; requestedAt: null };
+
+      expect(payload.ok).toBe(false);
+      expect(payload.error).toBe("GitLab auth unavailable");
+      expect(payload.requestedAt).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
