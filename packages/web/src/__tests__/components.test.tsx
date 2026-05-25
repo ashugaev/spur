@@ -39,18 +39,16 @@ vi.mock("next/font/google", () => ({
 
 vi.mock("@/components/DirectTerminal", () => ({
   DirectTerminal: ({
-    label,
     onClose,
     sessionId,
     title,
   }: {
-    label?: string;
     onClose?: () => void;
     sessionId: string;
     title?: string;
   }) => (
     <div>
-      <div>{`Direct terminal ${label ?? sessionId}`}</div>
+      <div>{`Direct terminal ${sessionId}`}</div>
       {title ? <div>{`Direct terminal title ${title}`}</div> : null}
       <button onClick={onClose} type="button">
         Close terminal
