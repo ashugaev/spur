@@ -352,10 +352,8 @@ export function collapseDeskRows(sessions: readonly DashboardSession[]): DeskCol
   }
 
   rows.sort((a, b) => {
-    const byDeskKey = a.session.deskKey.localeCompare(b.session.deskKey, undefined, {
-      sensitivity: "base",
-    });
-    if (byDeskKey !== 0) return byDeskKey;
+    const byActivity = b.session.lastActivityAt.localeCompare(a.session.lastActivityAt);
+    if (byActivity !== 0) return byActivity;
     return a.session.id.localeCompare(b.session.id);
   });
 

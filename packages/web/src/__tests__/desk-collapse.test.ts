@@ -47,4 +47,23 @@ describe("collapseDeskRows", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].lane).toBe("respond");
   });
+
+  it("sorts rows by lastActivityAt descending across desks", () => {
+    const older = baseView("a-older", { lastActivityAt: "2026-01-01T00:00:00.000Z" });
+    const newer = baseView("z-newer", { lastActivityAt: "2026-01-05T00:00:00.000Z" });
+    const middle = baseView("m-mid", { lastActivityAt: "2026-01-03T00:00:00.000Z" });
+    const rows = collapseDeskRows(
+      [older, newer, middle].map((s) => toDashboardSession(s, s.project)),
+    );
+    expect(rows.map((r) => r.session.id)).toEqual(["z-newer", "m-mid", "a-older"]);
+  });
+
+  it("breaks ties on equal lastActivityAt using session id ascending", () => {
+    const ts = "2026-01-04T12:00:00.000Z";
+    const b = baseView("b-id", { lastActivityAt: ts });
+    const a = baseView("a-id", { lastActivityAt: ts });
+    const c = baseView("c-id", { lastActivityAt: ts });
+    const rows = collapseDeskRows([b, a, c].map((s) => toDashboardSession(s, s.project)));
+    expect(rows.map((r) => r.session.id)).toEqual(["a-id", "b-id", "c-id"]);
+  });
 });
