@@ -65,6 +65,8 @@ describe("session artifact kinds", () => {
     await writeFile(join(dir, "notes.txt"), "hello", "utf8");
     await writeFile(join(dir, "report.imd"), "# Title", "utf8");
     await writeFile(join(dir, "app.log"), "line", "utf8");
+    await writeFile(join(dir, "readme.md"), "# Readme", "utf8");
+    await writeFile(join(dir, "config.json"), "{}", "utf8");
     await writeFile(join(dir, "data.bin"), "\x00\x01", "utf8");
 
     const artifacts = listSessionArtifacts(dataDir, sessionId);
@@ -81,6 +83,14 @@ describe("session artifact kinds", () => {
     expect(byId["app.log"]).toMatchObject({
       kind: "text",
       mimeType: "text/plain; charset=utf-8",
+    });
+    expect(byId["readme.md"]).toMatchObject({
+      kind: "text",
+      mimeType: "text/markdown; charset=utf-8",
+    });
+    expect(byId["config.json"]).toMatchObject({
+      kind: "text",
+      mimeType: "application/json",
     });
     expect(byId["data.bin"]).toMatchObject({
       kind: "download",
