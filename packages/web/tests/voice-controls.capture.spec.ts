@@ -149,7 +149,10 @@ test.describe("voice controls capture", () => {
     await page.goto(`/sessions/${session.id}`);
     await page.getByRole("button", { name: /^terminal$/i }).click();
     const terminalDialog = page.getByRole("dialog", { name: /terminal/i });
-    await expect(terminalDialog.getByText("Connected")).toBeVisible();
+    await expect(terminalDialog.getByTestId("direct-terminal-header-status-dot")).toHaveAttribute(
+      "data-ws-status",
+      "connected",
+    );
 
     // Idle: single mic button.
     const micButton = terminalDialog.getByRole("button", { name: /start voice recording/i });
