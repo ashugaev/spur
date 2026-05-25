@@ -339,7 +339,7 @@ function ArtifactCard({
             ) : null}
           </>
         ) : null}
-        {artifact.kind === "download" || artifact.kind === "text" ? (
+        {artifact.kind !== "image" && artifact.kind !== "video" ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-[var(--color-text-tertiary)]">
             <ArtifactFileIcon />
             <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--color-text-secondary)]">
@@ -432,24 +432,21 @@ function ArtifactLightbox({
   const [copyState, setCopyState] = useState<keyof typeof COPY_TEXT_LABELS>("idle");
 
   useEffect(() => {
+    setTextContent(null);
+    setTextPreviewState("loading");
+    setCopyState("idle");
+
     if (!artifact || !artifactHref || artifact.kind !== "text") {
-      setTextContent(null);
-      setTextPreviewState("loading");
-      setCopyState("idle");
       return;
     }
 
     if (artifact.size > TEXT_ARTIFACT_MAX_BYTES) {
-      setTextContent(null);
       setTextPreviewState("oversize");
       onPreviewReady(artifact.id);
       return;
     }
 
     const controller = new AbortController();
-    setTextContent(null);
-    setTextPreviewState("loading");
-    setCopyState("idle");
 
     void (async () => {
       try {
@@ -480,10 +477,18 @@ function ArtifactLightbox({
 
   if (!artifact || !artifactHref) return null;
 
-  const showLoadingOverlay =
+  const previewStatusMessage =
     artifact.kind === "text"
       ? textPreviewState === "loading"
-      : previewState !== "ready" && previewState !== "error";
+        ? "Loading preview"
+        : textPreviewState === "error"
+          ? "Preview unavailable"
+          : null
+      : previewState !== "ready"
+        ? previewState === "error"
+          ? "Preview unavailable"
+          : "Loading preview"
+        : null;
 
   const handleCopyText = async () => {
     if (!textContent || copyState === "copying") return;
@@ -552,53 +557,32 @@ function ArtifactLightbox({
           className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto border border-[var(--color-border-default)] bg-[var(--color-terminal-bg)] p-3 sm:p-4"
           onClick={(event) => event.stopPropagation()}
         >
-          {showLoadingOverlay ? (
+          {previewStatusMessage ? (
             <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-              Loading preview
+              {previewStatusMessage}
             </div>
           ) : null}
           {artifact.kind === "image" ? (
+            <img
+              alt={artifact.name}
+              className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              onError={() => onPreviewError(artifact.id)}
+              onLoad={() => onPreviewReady(artifact.id)}
+              src={artifactHref}
+            />
+          ) : artifact.kind === "video" ? (
+            <video
+              aria-label={`${artifact.name} player`}
+              autoPlay
+              className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
+              controls
+              onError={() => onPreviewError(artifact.id)}
+              onLoadedData={() => onPreviewReady(artifact.id)}
+              preload="metadata"
+              src={artifactHref}
+            />
+          ) : artifact.kind === "text" ? (
             <>
-              {previewState === "error" ? (
-                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  Preview unavailable
-                </div>
-              ) : null}
-              <img
-                alt={artifact.name}
-                className={`max-h-full max-w-full object-contain ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-                onError={() => onPreviewError(artifact.id)}
-                onLoad={() => onPreviewReady(artifact.id)}
-                src={artifactHref}
-              />
-            </>
-          ) : null}
-          {artifact.kind === "video" ? (
-            <>
-              {previewState === "error" ? (
-                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  Preview unavailable
-                </div>
-              ) : null}
-              <video
-                aria-label={`${artifact.name} player`}
-                autoPlay
-                className={`max-h-full max-w-full ${previewState === "ready" ? "opacity-100" : "opacity-0"}`}
-                controls
-                onError={() => onPreviewError(artifact.id)}
-                onLoadedData={() => onPreviewReady(artifact.id)}
-                preload="metadata"
-                src={artifactHref}
-              />
-            </>
-          ) : null}
-          {artifact.kind === "text" ? (
-            <>
-              {textPreviewState === "error" ? (
-                <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
-                  Preview unavailable
-                </div>
-              ) : null}
               {textPreviewState === "oversize" ? (
                 <div className="px-4 text-center text-[10px] font-bold uppercase tracking-[0.12em] text-[var(--color-text-tertiary)]">
                   File exceeds 1 MiB preview limit. Download to view the full content.
