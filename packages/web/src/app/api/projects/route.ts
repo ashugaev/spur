@@ -20,14 +20,14 @@ export async function POST(request: NextRequest) {
   const prefix = typeof body.prefix === "string" ? body.prefix.trim() : "";
   const path = typeof body.path === "string" ? body.path.trim() : "";
 
-  if (!displayName) {
-    return NextResponse.json({ error: "displayName is required" }, { status: 400 });
-  }
-  if (!prefix) {
-    return NextResponse.json({ error: "prefix is required" }, { status: 400 });
-  }
-  if (!path) {
-    return NextResponse.json({ error: "path is required" }, { status: 400 });
+  for (const [name, value] of [
+    ["displayName", displayName],
+    ["prefix", prefix],
+    ["path", path],
+  ] as const) {
+    if (!value) {
+      return NextResponse.json({ error: `${name} is required` }, { status: 400 });
+    }
   }
 
   try {

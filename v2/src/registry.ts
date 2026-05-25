@@ -130,21 +130,21 @@ export function readConfigRegistryFile(dataDir: string): ConfigRegistryFile {
       parsed = raw as Record<string, unknown>;
     }
   } catch {
-    parsed = {};
+    // Treat unreadable/invalid registry as empty; callers rewrite on next mutation.
   }
 
   const rawConfigPaths = parsed["configPaths"];
-  const configPaths = Array.isArray(rawConfigPaths)
-    ? normalizeConfigPaths(
-        rawConfigPaths.filter((value): value is string => typeof value === "string"),
-      )
-    : [];
   const rawUnconfigured = parsed["unconfiguredProjects"];
-  const unconfiguredProjects = Array.isArray(rawUnconfigured)
-    ? normalizeUnconfiguredProjects(rawUnconfigured)
-    : [];
-
-  return { configPaths, unconfiguredProjects };
+  return {
+    configPaths: Array.isArray(rawConfigPaths)
+      ? normalizeConfigPaths(
+          rawConfigPaths.filter((value): value is string => typeof value === "string"),
+        )
+      : [],
+    unconfiguredProjects: Array.isArray(rawUnconfigured)
+      ? normalizeUnconfiguredProjects(rawUnconfigured)
+      : [],
+  };
 }
 
 export function writeConfigRegistryFile(dataDir: string, file: ConfigRegistryFile): void {
